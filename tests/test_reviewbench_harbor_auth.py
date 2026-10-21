@@ -78,16 +78,26 @@ def test_refresh_returns_to_source_on_failed_judge_process(tmp_path: Path) -> No
 
 
 def test_cross_process_reviewer_and_judge_serialize_rotating_credentials(tmp_path: Path) -> None:
-    """Concurrent trials must consume the latest canonical refresh after their lease."""
+    """Prove real contention before checking the rotating-credential handoff.
+
+    A child-ready signal alone can pass without locking if the child is scheduled
+    after the parent releases its lease; the nonblocking probe closes that gap.
+    """
     canonical = tmp_path / "canonical"
     _login(canonical)
     child = tmp_path / "waiter.py"
     child.write_text(
-        "import importlib.util, json, pathlib, sys\n"
+        "import fcntl, importlib.util, json, pathlib, sys\n"
         "spec = importlib.util.spec_from_file_location('auth', sys.argv[1])\n"
         "auth = importlib.util.module_from_spec(spec); spec.loader.exec_module(auth)\n"
         "root = pathlib.Path(sys.argv[2])\n"
-        "(root / 'waiting').touch()\n"
+        "with (root / 'canonical' / '.lease.lock').open('r+') as lock:\n"
+        " try:\n"
+        "  fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        " except BlockingIOError:\n"
+        "  (root / 'lock-blocked').touch()\n"
+        " else:\n"
+        "  raise AssertionError('parent lease did not block independent lock acquisition')\n"
         "with auth.subscription_lease(root / 'canonical', root / 'judge', role='judge') as home:\n"
         " data = json.loads((home / 'auth.json').read_text())['openai-codex']\n"
         " assert data['refresh'] == 'synthetic-reviewer-rotated'\n"
@@ -98,10 +108,13 @@ def test_cross_process_reviewer_and_judge_serialize_rotating_credentials(tmp_pat
         process = subprocess.Popen([sys.executable, str(child), str(Path(harbor_auth.__file__)), str(tmp_path)],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            # A file handshake confirms the independent process entered its lease.
+            # The marker records an actual blocked acquisition, not elapsed time.
             import time
             deadline = time.monotonic() + 10
-            while not (tmp_path / "waiting").exists():
+            while not (tmp_path / "lock-blocked").exists():
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    pytest.fail(f"child exited before observing lock contention: {stdout}{stderr}")
                 assert time.monotonic() < deadline
                 time.sleep(0.01)
             assert process.poll() is None
