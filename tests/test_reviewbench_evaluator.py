@@ -246,6 +246,28 @@ def test_evaluator_preserves_existing_and_concurrently_published_output(
         evaluator.evaluate_round(source, candidates, conflict, provider="chosen-provider", model="chosen-model")
     assert (conflict / "retained.txt").read_text() == "concurrent bytes"
     assert not (conflict / "results.json").exists()
+    # A real install collision after some files are linked must preserve the
+    # competing file and withhold the final success marker. Process failures
+    # above happen before this independent publication boundary.
+    partial = tmp_path / "scores" / "round-3"
+    monkeypatch.setenv("DAYDREAM_TEST_EVAL_MODE", "success")
+    real_link = os.link
+
+    def competing_install(source: Any, destination: Any, **kwargs: Any) -> None:
+        if Path(destination) == partial / "results.json":
+            Path(destination).write_bytes(b"competing result bytes")
+        real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, "link", competing_install)
+    with pytest.raises(evaluator.EvaluationError, match="publication failed"):
+        evaluator.evaluate_round(source, candidates, partial, provider="chosen-provider", model="chosen-model")
+    assert (partial / "results.json").read_bytes() == b"competing result bytes"
+    assert (partial / "results.details.json").is_file()
+    assert not (partial / "evaluator.json").exists()
+    with pytest.raises(evaluator.EvaluationError, match="evaluator.json"):
+        evaluator.load_evaluation(source, candidates, partial)
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
+    assert not list(partial.parent.glob(".round-3-*"))
 
 
 @pytest.mark.parametrize("change", [

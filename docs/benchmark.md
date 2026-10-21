@@ -72,8 +72,10 @@ findings, rather than presenting discarded findings as a successful empty review
 Each `round-N/findings/` is one evaluator input. Never pass a parent containing
 multiple rounds: the supplied loader recursively merges identical PR identities.
 Artifacts are created at new paths and prior outputs are preserved on failure;
-use a new candidate plan for retries or changed inputs. `status` reports expected,
-produced, completed-empty, failed, missing and evaluated memberships independently
+use a new candidate plan for retries or changed inputs.
+The evaluator installs `evaluator.json` last; interrupted publication leaves an
+incomplete directory that reports reject, so preserve it and use a fresh plan.
+`status` reports expected, produced, completed-empty, failed, missing and evaluated memberships independently
 of supplied overlap-only scoring. Subsets are identified as subsets.
 
 **Judging incurs model calls for ordinary nonempty reviews.** Select its standalone
