@@ -1,0 +1,2 @@
+# Public ReviewBench requires this Harbor fork, not released harbor==0.24.0.
+reviewbench-harbor @ git+https://github.com/review-bench/ReviewBench.git@4f04392d6bf4941ab6f8a3ea0c15b449f4458864

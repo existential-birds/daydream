@@ -66,6 +66,9 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     """Add one namespace without changing the private Harbor commands."""
     parser = subparsers.add_parser('reviewbench', help='supplied ReviewBench through the native reviewer')
     commands = parser.add_subparsers(dest='reviewbench_command', required=True)
+    from daydream.benchmark.reviewbench.harbor_cli import add_parsers
+
+    add_parsers(commands)
     plan = commands.add_parser('plan', help='record supplied membership and candidate; no models')
     plan.add_argument('directory', type=Path)
     plan.add_argument('--source', type=Path, required=True, help='checkout at the documented pinned revision')
@@ -224,6 +227,10 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
 def handle(args: argparse.Namespace) -> int:
     """Run only the explicitly selected generation or judging action."""
     try:
+        if args.reviewbench_command in {'harbor-export', 'harbor-run'}:
+            from daydream.benchmark.reviewbench.harbor_cli import handle as harbor_handle
+
+            return harbor_handle(args, candidate_identity())
         if args.reviewbench_command == 'plan':
             return _plan(args)
         directory = args.directory.resolve()

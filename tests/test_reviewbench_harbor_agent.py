@@ -1,0 +1,146 @@
+"""Public reviewer boundary: real frozen Git, runner and role-private auth files."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream import git_ops, runner
+from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION
+from daydream.benchmark.reviewbench.harbor_entrypoint import main
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git
+from tests.test_reviewbench_native import finding, frozen_case
+
+
+def public_input(tmp_path: Path) -> dict[str, str]:
+    repo, case = frozen_case(tmp_path)
+    git(repo, 'remote', 'remove', 'origin')
+    git_ops.update_refs(repo, {'refs/reviewbench/base': case.base, 'refs/reviewbench/head': case.head})
+    inputs = tmp_path / 'pr'
+    inputs.mkdir()
+    pr = {**asdict(case), 'title': 'Frozen supplied title', 'body': 'Frozen supplied author explanation'}
+    (inputs / 'pr.json').write_text(json.dumps(pr))
+    (inputs / 'diff.patch').write_text(git_ops.diff_paths(repo, case.base, case.head, ['.']))
+    profile = {'schema': 1, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
+               'task_id': 7, 'evaluation_id': 99, 'reviewer': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'}}
+    profile['profile_sha256'] = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'))
+                                               .encode()).hexdigest()
+    (inputs / 'daydream-profile.json').write_text(json.dumps(profile))
+    canonical = tmp_path / 'subscription'
+    canonical.mkdir()
+    payload = base64.urlsafe_b64encode(json.dumps({'exp': 9000000000}).encode()).decode().rstrip('=')
+    (canonical / 'auth.json').write_text(json.dumps({'auth_mode': 'chatgpt', 'tokens': {
+        'access_token': f'header.{payload}.signature', 'refresh_token': 'private-refresh-canary',
+        'id_token': 'private-id-canary', 'account_id': 'test-account'}}))
+    return {'DAYDREAM_RB_REPOSITORY': str(repo), 'DAYDREAM_RB_INPUTS': str(inputs),
+            'DAYDREAM_RB_OUTPUT': str(tmp_path / 'out/findings.json'),
+            'DAYDREAM_RB_EVIDENCE': str(tmp_path / 'logs/daydream'),
+            'DAYDREAM_RB_CODEX_HOME': str(canonical), 'PATH': os.environ['PATH'], 'HOME': str(tmp_path),
+            'OPENAI_API_KEY': 'forbidden-api-canary', 'GH_TOKEN': 'forbidden-github-canary'}
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'incomplete', 'conversion_limited', 'provider_failed'])
+async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses_unscorable_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str,
+) -> None:
+    """A successful subprocess alone must not publish partial or discarded findings.
+
+    The existing native tests do not exercise public origin-free snapshots,
+    subscription leases, private trajectory retention or Harbor candidate output.
+    Only the external generation transport is replaced; runner and Git stay real.
+    """
+    environment = public_input(tmp_path)
+    role_homes: list[Path] = []
+    backends: list[EmptyReviewBackend] = []
+
+    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
+        assert name == 'codex'
+        child = kwargs['execution_input'].child_environment()
+        assert not {'OPENAI_API_KEY', 'GH_TOKEN', 'OPENAI_BASE_URL'} & child.keys()
+        home = Path(child['CODEX_HOME'])
+        role_homes.append(home)
+        assert home != Path(environment['DAYDREAM_RB_CODEX_HOME'])
+        assert json.loads((home / 'auth.json').read_text())['auth_mode'] == 'chatgpt'
+        # StubBackend's target is only a fixture root for non-review replies;
+        # actual native review passes its independent checkout to execute().
+        backend = EmptyReviewBackend(Path(environment['DAYDREAM_RB_REPOSITORY']),
+            forbid_merge=False, forbid_supervise=False,
+            review_by_stack={'structure': [finding(line=500 if outcome == 'conversion_limited' else 2)]},
+            incomplete_stack='python' if outcome == 'incomplete' else None,
+            responder=(lambda prompt: [RuntimeError('subscription quota exhausted')] if outcome == 'provider_failed'
+                and ('you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower())
+                else None))
+        backend.merge_echo_records = True
+        backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
+    result = await main(environment)
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    record = json.loads((evidence / 'execution.json').read_text())
+    assert record['status'] == ('failed' if outcome == 'provider_failed' else outcome), record['diagnostics']
+    assert (evidence / 'trajectory.json').is_file()
+    assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
+    assert record['terminal_result']['analyzed_revision']['head_sha'] == record['analyzed_comparison']['head_sha']
+    assert record['task_id'] == 7 and record['evaluation_id'] == 99
+    assert role_homes and all(not home.exists() for home in role_homes)
+    assert any('Frozen supplied author explanation' in call['prompt'] for backend in backends for call in backend.calls)
+    assert 'private-refresh-canary' not in (evidence / 'execution.json').read_text()
+    assert 'forbidden-api-canary' not in (evidence / 'trajectory.json').read_text()
+    output = Path(environment['DAYDREAM_RB_OUTPUT'])
+    assert output.exists() == (outcome == 'complete')
+    assert result == (0 if outcome == 'complete' else 1)
+    if output.exists():
+        assert json.loads(output.read_text())['findings'][0]['file'] == 'api.py'
+    assert not fake_gh.calls('POST')
+
+
+@pytest.mark.parametrize('fault', ['profile', 'patch', 'refs', 'origin', 'stale', 'stale_trajectory', 'auth'])
+async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
+) -> None:
+    """Public provenance must not weaken ordinary origin checks or replay artifacts."""
+    environment = public_input(tmp_path)
+    inputs = Path(environment['DAYDREAM_RB_INPUTS'])
+    if fault == 'profile':
+        profile_path = inputs / 'daydream-profile.json'
+        profile = json.loads(profile_path.read_text())
+        profile['reviewer']['model'] = 'unfrozen-model'
+        profile_path.write_text(json.dumps(profile))
+    elif fault == 'patch':
+        (inputs / 'diff.patch').write_text('unrelated supplied patch')
+    elif fault == 'refs':
+        git(Path(environment['DAYDREAM_RB_REPOSITORY']), 'update-ref', '-d', 'refs/reviewbench/base')
+    elif fault == 'origin':
+        git(Path(environment['DAYDREAM_RB_REPOSITORY']), 'remote', 'add', 'origin', 'https://github.com/other/repo')
+    elif fault == 'stale_trajectory':
+        trajectory = Path(environment['DAYDREAM_RB_EVIDENCE']).parent / 'trajectory.json'
+        trajectory.parent.mkdir(parents=True)
+        trajectory.write_text('previous-native-trajectory')
+    elif fault == 'stale':
+        output = Path(environment['DAYDREAM_RB_OUTPUT'])
+        output.parent.mkdir()
+        output.write_text('previous-evidence')
+    else:
+        (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('invalid public task reached generation transport')
+
+    monkeypatch.setattr(runner, 'create_backend', forbidden)
+    assert await main(environment) == 1
+    output = Path(environment['DAYDREAM_RB_OUTPUT'])
+    if fault == 'stale':
+        assert output.read_text() == 'previous-evidence'
+    else:
+        assert not output.exists()
+    if fault == 'stale_trajectory':
+        assert trajectory.read_text() == 'previous-native-trajectory'

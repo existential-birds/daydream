@@ -318,7 +318,15 @@ async def _step_intent(ctx: FlowContext) -> None:
 
         print_stage_progress(console, 1, 5, _PIPELINE_STAGE_NAMES[0])
         pr_description: str | None = None
-        if config.pr_number is not None:
+        pr_view = None
+        author_head = None
+        if config.frozen_author_description is not None:
+            frozen_author = config.frozen_author_description
+            if frozen_author.head_sha != work.head_sha:
+                raise ValueError("frozen author description does not match analyzed HEAD")
+            pr_description = frozen_author.description
+            author_head = frozen_author.head_sha
+        elif config.pr_number is not None:
             try:
                 pr_view = git_ops.gh_pr_view(
                     target_dir, config.pr_number, auth=ctx.github_execution.auth
@@ -349,6 +357,7 @@ async def _step_intent(ctx: FlowContext) -> None:
                     )
                 else:
                     pr_description = pr_view.get("body") or None
+                    author_head = pr_view.get("headRefOid") or None
         # Issue #279: publish whether a fresh, head-matched PR description grounded
         # the intent phase, so downstream reviewers can include the precedence rule.
         # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
@@ -356,9 +365,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         from daydream.deep.report_context import retain_author_context
         ctx.data['author_report_context_unavailable'] = True
         try:
-            retain_author_context(deep_state.dd, pr_description,
-                                  pr_view.get("headRefOid") or None if config.pr_number is not None
-                                  and pr_view is not None else None)
+            retain_author_context(deep_state.dd, pr_description, author_head)
         except (OSError, ValueError, TypeError, RecursionError) as exc:
             print_warning(console, f'Author report context unavailable: {type(exc).__name__}')
         else:

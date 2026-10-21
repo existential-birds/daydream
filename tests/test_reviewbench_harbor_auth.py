@@ -1,0 +1,183 @@
+"""Private role delivery and refresh ownership at real process/filesystem boundaries.
+
+Existing native/backend replay tests own model lifecycle, not the new shared OAuth
+lease or the standalone verifier executable. Synthetic secrets here never contact
+an OAuth or inference endpoint.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream.benchmark.reviewbench import harbor_auth
+
+
+def _token(expiry: int = 1) -> str:
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+    return f"test.{claims}.test"
+
+
+def _login(home: Path) -> dict[str, Any]:
+    home.mkdir(parents=True, exist_ok=True)
+    auth = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "tokens": {
+        "access_token": _token(), "refresh_token": "synthetic-refresh", "account_id": "test-account",
+        "id_token": "synthetic-id",
+    }, "last_refresh": "synthetic-date"}
+    (home / "auth.json").write_text(json.dumps(auth))
+    return auth
+
+
+def test_refresh_returns_to_source_on_failed_judge_process(tmp_path: Path) -> None:
+    """A quota/transport exit must not discard an already rotated refresh credential."""
+    source, canonical = tmp_path / "source", tmp_path / "canonical"
+    original = _login(source)
+    models = tmp_path / "models.json"
+    models.write_text('{"providers": {}}')
+    result_path = tmp_path / "environment.json"
+    script = tmp_path / "judge.py"
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "home = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])\n"
+        "auth = json.loads((home / 'auth.json').read_text())\n"
+        "assert auth['openai-codex']['type'] == 'oauth'\n"
+        "assert (home / 'models.json').read_text() == '{\"providers\": {}}'\n"
+        "auth['openai-codex']['refresh'] = 'synthetic-rotated'\n"
+        "(home / 'auth.json').write_text(json.dumps(auth))\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps({\n"
+        " 'api': 'OPENAI_API_KEY' in os.environ, 'url': 'OPENAI_BASE_URL' in os.environ,\n"
+        " 'codex': 'CODEX_HOME' in os.environ, 'private_home': str(home),\n"
+        " 'mode': (home / 'auth.json').stat().st_mode & 511}))\n"
+        "sys.exit(29)\n"
+    )
+    with harbor_auth.subscription_session(source, canonical):
+        environment = dict(os.environ, OPENAI_API_KEY="forbidden-api-key", OPENAI_BASE_URL="https://invalid.example")
+        result = subprocess.run([
+            sys.executable, str(Path(harbor_auth.__file__)), "judge", "--canonical-home", str(canonical),
+            "--models", str(models), "--", sys.executable, str(script), str(result_path),
+        ], env=environment, capture_output=True, text=True)
+        assert result.returncode == 29, result.stderr
+        observed = json.loads(result_path.read_text())
+        assert observed == {"api": False, "url": False, "codex": False,
+                            "private_home": observed["private_home"], "mode": 0o600}
+        assert not Path(observed["private_home"]).exists()
+        assert "synthetic-refresh" not in result.stdout + result.stderr
+    updated = json.loads((source / "auth.json").read_text())
+    assert updated["tokens"]["refresh_token"] == "synthetic-rotated"
+    assert updated["tokens"]["id_token"] == original["tokens"]["id_token"]
+    assert not (canonical / "auth.json").exists()
+
+
+def test_cross_process_reviewer_and_judge_serialize_rotating_credentials(tmp_path: Path) -> None:
+    """Concurrent trials must consume the latest canonical refresh after their lease."""
+    canonical = tmp_path / "canonical"
+    _login(canonical)
+    child = tmp_path / "waiter.py"
+    child.write_text(
+        "import importlib.util, json, pathlib, sys\n"
+        "spec = importlib.util.spec_from_file_location('auth', sys.argv[1])\n"
+        "auth = importlib.util.module_from_spec(spec); spec.loader.exec_module(auth)\n"
+        "root = pathlib.Path(sys.argv[2])\n"
+        "(root / 'waiting').touch()\n"
+        "with auth.subscription_lease(root / 'canonical', root / 'judge', role='judge') as home:\n"
+        " data = json.loads((home / 'auth.json').read_text())['openai-codex']\n"
+        " assert data['refresh'] == 'synthetic-reviewer-rotated'\n"
+        " data['refresh'] = 'synthetic-judge-rotated'\n"
+        " (home / 'auth.json').write_text(json.dumps({'openai-codex': data}))\n"
+    )
+    with harbor_auth.subscription_lease(canonical, tmp_path / "reviewer") as home:
+        process = subprocess.Popen([sys.executable, str(child), str(Path(harbor_auth.__file__)), str(tmp_path)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            # A file handshake confirms the independent process entered its lease.
+            import time
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "waiting").exists():
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert process.poll() is None
+            updated = json.loads((home / "auth.json").read_text())
+            updated["tokens"]["refresh_token"] = "synthetic-reviewer-rotated"
+            (home / "auth.json").write_text(json.dumps(updated))
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stdout + stderr
+    assert json.loads((canonical / "auth.json").read_text())["tokens"]["refresh_token"] == "synthetic-judge-rotated"
+    assert not (tmp_path / "reviewer" / "auth.json").exists()
+    assert not (tmp_path / "judge" / "auth.json").exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "api", "partial", "malformed", "symlink"])
+def test_subscription_only_rejects_unusable_auth_without_exposing_it(tmp_path: Path, damage: str) -> None:
+    """The new capability boundary must fail before any model/API fallback process."""
+    canonical, private = tmp_path / "canonical", tmp_path / "private"
+    value = _login(canonical)
+    path = canonical / "auth.json"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "api":
+        value["OPENAI_API_KEY"] = "synthetic-secret"
+        path.write_text(json.dumps(value))
+    elif damage == "partial":
+        value["tokens"].pop("refresh_token")
+        path.write_text(json.dumps(value))
+    elif damage == "malformed":
+        path.write_text("synthetic-secret:invalid-json")
+    else:
+        destination = canonical / "actual-auth.json"
+        path.rename(destination)
+        path.symlink_to(destination)
+    with pytest.raises(harbor_auth.SubscriptionAuthError) as caught:
+        with harbor_auth.subscription_lease(canonical, private):
+            pytest.fail("invalid subscription auth reached reviewer")
+    assert "synthetic-secret" not in str(caught.value)
+    assert not (private / "auth.json").exists()
+
+
+def test_external_source_rotation_preserves_both_stores(tmp_path: Path) -> None:
+    """A noncooperating native client must not lose its newer login at job shutdown."""
+    source, canonical = tmp_path / "source", tmp_path / "canonical"
+    _login(source)
+    with pytest.raises(harbor_auth.SubscriptionAuthError, match="changed outside"):
+        with harbor_auth.subscription_session(source, canonical):
+            outside = json.loads((source / "auth.json").read_text())
+            outside["tokens"]["refresh_token"] = "synthetic-outside-rotation"
+            (source / "auth.json").write_text(json.dumps(outside))
+    assert json.loads((source / "auth.json").read_text())["tokens"]["refresh_token"] == "synthetic-outside-rotation"
+    assert json.loads((canonical / "auth.json").read_text())["tokens"]["refresh_token"] == "synthetic-refresh"
+
+
+def test_killed_role_blocks_replay_of_uncertain_refresh(tmp_path: Path) -> None:
+    """Process death releases flock but cannot authorize reuse of pre-refresh auth."""
+    canonical = tmp_path / "canonical"
+    original = _login(canonical)
+    script = tmp_path / "killed.py"
+    script.write_text(
+        "import importlib.util, json, os, pathlib, sys\n"
+        "spec = importlib.util.spec_from_file_location('auth', sys.argv[1])\n"
+        "auth = importlib.util.module_from_spec(spec); spec.loader.exec_module(auth)\n"
+        "root = pathlib.Path(sys.argv[2])\n"
+        "with auth.subscription_lease(root / 'canonical', root / 'private') as home:\n"
+        " data = json.loads((home / 'auth.json').read_text())\n"
+        " data['tokens']['refresh_token'] = 'synthetic-uncertain-rotation'\n"
+        " (home / 'auth.json').write_text(json.dumps(data))\n"
+        " os._exit(37)\n"
+    )
+    result = subprocess.run([sys.executable, str(script), str(Path(harbor_auth.__file__)), str(tmp_path)])
+    assert result.returncode == 37
+    with pytest.raises(harbor_auth.SubscriptionAuthError, match="credential recovery"):
+        with harbor_auth.subscription_lease(canonical, tmp_path / "new-private"):
+            pytest.fail("uncertain prior refresh reached another model invocation")
+    assert json.loads((canonical / "auth.json").read_text()) == original
+    assert json.loads((tmp_path / "private" / "auth.json").read_text())["tokens"]["refresh_token"] == (
+        "synthetic-uncertain-rotation"
+    )

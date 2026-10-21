@@ -5,7 +5,10 @@ Check discovery and secret/variable-name agreement with the shipped YAML.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -39,10 +42,39 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
         expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
         expected_paths.add('daydream/backends/pi_structured_output.ts')
+        expected_paths.update({
+            'daydream/benchmark/reviewbench/harbor-runtime.in',
+            'daydream/benchmark/reviewbench/harbor-runtime.lock',
+            'daydream/benchmark/reviewbench/harbor_entrypoint.py',
+            'daydream/benchmark/reviewbench/harbor_auth.py',
+        })
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
+            installed = Path(tmp) / 'installed'
+            zf.extractall(installed)
         assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "
             f"Found resources: {sorted(names_in_wheel.intersection(expected_paths))!r}. "
             f"Expected paths: {sorted(expected_paths)!r}. "
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )
+        # Regression: source-tree resource reads pass while installed execution
+        # outside a checkout cannot find its runtime lock or public entrypoint.
+        script = (
+            'import json,sys; from pathlib import Path; '
+            'from daydream.benchmark.reviewbench.harbor_build import reviewer_build; '
+            'suffix,assets,identity=reviewer_build(Path(sys.argv[1])); '
+            'print(json.dumps({"identity":identity,"assets":list(assets),"suffix":suffix}))'
+        )
+        result = subprocess.run([sys.executable, '-c', script, str(wheels[0])], cwd=tmp,
+                                env={**os.environ, 'PYTHONPATH': str(installed)},
+                                check=True, capture_output=True, text=True)
+        build = json.loads(result.stdout)
+        assert build['identity']['platform'] == 'linux/amd64'
+        assert build['identity']['codex_cli'] == '0.163.0'
+        assert 'runtime.lock' in build['assets']
+        help_result = subprocess.run([sys.executable, '-m', 'daydream', 'benchmark', 'reviewbench',
+                                      'harbor-export', '--help'], cwd=tmp,
+                                     env={**os.environ, 'PYTHONPATH': str(installed)},
+                                     check=True, capture_output=True, text=True)
+        assert '--wheel' in help_result.stdout
+        assert '--source' in help_result.stdout

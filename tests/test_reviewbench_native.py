@@ -139,7 +139,7 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
             assert "No judging or inference performed" in checked.stdout
 
 
-@pytest.mark.parametrize("fault", ["dirty", "identity", "missing", "mirror"])
+@pytest.mark.parametrize("fault", ["dirty", "identity", "missing", "mirror", "no_origin"])
 async def test_frozen_input_is_verified_before_native_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
@@ -151,6 +151,8 @@ async def test_frozen_input_is_verified_before_native_dispatch(
         git(repo, "remote", "set-url", "origin", "https://github.com/another/project.git")
     elif fault == "missing":
         case = replace(case, head="f" * 40)
+    elif fault == "no_origin":
+        git(repo, "remote", "remove", "origin")
     else:
         git(repo, "remote", "set-url", "origin", "https://github.com/review-bench/example_project.git")
 
