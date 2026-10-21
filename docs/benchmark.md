@@ -34,7 +34,18 @@ Use the candidate installation/checkout itself to create and run its plan; anoth
 revision is a new plan, not a relabeled result. Package-byte changes invalidate a
 plan. Configuration is frozen on the first generation call and must agree across
 its rounds. Effective native configuration and profile digests accompany every
-terminal outcome. Missing usage/token/cost/duration measurements remain unavailable.
+terminal outcome. The freeze includes native provider/thinking/retry controls and
+the operator configuration root's public Pi model defaults. Case-local Pi defaults
+cannot replace them. Actual request model/provider/effort identities are retained
+separately from configured phase intent, including optional review phases.
+Available prompt/completion/cache/cost totals use the recorder's authoritative
+whole-run accounting, including joined forks exactly once. Missing measurements
+remain unavailable; no cleanup duration is relabeled as reviewer time. Credentials
+and credential-bearing files are never serialized or fingerprinted.
+Native configuration-directory, provider-switch and endpoint selectors accompany
+the adapter's supported host controls. Native client file contents and internal
+provider decisions can remain opaque; this limitation is recorded alongside
+observed request identities and does not change supplied scoring or averaging.
 
 **Generation incurs reviewer calls. Launch only with separate experiment
 authorization.** After `--`, use ordinary native review flags and a configuration

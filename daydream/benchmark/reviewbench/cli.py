@@ -178,7 +178,7 @@ def _fetch_case(case: Case, repository: Path) -> None:
 
 
 async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[Case], directory: Path) -> int:
-    from daydream.benchmark.reviewbench.native import review_case
+    from daydream.benchmark.reviewbench.native import native_configuration, review_case
 
     if candidate_identity() != plan['candidate']:
         raise ValueError('executing candidate bytes differ from plan; create a fresh candidate plan')
@@ -187,7 +187,8 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
     if args.repository is not None and args.pr is None:
         raise ValueError('--repository requires a single --pr')
     config = _native_config(args.native_args)
-    requested = json.loads(json.dumps(asdict(config), default=str))
+    runtime = native_configuration(config)
+    requested = {'run_config': json.loads(json.dumps(asdict(config), default=str)), 'native': runtime[0]}
     directory.mkdir(parents=True, exist_ok=True)
     config_path = directory.parent / 'configuration.json'
     if config_path.exists():
@@ -204,12 +205,14 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
         if outcome_path.exists() or candidate_path.exists():
             raise ValueError(f'case already has artifacts: {case.key}; create a fresh plan')
         try:
+            if native_configuration(config)[0] != runtime[0]:
+                raise ValueError('native configuration changed before this case; create a fresh candidate plan')
             with tempfile.TemporaryDirectory(prefix='daydream-reviewbench-') as temporary:
                 repository = args.repository
                 if repository is None:
                     repository = Path(temporary) / 'repository'
                     _fetch_case(case, repository)
-                result = await review_case(case, repository, config, plan['producer'])
+                result = await review_case(case, repository, config, plan['producer'], runtime=runtime)
                 outcome = asdict(result)
                 candidate = outcome.pop('candidate')
                 if outcome['status'] in {'complete', 'completed_empty'} and candidate is not None:

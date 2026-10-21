@@ -11,10 +11,11 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -127,6 +128,10 @@ class RunnerExecutionInput:
 
     backend: BackendExecutionInput = field(repr=False, compare=False)
     github: github_app.GitHubExecutionInput = field(repr=False, compare=False)
+    backends: Mapping[str, BackendExecutionInput | None] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "backends", MappingProxyType(dict(self.backends)))
 
 
 def _resolve_backend(
@@ -317,7 +322,7 @@ async def run(
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-                execution_input=backend_execution,
+                execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
             )
 
         backend_factory = create_for_context
