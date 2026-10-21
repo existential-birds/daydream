@@ -20,7 +20,7 @@ Python dependencies. Harbor stays outside core runtime dependencies.
 
 ```bash
 uv build --wheel --out-dir /tmp/reviewbench-wheels
-uv venv /tmp/reviewbench-runtime
+uv venv --python 3.14.3 /tmp/reviewbench-runtime
 uv pip install --python /tmp/reviewbench-runtime/bin/python \
   -r daydream/benchmark/reviewbench/harbor-runtime.lock \
   /tmp/reviewbench-wheels/daydream-0.30.0-py3-none-any.whl
@@ -33,7 +33,8 @@ Export the **entire** corpus without inference, from the installed candidate:
 /tmp/reviewbench-runtime/bin/daydream benchmark reviewbench harbor-export \
   /tmp/reviewbench-full --source /path/to/ReviewBench \
   --wheel /tmp/reviewbench-wheels/daydream-0.30.0-py3-none-any.whl \
-  --reviewer-model gpt-6.1-sol --reviewer-effort high --rounds 3
+  --reviewer-model gpt-6.1-sol --reviewer-effort high --rounds 3 \
+  --platform linux/amd64
 /tmp/reviewbench-runtime/bin/reviewbench-check-dataset /tmp/reviewbench-full
 ```
 
@@ -41,10 +42,20 @@ The profile freezes wheel/package bytes, upstream revision, PR title/body and
 base/HEAD, native model/effort, default review profile through package identity,
 judge settings/prompts/source, images, Python/Codex/uv versions, dependency lock,
 bootstrap/compose policy, custom evaluation IDs and task/dataset metric digests.
-Exported tasks use `linux/amd64`; Docker must support that architecture natively
-or through verified emulation, and Harbor's exact-host kernel isolation. Both
-roles allow only `chatgpt.com` and `auth.openai.com`. The runner checks isolation
-before inference and never widens the network policy.
+Choose the native Docker architecture explicitly. The default `linux/amd64`
+matches upstream's documented platform; `--platform linux/arm64` selects the
+custom native ARM64 profile. Keep that choice fixed across the before/after
+comparison. The reviewer uses a shipped, pinned Docker seccomp profile with
+only the namespace bootstrap allowances required by Codex's nested Bubblewrap
+sandbox. Docker capabilities stay at their default, and Codex applies its own
+read-only filesystem and seccomp restrictions. Reviewer setup checks those
+restrictions without model calls before inference. Emulation must support the
+actual sandbox, including nested seccomp; running an amd64 binary alone is
+insufficient.
+
+Harbor's exact-host kernel isolation is also required. Both roles allow only
+`chatgpt.com` and `auth.openai.com`; the runner checks isolation before inference
+and preserves that network policy.
 
 Reserve an existing file-backed **ChatGPT subscription login** for the whole job.
 `codex login status` must report ChatGPT access. API-key login and API fallbacks
@@ -57,7 +68,10 @@ therefore serializes. Host admission queues whole trials before their timed
 phases, so lease waiting cannot consume the supplied review/judge allowance.
 `--concurrency` is an upper bound: with one subscription login, effective trial
 concurrency is one, recorded alongside the requested limit in the job's admission
-policy. At job
+policy. Native reviewer fan-out is also frozen at one through Daydream's
+supported concurrency setting: separate Codex CLI processes have process-local
+refresh locks, so sharing an auth file alone cannot prevent simultaneous token
+rotation. The ordinary review phases and native transport remain in use. At job
 exit, refresh updates return to the original auth file. Conflicting external
 updates or a killed lease preserve private recovery credentials in the mounted
 auth directory and fail closed; recover the

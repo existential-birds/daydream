@@ -22,16 +22,24 @@ from daydream.benchmark.reviewbench.contract import (
     load_cases,
     verify_source,
 )
+from daydream.benchmark.reviewbench.harbor_build import REVIEWBENCH_PLATFORMS
 
 CODEX_MODEL = 'gpt-6.1-sol'
 SUBSCRIPTION_HOME = '/run/reviewbench-codex'
 PROFILE_PATH = '/work/pr/daydream-profile.json'
-COMPOSE = '''services:
+
+
+def _compose(platform: str, *, reviewer: bool) -> str:
+    """Keep the judge on Docker's default syscall policy and share only auth."""
+    security = ('    security_opt:\n'
+                '      - "seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}"\n'
+                if reviewer else '')
+    return f'''services:
   main:
-    platform: linux/amd64
-    volumes:
+    platform: {platform}
+{security}    volumes:
       - type: bind
-        source: ${RB_HARBOR_AUTH_DIR:?Set a dedicated subscription runtime directory}
+        source: ${{RB_HARBOR_AUTH_DIR:?Set a dedicated subscription runtime directory}}
         target: /run/reviewbench-codex
 '''
 
@@ -98,6 +106,7 @@ def export_harbor_profile(
     reviewer_assets: Mapping[str, bytes] | None = None,
     organization: str = 'daydream-local',
     rounds: int = 3,
+    platform: str = 'linux/amd64',
 ) -> dict[str, Any]:
     """Export all 219 supplied tasks without inference into a NEW local profile.
 
@@ -113,6 +122,10 @@ def export_harbor_profile(
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
     models = codex_models(reviewer_model)
+    if platform not in REVIEWBENCH_PLATFORMS:
+        raise ValueError('Public ReviewBench requires an explicit supported Linux platform')
+    if candidate.get('platform', platform) != platform:
+        raise ValueError('Reviewer build and task platform identities differ')
     if type(rounds) is not int or rounds < 1:
         raise ValueError('Independent comparison rounds must be positive')
     _image(base_image)
@@ -133,14 +146,25 @@ def export_harbor_profile(
 
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
     atomic_asset = Path(json_utils.__file__).read_bytes()
-    policy = {
+    seccomp_asset = Path(__file__).with_name('harbor-seccomp.json').read_bytes()
+    seccomp_provenance_asset = Path(__file__).with_name('harbor-seccomp-provenance.json').read_bytes()
+    seccomp_license_asset = Path(__file__).with_name('harbor-seccomp-LICENSE').read_bytes()
+    seccomp_provenance = json.loads(seccomp_provenance_asset)
+    seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
+    if seccomp_provenance['policy_sha256'] != seccomp_sha:
+        raise ValueError('Reviewer seccomp profile differs from its frozen provenance')
+    probe_sha = hashlib.sha256(Path(__file__).with_name('harbor_sandbox_probe.py').read_bytes()).hexdigest()
+    reviewer_compose = _compose(platform, reviewer=True)
+    verifier_compose = _compose(platform, reviewer=False)
+    policy: dict[str, Any] = {
         'schema': 1, 'name': 'daydream-reviewbench-codex-subscription-v1',
         'source': source_identity, 'source_prs': len(cases),
         'candidate': dict(candidate), 'final_comparison_rounds': rounds,
         'subscription_admission': {**ADMISSION_POLICY, 'plugin_sha256': hashlib.sha256(
             Path(__file__).with_name('harbor_subscription_plugin.py').read_bytes()).hexdigest()},
         'profile_builder_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': reviewer_timeout},
+        'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': reviewer_timeout,
+                     'fanout_concurrency': 1},
         'judge': {
             'provider': 'openai-codex', 'model': reviewer_model, 'auth': 'subscription-oauth',
             'matcher_effort': 'low', 'classifier_effort': 'medium',
@@ -151,7 +175,14 @@ def export_harbor_profile(
             'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
             'refresh_policy': 'canonical-exclusive-full-invocation-lease',
         },
-        'runtime': {'platform': 'linux/amd64', 'auth_compose_sha256': hashlib.sha256(COMPOSE.encode()).hexdigest(),
+        'runtime': {'platform': platform,
+                    'reviewer_compose_sha256': hashlib.sha256(reviewer_compose.encode()).hexdigest(),
+                    'verifier_compose_sha256': hashlib.sha256(verifier_compose.encode()).hexdigest(),
+                    'reviewer_seccomp_sha256': seccomp_sha,
+                    'reviewer_seccomp_provenance_sha256': hashlib.sha256(seccomp_provenance_asset).hexdigest(),
+                    'reviewer_seccomp_license_sha256': hashlib.sha256(seccomp_license_asset).hexdigest(),
+                    'reviewer_seccomp_provenance': seccomp_provenance,
+                    'sandbox_probe_sha256': probe_sha, 'verifier_seccomp': 'docker-default',
                     'verifier_image': base_image, 'reviewer_image': reviewer_image or base_image,
                     'reviewer_build_suffix_sha256': hashlib.sha256(reviewer_dockerfile_suffix.encode()).hexdigest(),
                     'reviewer_assets': {key: hashlib.sha256(value).hexdigest()
@@ -186,6 +217,9 @@ def export_harbor_profile(
                 'schema': 1, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
                 'task_id': task['task_id'], 'evaluation_id': task['evaluation_id'],
                 'reviewer': policy['reviewer'], 'candidate': dict(candidate), 'policy_sha256': policy_sha,
+                'runtime': {key: policy['runtime'][key] for key in (
+                    'platform', 'reviewer_seccomp_sha256', 'reviewer_seccomp_provenance_sha256', 'sandbox_probe_sha256',
+                )},
             }
             profile['profile_sha256'] = canonical_digest(profile)
             _write_json(task_dir / 'environment/daydream-profile.json', profile)
@@ -196,6 +230,9 @@ def export_harbor_profile(
             docker = docker.replace('RUN git init -q .', reviewer_dockerfile_suffix + '\nRUN git init -q .', 1)
             docker += '\nCOPY daydream-profile.json /work/pr/daydream-profile.json\n'
             docker_path.write_text(docker, encoding='utf-8')
+            (task_dir / 'environment/reviewer-seccomp.json').write_bytes(seccomp_asset)
+            (task_dir / 'environment/reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
+            (task_dir / 'environment/reviewer-seccomp-LICENSE').write_bytes(seccomp_license_asset)
             for relative, content in (reviewer_assets or {}).items():
                 relative_path = Path(relative)
                 if relative_path.is_absolute() or '..' in relative_path.parts:
@@ -205,8 +242,8 @@ def export_harbor_profile(
                 destination.write_bytes(content)
             (task_dir / 'tests/daydream-auth.py').write_bytes(auth_asset)
             (task_dir / 'tests/daydream_json_utils.py').write_bytes(atomic_asset)
-            for role_directory in ('environment', 'tests'):
-                (task_dir / role_directory / 'docker-compose.yaml').write_text(COMPOSE, encoding='utf-8')
+            (task_dir / 'environment/docker-compose.yaml').write_text(reviewer_compose, encoding='utf-8')
+            (task_dir / 'tests/docker-compose.yaml').write_text(verifier_compose, encoding='utf-8')
             _write_json(task_dir / 'tests/judge/.daydream-codex/models.json', models)
             bootstrap = (
                 '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
@@ -230,6 +267,9 @@ def export_harbor_profile(
         metric_sha = hashlib.sha256(metric.encode()).hexdigest()
         _write_json(exported / 'daydream-profile.json', {**policy, 'policy_sha256': policy_sha})
         profile_sha = hashlib.sha256((exported / 'daydream-profile.json').read_bytes()).hexdigest()
+        (exported / 'reviewer-seccomp.json').write_bytes(seccomp_asset)
+        (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
+        (exported / 'reviewer-seccomp-LICENSE').write_bytes(seccomp_license_asset)
         (exported / 'dataset.toml').write_text(
             'schema_version = "1.0"\n[dataset]\n'
             f'name = {json.dumps(organization + "/reviewbench-codex-subscription")}\n'
@@ -238,7 +278,13 @@ def export_harbor_profile(
             + '\n'.join(references) + '\n[[files]]\npath = "metric.py"\n'
             f'digest = "sha256:{metric_sha}"\n'
             '\n[[files]]\npath = "daydream-profile.json"\n'
-            f'digest = "sha256:{profile_sha}"\n', encoding='utf-8',
+            f'digest = "sha256:{profile_sha}"\n'
+            '\n[[files]]\npath = "reviewer-seccomp.json"\n'
+            f'digest = "sha256:{seccomp_sha}"\n'
+            '\n[[files]]\npath = "reviewer-seccomp-provenance.json"\n'
+            f'digest = "sha256:{hashlib.sha256(seccomp_provenance_asset).hexdigest()}"\n'
+            '\n[[files]]\npath = "reviewer-seccomp-LICENSE"\n'
+            f'digest = "sha256:{hashlib.sha256(seccomp_license_asset).hexdigest()}"\n', encoding='utf-8',
         )
         # Recheck the supplied checkout after generation so concurrent source
         # changes cannot silently claim the originally admitted revision.

@@ -37,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Export and run the complete public ReviewBench corpus through Harbor with the
   ordinary native Codex reviewer and a separate subscription-backed Codex judge.
   Freeze custom task/runtime identities, coordinate OAuth refresh across roles,
-  and retain private completion evidence and supplied independent-round metrics
+  validate the native container sandbox before inference, and retain private
+  completion evidence and supplied independent-round metrics
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 
 - Run supplied, revision-pinned ReviewBench cases through the ordinary native

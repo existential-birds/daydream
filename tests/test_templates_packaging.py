@@ -35,6 +35,10 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
             'daydream/benchmark/reviewbench/harbor-runtime.lock',
             'daydream/benchmark/reviewbench/harbor_entrypoint.py',
             'daydream/benchmark/reviewbench/harbor_auth.py',
+            'daydream/benchmark/reviewbench/harbor_sandbox_probe.py',
+            'daydream/benchmark/reviewbench/harbor-seccomp.json',
+            'daydream/benchmark/reviewbench/harbor-seccomp-provenance.json',
+            'daydream/benchmark/reviewbench/harbor-seccomp-LICENSE',
         })
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
@@ -57,13 +61,15 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
             'import json,sys; from pathlib import Path; '
             'from daydream.benchmark.reviewbench.harbor_build import reviewer_build; '
             'suffix,assets,identity=reviewer_build(Path(sys.argv[1])); '
-            'print(json.dumps({"identity":identity,"assets":list(assets),"suffix":suffix}))'
+            '_,_,arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64"); '
+            'print(json.dumps({"identity":identity,"arm_identity":arm_identity,"assets":list(assets),"suffix":suffix}))'
         )
         result = subprocess.run([sys.executable, '-c', script, str(wheels[0])], cwd=tmp,
                                 env={**os.environ, 'PYTHONPATH': str(installed)},
                                 check=True, capture_output=True, text=True)
         build = json.loads(result.stdout)
         assert build['identity']['platform'] == 'linux/amd64'
+        assert build['arm_identity']['platform'] == 'linux/arm64'
         assert build['identity']['codex_cli'] == '0.163.0'
         assert 'runtime.lock' in build['assets']
         help_result = subprocess.run([sys.executable, '-m', 'daydream', 'benchmark', 'reviewbench',
@@ -72,3 +78,4 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
                                      check=True, capture_output=True, text=True)
         assert '--wheel' in help_result.stdout
         assert '--source' in help_result.stdout
+        assert '--platform' in help_result.stdout

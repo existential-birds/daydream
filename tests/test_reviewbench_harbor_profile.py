@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from daydream import json_utils
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
@@ -18,14 +19,16 @@ from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
 
 
-@pytest.fixture
-def public_profile(supplied_source: Path, tmp_path: Path) -> Path:
+@pytest.fixture(params=['linux/amd64', 'linux/arm64'])
+def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     """Use real supplied inputs/export process, not a fake task generator."""
     output = tmp_path / 'public'
     export_harbor_profile(
-        supplied_source, output, candidate={'revision': 'test-candidate', 'wheel_sha256': 'a' * 64},
+        supplied_source, output,
+        candidate={'revision': 'test-candidate', 'wheel_sha256': 'a' * 64, 'platform': request.param},
         base_image=NODE_IMAGE, reviewer_assets={'runtime.lock': b'offline test build input\n'},
         reviewer_dockerfile_suffix='\nCOPY runtime.lock /opt/runtime.lock\n',
+        **({'platform': request.param} if request.param != 'linux/amd64' else {}),
     )
     return output
 
@@ -51,6 +54,11 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
     assert policy['judge']['max_output_tokens_enforced'] is False
+    assert policy['reviewer']['fanout_concurrency'] == 1
+    assert policy['runtime']['platform'] == policy['candidate']['platform']
+    assert policy['runtime']['reviewer_seccomp_sha256'] == _hash(public_profile / 'reviewer-seccomp.json')
+    assert policy['runtime']['reviewer_seccomp_provenance']['policy_sha256'] == (
+        policy['runtime']['reviewer_seccomp_sha256'])
     assert policy['subscription_admission']['effective_concurrency'] == 1
     assert policy['subscription_admission']['scope'] == 'whole-trial-before-create-and-phase-timers'
     expected = runpy.run_path(str(public_profile / 'metric.py'))['EXPECTED_TASKS']
@@ -65,6 +73,8 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         assert hashlib.sha256(encoded).hexdigest() == digest
         assert exported['evaluation_id'] == task['evaluation_id']
         assert exported['policy_sha256'] == policy['policy_sha256']
+        assert exported['runtime']['platform'] == policy['runtime']['platform']
+        assert _hash(directory / 'environment/reviewer-seccomp.json') == policy['runtime']['reviewer_seccomp_sha256']
         assert not (directory / 'environment/golden').exists()
         task_config = tomllib.loads((directory / 'task.toml').read_text())
         assert task_config['verifier']['environment_mode'] == 'separate'
@@ -108,10 +118,20 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert model['reasoning'] is True
     dockerfile = (task_dir / 'environment/Dockerfile').read_text()
     assert dockerfile.index('COPY runtime.lock') < dockerfile.index('RUN git init -q .')
-    # Both roles share only the auth directory; each still owns its isolated
-    # filesystem and exact-host network as validated above.
-    assert (task_dir / 'environment/docker-compose.yaml').read_bytes() == (
-        task_dir / 'tests/docker-compose.yaml').read_bytes()
+    # Both roles share only auth. Only the reviewer receives the narrowly
+    # extended syscall profile needed to bootstrap Codex's native sandbox.
+    reviewer = yaml.safe_load((task_dir / 'environment/docker-compose.yaml').read_text())['services']['main']
+    verifier = yaml.safe_load((task_dir / 'tests/docker-compose.yaml').read_text())['services']['main']
+    assert set(reviewer) == {'platform', 'security_opt', 'volumes'}
+    assert set(verifier) == {'platform', 'volumes'}
+    assert reviewer['platform'] == verifier['platform'] == policy['runtime']['platform']
+    assert reviewer['volumes'] == verifier['volumes'] == [{
+        'type': 'bind', 'source': '${RB_HARBOR_AUTH_DIR:?Set a dedicated subscription runtime directory}',
+        'target': '/run/reviewbench-codex',
+    }]
+    assert reviewer['security_opt'] == [
+        'seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}',
+    ]
 
 
 @pytest.mark.parametrize('option', [
@@ -119,6 +139,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     {'base_image': 'node:latest'}, {'reviewer_timeout': 0}, {'verifier_timeout': 0},
     {'candidate': {'refresh_token': 'must-never-be-retained'}},
     {'reviewer_assets': {'../escaped': b'bytes'}},
+    {'platform': 'linux/ppc64le'}, {'platform': 'linux/arm64', 'candidate': {'platform': 'linux/amd64'}},
 ])
 def test_invalid_public_profile_preserves_source_and_publishes_nothing(
     supplied_source: Path, tmp_path: Path, option: dict[str, Any],

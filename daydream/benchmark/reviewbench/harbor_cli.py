@@ -12,7 +12,12 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from daydream.benchmark.reviewbench.harbor_build import HARBOR_REVISION, NODE_IMAGE, reviewer_build
+from daydream.benchmark.reviewbench.harbor_build import (
+    HARBOR_REVISION,
+    NODE_IMAGE,
+    REVIEWBENCH_PLATFORMS,
+    reviewer_build,
+)
 
 
 def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -23,6 +28,8 @@ def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
     export.add_argument('--reviewer-model', default='gpt-6.1-sol')
     export.add_argument('--reviewer-effort', choices=('low', 'medium', 'high', 'xhigh'), default='high')
     export.add_argument('--base-image', default=NODE_IMAGE)
+    export.add_argument('--platform', choices=REVIEWBENCH_PLATFORMS, default='linux/amd64',
+                        help='frozen task architecture; native sandbox preflight must pass')
     export.add_argument('--rounds', type=int, choices=(1, 3), default=3)
     run = commands.add_parser('harbor-run', help='run the exported public profile; launches models')
     run.add_argument('directory', type=Path)
@@ -96,11 +103,12 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     if args.reviewbench_command == 'harbor-export':
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 
-        suffix, assets, identity = reviewer_build(args.wheel.resolve())
+        suffix, assets, identity = reviewer_build(args.wheel.resolve(), platform=args.platform)
         result = export_harbor_profile(
             args.source, args.directory, candidate={**candidate, **identity}, base_image=args.base_image,
             reviewer_model=args.reviewer_model, reviewer_effort=args.reviewer_effort,
             reviewer_dockerfile_suffix=suffix, reviewer_assets=assets, rounds=args.rounds,
+            platform=args.platform,
         )
         print(json.dumps(result, indent=2))
         return 0
@@ -147,6 +155,7 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         # retain the host-native architecture rather than inherit an override.
         environment.pop('DOCKER_DEFAULT_PLATFORM', None)
         environment.update(RB_HARBOR_AUTH_DIR=str(home), RB_HARBOR_SUBSCRIPTION_HOME='/run/reviewbench-codex')
+        environment['RB_HARBOR_SECCOMP_PROFILE'] = str(args.directory.resolve() / 'reviewer-seccomp.json')
         returncode = subprocess.call(command, env=environment)
     if returncode:
         return returncode

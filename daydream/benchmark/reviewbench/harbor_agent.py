@@ -39,6 +39,15 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
         result = await environment.exec('python -c ' + shlex.quote(probe))
         if result.return_code != 0:
             raise RuntimeError('public ReviewBench candidate image setup failed')
+        result = await environment.exec('python -m daydream.benchmark.reviewbench.harbor_sandbox_probe',
+                                        cwd='/work/repo', timeout_sec=60)
+        from daydream.redaction import redact_structured_text
+
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        with (Path(self.logs_dir) / 'sandbox-preflight.log').open('x') as stream:
+            stream.write(redact_structured_text((result.stdout or '') + (result.stderr or '')))
+        if result.return_code != 0:
+            raise RuntimeError('public ReviewBench native Codex sandbox preflight failed before model execution')
 
     async def run(self, instruction: str, environment: Any, context: Any) -> None:
         # The upstream instruction is embodied by the exact frozen task metadata.
