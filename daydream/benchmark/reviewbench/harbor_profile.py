@@ -128,11 +128,15 @@ def export_harbor_profile(
     serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
     if re.search(r'(?i)(api.?key|access.?token|refresh.?token|id.?token|password|secret)', serialized_candidate):
         raise ValueError('Candidate identity must contain no credentials or secret fields')
+    from daydream.benchmark.reviewbench.harbor_subscription_plugin import ADMISSION_POLICY
+
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
     policy = {
         'schema': 1, 'name': 'daydream-reviewbench-codex-subscription-v1',
         'source': source_identity, 'source_prs': len(cases),
         'candidate': dict(candidate), 'final_comparison_rounds': rounds,
+        'subscription_admission': {**ADMISSION_POLICY, 'plugin_sha256': hashlib.sha256(
+            Path(__file__).with_name('harbor_subscription_plugin.py').read_bytes()).hexdigest()},
         'profile_builder_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': reviewer_timeout},
         'judge': {

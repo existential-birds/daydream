@@ -53,9 +53,14 @@ auth directory outside results; it never mounts the personal home. Do not run
 other Codex clients with that login while the job owns it. One exclusive lease
 covers each complete reviewer/judge invocation, and rotated credentials are
 reconciled into the canonical store before another role starts. Account inference
-therefore serializes even when Harbor builds/queues concurrent trials. At job
+therefore serializes. Host admission queues whole trials before their timed
+phases, so lease waiting cannot consume the supplied review/judge allowance.
+`--concurrency` is an upper bound: with one subscription login, effective trial
+concurrency is one, recorded alongside the requested limit in the job's admission
+policy. At job
 exit, refresh updates return to the original auth file. Conflicting external
-updates or a killed lease preserve credentials and fail closed; recover the
+updates or a killed lease preserve private recovery credentials in the mounted
+auth directory and fail closed; recover the
 reserved login before starting a new session. Never archive the auth directory.
 
 **The following command launches reviewer and judge model work.** Select one

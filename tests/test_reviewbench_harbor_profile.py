@@ -50,6 +50,8 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
     assert policy['judge']['max_output_tokens_enforced'] is False
+    assert policy['subscription_admission']['effective_concurrency'] == 1
+    assert policy['subscription_admission']['scope'] == 'whole-trial-before-create-and-phase-timers'
     expected = runpy.run_path(str(public_profile / 'metric.py'))['EXPECTED_TASKS']
     assert len(expected) == 219
     for reference in dataset['tasks']:

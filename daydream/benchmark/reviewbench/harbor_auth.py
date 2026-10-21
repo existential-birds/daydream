@@ -124,8 +124,12 @@ def subscription_lease(
     """Borrow exact OAuth capability and reconcile refresh even after model failure.
 
     The canonical directory is an explicit runtime mount, never the personal home.
-    Role directories must be private and contain no earlier auth. A failed atomic
-    writeback retains the role auth for recovery and blocks further success.
+    Role directories must be private and contain no earlier auth. Their auth file
+    links to a private durable credential file on the canonical mount: the pinned
+    Codex 0.163.0 file store and Pi 0.75.5 file store update auth in place. Their
+    conversations, configuration and logs remain in ephemeral role directories.
+    A failed writeback or process death retains the durable role-format auth and
+    marker for recovery even after the role directory/container is removed.
     """
     if role not in {"reviewer", "judge"}:
         raise SubscriptionAuthError("unsupported subscription role")
@@ -144,20 +148,29 @@ def subscription_lease(
     with os.fdopen(descriptor, "r+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = canonical_home / ".lease-state.json"
-        if state.exists():
+        durable = canonical_home / ".lease-auth.json"
+        if state.exists() or durable.exists():
             raise SubscriptionAuthError("interrupted subscription lease requires credential recovery")
         original = _codex_auth(_read(canonical_home / "auth.json"))
-        _write(state, {"role": role})
-        _write(role_path, original if role == "reviewer" else _judge_auth(original))
+        _write(state, {"role": role, "credential_file": durable.name})
+        _write(durable, original if role == "reviewer" else _judge_auth(original))
+        # Pinned Codex file-store save uses OpenOptions::truncate/write (not
+        # rename), and pinned Pi FileAuthStorageBackend uses writeFileSync.
+        # Only credential bytes follow this link; sessions stay in role_home.
+        # github.com/openai/codex/blob/rust-v0.163.0/codex-rs/login/src/auth/storage.rs
+        role_path.symlink_to(durable.resolve())
         try:
             yield role_home
         finally:
-            updated = _read(role_path)
+            if _read(canonical_home / "auth.json") != original:
+                raise SubscriptionAuthError("canonical auth changed outside the reserved subscription lease")
+            updated = _read(durable)
             updated = _codex_auth(updated) if role == "reviewer" else _judge_update(original, updated)
             if updated["tokens"]["account_id"] != original["tokens"]["account_id"]:
                 raise SubscriptionAuthError("reviewer subscription account changed during invocation")
             _write(canonical_home / "auth.json", updated)
             role_path.unlink()
+            durable.unlink()
             state.unlink()
 
 
