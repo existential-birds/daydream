@@ -66,7 +66,7 @@ async def test_public_agent_setup_rejects_failed_native_sandbox_before_run(tmp_p
     """Harbor must receive a setup failure before it can admit reviewer inference."""
     class Environment:
         async def exec(self, command: str, **kwargs: Any) -> Any:
-            if command == 'python -m daydream.benchmark.reviewbench.harbor_sandbox_probe':
+            if command == 'python -I -m daydream.benchmark.reviewbench.harbor_sandbox_probe':
                 return SimpleNamespace(return_code=1, stdout='', stderr='native seccomp unavailable')
             return SimpleNamespace(return_code=0, stdout='', stderr='')
 

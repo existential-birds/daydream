@@ -36,10 +36,10 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
                  f'assert importlib.metadata.version("daydream")=={self.version()!r};'
                  'assert shutil.which("codex");'
                  'from daydream.benchmark.reviewbench.harbor_entrypoint import main')
-        result = await environment.exec('python -c ' + shlex.quote(probe))
+        result = await environment.exec('python -I -c ' + shlex.quote(probe))
         if result.return_code != 0:
             raise RuntimeError('public ReviewBench candidate image setup failed')
-        result = await environment.exec('python -m daydream.benchmark.reviewbench.harbor_sandbox_probe',
+        result = await environment.exec('python -I -m daydream.benchmark.reviewbench.harbor_sandbox_probe',
                                         cwd='/work/repo', timeout_sec=60)
         from daydream.redaction import redact_structured_text
 
@@ -54,7 +54,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
         # Do not forward arbitrary agent env (including API keys) to this lane.
         if self.extra_env:
             raise ValueError('public ReviewBench agent does not accept extra_env; use the subscription mount')
-        result = await environment.exec('python -m daydream.benchmark.reviewbench.harbor_entrypoint',
+        result = await environment.exec('python -I -m daydream.benchmark.reviewbench.harbor_entrypoint',
                                         cwd='/work/repo', timeout_sec=3600)
         from daydream.redaction import redact_structured_text
 
