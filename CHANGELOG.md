@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
   ordinary Pi defaults are unchanged. This compatible minor feature retains
   committed result schema 1 and extension API 8.
+- Export and run the complete public ReviewBench corpus through Harbor with the
+  ordinary native Codex reviewer and a separate subscription-backed Codex judge.
+  Freeze custom task/runtime identities, coordinate OAuth refresh across roles,
+  and retain private completion evidence and supplied independent-round metrics
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
 - Run supplied, revision-pinned ReviewBench cases through the ordinary native
   reviewer, with isolated candidate/round outputs, typed completion and source
   verification, visible conversion/failure/missing-case accounting, and supplied

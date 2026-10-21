@@ -1,5 +1,103 @@
 # Review benchmarks
 
+## Public Harbor with Codex subscription access
+
+This is a distinct **local custom evaluation profile**, not the published
+`review-bench/reviewbench-public@v1` judge configuration. It uses all 219 supplied
+cases and the unchanged upstream matcher, classifier, deduplication, scorer and
+independent-round metric. Daydream's ordinary native Codex backend reviews each
+frozen repository. A separate sandbox runs the upstream Pi judge with
+`openai-codex` subscription authentication. This supports private matched
+before/after comparisons; it claims neither leaderboard eligibility nor a quality
+improvement. The private `daydream benchmark` Harbor workflow remains separate.
+
+Build the candidate wheel, then install the **public** runtime into a separate
+environment. Released Harbor 0.24.0 lacks the upload-metric API imported by the
+upstream plugin; the shipped lock pins ReviewBench
+`4f04392d6bf4941ab6f8a3ea0c15b449f4458864` (`0.1.0rc10`) and its Harbor fork
+`6ce6abee0b9fa94a50c88f0557d030a419998d78` (`0.24.0`). It also freezes resolved
+Python dependencies. Harbor stays outside core runtime dependencies.
+
+```bash
+uv build --wheel --out-dir /tmp/reviewbench-wheels
+uv venv /tmp/reviewbench-runtime
+uv pip install --python /tmp/reviewbench-runtime/bin/python \
+  -r daydream/benchmark/reviewbench/harbor-runtime.lock \
+  /tmp/reviewbench-wheels/daydream-0.30.0-py3-none-any.whl
+```
+
+Use a clean pinned ReviewBench checkout with `npm ci` already completed (as below).
+Export the **entire** corpus without inference, from the installed candidate:
+
+```bash
+/tmp/reviewbench-runtime/bin/daydream benchmark reviewbench harbor-export \
+  /tmp/reviewbench-full --source /path/to/ReviewBench \
+  --wheel /tmp/reviewbench-wheels/daydream-0.30.0-py3-none-any.whl \
+  --reviewer-model gpt-6.1-sol --reviewer-effort high --rounds 3
+/tmp/reviewbench-runtime/bin/reviewbench-check-dataset /tmp/reviewbench-full
+```
+
+The profile freezes wheel/package bytes, upstream revision, PR title/body and
+base/HEAD, native model/effort, default review profile through package identity,
+judge settings/prompts/source, images, Python/Codex/uv versions, dependency lock,
+bootstrap/compose policy, custom evaluation IDs and task/dataset metric digests.
+Exported tasks use `linux/amd64`; Docker must support that architecture natively
+or through verified emulation, and Harbor's exact-host kernel isolation. Both
+roles allow only `chatgpt.com` and `auth.openai.com`. The runner checks isolation
+before inference and never widens the network policy.
+
+Reserve an existing file-backed **ChatGPT subscription login** for the whole job.
+`codex login status` must report ChatGPT access. API-key login and API fallbacks
+are rejected. The runner borrows only `CODEX_HOME/auth.json` into a new private
+auth directory outside results; it never mounts the personal home. Do not run
+other Codex clients with that login while the job owns it. One exclusive lease
+covers each complete reviewer/judge invocation, and rotated credentials are
+reconciled into the canonical store before another role starts. Account inference
+therefore serializes even when Harbor builds/queues concurrent trials. At job
+exit, refresh updates return to the original auth file. Conflicting external
+updates or a killed lease preserve credentials and fail closed; recover the
+reserved login before starting a new session. Never archive the auth directory.
+
+**The following command launches reviewer and judge model work.** Select one
+task from the full export for integration proof:
+
+```bash
+/tmp/reviewbench-runtime/bin/daydream benchmark reviewbench harbor-run \
+  /tmp/reviewbench-full --codex-home "$HOME/.codex" \
+  --auth-runtime /tmp/reviewbench-private-auth-1 --jobs-dir /tmp/reviewbench-jobs \
+  --job-name one-task --n-tasks 1 --concurrency 1 --rounds 1
+/tmp/reviewbench-runtime/bin/reviewbench-check-job \
+  /tmp/reviewbench-jobs/one-task \
+  /tmp/reviewbench-jobs/one-task/reviewbench-metric.py \
+  --output /tmp/reviewbench-jobs/one-task/checked.json
+```
+
+`--task NAME_OR_GLOB` selects a supplied case; `--n-tasks` limits selection after
+filtering. The wrapper invokes Harbor with the public ReviewBench plugin and the
+Daydream public agent, without a bare Codex agent or the private Daydream scorer.
+For an independently authorized final comparison, omit task filters and use
+`--rounds 3`; each task has one separate attempt per round and corresponding
+round scores are averaged by the supplied metric. Source membership stays 219;
+selected, missing, failed and scored memberships remain distinct. No full run
+is authorized merely by exporting its profile.
+
+The supplied reviewer/verifier wall limits remain 900/7200 seconds. Matcher
+reasoning stays low, classifier medium. The explicit Pi model metadata declares
+8192 max tokens, but its Codex transport does **not** send `max_output_tokens`;
+no enforced token cap is claimed. Supported wall/reasoning controls remain in
+place. Current model metadata comes from [official OpenAI documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol);
+account availability must also be demonstrated by the actual authenticated run.
+
+Retain `reviewbench-plan.json`, `reviewbench-metric.py`, trial results, findings,
+`agent/daydream/execution.json`, native trajectories, verifier logs,
+`scores.json`, `scores.details.json` and `reward.json`. Partial or conversion-limited
+reviews cannot publish findings, and existing output is never reused as a new
+success. A valid empty review may require no judge calls: integration acceptance
+also needs genuine solver findings and at least one real semantic Codex request.
+Classifier execution is conditional on unmatched findings. Supplied null metrics
+stay null; token counts and API-equivalent cost estimates are evidence, not
+subscription cash charges. Benchmark data never enters capture/training.
+
 ## Supplied ReviewBench with native Daydream
 
 Use `daydream benchmark reviewbench COMMAND --help`. This evaluation-only adapter

@@ -21,7 +21,7 @@ from daydream import git_ops, runner
 from daydream.backends import BackendExecutionInput, resolve_fanout_concurrency
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends.pi import native_pi_settings
-from daydream.benchmark.reviewbench.contract import Case
+from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
@@ -29,7 +29,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, parse_hunks
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
-from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_reasoning_effort
+from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name, _resolved_reasoning_effort
 
 
 def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
@@ -100,6 +100,43 @@ def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.Runn
     if fallback is None:
         fallback = BackendExecutionInput.from_environment(dict(os.environ), backend="claude")
     return provenance, runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends=inputs)
+
+
+@dataclass(frozen=True)
+class PublicHarborTask:
+    """Host-admitted public task identity, separate from standalone origin admission.
+
+    Harbor constructs snapshots without origin. Its frozen task/profile supplies
+    the identity; actual refs, HEAD and full patch still have to prove the input.
+    This capability is accepted only for origin-free public frozen snapshots.
+    """
+
+    case: Case
+    upstream_revision: str
+    patch: str
+    task_id: int
+    evaluation_id: int
+    profile_sha256: str
+    author_description: str | None = None
+
+    def verify(self, repository: Path, case: Case) -> str:
+        if (self.case != case or self.upstream_revision != REVIEWBENCH_REVISION
+                or type(self.task_id) is not int or self.task_id < 0
+                or type(self.evaluation_id) is not int or self.evaluation_id < 0
+                or re.fullmatch(r"[0-9a-f]{64}", self.profile_sha256) is None):
+            raise ValueError("public Harbor task identity is invalid")
+        if git_ops.remote_urls(repository):
+            raise ValueError("public Harbor frozen repository must have no remotes")
+        base_ref = _run_git(repository, ['rev-parse', '--verify', 'refs/reviewbench/base'], retries=0).stdout.strip()
+        head_ref = _run_git(repository, ['rev-parse', '--verify', 'refs/reviewbench/head'], retries=0).stdout.strip()
+        if (git_ops.head_sha(repository) != case.head
+                or base_ref != case.base
+                or head_ref != case.head):
+            raise ValueError("public Harbor frozen refs differ from supplied task")
+        merge_base = git_ops.merge_base(repository, case.base, case.head)
+        if merge_base is None or git_ops.diff_paths(repository, merge_base, case.head, ['.']) != self.patch:
+            raise ValueError("public Harbor patch differs from supplied frozen comparison")
+        return case.repo
 
 
 @dataclass
@@ -249,7 +286,9 @@ def _source_identity(repository: Path, case: Case) -> str:
 
 
 async def review_case(case: Case, repository: Path, config: RunConfig, producer: str, *,
-                      runtime: tuple[dict[str, Any], runner.RunnerExecutionInput] | None = None) -> CaseExecution:
+                      runtime: tuple[dict[str, Any], runner.RunnerExecutionInput] | None = None,
+                      public_task: PublicHarborTask | None = None,
+                      evidence_directory: Path | None = None) -> CaseExecution:
     """Review one clean local frozen repository in a disposable independent checkout.
 
     No GitHub publication target is manufactured. The callback supplies actual
@@ -266,7 +305,12 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
         git_ops.assert_is_worktree(repository)
         if git_ops.status_porcelain(repository).strip():
             raise ValueError("source repository is not clean")
-        execution.source_identity = _source_identity(repository, case)
+        execution.source_identity = (_source_identity(repository, case) if public_task is None
+                                     else public_task.verify(repository, case))
+        trajectory = None
+        if evidence_directory is not None:
+            evidence_directory.mkdir(parents=True, exist_ok=False)
+            trajectory = evidence_directory / 'trajectory.json'
         if not all(git_ops.commit_exists(repository, oid) for oid in (case.base, case.head)):
             raise ValueError("supplied base or head is unavailable")
         with tempfile.TemporaryDirectory(prefix="daydream-reviewbench-case-") as directory:
@@ -301,8 +345,10 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             native = replace(config, target=str(checkout), base=case.base, branch=None, force_worktree=False,
                 output_mode="review", flow_name="review", pr_number=None, pr_repo=None,
                 approved_head_sha=case.head, discover_github_provenance=False, findings_out=None,
+                frozen_author_description=(None if public_task is None or public_task.author_description is None
+                    else FrozenAuthorDescription(case.head, public_task.author_description)),
                 dataset_capture=False, dataset_capture_disabled=True, trajectory_hub_repo=None,
-                archive=False, run_eval=False, trajectory_path=None, dump_artifacts=None, non_interactive=True)
+                archive=False, run_eval=False, trajectory_path=trajectory, dump_artifacts=None, non_interactive=True)
             exit_code: int | None = None
             try:
                 exit_code = await runner.run(native, review_result_handler=finalized.append, execution=native_execution)

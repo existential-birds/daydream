@@ -76,6 +76,8 @@ include = [
     "daydream/benchmark/harbor/templates/**",
     "daydream/benchmark/harbor/runtime-requirements.lock",
     "daydream/benchmark/reviewbench/report.ts",
+    "daydream/benchmark/reviewbench/harbor-runtime.in",
+    "daydream/benchmark/reviewbench/harbor-runtime.lock",
 ]
 
 [tool.mypy]
