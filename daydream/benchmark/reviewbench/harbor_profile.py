@@ -128,9 +128,11 @@ def export_harbor_profile(
     serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
     if re.search(r'(?i)(api.?key|access.?token|refresh.?token|id.?token|password|secret)', serialized_candidate):
         raise ValueError('Candidate identity must contain no credentials or secret fields')
+    from daydream import json_utils
     from daydream.benchmark.reviewbench.harbor_subscription_plugin import ADMISSION_POLICY
 
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
+    atomic_asset = Path(json_utils.__file__).read_bytes()
     policy = {
         'schema': 1, 'name': 'daydream-reviewbench-codex-subscription-v1',
         'source': source_identity, 'source_prs': len(cases),
@@ -146,6 +148,7 @@ def export_harbor_profile(
             'verifier_timeout_sec': verifier_timeout, 'models': models,
             'max_output_tokens_enforced': False, 'cost_source': 'api-equivalent-estimate',
             'auth_bootstrap_sha256': hashlib.sha256(auth_asset).hexdigest(),
+            'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
             'refresh_policy': 'canonical-exclusive-full-invocation-lease',
         },
         'runtime': {'platform': 'linux/amd64', 'auth_compose_sha256': hashlib.sha256(COMPOSE.encode()).hexdigest(),
@@ -201,6 +204,7 @@ def export_harbor_profile(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
             (task_dir / 'tests/daydream-auth.py').write_bytes(auth_asset)
+            (task_dir / 'tests/daydream_json_utils.py').write_bytes(atomic_asset)
             for role_directory in ('environment', 'tests'):
                 (task_dir / role_directory / 'docker-compose.yaml').write_text(COMPOSE, encoding='utf-8')
             _write_json(task_dir / 'tests/judge/.daydream-codex/models.json', models)

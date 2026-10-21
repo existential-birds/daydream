@@ -233,14 +233,14 @@ async def test_production_role_retains_rotated_credentials_after_writeback_failu
                                   forbid_merge=False, forbid_supervise=False)
 
     monkeypatch.setattr(runner, 'create_backend', create)
-    replace = Path.replace
+    replace = os.replace
 
-    def fail_canonical_replace(path: Path, target: Path) -> Path:
+    def fail_canonical_replace(path: str | Path, target: str | Path) -> None:
         if target == canonical / 'auth.json' and (canonical / '.lease-state.json').exists():
             raise OSError('synthetic canonical replacement failure')
         return replace(path, target)
 
-    monkeypatch.setattr(Path, 'replace', fail_canonical_replace)
+    monkeypatch.setattr(os, 'replace', fail_canonical_replace)
     with pytest.raises(harbor_auth.SubscriptionAuthError, match='prevents source credential reconciliation'):
         with harbor_auth.subscription_session(source, canonical):
             if role == 'reviewer':
@@ -320,7 +320,7 @@ os.chown(source/'auth.json', 1000, 1000)
 os.setegid(1000)
 os.seteuid(1000)
 recovery = sys.argv[1] == 'True'
-replace = pathlib.Path.replace
+replace = os.replace
 try:
  with auth.subscription_session(source, canonical):
   os.seteuid(0)
@@ -328,7 +328,7 @@ try:
    if recovery and target == canonical/'auth.json' and (canonical/'.lease-state.json').exists():
     raise OSError('synthetic replacement fault')
    return replace(path, target)
-  pathlib.Path.replace = fail_replacement
+  os.replace = fail_replacement
   try:
    with auth.subscription_lease(canonical, role) as home:
     updated = json.loads((home/'auth.json').read_text())
@@ -337,7 +337,7 @@ try:
   except OSError:
    assert recovery
   finally:
-   pathlib.Path.replace = replace
+   os.replace = replace
    os.seteuid(1000)
   for file in canonical.iterdir():
    info = file.stat()
@@ -359,7 +359,9 @@ print(json.dumps({'host_uid':os.geteuid(),'private_files_readable':True,'recover
 '''
     result = subprocess.run([
         docker, 'run', '--rm', '--pull', 'never', '--network', 'none',
-        '-v', f'{Path(harbor_auth.__file__).resolve()}:/auth.py:ro', image,
+        '-v', f'{Path(harbor_auth.__file__).resolve()}:/auth.py:ro',
+        '-v', f'{Path(harbor_auth.__file__).resolve().parents[2] / "json_utils.py"}:/daydream_json_utils.py:ro',
+        image,
         'python', '-c', script, str(recovery),
     ], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

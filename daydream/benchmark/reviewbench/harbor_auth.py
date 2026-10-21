@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import importlib
 import json
 import os
 import shutil
@@ -24,6 +25,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+try:
+    from daydream.json_utils import atomic_write_bytes
+except ModuleNotFoundError as missing:
+    if missing.name not in {"daydream", "daydream.json_utils"}:
+        raise
+    # The verifier ships this exact shared-owner module beside its bootstrap.
+    atomic_write_bytes = importlib.import_module("daydream_json_utils").atomic_write_bytes
 
 
 class SubscriptionAuthError(ValueError):
@@ -84,21 +93,8 @@ def _write(path: Path, value: dict[str, Any]) -> None:
     if path.is_symlink():
         raise SubscriptionAuthError("refusing a symlink subscription auth destination")
     owner = (path if path.exists() else path.parent).stat()
-    descriptor, name = tempfile.mkstemp(prefix=".auth-", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            current = os.fstat(stream.fileno())
-            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
-                # Container root must return private files to the host owner;
-                # mode600 without ownership preservation breaks Linux handoff.
-                os.fchown(stream.fileno(), owner.st_uid, owner.st_gid)
-            json.dump(value, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_bytes(path, json.dumps(value).encode("utf-8"), fsync=True, mode=0o600,
+                       owner=(owner.st_uid, owner.st_gid))
 
 
 def _judge_auth(codex: dict[str, Any]) -> dict[str, Any]:

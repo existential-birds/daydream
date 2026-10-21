@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from daydream import json_utils
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
@@ -84,6 +85,10 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
     judge = task_dir / 'tests/judge'
+    atomic_asset = task_dir / 'tests/daydream_json_utils.py'
+    assert atomic_asset.read_bytes() == Path(json_utils.__file__).read_bytes()
+    policy = json.loads((public_profile / 'daydream-profile.json').read_text())
+    assert policy['judge']['atomic_writer_sha256'] == _hash(atomic_asset)
     for relative in ('scripts/eval/matcher.ts', 'scripts/eval/eval.ts', 'scripts/eval/scorer.ts',
                      'scripts/classifier/classify.ts', 'scripts/classifier/prompts.ts', 'scripts/harbor/verify.ts',
                      'package.json', 'package-lock.json'):

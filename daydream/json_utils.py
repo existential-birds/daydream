@@ -13,8 +13,6 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
-from jsonschema import Draft202012Validator
-
 
 def _fsync_directory(path: Path) -> None:
     """Fsync the parent directory to persist a published rename."""
@@ -59,12 +57,18 @@ def umask_derived_mode() -> int:
     return 0o666 & ~_read_umask()
 
 
-def _stage_bytes(path: Path, content: bytes, *, fsync: bool, mode: int | None) -> Path:
+def _stage_bytes(
+    path: Path, content: bytes, *, fsync: bool, mode: int | None, owner: tuple[int, int] | None = None,
+) -> Path:
     """Write ``content`` to a sibling temp for ``path`` and return the temp path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
+            if owner is not None:
+                current = os.fstat(f.fileno())
+                if (current.st_uid, current.st_gid) != owner:
+                    os.fchown(f.fileno(), *owner)
             f.write(content)
             f.flush()
             if fsync:
@@ -99,12 +103,15 @@ def atomic_write_bytes(
     fsync: bool = True,
     dir_fsync: bool = False,
     mode: int | None = None,
+    owner: tuple[int, int] | None = None,
 ) -> None:
     """Publish bytes through an exclusive sibling temp and atomic rename.
 
     Create parents and clean failed temps best-effort. fsync flushes staged bytes;
-    mode chmods both temp and final path; dir_fsync persists the parent rename."""
-    tmp = _stage_bytes(path, content, fsync=fsync, mode=mode)
+    mode chmods both temp and final path; dir_fsync persists the parent rename.
+    An explicit owner applies uid/gid to the private staging file before publication."""
+    tmp = (_stage_bytes(path, content, fsync=fsync, mode=mode) if owner is None
+           else _stage_bytes(path, content, fsync=fsync, mode=mode, owner=owner))
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 
 
@@ -217,6 +224,8 @@ def extract_json(text: str) -> Any:
 
 def validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     """Return whether ``value`` validates against ``schema`` (the strict full gate)."""
+    from jsonschema import Draft202012Validator
+
     return not any(Draft202012Validator(schema).iter_errors(value))
 
 
@@ -237,6 +246,8 @@ def schema_rejection(value: Any, schema: dict[str, Any], *, candidate_count: int
     """Only a complete object candidate can qualify for a fresh strict-schema attempt."""
     if not isinstance(value, dict):
         return None
+    from jsonschema import Draft202012Validator
+
     errors = list(islice(Draft202012Validator(schema).iter_errors(value), 128))
     if not errors:
         return None
@@ -359,6 +370,8 @@ def extract_json_by_schema(
     # Nothing accepted: trace the largest span with content-free rejection evidence.
     largest = _largest_span(candidates)
     reason = None
+    from jsonschema import Draft202012Validator
+
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"
         break
