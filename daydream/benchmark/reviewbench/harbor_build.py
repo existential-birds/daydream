@@ -44,23 +44,33 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64') -> tuple[str, 
                 installed = package / name.removeprefix('daydream/')
                 if not installed.is_file() or installed.read_bytes() != archive.read(name):
                     raise ValueError('Export must execute the same candidate package as its reviewer wheel')
-    requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
-    assets = {wheel.name: wheel.read_bytes(), 'runtime.lock': requirements}
-    # The lock contains the public host runtime too. Installing it in the reviewer
-    # keeps the exact same package graph, but exposes no verifier assets/goldens.
+    requirements = Path(__file__).with_name('reviewer-runtime.lock').read_bytes()
+    host_requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
+    assets = {wheel.name: wheel.read_bytes(), 'reviewer-runtime.lock': requirements}
+    # Only the host installs Harbor/ReviewBench. Their Git source distributions
+    # include reference answers, including in uv's retained source checkout.
+    # Install the hash-locked core graph without caches, then only our own wheel.
     suffix = (
         f'\nCOPY --from={UV_IMAGE} /uv /usr/local/bin/uv\n'
-        'ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy\n'
+        'ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_LINK_MODE=copy UV_NO_CACHE=1\n'
         'RUN uv python install 3.14.3 && uv venv --python 3.14.3 /opt/daydream\n'
-        'COPY runtime.lock /opt/runtime.lock\n'
+        'COPY reviewer-runtime.lock /opt/reviewer-runtime.lock\n'
         f'COPY {wheel.name} /opt/{wheel.name}\n'
-        f'RUN uv pip install --python /opt/daydream/bin/python -r /opt/runtime.lock /opt/{wheel.name}\n'
+        'RUN uv pip install --no-cache --require-hashes --python /opt/daydream/bin/python '
+        '-r /opt/reviewer-runtime.lock\n'
+        f'RUN uv pip install --no-cache --no-deps --python /opt/daydream/bin/python /opt/{wheel.name} '
+        '&& uv pip check --python /opt/daydream/bin/python\n'
         'RUN npm install --global --ignore-scripts @openai/codex@0.163.0\n'
         'ENV PATH="/opt/daydream/bin:${PATH}"\n'
-        'RUN python --version && codex --version\n'
+        'RUN python --version && codex --version && python -c '
+        "\"from importlib.util import find_spec; "
+        "assert find_spec('harbor') is None; assert find_spec('reviewbench_harbor') is None; "
+        "from daydream.benchmark.reviewbench.harbor_entrypoint import main\" "
+        '&& test ! -d /root/.cache/uv/git-v0\n'
     )
     identity = {'wheel_name': wheel.name, 'wheel_sha256': hashlib.sha256(assets[wheel.name]).hexdigest(),
-                'runtime_lock_sha256': hashlib.sha256(requirements).hexdigest(),
+                'reviewer_runtime_lock_sha256': hashlib.sha256(requirements).hexdigest(),
+                'host_runtime_lock_sha256': hashlib.sha256(host_requirements).hexdigest(),
                 'codex_cli': '0.163.0', 'python': '3.14.3', 'uv_image': UV_IMAGE,
                 'platform': platform, 'harbor_revision': HARBOR_REVISION}
     return suffix, assets, identity
