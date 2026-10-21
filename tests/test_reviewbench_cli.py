@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,7 @@ from typing import Any
 import pytest
 
 from daydream import runner
+from daydream.backends import AgentEvent, CostEvent
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.reviewbench import cli, contract, evaluator
 from daydream.benchmark.reviewbench.contract import Case, execution_accounting, load_cases, verify_source
@@ -19,7 +23,7 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
 from tests.test_reviewbench_evaluator import _finding, _metrics, external_evaluator as external_evaluator
-from tests.test_reviewbench_native import frozen_case
+from tests.test_reviewbench_native import finding, frozen_case
 
 
 @pytest.fixture
@@ -200,12 +204,50 @@ def test_incomplete_full_round_reports_remain_visible_without_a_full_set_average
     assert '"round_count"' not in output and '"scope": "complete-set"' not in output
 
 
-@pytest.mark.parametrize('profile_source', ['explicit', 'env', 'repo', 'default', 'escape', 'symlink'])
+@pytest.mark.parametrize('profile_source', [
+    'explicit', 'env', 'repo', 'default', 'escape', 'symlink', 'candidate-before', 'candidate-during',
+])
 def test_plan_run_and_status_bind_candidate_case_and_round(
     supplied_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
     capsys: pytest.CaptureFixture[str], profile_source: str,
 ) -> None:
     """Bind CLI selection, native config/profile precedence and honest round completion."""
+    mutation = profile_source.removeprefix('candidate-') if profile_source.startswith('candidate-') else None
+    if mutation and os.environ.get('DAYDREAM_TEST_CANDIDATE_MUTATION') != mutation:
+        # Reuse this complete real-run fixture in an isolated executing package;
+        # mutating the shared source checkout would contaminate concurrent tests.
+        import daydream
+
+        package = tmp_path / 'candidate'
+        shutil.copytree(Path(daydream.__file__).parent, package / 'daydream',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
+        child = subprocess.run([
+            sys.executable, '-m', 'pytest', f'{__file__}::'
+            f'test_plan_run_and_status_bind_candidate_case_and_round[{profile_source}]',
+            '-q', '-o', 'addopts=', '--import-mode=importlib', '--basetemp', str(tmp_path / 'child-pytest'),
+        ], cwd=tmp_path, env={**os.environ, 'DAYDREAM_TEST_CANDIDATE_MUTATION': mutation,
+            'PYTHONPATH': os.pathsep.join((str(package), str(Path(__file__).resolve().parent.parent)))},
+            capture_output=True, text=True, timeout=60)
+        assert child.returncode == 0, child.stdout + child.stderr
+        return
+    if mutation:
+        profile_source = 'default'
+    asset = Path(cli.__file__).resolve().parents[2] / 'backends/pi_structured_output.ts'
+    if mutation:
+        assert asset.is_relative_to(Path(os.environ['PYTHONPATH'].split(os.pathsep)[0]))
+
+    def change_candidate() -> None:
+        asset.write_text(asset.read_text() + '\n// concurrent candidate asset update\n')
+
+    if mutation == 'before':
+        native_config = cli._native_config
+
+        def resolve(arguments: list[str]) -> Any:
+            config = native_config(arguments)
+            change_candidate()
+            return config
+
+        monkeypatch.setattr(cli, '_native_config', resolve)
     repo, case = frozen_case(tmp_path)
     for filename in ('corpus/manifest.json', 'corpus/test/test.json'):
         path = supplied_source / filename
@@ -236,9 +278,24 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     if profile_source == 'explicit':
         native_args += ['--review-profile', str(tmp_path / 'explicit.toml')]
     created: list[EmptyReviewBackend] = []
+    measured_calls = 0
+
+    class MeasuredBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            nonlocal measured_calls
+            measured_calls += 1
+            yield CostEvent(cost_usd=0.25, input_tokens=11, output_tokens=3, cached_tokens=2)
+            async for event in super().execute(*args, **kwargs):
+                yield event
 
     def create(_name: str, **kwargs: Any) -> EmptyReviewBackend:
-        backend = EmptyReviewBackend(kwargs['cwd'])
+        if mutation == 'during' and not created:
+            change_candidate()
+        backend_type = MeasuredBackend if mutation == 'during' else EmptyReviewBackend
+        backend = backend_type(kwargs['cwd'], forbid_merge=mutation != 'during',
+            forbid_supervise=mutation != 'during',
+            review_by_stack={'structure': [finding()]} if mutation == 'during' else {})
+        backend.merge_echo_records = mutation == 'during'
         created.append(backend)
         return backend
 
@@ -257,6 +314,27 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     status = json.loads(capsys.readouterr().out.split(str(directory) + '\n')[-1])
     assert len(status['missing']) == 25 and not status['produced']
     result = run()
+    if mutation:
+        if mutation == 'before':
+            assert not created
+        assert result == 1
+        case = load_cases(supplied_source, 'test')[0]
+        round_dir = directory / 'round-1'
+        outcome = json.loads((round_dir / 'outcomes' / f'{case.key}.json').read_text())
+        assert outcome['status'] == 'failed' and 'candidate bytes changed' in outcome['diagnostics'][0]
+        assert not (round_dir / 'findings' / f'{case.key}.json').exists()
+        accounting = cli._accounting(round_dir, load_cases(supplied_source, 'test'), supplied_source)
+        assert accounting['failed'] == [case.key] and not accounting['produced']
+        if mutation == 'before':
+            assert 'terminal_result' not in outcome
+        else:
+            assert created and outcome['terminal_result']['analysis_state'] == 'complete'
+            assert outcome['retained_findings'] and outcome['configuration']
+            assert measured_calls > 0
+            assert outcome['usage'] == {'prompt_tokens': 11 * measured_calls, 'completion_tokens': 3 * measured_calls,
+                'cached_tokens': 2 * measured_calls, 'total_tokens': 14 * measured_calls,
+                'cost_usd': 0.25 * measured_calls}
+        return
     if profile_source in {'escape', 'symlink'}:
         assert result == 1
         assert 'escapes the repository root' in capsys.readouterr().err

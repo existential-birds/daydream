@@ -198,6 +198,8 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
         if outcome_path.exists() or candidate_path.exists():
             raise ValueError(f'case already has artifacts: {case.key}; create a fresh plan')
         try:
+            if candidate_identity() != plan['candidate']:
+                raise ValueError('executing candidate bytes changed before this case; create a fresh candidate plan')
             if native_configuration(config)[0] != runtime[0]:
                 raise ValueError('native configuration changed before this case; create a fresh candidate plan')
             with tempfile.TemporaryDirectory(prefix='daydream-reviewbench-') as temporary:
@@ -206,6 +208,14 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
                     repository = Path(temporary) / 'repository'
                     _fetch_case(case, repository)
                 result = await review_case(case, repository, config, plan['producer'], runtime=runtime)
+                try:
+                    if candidate_identity() != plan['candidate']:
+                        raise ValueError('executing candidate bytes changed during review; '
+                                         'create a fresh candidate plan')
+                except (OSError, ValueError) as exc:
+                    result.status = 'failed'
+                    result.candidate = None
+                    result.diagnostics.append(str(exc))
                 outcome = asdict(result)
                 candidate = outcome.pop('candidate')
                 if outcome['status'] in {'complete', 'completed_empty'} and candidate is not None:
