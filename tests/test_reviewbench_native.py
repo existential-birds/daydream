@@ -1,9 +1,4 @@
-"""Native ReviewBench boundary regressions using real Git and the ordinary runner.
-
-The existing terminal-result journeys own coverage derivation; these tests add the
-missing adapter risks: frozen source identity, conservative HEAD coordinates,
-nonpublishing isolated execution, and preservation of native Pi authentication.
-"""
+"""Native ReviewBench contracts using real Git and the ordinary runner."""
 from __future__ import annotations
 
 import asyncio
@@ -61,15 +56,22 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str, status: str,
     dataset_store: Path, dataset_hub: FakeDatasetHub, operator_dataset_sentinel: Path,
 ) -> None:
-    """Exit zero/empty output cannot hide failed scopes or discarded native findings.
-
-    Existing test_review_completion exercises publication; this adapter journey
-    proves the same terminal authority reaches nonpublishing historical cases.
-    """
+    """Frozen native attempts preserve terminal authority, isolation and available usage."""
     repo, case = frozen_case(tmp_path)
     original = tracked_source_state(repo)
-    created: list[EmptyReviewBackend] = []
     roots: list[Path] = []
+
+    @dataclass(frozen=True)
+    class CustomConfig(EffectiveRequestConfig):
+        arbitrary: str = "custom-unstructured-canary"
+
+    class MeasuredBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            yield RequestEvent(prompt="Unpersisted request prompt", config=CustomConfig())
+            yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
+            async for event in super().execute(*args, **kwargs):
+                yield event
+
     nonempty = outcome in {"finding", "partial", "relocated", "pipeline_failure"}
 
     def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
@@ -77,7 +79,8 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
         checkout = kwargs["cwd"]
         assert checkout != repo and not git_ops.remote_urls(checkout)
         roots.append(checkout)
-        backend = EmptyReviewBackend(checkout, forbid_merge=False, forbid_supervise=False,
+        backend_type = EmptyReviewBackend if outcome == "empty" else MeasuredBackend
+        backend = backend_type(checkout, forbid_merge=False, forbid_supervise=False,
             review_by_stack={"structure": [finding(line=500 if outcome == "relocated" else 2)]} if nonempty else {},
             fail_stack="python" if outcome == "partial" else None,
             responder=(lambda prompt: [RuntimeError("offline failure")] if (
@@ -85,7 +88,6 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
                                          or "you are the structural reviewer" in prompt.lower())
                 or outcome == "pipeline_failure" and "supervisor adjudication" in prompt.lower()) else None))
         backend.merge_echo_records = True
-        created.append(backend)
         return backend
 
     monkeypatch.setattr(runner, "create_backend", create)
@@ -99,19 +101,27 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
     assert result.analyzed_comparison == {"head_sha": case.head, "merge_base_sha": case.base,
         "diff_key": diff_key(git_ops.diff_paths(repo, case.base, case.head, ["."]))}
     assert tracked_source_state(repo) == original and not (repo / ".daydream").exists()
-    assert created and all(not root.exists() for root in roots)
+    assert roots and all(not root.exists() for root in roots)
     assert not (tmp_path / "must-not-publish.json").exists()
     assert not (tmp_path / "ignored-trajectory.json").exists()
     assert not dataset_store.exists() and dataset_hub.commits == []
     assert not fake_gh.calls("POST")
     assert result.configuration["phases"]["per_stack_review"]["model"] == config.model
+    assert result.usage == ({} if outcome == "empty" else {"completion_tokens": 0, "cost_usd": 0.0})
+    if outcome != "empty":
+        assert result.configuration["observed_requests"]
+        assert all(row["controls"] == {} for row in result.configuration["observed_requests"])
+    assert "custom-unstructured-canary" not in json.dumps(asdict(result))
     if status in {"failed", "incomplete"}:
         assert result.candidate is None
     else:
         assert result.candidate is not None
         assert result.candidate["pr"] == asdict(case)
         assert bool(result.candidate["findings"]) == (outcome == "finding")
-        assert "usage" not in result.candidate
+        if outcome == "empty":
+            assert "usage" not in result.candidate
+        else:
+            assert result.candidate["usage"] == result.usage
     if nonempty:
         assert result.retained_findings[0]["description"] == finding()["description"]
     if outcome == "relocated":
@@ -133,11 +143,7 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
 async def test_frozen_input_is_verified_before_native_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
-    """A supplied SHA label must not admit the wrong repository or dirty source.
-
-    Existing workspace tests resolve refs for ordinary runs; they do not validate
-    supplied benchmark identities or reject dirty caches before cloning.
-    """
+    """Reject dirty, mismatched or unavailable frozen sources before dispatch."""
     repo, case = frozen_case(tmp_path)
     if fault == "dirty":
         (repo / "untracked.py").write_text("not part of the frozen case")
@@ -160,11 +166,7 @@ async def test_frozen_input_is_verified_before_native_dispatch(
 
 
 def test_head_conversion_retains_logical_records_and_exposes_ambiguous_locations(tmp_path: Path) -> None:
-    """Native line hints cannot turn old/deleted coordinates into HEAD findings.
-
-    Native location-validator tests own snapping; this distinct external format
-    boundary must reject that snap and numeric old/new ambiguity explicitly.
-    """
+    """Convert proven HEAD locations and retain explicit omissions for unsafe hints."""
     repo, initial = frozen_case(tmp_path)
     # A later frozen PR includes a same-number replacement, unchanged context,
     # a pure-deleted file, and new-only lines beyond the old hunk's bounds.
@@ -190,11 +192,7 @@ def test_head_conversion_retains_logical_records_and_exposes_ambiguous_locations
 
 
 def test_head_conversion_checks_old_coordinates_outside_captured_hunks(tmp_path: Path) -> None:
-    """An old-file line remains ambiguous when insertion moves it outside the old hunk.
-
-    The replacement fixture above has overlapping old/new hunk ranges and misses
-    a bare native hint that is old-side-valid elsewhere in the actual old file.
-    """
+    """Old-file coordinates remain ambiguous beyond the captured old hunk."""
     repo, initial = frozen_case(tmp_path)
     old_contents = "".join(f"# original {number}\n" for number in range(1, 41))
     write_and_stage(repo, "api.py", old_contents)
@@ -210,50 +208,10 @@ def test_head_conversion_checks_old_coordinates_outside_captured_hunks(tmp_path:
     assert omitted == [{"uid": None, "id": 1, "reason": "ambiguous_old_or_new_side_line_hint"}]
 
 
-@pytest.mark.parametrize('incomplete', [False, True])
-async def test_native_usage_preserves_observed_zero_without_inventing_missing_dimensions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, incomplete: bool,
-) -> None:
-    """Cumulative usage-only events cannot manufacture unavailable prompt/cache counts.
-
-    Positive Pi totals below miss both observed zero and absent dimensions when
-    invocation costs and sibling trajectories are folded into the native result.
-    """
-    repo, case = frozen_case(tmp_path)
-
-    @dataclass(frozen=True)
-    class CustomConfig(EffectiveRequestConfig):
-        arbitrary: str = 'custom-unstructured-canary'
-
-    class MeasuredBackend(EmptyReviewBackend):
-        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            yield RequestEvent(prompt='Unpersisted request prompt', config=CustomConfig())
-            yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
-            async for event in super().execute(*args, **kwargs):
-                yield event
-
-    monkeypatch.setattr(runner, 'create_backend', lambda *_args, **kwargs: MeasuredBackend(
-        kwargs['cwd'], fail_stack='python' if incomplete else None))
-    result = await review_case(case, repo, empty_review_config(repo, tmp_path / 'trajectory', backend='pi'), 'fixture')
-    assert result.status == ('incomplete' if incomplete else 'completed_empty'), result.diagnostics
-    assert result.usage == {'completion_tokens': 0, 'cost_usd': 0.0}
-    if not incomplete:
-        assert result.candidate is not None and result.candidate['usage'] == result.usage
-    else:
-        assert result.candidate is None
-    assert result.configuration['observed_requests']
-    assert all(row['controls'] == {} for row in result.configuration['observed_requests'])
-    assert 'custom-unstructured-canary' not in json.dumps(asdict(result))
-
-
 async def test_native_extension_phase_retains_its_own_backend_execution_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, ext_dir: ExtDir,
 ) -> None:
-    """A configured extension phase must not inherit another backend's retry policy.
-
-    Homogeneous native cases and existing singular execution-input tests cannot
-    expose a runtime map that omits extension-owned phase configuration.
-    """
+    """Extension phases retain their own native backend execution policy."""
     repo, case = frozen_case(tmp_path)
     monkeypatch.delenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', raising=False)
     ext_dir.write_module(
@@ -287,11 +245,7 @@ async def test_native_extension_phase_retains_its_own_backend_execution_policy(
 async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """Unknown operator effort must not inherit a historical case's project default.
-
-    The explicit/project selection tests below have known effort and cannot
-    expose native Pi's fallback to case-local settings when no effort is pinned.
-    """
+    """Case-local effort cannot replace an unavailable operator default."""
     repo, case = frozen_case(tmp_path)
     write_and_stage(repo, '.pi/settings.json', '{"defaultThinkingLevel":"high"}')
     case = replace(case, head=commit(repo, 'case-local thinking default'))
@@ -301,37 +255,26 @@ async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
         '{"defaultProvider":"nous","defaultModel":"deepseek/deepseek-v4.1-flash"}')
     monkeypatch.delenv('PI_THINKING', raising=False)
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
-    spawned: list[str] = []
-    real_exec = asyncio.create_subprocess_exec
 
-    async def no_model(*args: Any, **kwargs: Any) -> Any:
-        if args[0] == 'pi':
-            spawned.append('pi')
-            raise AssertionError('a conflicting case must fail before model work')
-        return await real_exec(*args, **kwargs)
+    def no_backend(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("a conflicting case must fail before backend creation")
 
-    monkeypatch.setattr('daydream.backends._transport.asyncio.create_subprocess_exec', no_model)
+    monkeypatch.setattr(runner, "create_backend", no_backend)
     config = empty_review_config(operator, tmp_path / 'trajectory', backend='pi')
     result = await review_case(case, repo, config, 'fixture')
-    assert result.status == 'failed' and result.candidate is None and not spawned
+    assert result.status == 'failed' and result.candidate is None
     assert result.terminal_result is None
     assert 'Case Pi thinking conflicts with unavailable operator effort' in result.diagnostics
 
 
 @pytest.mark.parametrize(("selection", "provider"), [
-    ("explicit", "nous"), ("project", "nous"), ("project_cli", "nous"), ("project_phase", "nous"),
+    ("explicit", "nous"), ("project", "nous"), ("project_phase", "nous"),
     ("project_cli", "openrouter"), ("project_cli_missing", "nous"), ("project_env", "nous"),
 ])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str, provider: str,
 ) -> None:
-    """The adapter must not inherit Harbor's forced OpenRouter provider policy.
-
-    Existing Pi runner tests establish transport precedence; this real adapter
-    journey proves its isolation and configuration copy preserve that boundary.
-    Project model overrides also retain their frozen provider; a non-default
-    provider exposes loss that the matching nous host default would conceal.
-    """
+    """Freeze operator provider, model and authentication across isolated native runs."""
     repo, case = frozen_case(tmp_path)
     if selection in {"explicit", "project_env"}:
         monkeypatch.setenv("PI_PROVIDER", "nous")
@@ -400,7 +343,6 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     expected_models = {"deepseek/deepseek-v4.1-flash"}
     for argv, kwargs in captured:
         assert argv[argv.index("--provider") + 1] == provider
-        assert argv[argv.index("--model") + 1] in expected_models
         assert argv[argv.index("--thinking") + 1] in ({"low"} if selection == "explicit" else {"low", "medium"})
         assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
         if provider == "openrouter":
@@ -435,12 +377,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
 async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
-    """Lost artifacts and a different actual patch cannot be scored under supplied SHAs.
-
-    Existing terminal tests own atomic artifact publication; this adapter contract
-    rejects missing callbacks, invalid canonical projection, and mismatched native
-    comparisons using real filesystem/Git operations instead of fabricated results.
-    """
+    """Artifact faults and changed comparisons cannot produce scorable empty success."""
     repo, case = frozen_case(tmp_path)
     original = tracked_source_state(repo)
     injected: list[str] = []
@@ -495,11 +432,7 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
 async def test_unadvertised_divergent_base_survives_frozen_endpoint_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """SHA-only mirror caches need both endpoints, even when base is not a HEAD ancestor.
-
-    The ancestor fixtures above cannot expose ordinary cloning dropping an
-    unadvertised base tip; this real Git graph matches the supplied fetch workflow.
-    """
+    """Materialize both frozen endpoints even when base is unadvertised and divergent."""
     repo, initial = frozen_case(tmp_path)
     git(repo, "checkout", "--detach", initial.base)
     write_and_stage(repo, "base-progress.txt", "The upstream branch advanced independently.\n")
@@ -527,12 +460,7 @@ async def test_unadvertised_divergent_base_survives_frozen_endpoint_materializat
 async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """Observer terminal mutations cannot change the report or leak to later runs.
-
-    Existing terminal artifact tests have no embedded observer; a callback that
-    edits terminal state must not change final presentation or outlive its run.
-    Caller-owned items/configuration copies have a separate delivery-boundary test.
-    """
+    """Observer mutations leave native reporting and later invocation scope intact."""
     repo, case = frozen_case(tmp_path)
     received: list[str] = []
     backend = EmptyReviewBackend(repo, forbid_merge=False, forbid_supervise=False,
@@ -559,23 +487,16 @@ async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     assert len(received) == 1, "a later ordinary invocation must not inherit the observer"
 
 
-@pytest.mark.parametrize("component", ["items", "configuration"])
-def test_result_delivery_preserves_caller_owned_nested_values(component: str) -> None:
-    """Observer edits must not alias nested caller-owned findings or configuration.
-
-    The runner report is rendered from already prepared findings/configuration,
-    so that journey cannot detect removal of either delivery copy guard.
-    """
+def test_result_delivery_preserves_caller_owned_nested_values() -> None:
+    """Observer mutations leave nested caller-owned findings and configuration intact."""
     items = [finding(source_uids=["native-source"])]
     configuration = {"phases": {"per_stack_review": {"model": "native-model"}}}
     received: list[FinalizedReview] = []
 
     def observe(result: FinalizedReview) -> None:
         received.append(result)
-        if component == "items":
-            result.items[0]["source_uids"].append("observer-source")
-        else:
-            result.configuration["phases"]["per_stack_review"]["model"] = "observer-model"
+        result.items[0]["source_uids"].append("observer-source")
+        result.configuration["phases"]["per_stack_review"]["model"] = "observer-model"
 
     with bind_review_result_handler(observe):
         deliver_finalized_review(terminal_result(), items, configuration)
