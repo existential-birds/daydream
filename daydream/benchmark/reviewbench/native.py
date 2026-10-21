@@ -21,6 +21,7 @@ from daydream import git_ops, runner
 from daydream.backends import BackendExecutionInput, resolve_fanout_concurrency
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends.pi import native_pi_settings
+from daydream.benchmark.reviewbench.candidate import selected_extension_identity
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
@@ -42,7 +43,7 @@ def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.Runn
     phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
     names = {_resolved_backend_name(config, phase) for phase in phases}
     inputs: dict[str, BackendExecutionInput | None] = {}
-    provenance: dict[str, Any] = {}
+    provenance: dict[str, Any] = {'extension': selected_extension_identity()}
     for name in sorted(names):
         selector_names = {
             'pi': ('PI_CODING_AGENT_DIR',),
@@ -301,7 +302,12 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
     execution = CaseExecution("failed")
     finalized: list[FinalizedReview] = []
     try:
+        extension = selected_extension_identity()
         public_native, native_execution = native_configuration(config) if runtime is None else runtime
+        public_native = copy.deepcopy(public_native)
+        if public_native.get('extension', extension) != extension:
+            raise ValueError('native extension differs from frozen configuration; create a fresh candidate plan')
+        public_native['extension'] = extension
         if not producer.strip():
             raise ValueError("producer must be nonempty")
         if any(re.fullmatch(r"[0-9a-f]{40}", oid) is None for oid in (case.base, case.head)):
@@ -357,26 +363,29 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 exit_code = await runner.run(native, review_result_handler=finalized.append, execution=native_execution)
             except Exception as exc:
                 execution.diagnostics.append(f"native reviewer raised {type(exc).__name__}")
+            result = finalized[0] if len(finalized) == 1 else None
+            if result is not None:
+                execution.terminal_result = copy.deepcopy(result.terminal_result)
+                execution.configuration = copy.deepcopy(result.configuration)
+                execution.usage = copy.deepcopy(result.usage)
+                execution.configuration['native'] = copy.deepcopy(public_native)
+                execution.retained_findings = copy.deepcopy(result.items)
+            if selected_extension_identity() != extension:
+                raise ValueError('native extension changed during review; create a fresh candidate plan')
             if not finalized:
                 execution.diagnostics.append("native reviewer did not produce a finalized terminal result")
                 return execution
-            if len(finalized) != 1:
+            if result is None:
                 raise ValueError("native reviewer produced multiple terminal results")
-            result = finalized[0]
-            execution.terminal_result = copy.deepcopy(result.terminal_result)
-            execution.configuration = copy.deepcopy(result.configuration)
-            execution.usage = copy.deepcopy(result.usage)
-            execution.configuration['native'] = copy.deepcopy(public_native)
-            execution.retained_findings = copy.deepcopy(result.items)
-            validate_terminal_result(execution.terminal_result, expected_head_sha=case.head)
-            revision = execution.terminal_result["analyzed_revision"]
+            validate_terminal_result(result.terminal_result, expected_head_sha=case.head)
+            revision = result.terminal_result["analyzed_revision"]
             if any(revision.get(key) != value for key, value in expected.items()):
                 raise ValueError("native analyzed comparison differs from supplied frozen comparison")
             if git_ops.head_sha(checkout) != case.head or git_ops.diff_worktree_against(checkout, case.head, ["."]):
                 raise ValueError("native reviewer changed the frozen checkout revision")
             findings, execution.conversion_omissions = convert_findings(
                 result.items, repository=checkout, case=case, producer=producer, comparison=comparison)
-            state = execution.terminal_result["analysis_state"]
+            state = result.terminal_result["analysis_state"]
             if state != "complete":
                 execution.status = "incomplete" if state == "incomplete" else "failed"
                 execution.diagnostics.append("native analysis is " + state)

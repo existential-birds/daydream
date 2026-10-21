@@ -8,6 +8,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from daydream.benchmark.reviewbench.candidate import candidate_package_files
+
 NODE_IMAGE = 'node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7'
 UV_IMAGE = 'ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc'
 HARBOR_REVISION = '6ce6abee0b9fa94a50c88f0557d030a419998d78'
@@ -29,21 +31,15 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64') -> tuple[str, 
         required = 'daydream/benchmark/reviewbench/harbor_entrypoint.py'
         if required not in archive.namelist():
             raise ValueError('Reviewer wheel lacks the public Harbor runtime')
-        package = Path(__file__).resolve().parents[2]
-        installed_names = {
-            'daydream/' + path.relative_to(package).as_posix()
-            for path in package.rglob('*') if path.is_file()
-            and '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
-            and path.name != '.DS_Store'
-        }
-        wheel_names = {name for name in archive.namelist() if name.startswith('daydream/') and not name.endswith('/')}
-        if wheel_names != installed_names:
+        installed = candidate_package_files()
+        wheel_names = {name for name in archive.namelist() if not name.endswith('/') and (
+            name.startswith(('daydream/', 'daydream_ext/')) or name == 'daydream_ext.py'
+        )}
+        if wheel_names != installed.keys():
             raise ValueError('Reviewer wheel package membership differs from the executing candidate')
-        for name in archive.namelist():
-            if name.startswith('daydream/') and not name.endswith('/'):
-                installed = package / name.removeprefix('daydream/')
-                if not installed.is_file() or installed.read_bytes() != archive.read(name):
-                    raise ValueError('Export must execute the same candidate package as its reviewer wheel')
+        for name, path in installed.items():
+            if path.read_bytes() != archive.read(name):
+                raise ValueError('Export must execute the same candidate package as its reviewer wheel')
     requirements = Path(__file__).with_name('reviewer-runtime.lock').read_bytes()
     host_requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
     assets = {wheel.name: wheel.read_bytes(), 'reviewer-runtime.lock': requirements}

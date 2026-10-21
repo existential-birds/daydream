@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -15,12 +17,12 @@ import pytest
 
 from daydream import git_ops, runner
 from daydream.backends import AgentEvent, CostEvent, EffectiveRequestConfig, RequestEvent
+from daydream.benchmark.reviewbench.candidate import selected_extension_identity
 from daydream.benchmark.reviewbench.contract import Case
-from daydream.benchmark.reviewbench.native import convert_findings, review_case
+from daydream.benchmark.reviewbench.native import convert_findings, native_configuration, review_case
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
 from daydream.review_result import FinalizedReview, bind_review_result_handler, deliver_finalized_review
-from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
@@ -254,13 +256,59 @@ async def test_native_renamed_file_uses_original_source_for_coordinate_ambiguity
     assert [item['reason'] for item in result.conversion_omissions] == ['ambiguous_old_or_new_side_line_hint']
 
 
-async def test_native_extension_phase_retains_its_own_backend_execution_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, ext_dir: ExtDir,
+async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, mutation: str, report: Path) -> None:
+    """Run inside the isolated candidate import root, replacing only generation."""
+    created: list[tuple[str, EmptyReviewBackend]] = []
+    config = empty_review_config(repo, report.parent / 'trajectory', file_config=DaydreamFileConfig(
+        backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
+    expected_extension = selected_extension_identity()
+    frozen = native_configuration(config)
+    if mutation == 'before':
+        extension.write_text(extension.read_text() + '\n# changed before generation\n')
+
+    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
+        assert kwargs['execution_input'].retry_policy.base_delay_s == (10.0 if name == 'pi' else 2.0)
+        if mutation == 'during' and not created:
+            extension.write_text(extension.read_text() + '\n# changed during the admitted run\n')
+        backend = EmptyReviewBackend(kwargs.get('cwd', repo), forbid_merge=False, forbid_supervise=False,
+            review_by_stack={'structure': [finding()]} if mutation == 'during' else {})
+        backend.model = kwargs['model']
+        backend.merge_echo_records = True
+        created.append((name, backend))
+        return backend
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runner, 'create_backend', create)
+        result = await review_case(case, repo, config, 'fixture', runtime=frozen)
+    report.write_text(json.dumps({'execution': asdict(result), 'frozen_extension': expected_extension,
+        'created': len(created), 'custom_phase_called': any(name == 'claude' and backend.calls
+            for name, backend in created), 'prompt_override_called': any('PACKAGED_PROMPT_OVERRIDE' in call['prompt']
+            for _, backend in created for call in backend.calls)}))
+
+
+@pytest.mark.parametrize('mutation', ['none', 'before', 'during'])
+async def test_native_packaged_extension_is_bound_before_and_after_real_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, mutation: str,
 ) -> None:
-    """Extension phases retain their own native backend execution policy."""
+    """Keep ordinary packaged customization and reject changed executable inputs.
+
+    The earlier ExtDir phase test could prove backend policy while allowing a
+    mutable, untracked extension through both benchmark identity checks. Run an
+    actual owned default extension in an isolated copy of the candidate, with real
+    Git and runner execution, then edit its real source before/during admission.
+    """
+    import daydream
+
     repo, case = frozen_case(tmp_path)
     monkeypatch.delenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', raising=False)
-    ext_dir.write_module(
+    monkeypatch.delenv('DAYDREAM_EXT_DIR', raising=False)
+    candidate = tmp_path / 'candidate'
+    shutil.copytree(Path(daydream.__file__).parent, candidate / 'daydream',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
+    extension = candidate / 'daydream_ext' / '__init__.py'
+    extension.parent.mkdir()
+    extension.write_text(
+        'DAYDREAM_EXT_API = 8\n'
         'from daydream.agent import run_agent\n'
         'from daydream.extensions import FlowStep\n'
         'from daydream.trajectory import DaydreamPhase\n'
@@ -268,24 +316,84 @@ async def test_native_extension_phase_retains_its_own_backend_execution_policy(
         '    await run_agent(ctx.backend_for("extension-review"), ctx.work.repo, "NATIVE_EXTENSION", '
         'phase=DaydreamPhase.REVIEW, run_context=ctx.run_context)\n'
         'def register(registry):\n'
+        '    intent = registry.prompt("intent")\n'
+        '    registry.override_prompt("intent", lambda *args, **kwargs: '
+        'intent(*args, **kwargs) + "\\nPACKAGED_PROMPT_OVERRIDE")\n'
         '    registry.register_phase(FlowStep(name="native-probe", run=probe))\n'
         '    registry.insert_before("deep", anchor="intent", step="native-probe")\n')
-    created: list[tuple[str, EmptyReviewBackend]] = []
+    home = tmp_path / 'private-home'
+    home.mkdir()
+    report = tmp_path / 'extension-result.json'
+    script = (
+        'import asyncio,json,sys; from pathlib import Path; '
+        'from tests.test_reviewbench_native import _packaged_extension_journey; '
+        'from daydream.benchmark.reviewbench.contract import Case; '
+        'asyncio.run(_packaged_extension_journey(Path(sys.argv[1]), Case.from_dict(json.loads(sys.argv[2])), '
+        'Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5])))'
+    )
+    subprocess.run([sys.executable, '-c', script, str(repo), json.dumps(asdict(case)), str(extension), mutation,
+                    str(report)], cwd=tmp_path, env={**os.environ, 'HOME': str(home),
+        'PYTHONPATH': os.pathsep.join((str(candidate), str(Path(__file__).resolve().parent.parent)))},
+        check=True, capture_output=True, text=True, timeout=60)
+    observed = json.loads(report.read_text())
+    result = observed['execution']
+    assert observed['frozen_extension']['source_kind'] == 'packaged'
+    if mutation == 'none':
+        assert result['status'] == 'completed_empty', result['diagnostics']
+        assert result['candidate'] is not None
+    else:
+        assert result['status'] == 'failed' and result['candidate'] is None
+    if mutation == 'before':
+        assert observed['created'] == 0 and result['terminal_result'] is None
+        assert 'native extension differs from frozen configuration' in result['diagnostics'][0]
+    else:
+        assert observed['custom_phase_called'] and observed['prompt_override_called']
+        assert result['configuration']['phases']['extension-review']['model'] == 'claude-sonnet-5'
+        assert result['configuration']['native']['extension'] == observed['frozen_extension']
+    if mutation == 'during':
+        assert result['terminal_result']['analysis_state'] == 'complete'
+        assert result['retained_findings']
+        assert 'native extension changed during review' in result['diagnostics'][0]
+    assert not fake_gh.calls('POST')
 
-    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
-        assert kwargs['execution_input'].retry_policy.base_delay_s == (10.0 if name == 'pi' else 2.0)
-        backend = EmptyReviewBackend(kwargs.get('cwd', repo))
-        backend.model = kwargs['model']
-        created.append((name, backend))
-        return backend
 
-    monkeypatch.setattr(runner, 'create_backend', create)
-    config = empty_review_config(repo, tmp_path / 'trajectory', file_config=DaydreamFileConfig(
-        backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
-    result = await review_case(case, repo, config, 'fixture')
-    assert result.status == 'completed_empty', result.diagnostics
-    assert any(name == 'claude' and backend.calls for name, backend in created)
-    assert result.configuration['phases']['extension-review']['model'] == 'claude-sonnet-5'
+async def test_native_explicit_runtime_cannot_admit_external_extension_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Public callers supplying capabilities must still pass host extension admission.
+
+    Native configuration is bypassed by an explicit runtime tuple; this boundary
+    must reject an external selector before scanning arbitrary operator files or
+    invoking its register function, even when backend capabilities are frozen.
+    """
+    repo, case = frozen_case(tmp_path)
+    config = empty_review_config(repo, tmp_path / 'trajectory', backend='codex')
+    frozen = native_configuration(config)
+    extension = tmp_path / 'operator-directory'
+    extension.mkdir()
+    marker = tmp_path / 'extension-executed'
+    (extension / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
+                                          + ').write_text("must not execute")\n')
+    (extension / 'auth.json').write_text('{"refresh_token":"do-not-read-or-fingerprint"}')
+    monkeypatch.setenv('DAYDREAM_EXT_DIR', str(extension))
+    read_bytes = Path.read_bytes
+
+    def bounded_read(path: Path) -> bytes:
+        if path.is_relative_to(extension):
+            pytest.fail('benchmark admission read external extension or credential bytes')
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, 'read_bytes', bounded_read)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('external extension selection reached generation')
+
+    monkeypatch.setattr(runner, 'create_backend', forbidden)
+    result = await review_case(case, repo, config, 'fixture', runtime=frozen)
+    assert result.status == 'failed' and result.candidate is None and result.terminal_result is None
+    assert not marker.exists()
+    assert 'DAYDREAM_EXT_DIR' in result.diagnostics[0]
+    assert 'do-not-read-or-fingerprint' not in json.dumps(asdict(result))
 
 
 async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
