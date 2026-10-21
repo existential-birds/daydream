@@ -307,6 +307,6 @@ def export_harbor_profile(
         # changes cannot silently claim the originally admitted revision.
         if verify_source(source) != source_identity:
             raise ValueError('Supplied source changed during export')
-        shutil.move(str(exported), output)
+        shutil.copytree(exported, output)
     return {'tasks': len(cases), 'policy_sha256': policy_sha, 'metric_sha256': metric_sha,
             'output': str(output), 'profile': policy}

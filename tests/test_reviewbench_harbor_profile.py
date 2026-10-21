@@ -15,6 +15,8 @@ import pytest
 import yaml
 
 from daydream import credential_patterns, json_utils, redaction
+from daydream.benchmark.reviewbench import harbor_profile
+from daydream.benchmark.reviewbench.contract import verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
@@ -173,4 +175,41 @@ def test_invalid_public_profile_preserves_source_and_publishes_nothing(
         export_harbor_profile(supplied_source, output, **options)
     assert not output.exists()
     assert not (tmp_path / 'escaped').exists()
+    assert not list(tmp_path.glob('.reviewbench-export-*'))
+
+
+def test_competing_export_destination_preserves_the_winning_profile(
+    supplied_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A destination created during export must not receive a nested candidate.
+
+    Successful format tests miss the race between admission and publication: a
+    move into an existing directory returns the winner's path with our policy.
+    """
+    output = tmp_path / 'competing-profile'
+    winning_files = {
+        'daydream-profile.json': b'{"winner": "other-export"}\n',
+        'retained.txt': b'preserve competing export bytes\n',
+    }
+    verifications = 0
+
+    def competing_destination(source: Path) -> dict[str, Any]:
+        nonlocal verifications
+        identity = verify_source(source)
+        verifications += 1
+        if verifications == 2:
+            # The real export is complete and source verification still passes.
+            # Publish competing bytes at the last boundary before installation.
+            output.mkdir()
+            for name, content in winning_files.items():
+                (output / name).write_bytes(content)
+        return identity
+
+    monkeypatch.setattr(harbor_profile, 'verify_source', competing_destination)
+    with pytest.raises(FileExistsError):
+        export_harbor_profile(supplied_source, output, candidate={'revision': 'losing-export'}, base_image=NODE_IMAGE)
+    assert verifications == 2
+    assert {path.relative_to(output).as_posix(): path.read_bytes()
+            for path in output.rglob('*') if path.is_file()} == winning_files
+    assert not (output / 'dataset').exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
