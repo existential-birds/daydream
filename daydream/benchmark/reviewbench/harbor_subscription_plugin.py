@@ -47,5 +47,5 @@ class SubscriptionAdmissionPlugin:
         # through verifier finalization; its async-with owns all cleanup paths.
         queue._semaphore = asyncio.Semaphore(1)
 
-    async def on_job_end(self, job_result: Any) -> None:
+    async def on_job_end(self, _job_result: Any) -> None:
         """Harbor owns permit cleanup; no account lease survives the job."""
