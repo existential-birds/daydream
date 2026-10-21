@@ -31,12 +31,13 @@ from daydream.backends import (
     AgentEvent,
     AuditIsolationError,
     Backend,
+    BackendExecutionInput,
     ResultEvent,
     TextEvent,
 )
 from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
 from daydream.cli import _signal_handler
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import (
     DeepArtifact,
@@ -1555,6 +1556,70 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     assert identity.review_backend == "claude"
     assert identity.phases.per_stack_review
     assert identity.deep is not shallow
+
+
+@pytest.mark.parametrize(("source", "expected_model"), [
+    ("frozen", "operator-frozen-model"), ("empty", DEFAULT_PI_MODEL), ("root", "operator-file-model"),
+    ("cwd", "case-model"), ("ambient", "case-model"), ("explicit", "phase-explicit-model"),
+])
+def test_manifest_pi_model_preserves_native_execution_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, expected_model: str,
+) -> None:
+    """Persisted model identity must honor frozen defaults rather than case settings.
+
+    The per-stack tier tests above cover RunConfig overrides but miss native Pi
+    model resolution from an embedded execution capability in another cwd.
+    """
+    case, operator = tmp_path / "case", tmp_path / "operator"
+    for root, model in ((case, "case-model"), (operator, "operator-file-model")):
+        (root / ".pi").mkdir(parents=True)
+        (root / ".pi/settings.json").write_text(json.dumps({"defaultModel": model}))
+    agent_dir = tmp_path / "agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    execution = BackendExecutionInput.from_environment({"PI_CODING_AGENT_DIR": str(agent_dir)}, backend="pi")
+    if source in {"frozen", "empty", "explicit"}:
+        execution = replace(execution, pi_settings_root=operator,
+                            pi_settings={} if source == "empty" else {"defaultModel": "operator-frozen-model"})
+    elif source == "root":
+        execution = replace(execution, pi_settings_root=operator)
+    config = RunConfig(backend="pi", model="phase-explicit-model" if source == "explicit" else None)
+    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), case,
+                                            execution_input=None if source == "ambient" else execution)
+    assert identity.per_stack_review_backend == "pi"
+    assert identity.per_stack_review_model == expected_model
+
+
+async def test_runner_archive_manifest_uses_per_stack_native_capability(
+    feature_branch_repo: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any,
+) -> None:
+    """A mixed-backend run must archive the Pi phase's frozen model identity.
+
+    Direct manifest tests cannot detect runner routing the general Claude
+    capability to manifest capture while its per-stack backend receives Pi's.
+    """
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+
+    (feature_branch_repo / ".pi").mkdir()
+    (feature_branch_repo / ".pi/settings.json").write_text('{"defaultModel":"case-model"}')
+    _git(feature_branch_repo, "add", ".pi/settings.json")
+    _commit(feature_branch_repo, "case native defaults")
+    environment = {"PI_CODING_AGENT_DIR": str(tmp_path / "agent")}
+    fallback = BackendExecutionInput.from_environment(environment, backend="claude")
+    pi = replace(BackendExecutionInput.from_environment(environment, backend="pi"),
+                 pi_settings={"defaultModel": "operator-frozen-model"})
+    execution = runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends={"claude": fallback, "pi": pi})
+    monkeypatch.setattr(runner, "create_backend", lambda _name, **kwargs:
+                        EmptyReviewBackend(kwargs.get("cwd") or feature_branch_repo))
+    config = empty_review_config(feature_branch_repo, tmp_path / "trajectory.json", archive=True,
+        file_config=DaydreamFileConfig(backend="claude", phases={"per_stack_review": {"backend": "pi"}}))
+    assert await runner.run(config, execution=execution,
+                            private_roots=private_root_locations(base=tmp_path / "private")) == 0
+    _, archived_run = _assert_one_published_run(feature_branch_repo, archive_dir)
+    manifest = json.loads((archived_run / "manifest.json").read_text())["run"]
+    assert manifest["backend"] == "claude" and manifest["per_stack_review_backend"] == "pi"
+    assert manifest["per_stack_review_model"] == "operator-frozen-model"
+
 
 async def test_overlapping_posting_runs_keep_their_own_github_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
