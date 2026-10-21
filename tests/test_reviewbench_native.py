@@ -24,13 +24,14 @@ from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import convert_findings, review_case
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
-from daydream.review_result import FinalizedReview
+from daydream.review_result import FinalizedReview, bind_review_result_handler, deliver_finalized_review
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo, tracked_source_state, write_and_stage
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import review_stage_state, stage_result
 
 
@@ -317,33 +318,42 @@ async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
     assert 'Case Pi thinking conflicts with unavailable operator effort' in result.diagnostics
 
 
-@pytest.mark.parametrize("selection", ["explicit", "project"])
+@pytest.mark.parametrize(("selection", "provider"), [
+    ("explicit", "nous"), ("project", "nous"), ("project_cli", "nous"), ("project_phase", "nous"),
+    ("project_cli", "openrouter"), ("project_cli_missing", "nous"), ("project_env", "nous"),
+])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str, provider: str,
 ) -> None:
     """The adapter must not inherit Harbor's forced OpenRouter provider policy.
 
     Existing Pi runner tests establish transport precedence; this real adapter
     journey proves its isolation and configuration copy preserve that boundary.
+    Project model overrides also retain their frozen provider; a non-default
+    provider exposes loss that the matching nous host default would conceal.
     """
     repo, case = frozen_case(tmp_path)
-    if selection == "explicit":
+    if selection in {"explicit", "project_env"}:
         monkeypatch.setenv("PI_PROVIDER", "nous")
     else:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_API_KEY", raising=False)
     monkeypatch.delenv("PI_THINKING", raising=False)
     monkeypatch.setenv("NOUS_API_KEY", "offline-native-auth-canary")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-other-auth-canary")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "operator-pi"))
     real_exec: Any = asyncio.create_subprocess_exec
     captured: list[tuple[list[str], dict[str, Any]]] = []
     expected_usage: list[tuple[int, int, int, float]] = []
     operator = tmp_path / "operator"
-    if selection == "project":
+    overridden = selection in {"project_cli", "project_phase", "project_cli_missing"}
+    if selection != "explicit":
         (operator / ".pi").mkdir(parents=True)
-        (operator / ".pi/settings.json").write_text(json.dumps({"defaultProvider": "nous",
-            "defaultModel": "deepseek/deepseek-v4.1-flash", "defaultThinkingLevel": "low",
-            "apiKey": "must-not-fingerprint-this-secret"}))
+        settings = {"defaultModel": "operator-default-model" if overridden else "deepseek/deepseek-v4.1-flash",
+                    "defaultThinkingLevel": "low", "apiKey": "must-not-fingerprint-this-secret"}
+        if selection != "project_cli_missing":
+            settings["defaultProvider"] = "openrouter" if selection == "project_env" else provider
+        (operator / ".pi/settings.json").write_text(json.dumps(settings))
         write_and_stage(repo, ".pi/settings.json", '{"defaultProvider":"other","defaultModel":"wrong-model"}')
         case = replace(case, head=commit(repo, "case native settings cannot replace operator settings"))
 
@@ -378,33 +388,47 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     config = empty_review_config(repo, tmp_path / "trajectory", backend="pi",
         file_config=DaydreamFileConfig(model="deepseek/deepseek-v4.1-flash", reasoning_effort="low")
         if selection == "explicit" else DaydreamFileConfig())
-    if selection == "project":
+    if selection != "explicit":
         config.target = str(operator)
+    if selection in {"project_cli", "project_cli_missing"}:
+        config.model = "deepseek/deepseek-v4.1-flash"
+    elif selection == "project_phase":
+        config.file_config = DaydreamFileConfig(phases={"per_stack_review": {"model": "deepseek/deepseek-v4.1-flash"}})
     result = await review_case(case, repo, config, "native-pi-fixture")
     assert result.status == "completed_empty", result.diagnostics
     assert captured
+    expected_models = {"deepseek/deepseek-v4.1-flash"}
     for argv, kwargs in captured:
-        assert argv[argv.index("--provider") + 1] == "nous"
-        assert argv[argv.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+        assert argv[argv.index("--provider") + 1] == provider
+        assert argv[argv.index("--model") + 1] in expected_models
         assert argv[argv.index("--thinking") + 1] in ({"low"} if selection == "explicit" else {"low", "medium"})
         assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
+        if provider == "openrouter":
+            assert kwargs["env"]["OPENROUTER_API_KEY"] == "offline-other-auth-canary"
+    assert {argv[argv.index("--model") + 1] for argv, _ in captured} == expected_models
     assert result.candidate is not None
     assert result.candidate['usage'] == {"prompt_tokens": sum(row[0] for row in expected_usage),
         "completion_tokens": sum(row[1] for row in expected_usage),
         "cached_tokens": sum(row[2] for row in expected_usage),
         "cost_usd": pytest.approx(sum(row[3] for row in expected_usage)),
         "total_tokens": sum(row[0] + row[1] for row in expected_usage)}
-    assert {row['provider'] for row in result.configuration['observed_requests']} == {'nous'}
-    assert {row['model'] for row in result.configuration['observed_requests']} == {'deepseek/deepseek-v4.1-flash'}
+    assert {row['provider'] for row in result.configuration['observed_requests']} == {provider}
+    assert {row['model'] for row in result.configuration['observed_requests']} == expected_models
     assert {'wonder', 'arbiter', 'parse'} <= result.configuration['phases'].keys()
     if selection == "explicit":
         assert config.file_config is not None and config.file_config.model == "deepseek/deepseek-v4.1-flash"
         assert os.environ["PI_PROVIDER"] == "nous"
     else:
-        assert result.configuration['native']['pi']['defaults']['defaultProvider'] == 'nous'
+        if selection != "project_cli_missing":
+            assert result.configuration['native']['pi']['defaults']['defaultProvider'] == (
+                "openrouter" if selection == "project_env" else provider)
         assert 'must-not-fingerprint-this-secret' not in json.dumps(asdict(result), default=str)
-        assert 'PI_PROVIDER' not in os.environ
+        if selection == "project_env":
+            assert os.environ["PI_PROVIDER"] == "nous"
+        else:
+            assert 'PI_PROVIDER' not in os.environ
     assert "offline-native-auth-canary" not in json.dumps(asdict(result), default=str)
+    assert "offline-other-auth-canary" not in json.dumps(asdict(result), default=str)
 
 
 @pytest.mark.parametrize("fault", ["missing_terminal", "malformed_projection", "ignored_patch", "moved_head"])
@@ -500,13 +524,14 @@ async def test_unadvertised_divergent_base_survives_frozen_endpoint_materializat
     assert tracked_source_state(repo) == original
 
 
-async def test_result_observer_cannot_mutate_native_evidence_or_report(
+async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """The supported handoff owns copies rather than aliases into native authority.
+    """Observer terminal mutations cannot change the report or leak to later runs.
 
     Existing terminal artifact tests have no embedded observer; a callback that
-    edits its result must not corrupt the final coverage, canonical items or report.
+    edits terminal state must not change final presentation or outlive its run.
+    Caller-owned items/configuration copies have a separate delivery-boundary test.
     """
     repo, case = frozen_case(tmp_path)
     received: list[str] = []
@@ -519,20 +544,41 @@ async def test_result_observer_cannot_mutate_native_evidence_or_report(
         received.append(result.terminal_result["run_id"])
         result.terminal_result["run_id"] = "observer-mutated-run"
         result.terminal_result["analysis_state"] = "failed"
-        result.items[0]["description"] = "observer-mutated-finding"
-        result.configuration["phases"]["per_stack_review"]["model"] = "observer-mutated-model"
 
     config = empty_review_config(repo, tmp_path / "trajectory", backend="pi", base=case.base,
                                  model="native-original-model", pr_number=None)
     assert await runner.run(config, review_result_handler=observe) == 0
     assert len(received) == 1
     coverage = json.loads((repo / ".daydream/deep/review-coverage.json").read_text())
-    items = json.loads((repo / ".daydream/deep/merged-items.json").read_text())
     report = (repo / ".review-output.md").read_text()
     assert coverage["run_id"] == received[0]
     assert all(scope["status"] == "complete" for scope in coverage["stack_outcomes"])
-    assert items["items"][0]["description"] == finding()["description"]
     assert "observer-mutated" not in report and received[0] in report
-    assert "<code>complete</code>" in report and config.model == "native-original-model"
+    assert "<code>complete</code>" in report
     assert await runner.run(config) == 0
     assert len(received) == 1, "a later ordinary invocation must not inherit the observer"
+
+
+@pytest.mark.parametrize("component", ["items", "configuration"])
+def test_result_delivery_preserves_caller_owned_nested_values(component: str) -> None:
+    """Observer edits must not alias nested caller-owned findings or configuration.
+
+    The runner report is rendered from already prepared findings/configuration,
+    so that journey cannot detect removal of either delivery copy guard.
+    """
+    items = [finding(source_uids=["native-source"])]
+    configuration = {"phases": {"per_stack_review": {"model": "native-model"}}}
+    received: list[FinalizedReview] = []
+
+    def observe(result: FinalizedReview) -> None:
+        received.append(result)
+        if component == "items":
+            result.items[0]["source_uids"].append("observer-source")
+        else:
+            result.configuration["phases"]["per_stack_review"]["model"] = "observer-model"
+
+    with bind_review_result_handler(observe):
+        deliver_finalized_review(terminal_result(), items, configuration)
+    assert len(received) == 1
+    assert items[0]["source_uids"] == ["native-source"]
+    assert configuration["phases"]["per_stack_review"]["model"] == "native-model"

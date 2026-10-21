@@ -685,9 +685,10 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_PROVIDER")
         )
-        if provider is None and configured_model is not None and settings_root is not None:
+        if provider is None and settings_root is not None:
             provider = frozen_settings.get("defaultProvider")
-            if provider is None and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None:
+            if (provider is None and configured_model is not None
+                    and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None):
                 raise PiError("Case Pi provider conflicts with unavailable operator provider", category="AUTH_CONFIG")
         if provider is None and configured_model is None:
             provider = _PI_DEFAULT_PROVIDER
