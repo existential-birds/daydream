@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
   ordinary Pi defaults are unchanged. This compatible minor feature retains
   committed result schema 1 and extension API 8.
+- Run supplied, revision-pinned ReviewBench cases through the ordinary native
+  reviewer, with isolated candidate/round outputs, typed completion and source
+  verification, visible conversion/failure/missing-case accounting, and supplied
+  evaluator reports ([#92](https://github.com/existential-birds/daydream/issues/92)).
+  This is compatible new functionality; reviewer defaults are unchanged.
 
 ### Fixed
 

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
@@ -18,6 +20,43 @@ from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
+
+
+@dataclass(frozen=True)
+class FinalizedReview:
+    """Validated native result independent of PR publication and presentation.
+
+    Each delivery owns copies of frozen terminal evidence and canonical items.
+    Missing delivery means unavailable analysis, never an empty review.
+    """
+
+    terminal_result: dict[str, Any]
+    items: list[dict[str, Any]]
+    configuration: dict[str, Any]
+
+
+_result_handler: ContextVar[Callable[[FinalizedReview], None] | None] = ContextVar(
+    "native_review_result_handler", default=None,
+)
+
+
+@contextmanager
+def bind_review_result_handler(handler: Callable[[FinalizedReview], None] | None) -> Iterator[None]:
+    """Scope an embedded consumer to this invocation, including concurrent runs."""
+    token = _result_handler.set(handler)
+    try:
+        yield
+    finally:
+        _result_handler.reset(token)
+
+
+def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
+                             configuration: dict[str, Any]) -> None:
+    """Deliver frozen authority at the native terminal validation boundary."""
+    handler = _result_handler.get()
+    if handler is not None:
+        validate_terminal_result(result)
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(configuration)))
 
 
 class ReasonCode(StrEnum):

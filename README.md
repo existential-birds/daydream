@@ -50,3 +50,6 @@ Hugging Face dataset and the `hub` extra. The training pipeline implements
 reward construction → SFT → RFT → online RL; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
 [training](docs/training-launch.md), [benchmarks](docs/benchmark.md).
+`daydream benchmark reviewbench` integrates the supplied frozen ReviewBench cases
+with the native reviewer and supplied reports; generation and judging are separate
+explicit operator actions. The private Harbor benchmark remains a separate workflow.

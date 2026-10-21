@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -72,6 +73,7 @@ from daydream.phases.inputs import (
     _git_branch,
     _git_log,
 )
+from daydream.review_result import FinalizedReview, bind_review_result_handler
 from daydream.run_artifacts import (
     _finalize_run_artifacts,
     _open_recorder,
@@ -286,8 +288,14 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 async def run(
     config: RunConfig | None = None, *, private_roots: PrivateRootLocations | None = None,
     execution: RunnerExecutionInput | None = None,
+    review_result_handler: Callable[[FinalizedReview], None] | None = None,
 ) -> int:
-    """Open a workspace and execute the selected daydream flow."""
+    """Execute a native flow and optionally deliver its actual finalized review.
+
+    The integer remains the workflow exit code. Review authority is independent
+    of later artifacts/publication; missing delivery means unavailable analysis.
+    Handler errors fail the invocation.
+    """
     if config is None:
         config = RunConfig()
     if config.dataset_capture_disabled:
@@ -330,7 +338,7 @@ async def run(
         quiet=quiet,
         log_mode=config.log_mode,
     ))
-    with bind_run_context(run_context):
+    with bind_run_context(run_context), bind_review_result_handler(review_result_handler):
         try:
             return await _run_with_context(
                 config, private_roots=private_roots, run_context=run_context,

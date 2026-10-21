@@ -37,6 +37,9 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
+    from daydream.benchmark.reviewbench.cli import add_parser
+
+    add_parser(sub)
 
     init_p = sub.add_parser("init", help="create a private benchmark workspace")
     init_p.add_argument("dir", type=Path, help="workspace directory (must be empty/absent)")
@@ -580,7 +583,17 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     """
 
     parser = _build_benchmark_parser()
+    native_args: list[str] = []
+    if argv[:2] == ['reviewbench', 'run'] and '--' in argv:
+        boundary = argv.index('--')
+        argv, native_args = argv[:boundary], argv[boundary + 1:]
     args = parser.parse_args(argv)
+    if args.subcommand == 'reviewbench':
+        from daydream.benchmark.reviewbench.cli import handle
+
+        if args.reviewbench_command == 'run':
+            args.native_args = native_args
+        return handle(args)
     sub = args.subcommand
     if sub is None:
         parser.print_help()

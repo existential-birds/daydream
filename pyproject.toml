@@ -75,6 +75,7 @@ include = [
     "daydream/atif/NOTICE",
     "daydream/benchmark/harbor/templates/**",
     "daydream/benchmark/harbor/runtime-requirements.lock",
+    "daydream/benchmark/reviewbench/report.ts",
 ]
 
 [tool.mypy]

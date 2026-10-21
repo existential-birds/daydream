@@ -6,6 +6,15 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
+Embedded consumers may pass `review_result_handler` to `runner.run`. It receives
+one `FinalizedReview` from the actual terminal boundary: validated canonical
+items, the frozen typed terminal result (including run/source identity), and
+effective configuration. It requires no GitHub publication target. The integer
+return remains the workflow exit code; missing delivery is unavailable analysis.
+Valid partial findings survive analysis failure. Consumer mutation cannot change
+the native result; consumer exceptions fail the invocation. This handoff does
+not establish later artifact, capture or external publication success.
+
 Ordinary `--findings-out` uses schema version 2 with `terminal_result` version 1.
 Immutable PR exports use schema 3, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
