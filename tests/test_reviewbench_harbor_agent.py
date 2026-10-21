@@ -207,10 +207,24 @@ async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_prop
     """
     environment = public_input(tmp_path)
     entered, joined = asyncio.Event(), asyncio.Event()
+    emitted = 'Synthetic generation stream before cancellation'
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    destinations = {evidence / 'trajectory.json', evidence.parent / 'trajectory.json'}
+    published: list[Path] = []
+    link = os.link
+
+    def publish_after_join(source: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
+        target = Path(destination)
+        if target in destinations:
+            assert joined.is_set(), 'ATIF publication raced generation cleanup'
+            published.append(target)
+        link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'link', publish_after_join)
 
     class BlockedBackend(EmptyReviewBackend):
         async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            yield TextEvent('Synthetic generation stream before cancellation')
+            yield TextEvent(emitted)
             entered.set()
             try:
                 await asyncio.Event().wait()
@@ -225,9 +239,15 @@ async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_prop
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(running, timeout=5)
     assert joined.is_set()
-    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    assert set(published) == destinations
     assert (evidence / 'trajectory.json').is_file()
     assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
+    trajectory = json.loads((evidence / 'trajectory.json').read_text())
+    assert any(step['source'] == 'agent' and step.get('message') == emitted
+               and step.get('extra', {}).get('stop_reason') == 'cancelled' for step in trajectory['steps'])
+    assert trajectory['extra']['partial'] is True
+    assert any(event['event'] == 'phase_end' and event.get('status') == 'cancelled'
+               for event in trajectory['extra']['phase_events'])
     record = json.loads((evidence / 'execution.json').read_text())
     assert record['status'] == 'cancelled' and record['terminal_result'] is None
     assert 'cancelled before returning' in record['diagnostics'][0]
