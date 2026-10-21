@@ -48,8 +48,10 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'parser.add_argument("command", choices=["run"])\n'
         'for flag, name in [("-p", "dataset"), ("-a", "agent"), ("-n", "concurrency"),\n'
         ' ("-k", "rounds"), ("-r", "retries"), ("-o", "jobs"),\n'
-        ' ("--job-name", "job"), ("--plugin", "plugin"), ("-i", "task"), ("-l", "limit")]:\n'
+        ' ("--job-name", "job"), ("-i", "task"), ("-l", "limit")]:\n'
         ' parser.add_argument(flag, dest=name)\n'
+        'parser.add_argument("--yes", action="store_true")\n'
+        'parser.add_argument("--plugin", dest="plugins", action="append")\n'
         'args = parser.parse_args()\n'
         'auth_dir = pathlib.Path(os.environ["RB_HARBOR_AUTH_DIR"])\n'
         'auth = json.loads((auth_dir / "auth.json").read_text())\n'
@@ -115,7 +117,9 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
         'command': 'run', 'dataset': str(args.directory.resolve()),
         'agent': 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
         'concurrency': '2', 'rounds': str(rounds), 'retries': '0', 'jobs': str(args.jobs_dir.resolve()),
-        'job': args.job_name, 'plugin': 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
+        'job': args.job_name, 'yes': True, 'plugins': [
+            'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
+            'daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin'],
         'task': 'owner_repo*', 'limit': '1', 'round_membership': list(range(1, rounds + 1)),
         'auth_home': '/run/reviewbench-codex', 'platform': None, 'forbidden_env': [],
     }

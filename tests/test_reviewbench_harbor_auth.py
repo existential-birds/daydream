@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.reviewbench import harbor_auth
+from tests.harness.fake_gh import FakeGh
 
 
 def _token(expiry: int = 1) -> str:
@@ -178,6 +180,105 @@ def test_killed_role_blocks_replay_of_uncertain_refresh(tmp_path: Path) -> None:
         with harbor_auth.subscription_lease(canonical, tmp_path / "new-private"):
             pytest.fail("uncertain prior refresh reached another model invocation")
     assert json.loads((canonical / "auth.json").read_text()) == original
-    assert json.loads((tmp_path / "private" / "auth.json").read_text())["tokens"]["refresh_token"] == (
-        "synthetic-uncertain-rotation"
+    shutil.rmtree(tmp_path / "private")  # Simulate disposable container filesystem removal.
+    recovery = canonical / ".lease-auth.json"
+    assert json.loads(recovery.read_text())["tokens"]["refresh_token"] == "synthetic-uncertain-rotation"
+    assert recovery.stat().st_mode & 0o777 == 0o600
+    assert json.loads((canonical / ".lease-state.json").read_text()) == {
+        "role": "reviewer", "credential_file": ".lease-auth.json",
+    }
+
+
+@pytest.mark.parametrize('role', ['reviewer', 'judge'])
+async def test_production_role_retains_rotated_credentials_after_writeback_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, role: str,
+) -> None:
+    """Caller TemporaryDirectory cleanup must not erase the only rotated token.
+
+    The earlier lease-only death test kept its caller home alive; it missed both
+    production callers' automatic cleanup. Inject at the actual atomic replace
+    after a real native-boundary invocation writes refreshed credentials.
+    """
+    from daydream import runner
+    from daydream.benchmark.reviewbench.harbor_entrypoint import main as reviewer_main
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+    from tests.test_reviewbench_harbor_agent import public_input
+
+    environment = public_input(tmp_path)
+    source, canonical = tmp_path / 'source', tmp_path / 'canonical'
+    original = _login(source)
+    environment['DAYDREAM_RB_CODEX_HOME'] = str(canonical)
+    role_homes: list[Path] = []
+    observed_home = tmp_path / 'observed-home'
+    models = tmp_path / 'models.json'
+    models.write_text('{}')
+    script = tmp_path / 'rotate.py'
+    script.write_text(
+        'import json, os, pathlib, sys\n'
+        'home = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"])\n'
+        'pathlib.Path(sys.argv[1]).write_text(str(home))\n'
+        'auth = json.loads((home / "auth.json").read_text())\n'
+        'auth["openai-codex"]["refresh"] = "synthetic-production-rotation"\n'
+        '(home / "auth.json").write_text(json.dumps(auth))\n'
+    )
+
+    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
+        assert name == 'codex'
+        home = Path(kwargs['execution_input'].child_environment()['CODEX_HOME'])
+        role_homes.append(home)
+        auth = json.loads((home / 'auth.json').read_text())
+        auth['tokens']['refresh_token'] = 'synthetic-production-rotation'
+        (home / 'auth.json').write_text(json.dumps(auth))
+        return EmptyReviewBackend(Path(environment['DAYDREAM_RB_REPOSITORY']),
+                                  forbid_merge=False, forbid_supervise=False)
+
+    monkeypatch.setattr(runner, 'create_backend', create)
+    replace = Path.replace
+
+    def fail_canonical_replace(path: Path, target: Path) -> Path:
+        if target == canonical / 'auth.json' and (canonical / '.lease-state.json').exists():
+            raise OSError('synthetic canonical replacement failure')
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, 'replace', fail_canonical_replace)
+    with pytest.raises(harbor_auth.SubscriptionAuthError, match='prevents source credential reconciliation'):
+        with harbor_auth.subscription_session(source, canonical):
+            if role == 'reviewer':
+                assert await reviewer_main(environment) == 1
+            else:
+                assert harbor_auth.main([
+                    'judge', '--canonical-home', str(canonical), '--models', str(models), '--',
+                    sys.executable, str(script), str(observed_home),
+                ]) == 1
+                role_homes.append(Path(observed_home.read_text()))
+    assert role_homes and all(not home.exists() for home in role_homes)
+    assert not fake_gh.calls("POST")
+    assert json.loads((source / 'auth.json').read_text()) == original
+    assert json.loads((canonical / 'auth.json').read_text()) == original
+    recovery_path = canonical / '.lease-auth.json'
+    recovery = json.loads(recovery_path.read_text())
+    rotated = recovery['tokens']['refresh_token'] if role == 'reviewer' else recovery['openai-codex']['refresh']
+    assert rotated == 'synthetic-production-rotation'
+    assert recovery_path.stat().st_mode & 0o777 == 0o600
+    assert set(path.name for path in canonical.iterdir()) == {
+        'auth.json', '.lease.lock', '.lease-state.json', '.lease-auth.json',
+    }
+
+
+def test_competing_canonical_rotation_preserves_both_credentials(tmp_path: Path) -> None:
+    """A noncooperating canonical writer must not be overwritten by lease cleanup."""
+    canonical = tmp_path / 'canonical'
+    original = _login(canonical)
+    with pytest.raises(harbor_auth.SubscriptionAuthError, match='canonical auth changed outside'):
+        with harbor_auth.subscription_lease(canonical, tmp_path / 'reviewer') as home:
+            role = json.loads((home / 'auth.json').read_text())
+            role['tokens']['refresh_token'] = 'synthetic-role-rotation'
+            (home / 'auth.json').write_text(json.dumps(role))
+            original['tokens']['refresh_token'] = 'synthetic-competing-rotation'
+            (canonical / 'auth.json').write_text(json.dumps(original))
+    assert json.loads((canonical / 'auth.json').read_text())['tokens']['refresh_token'] == (
+        'synthetic-competing-rotation'
+    )
+    assert json.loads((canonical / '.lease-auth.json').read_text())['tokens']['refresh_token'] == (
+        'synthetic-role-rotation'
     )

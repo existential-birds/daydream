@@ -86,11 +86,12 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         raise ValueError('Docker kernel lacks Harbor exact-host isolation support')
     # Schema and package validation precede credential delivery and model work.
     subprocess.run([sys.executable, '-m', 'reviewbench_harbor.check-format', str(args.directory.resolve())], check=True)
-    command = [str(Path(sys.executable).with_name('harbor')), 'run', '-p', str(args.directory.resolve()),
+    command = [str(Path(sys.executable).with_name('harbor')), 'run', '--yes', '-p', str(args.directory.resolve()),
                '-a', 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
                '-n', str(args.concurrency), '-k', str(args.rounds), '-r', '0',
                '-o', str(args.jobs_dir.resolve()), '--job-name', args.job_name,
-               '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin']
+               '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
+               '--plugin', 'daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin']
     if args.task:
         command.extend(['-i', args.task])
     if args.n_tasks is not None:
