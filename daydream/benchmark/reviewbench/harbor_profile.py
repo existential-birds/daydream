@@ -141,11 +141,13 @@ def export_harbor_profile(
     serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
     if re.search(r'(?i)(api.?key|access.?token|refresh.?token|id.?token|password|secret)', serialized_candidate):
         raise ValueError('Candidate identity must contain no credentials or secret fields')
-    from daydream import json_utils
+    from daydream import credential_patterns, json_utils, redaction
     from daydream.benchmark.reviewbench.harbor_subscription_plugin import ADMISSION_POLICY
 
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
     atomic_asset = Path(json_utils.__file__).read_bytes()
+    redaction_asset = Path(redaction.__file__).read_bytes()
+    credential_patterns_asset = Path(credential_patterns.__file__).read_bytes()
     seccomp_asset = Path(__file__).with_name('harbor-seccomp.json').read_bytes()
     seccomp_provenance_asset = Path(__file__).with_name('harbor-seccomp-provenance.json').read_bytes()
     seccomp_license_asset = Path(__file__).with_name('harbor-seccomp-LICENSE').read_bytes()
@@ -174,6 +176,15 @@ def export_harbor_profile(
             'auth_bootstrap_sha256': hashlib.sha256(auth_asset).hexdigest(),
             'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
             'refresh_policy': 'canonical-exclusive-full-invocation-lease',
+            'evidence': {
+                'classifier_sessions_source': '/tests/judge/classifier-output/sessions',
+                'classifier_sessions_destination': '/logs/verifier/judge-sessions',
+                'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
+                'redaction_sha256': hashlib.sha256(redaction_asset).hexdigest(),
+                'credential_patterns_sha256': hashlib.sha256(credential_patterns_asset).hexdigest(),
+                'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
+                'monetary_usage_source': 'api-equivalent-estimate',
+            },
         },
         'runtime': {'platform': platform,
                     'reviewer_compose_sha256': hashlib.sha256(reviewer_compose.encode()).hexdigest(),
@@ -242,6 +253,10 @@ def export_harbor_profile(
                 destination.write_bytes(content)
             (task_dir / 'tests/daydream-auth.py').write_bytes(auth_asset)
             (task_dir / 'tests/daydream_json_utils.py').write_bytes(atomic_asset)
+            (task_dir / 'tests/daydream').mkdir()
+            (task_dir / 'tests/daydream/__init__.py').write_bytes(b'')
+            (task_dir / 'tests/daydream/redaction.py').write_bytes(redaction_asset)
+            (task_dir / 'tests/daydream/credential_patterns.py').write_bytes(credential_patterns_asset)
             (task_dir / 'environment/docker-compose.yaml').write_text(reviewer_compose, encoding='utf-8')
             (task_dir / 'tests/docker-compose.yaml').write_text(verifier_compose, encoding='utf-8')
             _write_json(task_dir / 'tests/judge/.daydream-codex/models.json', models)
@@ -249,6 +264,8 @@ def export_harbor_profile(
                 '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
                 'exec python3 /tests/daydream-auth.py judge '
                 f'--canonical-home {SUBSCRIPTION_HOME} '
+                '--classifier-sessions /tests/judge/classifier-output/sessions '
+                '--judge-evidence /logs/verifier/judge-sessions '
                 '--models /tests/judge/.daydream-codex/models.json -- '
                 'node --import tsx scripts/harbor/verify.ts /tests/task.json\n'
             )

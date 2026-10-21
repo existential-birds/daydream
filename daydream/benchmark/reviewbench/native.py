@@ -30,7 +30,6 @@ from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, p
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name, _resolved_reasoning_effort
-from daydream.trajectory import RUN_DOCUMENT_NAME
 
 
 def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
@@ -294,6 +293,10 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
 
     No GitHub publication target is manufactured. The callback supplies actual
     terminal coverage even when the runner raises after admitting partial work.
+    Optional private evidence uses the ordinary finalized dump so immutable fork
+    documents remain bound to the same artifact owner as the root trajectory.
+    Its caller must confine DAYDREAM_ARCHIVE_DIR to disposable private storage:
+    the ordinary dump assembly also maintains an archive index.
     """
     execution = CaseExecution("failed")
     finalized: list[FinalizedReview] = []
@@ -308,10 +311,8 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             raise ValueError("source repository is not clean")
         execution.source_identity = (_source_identity(repository, case) if public_task is None
                                      else public_task.verify(repository, case))
-        trajectory = None
         if evidence_directory is not None:
             evidence_directory.mkdir(parents=True, exist_ok=False)
-            trajectory = evidence_directory / RUN_DOCUMENT_NAME
         if not all(git_ops.commit_exists(repository, oid) for oid in (case.base, case.head)):
             raise ValueError("supplied base or head is unavailable")
         with tempfile.TemporaryDirectory(prefix="daydream-reviewbench-case-") as directory:
@@ -349,7 +350,8 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 frozen_author_description=(None if public_task is None or public_task.author_description is None
                     else FrozenAuthorDescription(case.head, public_task.author_description)),
                 dataset_capture=False, dataset_capture_disabled=True, trajectory_hub_repo=None,
-                archive=False, run_eval=False, trajectory_path=trajectory, dump_artifacts=None, non_interactive=True)
+                archive=False, run_eval=False, trajectory_path=None,
+                dump_artifacts=None if evidence_directory is None else str(evidence_directory), non_interactive=True)
             exit_code: int | None = None
             try:
                 exit_code = await runner.run(native, review_result_handler=finalized.append, execution=native_execution)

@@ -113,7 +113,16 @@ account availability must also be demonstrated by the actual authenticated run.
 
 Retain `reviewbench-plan.json`, `reviewbench-metric.py`, trial results, findings,
 `agent/daydream/execution.json`, native trajectories, verifier logs,
-`scores.json`, `scores.details.json` and `reward.json`. Partial or conversion-limited
+`scores.json`, `scores.details.json` and `reward.json`. The native evidence bundle
+under `agent/daydream/runs/<session>/` preserves the root and joined sibling
+trajectories with their original logical references; `agent/daydream/trajectory.json`
+is a root alias. Temporary archive assembly stays private and is removed after
+export. The separate verifier retains sanitized classifier session JSONL and a
+digest/model/effort/available-usage index under `verifier/judge-sessions/`.
+Session digests cover retained sanitized bytes; credentials are excluded.
+The supplied matcher uses an in-memory session and its evaluator does not retain
+matcher usage; those measurements remain explicitly unavailable. Judge evidence
+contains no authentication store or role home. Partial or conversion-limited
 reviews cannot publish findings, and existing output is never reused as a new
 success. A valid empty review may require no judge calls: integration acceptance
 also needs genuine solver findings and at least one real semantic Codex request.

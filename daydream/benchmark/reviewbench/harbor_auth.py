@@ -13,9 +13,11 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,13 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from daydream.redaction import redact_value
+
 try:
-    from daydream.json_utils import atomic_write_bytes
+    from daydream.json_utils import atomic_write_bytes, publish_staged_directory
 except ModuleNotFoundError as missing:
     if missing.name not in {"daydream", "daydream.json_utils"}:
         raise
     # The verifier ships this exact shared-owner module beside its bootstrap.
-    atomic_write_bytes = importlib.import_module("daydream_json_utils").atomic_write_bytes
+    shared_writer = importlib.import_module("daydream_json_utils")
+    atomic_write_bytes = shared_writer.atomic_write_bytes
+    publish_staged_directory = shared_writer.publish_staged_directory
 
 
 class SubscriptionAuthError(ValueError):
@@ -229,29 +235,166 @@ def subscription_environment(environment: Mapping[str, str]) -> dict[str, str]:
     )}
 
 
+
+_SESSION_NAME = re.compile(
+    r"[0-9]{4}(?:-[0-9]{2}){2}T[0-9]{2}(?:-[0-9]{2}){2}-[0-9]{3}Z_"
+    r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.jsonl"
+)
+
+
+def _credential_values(auth: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key, value in auth.items():
+        if isinstance(value, dict):
+            values.update(_credential_values(value))
+        elif key in {"access", "refresh", "access_token", "refresh_token", "id_token", "account_id", "accountId"}:
+            if isinstance(value, str) and value:
+                values.add(value)
+    return values
+
+
+
+def _embedded_auth_values(value: Any) -> set[str]:
+    """Recognize our two auth-store formats even inside JSON tool-result text."""
+    if isinstance(value, dict):
+        values = (_credential_values(value) if value.get("type") == "oauth"
+                  or value.get("auth_mode") == "chatgpt" else set())
+        for item in value.values():
+            values.update(_embedded_auth_values(item))
+        return values
+    if isinstance(value, list):
+        return set().union(*(_embedded_auth_values(item) for item in value))
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return _embedded_auth_values(json.loads(value))
+        except json.JSONDecodeError:
+            pass
+    return set()
+
+
+def _replace_credentials(value: Any, credentials: set[str]) -> Any:
+    if isinstance(value, str):
+        for credential in sorted(credentials, key=len, reverse=True):
+            value = value.replace(credential, "[REDACTED_CREDENTIAL]")
+        return value
+    if isinstance(value, dict):
+        return {_replace_credentials(key, credentials): _replace_credentials(item, credentials)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_credentials(item, credentials) for item in value]
+    return value
+
+
+def _session_roots(source: Path, destination: Path) -> None:
+    """Admit fresh explicit verifier roots before model work, never an auth home."""
+    if (source.is_symlink() or destination.is_symlink() or destination.exists()
+            or source.resolve().is_relative_to(destination.resolve())
+            or destination.resolve().is_relative_to(source.resolve())):
+        raise SubscriptionAuthError("classifier session evidence roots are stale or unsafe")
+    if source.exists() and (not source.is_dir() or any(source.iterdir())):
+        raise SubscriptionAuthError("classifier sessions require a fresh regular directory")
+
+
+def _retain_classifier_sessions(source: Path, destination: Path, credentials: set[str]) -> None:
+    """Publish only fresh Pi JSONL files through shared credential redaction.
+
+    The supplied classifier can read its auth capability. Redact recursively and
+    replace known initial/refreshed secrets before hashing retained bytes. Never
+    copy the role home, configuration, or other session roots.
+    """
+    if source.is_symlink() or (source.exists() and not source.is_dir()):
+        raise SubscriptionAuthError("classifier session evidence source is unsafe")
+    paths = sorted(source.iterdir()) if source.exists() else []
+    if any(path.is_symlink() or not path.is_file() or not _SESSION_NAME.fullmatch(path.name) for path in paths):
+        raise SubscriptionAuthError("classifier session evidence includes an unexpected file")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".judge-evidence-", dir=destination.parent) as temporary:
+        staged = Path(temporary)
+        sessions = []
+        for path in paths:
+            content = path.read_bytes()
+            text = content.decode("utf-8")
+            try:
+                entries = [json.loads(line) for line in text.splitlines() if line.strip()]
+            except json.JSONDecodeError:
+                raise SubscriptionAuthError("classifier session evidence is not valid JSONL") from None
+            if (not entries or any(not isinstance(entry, dict) for entry in entries)
+                    or entries[0].get("type") != "session"):
+                raise SubscriptionAuthError("classifier session evidence is not a Pi session")
+            session_credentials = credentials | _embedded_auth_values(entries)
+            sanitized = [_replace_credentials(redact_value(entry), session_credentials) for entry in entries]
+            if sanitized != entries:
+                content = ("\n".join(json.dumps(entry) for entry in sanitized) + "\n").encode("utf-8")
+            if b"[REDACTION_FAILED]" in content or any(value.encode() in content for value in session_credentials):
+                raise SubscriptionAuthError("classifier session credential redaction failed")
+            metadata: dict[str, Any] = {"name": path.name, "sha256": hashlib.sha256(content).hexdigest(),
+                                      "format": "sanitized-pi-jsonl", "redacted": sanitized != entries,
+                                      "model_changes": [], "thinking_levels": [], "assistant_messages": []}
+            for entry in sanitized:
+                if entry.get("type") == "model_change":
+                    metadata["model_changes"].append({key: entry[key] for key in ("provider", "modelId")
+                                                      if key in entry})
+                elif entry.get("type") == "thinking_level_change":
+                    if "thinkingLevel" in entry:
+                        metadata["thinking_levels"].append(entry["thinkingLevel"])
+                elif entry.get("type") == "message":
+                    message = entry.get("message")
+                    if isinstance(message, dict) and message.get("role") == "assistant":
+                        metadata["assistant_messages"].append({key: message[key] for key in (
+                            "provider", "model", "api", "stopReason", "timestamp", "usage",
+                        ) if key in message})
+            atomic_write_bytes(staged / path.name, content, mode=0o600)
+            sessions.append(metadata)
+        index = {"schema_version": 1, "classifier_sessions": sessions,
+                 "classifier_availability": "retained" if sessions else "no_persisted_session",
+                 "matcher_sessions": "unavailable_upstream_in_memory", "matcher_usage": "not_retained_by_eval",
+                 "monetary_usage_source": "api-equivalent-estimate",
+                 "subscription_cash_charges": None}
+        atomic_write_bytes(staged / "index.json", json.dumps(index, indent=2).encode("utf-8"), mode=0o600)
+        publish_staged_directory(staged, destination, commit_last="index.json")
+        destination.chmod(0o700)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the unchanged upstream judge under the same refresh lease as Codex."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("role", choices=("judge",))
     parser.add_argument("--canonical-home", type=Path, required=True)
     parser.add_argument("--models", type=Path, required=True)
+    parser.add_argument("--classifier-sessions", type=Path)
+    parser.add_argument("--judge-evidence", type=Path)
     arguments = list(sys.argv[1:] if argv is None else argv)
     separator = arguments.index("--") if "--" in arguments else len(arguments)
     args = parser.parse_args(arguments[:separator])
     command = arguments[separator + 1:]
     if not command:
         parser.error("judge command is required after --")
+    if (args.classifier_sessions is None) != (args.judge_evidence is None):
+        parser.error("--classifier-sessions and --judge-evidence must be supplied together")
     try:
+        if args.classifier_sessions is not None:
+            _session_roots(args.classifier_sessions, args.judge_evidence)
         with tempfile.TemporaryDirectory(prefix="daydream-judge-") as temporary:
             home = Path(temporary)
             shutil.copyfile(args.models, home / "models.json")
             with subscription_lease(args.canonical_home, home, role="judge"):
                 environment = subscription_environment(os.environ)
                 environment["PI_CODING_AGENT_DIR"] = str(home)
-                return subprocess.call(command, env=environment)
-    except (OSError, SubscriptionAuthError):
-        print("ReviewBench subscription authentication or execution failed; no API fallback was attempted.",
-              file=sys.stderr)
+                credentials: set[str] = set()
+                if args.classifier_sessions is not None:
+                    # The role path is an intentional symlink; read only its
+                    # admitted regular durable target while this lease is held.
+                    credentials.update(_credential_values(_read(args.canonical_home / ".lease-auth.json")))
+                    credentials.update(_credential_values(_read(args.canonical_home / "auth.json")))
+                try:
+                    return subprocess.call(command, env=environment)
+                finally:
+                    if args.classifier_sessions is not None:
+                        credentials.update(_credential_values(_read(args.canonical_home / ".lease-auth.json")))
+                        _retain_classifier_sessions(args.classifier_sessions, args.judge_evidence, credentials)
+    except (OSError, UnicodeError, SubscriptionAuthError):
+        print("ReviewBench judge authentication, execution, or evidence retention failed; "
+              "no API fallback was attempted.", file=sys.stderr)
         return 1
 
 
