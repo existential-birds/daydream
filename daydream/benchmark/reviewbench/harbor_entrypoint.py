@@ -12,7 +12,9 @@ import os
 import sys
 import tempfile
 import time
-from collections.abc import Mapping
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.redaction import redact_structured_text
 from daydream.review_profile import resolve_harbor_profile
 from daydream.run_config import RunConfig
-from daydream.trajectory import RUN_DOCUMENT_NAME
+from daydream.trajectory import RUN_DOCUMENT_NAME, run_directory
 
 
 class PublicReviewerError(ValueError):
@@ -87,6 +89,25 @@ def _write_new_json(destination: Path, value: Any) -> None:
     _write_new_bytes(destination, body.encode('utf-8'))
 
 
+@contextmanager
+def _private_archive_directory(directory: Path) -> Iterator[None]:
+    """Confine dump assembly's archive side effects to this single-run process.
+
+    The ordinary dump pipeline also maintains an archive index. Its supported
+    environment selector must point at disposable private storage, never the
+    operator's archive. This selector is excluded from backend environments.
+    """
+    previous = os.environ.get('DAYDREAM_ARCHIVE_DIR')
+    os.environ['DAYDREAM_ARCHIVE_DIR'] = str(directory)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop('DAYDREAM_ARCHIVE_DIR', None)
+        else:
+            os.environ['DAYDREAM_ARCHIVE_DIR'] = previous
+
+
 def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Path) -> None:
     """Copy only joined native evidence onto Harbor's non-exchange log mount.
 
@@ -95,13 +116,24 @@ def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Pa
     joined, through a no-clobber install local to its own destination filesystem.
     """
     evidence.mkdir(parents=True, exist_ok=False)
+    trajectory = staged / RUN_DOCUMENT_NAME
+    bundle = evidence
+    if trajectory.is_file():
+        document = json.loads(trajectory.read_bytes())
+        session_id = document.get('session_id') if isinstance(document, dict) else None
+        if not isinstance(session_id, str) or str(uuid.UUID(session_id)) != session_id:
+            raise PublicReviewerError('native evidence has an invalid session identity')
+        # The sanctioned dump projects the immutable root and every sibling into
+        # one run bundle. Use its owner layout so original logical sibling refs
+        # resolve from the retained evidence root without rewriting ATIF bytes.
+        bundle = run_directory(evidence, session_id)
     for source in sorted(staged.rglob('*')):
         if source.is_symlink():
             raise PublicReviewerError('native evidence contains an unexpected symlink')
         if source.is_file():
-            _write_new_bytes(evidence / source.relative_to(staged), source.read_bytes())
-    trajectory = staged / RUN_DOCUMENT_NAME
+            _write_new_bytes(bundle / source.relative_to(staged), source.read_bytes())
     if trajectory.is_file():
+        _write_new_bytes(evidence / RUN_DOCUMENT_NAME, trajectory.read_bytes())
         _write_new_bytes(harbor_trajectory, trajectory.read_bytes())
 
 
@@ -128,7 +160,8 @@ async def main(environment: Mapping[str, str]) -> int:
             private = Path(private_directory).resolve()
             staged = private / 'native-evidence'
             try:
-                with subscription_lease(canonical, private / 'codex', role='reviewer') as role_home:
+                with (_private_archive_directory(private / 'archive'),
+                      subscription_lease(canonical, private / 'codex', role='reviewer') as role_home):
                     # A fresh private home prevents user config, API providers and
                     # project settings from changing this frozen subscription lane.
                     (role_home / 'config.toml').write_text('model_provider = "openai"\n'

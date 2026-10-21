@@ -7,6 +7,7 @@ an OAuth or inference endpoint.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -361,8 +362,189 @@ print(json.dumps({'host_uid':os.geteuid(),'private_files_readable':True,'recover
         docker, 'run', '--rm', '--pull', 'never', '--network', 'none',
         '-v', f'{Path(harbor_auth.__file__).resolve()}:/auth.py:ro',
         '-v', f'{Path(harbor_auth.__file__).resolve().parents[2] / "json_utils.py"}:/daydream_json_utils.py:ro',
+        '-v', f'{Path(harbor_auth.__file__).resolve().parents[2] / "redaction.py"}:/daydream/redaction.py:ro',
+        '-v', (f'{Path(harbor_auth.__file__).resolve().parents[2] / "credential_patterns.py"}'
+               ':/daydream/credential_patterns.py:ro'),
         image,
         'python', '-c', script, str(recovery),
     ], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout) == {'host_uid': 1000, 'private_files_readable': True, 'recovery': recovery}
+
+
+@pytest.fixture
+def classifier_retention(tmp_path: Path) -> tuple[list[str], Path, Path, Path]:
+    """A harmless child writes genuine-shaped Pi files through the public wrapper."""
+    canonical = tmp_path / 'canonical'
+    _login(canonical)
+    models = tmp_path / 'models.json'
+    models.write_text('{}')
+    sessions, evidence = tmp_path / 'judge/classifier-output/sessions', tmp_path / 'verifier/judge-sessions'
+    script = tmp_path / 'classifier.py'
+    script.write_text('''import json, os, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+home = pathlib.Path(os.environ['PI_CODING_AGENT_DIR'])
+(root/'invoked').touch()
+auth = json.loads((home/'auth.json').read_text())
+original = auth['openai-codex']['refresh']
+auth['openai-codex']['refresh'] = 'synthetic-new-judge-refresh'
+(home/'auth.json').write_text(json.dumps(auth))
+(root/'role-home').write_text(str(home))
+sessions = root/'judge/classifier-output/sessions'
+sessions.mkdir(parents=True, exist_ok=True)
+payload = json.loads((root/'payload.json').read_text())
+text = ''.join(json.dumps(entry)+'\\n' for entry in payload)
+mode = sys.argv[3]
+name = '2026-10-21T20-25-25-956Z_01a16023-debe-7edd-a755-3d10ced5c19f.jsonl'
+path = sessions/name
+if mode == 'symlink':
+ path.symlink_to(home/'auth.json')
+elif mode == 'directory':
+ path.mkdir()
+elif mode == 'malformed':
+ path.write_text('{partial session')
+elif mode == 'unexpected':
+ (sessions/'auth.json').write_text((home/'auth.json').read_text())
+elif mode in ('initial-secret', 'refreshed-secret', 'tool-auth'):
+ secret = original if mode == 'initial-secret' else auth['openai-codex']['refresh']
+ if mode == 'tool-auth':
+  secret = json.dumps({'openai-codex':{'type':'oauth','access':'opaque-intermediate-access',
+   'refresh':'opaque-intermediate-refresh'},'other':{'access_token':'opaque-intermediate-token'}})
+ payload.append({'type':'message','message':{'role':'toolResult','content':[{'type':'text','text':secret}]}})
+ path.write_text(''.join(json.dumps(entry)+'\\n' for entry in payload))
+else:
+ path.write_text(text)
+sys.exit(int(sys.argv[2]))
+''')
+    payload = [
+        {'type': 'session', 'version': 3, 'id': 'synthetic-session', 'cwd': '/work/repo'},
+        {'type': 'model_change', 'provider': 'openai-codex', 'modelId': 'gpt-6.1-sol'},
+        {'type': 'thinking_level_change', 'thinkingLevel': 'medium'},
+        {'type': 'message', 'message': {'role': 'user', 'content': 'Synthetic classifier context'}},
+        {'type': 'message', 'message': {'role': 'assistant', 'provider': 'openai-codex',
+            'model': 'gpt-6.1-sol', 'api': 'openai-codex-responses', 'stopReason': 'stop', 'timestamp': 123,
+            'usage': {'input': 10, 'output': 4, 'cacheRead': 3, 'cost': {'total': 0.00012}},
+            'content': [{'type': 'text', 'text': 'Synthetic classification'}]}},
+    ]
+    (tmp_path / 'payload.json').write_text(json.dumps(payload))
+    arguments = ['judge', '--canonical-home', str(canonical), '--models', str(models),
+                 '--classifier-sessions', str(sessions), '--judge-evidence', str(evidence), '--',
+                 sys.executable, str(script), str(tmp_path)]
+    return arguments, canonical, sessions, evidence
+
+
+@pytest.mark.parametrize('exit_code', [0, 29])
+def test_judge_retains_exact_classifier_sessions_and_available_usage(
+    classifier_retention: tuple[list[str], Path, Path, Path], exit_code: int,
+) -> None:
+    """Container cleanup must not erase classifier model/effort/token evidence, even on failure."""
+    arguments, canonical, sessions, evidence = classifier_retention
+    assert harbor_auth.main([*arguments, str(exit_code), 'valid']) == exit_code
+    session = next(sessions.glob('*.jsonl'))
+    assert (evidence / session.name).read_bytes() == session.read_bytes()
+    index = json.loads((evidence / 'index.json').read_text())
+    assert index['classifier_availability'] == 'retained'
+    assert index['matcher_sessions'] == 'unavailable_upstream_in_memory'
+    assert index['matcher_usage'] == 'not_retained_by_eval'
+    assert index['monetary_usage_source'] == 'api-equivalent-estimate'
+    assert index['subscription_cash_charges'] is None
+    record = index['classifier_sessions'][0]
+    assert record['sha256'] == hashlib.sha256(session.read_bytes()).hexdigest()
+    assert record['model_changes'] == [{'provider': 'openai-codex', 'modelId': 'gpt-6.1-sol'}]
+    assert record['thinking_levels'] == ['medium']
+    assert record['assistant_messages'] == [{
+        'provider': 'openai-codex', 'model': 'gpt-6.1-sol', 'api': 'openai-codex-responses',
+        'stopReason': 'stop', 'timestamp': 123,
+        'usage': {'input': 10, 'output': 4, 'cacheRead': 3, 'cost': {'total': 0.00012}},
+    }]
+    assert set(path.name for path in evidence.iterdir()) == {session.name, 'index.json'}
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence.iterdir())
+    assert evidence.stat().st_mode & 0o777 == 0o700
+    assert not Path((canonical.parent / 'role-home').read_text()).exists()
+    assert json.loads((canonical / 'auth.json').read_text())['tokens']['refresh_token'] == 'synthetic-new-judge-refresh'
+    assert all('synthetic-new-judge-refresh' not in path.read_text() for path in evidence.iterdir())
+
+
+@pytest.mark.parametrize('fault', ['source-file', 'source-symlink', 'stale-source', 'stale-output', 'output-symlink'])
+def test_judge_evidence_roots_refuse_stale_or_unsafe_paths_before_execution(
+    classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
+) -> None:
+    """An old session or symlink root must never be attributed to this judge attempt."""
+    arguments, canonical, source, output = classifier_retention
+    if fault.startswith('source') or fault == 'stale-source':
+        source.parent.mkdir(parents=True)
+        if fault == 'source-file':
+            source.write_text('existing bytes')
+        elif fault == 'source-symlink':
+            source.symlink_to(canonical, target_is_directory=True)
+        else:
+            source.mkdir()
+            (source / 'old-session.jsonl').write_text('old bytes')
+    else:
+        output.parent.mkdir()
+        if fault == 'output-symlink':
+            output.symlink_to(canonical, target_is_directory=True)
+        else:
+            output.mkdir()
+            (output / 'index.json').write_text('old index')
+    assert harbor_auth.main([*arguments, '0', 'valid']) == 1
+    assert not (canonical.parent / 'invoked').exists()
+    if fault == 'stale-output':
+        assert (output / 'index.json').read_text() == 'old index'
+
+
+@pytest.mark.parametrize('fault', ['symlink', 'directory', 'malformed', 'unexpected'])
+def test_judge_refuses_unsafe_transcripts_without_publishing_credentials(
+    classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
+) -> None:
+    """Read tools/provider errors can expose auth; unsafe logs must fail closed before hashing/publication."""
+    arguments, canonical, _source, output = classifier_retention
+    assert harbor_auth.main([*arguments, '0', fault]) == 1
+    assert (canonical.parent / 'invoked').exists()
+    assert not output.exists()
+    assert json.loads((canonical / 'auth.json').read_text())['tokens']['refresh_token'] == 'synthetic-new-judge-refresh'
+
+
+def test_judge_session_publication_failure_preserves_partial_evidence_and_blocks_reuse(
+    classifier_retention: tuple[list[str], Path, Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure installing the final index must remain incomplete without overwriting a later attempt."""
+    arguments, canonical, source, output = classifier_retention
+    link = os.link
+
+    def fail_index(source_path: Path, destination: Path, **kwargs: Any) -> None:
+        if destination == output / 'index.json':
+            raise OSError('synthetic index publication failure')
+        link(source_path, destination, **kwargs)
+
+    monkeypatch.setattr(os, 'link', fail_index)
+    assert harbor_auth.main([*arguments, '0', 'valid']) == 1
+    session = next(source.glob('*.jsonl'))
+    assert (output / session.name).read_bytes() == session.read_bytes()
+    assert not (output / 'index.json').exists()
+    (canonical.parent / 'invoked').unlink()
+    assert harbor_auth.main([*arguments, '0', 'valid']) == 1
+    assert not (canonical.parent / 'invoked').exists()
+
+
+@pytest.mark.parametrize('fault', ['initial-secret', 'refreshed-secret', 'tool-auth'])
+def test_judge_sanitizes_auth_tool_results_before_retention_and_digest(
+    classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
+) -> None:
+    """Absolute-path reads may expose initial, rotated or intermediate OAuth stores."""
+    arguments, _canonical, source, output = classifier_retention
+    assert harbor_auth.main([*arguments, '0', fault]) == 0
+    original = next(source.glob('*.jsonl'))
+    retained = output / original.name
+    text = retained.read_text()
+    assert '[REDACTED_CREDENTIAL]' in text
+    for credential in ('synthetic-refresh', 'synthetic-new-judge-refresh', 'opaque-intermediate-access',
+                       'opaque-intermediate-refresh', 'opaque-intermediate-token'):
+        assert credential not in text
+    assert all(isinstance(json.loads(line), dict) for line in text.splitlines())
+    index = json.loads((output / 'index.json').read_text())
+    record = index['classifier_sessions'][0]
+    assert record['format'] == 'sanitized-pi-jsonl' and record['redacted'] is True
+    assert record['sha256'] == hashlib.sha256(retained.read_bytes()).hexdigest()
+    assert record['sha256'] != hashlib.sha256(original.read_bytes()).hexdigest()
+    assert 'source_sha256' not in record

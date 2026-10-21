@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import runpy
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream import json_utils
+from daydream import credential_patterns, json_utils, redaction
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
@@ -99,6 +100,27 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert atomic_asset.read_bytes() == Path(json_utils.__file__).read_bytes()
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
     assert policy['judge']['atomic_writer_sha256'] == _hash(atomic_asset)
+    redaction_asset = task_dir / 'tests/daydream/redaction.py'
+    credential_patterns_asset = task_dir / 'tests/daydream/credential_patterns.py'
+    assert redaction_asset.read_bytes() == Path(redaction.__file__).read_bytes()
+    assert credential_patterns_asset.read_bytes() == Path(credential_patterns.__file__).read_bytes()
+    assert (task_dir / 'tests/daydream/__init__.py').read_bytes() == b''
+    # Auth-wrapper tests own session publication. The shipped task must actually
+    # opt into that contract, otherwise successful verifier cleanup loses its
+    # classifier conversations despite a working retention helper.
+    bootstrap = (task_dir / 'tests/test.sh').read_text().splitlines()[-1]
+    arguments = shlex.split(bootstrap)
+    source = arguments[arguments.index('--classifier-sessions') + 1]
+    destination = arguments[arguments.index('--judge-evidence') + 1]
+    assert source == '/tests/judge/classifier-output/sessions'
+    assert destination == '/logs/verifier/judge-sessions'
+    assert policy['judge']['evidence'] == {
+        'classifier_sessions_source': source, 'classifier_sessions_destination': destination,
+        'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
+        'redaction_sha256': _hash(redaction_asset), 'credential_patterns_sha256': _hash(credential_patterns_asset),
+        'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
+        'monetary_usage_source': 'api-equivalent-estimate',
+    }
     for relative in ('scripts/eval/matcher.ts', 'scripts/eval/eval.ts', 'scripts/eval/scorer.ts',
                      'scripts/classifier/classify.ts', 'scripts/classifier/prompts.ts', 'scripts/harbor/verify.ts',
                      'package.json', 'package-lock.json'):
