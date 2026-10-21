@@ -52,6 +52,9 @@ and default extensions resolving outside the candidate package: package the
 desired extension as `daydream_ext` and unset the override. Ordinary Daydream
 extension loading is unchanged. Extension identity is checked again after
 generation; changed executable inputs make the review unscorable.
+Public reviewer admission, sandbox probing and execution use isolated Python
+startup, so task checkout modules and `PYTHONPATH` cannot replace the installed
+adapter. The native reviewer still works in the frozen task repository.
 Choose the native Docker architecture explicitly. The default `linux/amd64`
 matches upstream's documented platform; `--platform linux/arm64` selects the
 custom native ARM64 profile. Keep that choice fixed across the before/after

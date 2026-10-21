@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind controlled benchmark identities and wheel checks to packaged executable
   extensions, and reject external extension overrides or changes during review
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+- Isolate public Harbor adapter imports so a task checkout cannot shadow the
+  installed candidate before admission or review
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Preserve relative Pi credential directories during isolated ReviewBench runs
   and reject ambiguous renamed-file line hints using the original source path
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).

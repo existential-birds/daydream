@@ -7,9 +7,12 @@ import errno
 import hashlib
 import json
 import os
+import shlex
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +22,7 @@ from daydream.artifacts import external
 from daydream.backends import AgentEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.codex import CodexBackend
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION
+from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
 from daydream.trajectory import RUNS_DIRNAME, run_directory, run_document_path
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -53,6 +57,61 @@ def public_input(tmp_path: Path) -> dict[str, str]:
             'DAYDREAM_RB_EVIDENCE': str(tmp_path / 'logs/daydream'),
             'DAYDREAM_RB_CODEX_HOME': str(canonical), 'PATH': os.environ['PATH'], 'HOME': str(tmp_path),
             'OPENAI_API_KEY': 'forbidden-api-canary', 'GH_TOKEN': 'forbidden-github-canary'}
+
+
+@pytest.mark.parametrize('stage', ['setup', 'run'])
+async def test_public_agent_python_startup_cannot_import_reviewed_repository_packages(
+    tmp_path: Path, stage: str,
+) -> None:
+    """Execute the real agent commands from hostile source using real Python.
+
+    Direct entrypoint tests import the operator's package before selecting a
+    repository, so they miss Python's cwd/PYTHONPATH precedence at process startup.
+    Both a candidate-named package and a default extension in the reviewed source
+    must stay unexecuted, including the initial setup import before sandbox checks.
+    """
+    environment = public_input(tmp_path)
+    repository = Path(environment['DAYDREAM_RB_REPOSITORY'])
+    marker = tmp_path / 'reviewed-python-executed'
+    for name in ('daydream', 'daydream_ext'):
+        package = repository / name
+        package.mkdir()
+        (package / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
+            + ').write_text("reviewed package executed")\nraise RuntimeError("hostile source imported")\n')
+    # A real CLI stand-in is always incapable of model inference, even if a
+    # machine happens to have the image-only /work/pr profile path available.
+    binary = tmp_path / 'bin' / 'codex'
+    binary.parent.mkdir()
+    binary.write_text(f'#!{sys.executable}\nimport sys\nassert "exec" not in sys.argv\nprint("unverified probe")\n')
+    binary.chmod(0o755)
+    (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
+    child_environment = {**os.environ, **environment, 'PYTHONPATH': str(repository),
+                         'PATH': os.pathsep.join((str(binary.parent), os.environ['PATH']))}
+
+    class Environment:
+        async def exec(self, command: str, **kwargs: Any) -> Any:
+            arguments = shlex.split(command)
+            assert arguments[0] == 'python'
+            # Harbor's image resolves `python` to its installed environment.
+            # Execute those actual arguments with this test environment's Python.
+            arguments[0] = sys.executable
+            child = await asyncio.create_subprocess_exec(*arguments, cwd=repository, env=child_environment,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
+            return SimpleNamespace(return_code=child.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+
+    logs = tmp_path / 'agent'
+    agent = DaydreamPublicReviewAgent(logs_dir=logs)
+    if stage == 'setup':
+        with pytest.raises(RuntimeError, match='native Codex sandbox preflight failed'):
+            await agent.setup(Environment())
+        assert 'Public ReviewBench sandbox preflight failed' in (logs / 'sandbox-preflight.log').read_text()
+    else:
+        with pytest.raises(RuntimeError, match='native reviewer failed'):
+            await agent.run('supplied task', Environment(), SimpleNamespace())
+        assert 'SubscriptionAuthError' in (logs / 'reviewer-entrypoint.log').read_text()
+    assert not marker.exists()
+    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
 
 
 @pytest.mark.parametrize('outcome', ['complete', 'incomplete', 'conversion_limited', 'provider_failed'])
