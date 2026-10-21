@@ -77,6 +77,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'record["metric_config"] = json.loads(pathlib.Path(args.config).read_text())\n'
         'record.update(round_membership=list(range(1, int(args.rounds) + 1)),\n'
         ' auth_home=os.environ["RB_HARBOR_SUBSCRIPTION_HOME"],\n'
+        ' seccomp_profile=os.environ["RB_HARBOR_SECCOMP_PROFILE"],\n'
         ' platform=os.environ.get("DOCKER_DEFAULT_PLATFORM"),\n'
         ' forbidden_env=sorted(k for k in os.environ if k in ["OPENAI_API_KEY",\n'
         ' "OPENAI_BASE_URL", "CODEX_BEARER_TOKEN", "OPENAI_WORKLOAD_IDENTITY_TOKEN"]))\n'
@@ -124,6 +125,7 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
     args.rounds = rounds
     monkeypatch.setenv('DAYDREAM_TEST_HARBOR_EXIT', str(exit_code))
     monkeypatch.setenv('DOCKER_DEFAULT_PLATFORM', 'linux/amd64')
+    monkeypatch.setenv('RB_HARBOR_SECCOMP_PROFILE', 'unconfined')
     for key in ('OPENAI_API_KEY', 'OPENAI_BASE_URL', 'CODEX_BEARER_TOKEN', 'OPENAI_WORKLOAD_IDENTITY_TOKEN'):
         monkeypatch.setenv(key, 'synthetic-forbidden-route')
     assert harbor_cli.handle(args, candidate) == exit_code
@@ -141,6 +143,7 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
             'daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin'],
         'task': 'owner_repo*', 'limit': '1', 'round_membership': list(range(1, rounds + 1)),
         'auth_home': '/run/reviewbench-codex', 'platform': None, 'forbidden_env': [],
+        'seccomp_profile': str(args.directory.resolve() / 'reviewer-seccomp.json'),
     }
     assert (args.directory / 'format-checked').is_file()
     assert not (args.auth_runtime / 'auth.json').exists()

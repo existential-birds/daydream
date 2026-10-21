@@ -17,6 +17,7 @@ import pytest
 from daydream import git_ops, runner
 from daydream.artifacts import external
 from daydream.backends import AgentEvent, TextEvent
+from daydream.backends.codex import CodexBackend
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -35,7 +36,8 @@ def public_input(tmp_path: Path) -> dict[str, str]:
     (inputs / 'pr.json').write_text(json.dumps(pr))
     (inputs / 'diff.patch').write_text(git_ops.diff_paths(repo, case.base, case.head, ['.']))
     profile = {'schema': 1, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
-               'task_id': 7, 'evaluation_id': 99, 'reviewer': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'}}
+               'task_id': 7, 'evaluation_id': 99,
+               'reviewer': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high', 'fanout_concurrency': 1}}
     profile['profile_sha256'] = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'))
                                                .encode()).hexdigest()
     (inputs / 'daydream-profile.json').write_text(json.dumps(profile))
@@ -78,9 +80,23 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     monkeypatch.setattr(external._AtomicNameExchange, 'call', logs_do_not_support_exchange)
     role_homes: list[Path] = []
     backends: list[EmptyReviewBackend] = []
+    active = peak_active = 0
+
+    class SerializedBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            nonlocal active, peak_active
+            active += 1
+            peak_active = max(peak_active, active)
+            try:
+                await asyncio.sleep(0.01)
+                async for event in super().execute(*args, **kwargs):
+                    yield event
+            finally:
+                active -= 1
 
     def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
         assert name == 'codex'
+        assert kwargs['execution_input'].fanout_concurrency == 1
         child = kwargs['execution_input'].child_environment()
         assert not {'OPENAI_API_KEY', 'GH_TOKEN', 'OPENAI_BASE_URL'} & child.keys()
         home = Path(child['CODEX_HOME'])
@@ -89,13 +105,18 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
         assert json.loads((home / 'auth.json').read_text())['auth_mode'] == 'chatgpt'
         # StubBackend's target is only a fixture root for non-review replies;
         # actual native review passes its independent checkout to execute().
-        backend = EmptyReviewBackend(Path(environment['DAYDREAM_RB_REPOSITORY']),
+        backend = SerializedBackend(Path(environment['DAYDREAM_RB_REPOSITORY']),
             forbid_merge=False, forbid_supervise=False,
             review_by_stack={'structure': [finding(line=500 if outcome == 'conversion_limited' else 2)]},
             incomplete_stack='python' if outcome == 'incomplete' else None,
             responder=(lambda prompt: [RuntimeError('subscription quota exhausted')] if outcome == 'provider_failed'
                 and ('you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower())
                 else None))
+        # Preserve the real native constructor's public scheduling hint while
+        # replacing only its external generation stream with this fixture.
+        backend.fanout_concurrency = CodexBackend(
+            model=kwargs['model'], reasoning_effort=kwargs['reasoning_effort'],
+            execution_input=kwargs['execution_input']).fanout_concurrency
         backend.merge_echo_records = True
         backends.append(backend)
         return backend
@@ -110,6 +131,8 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     assert record['terminal_result']['analyzed_revision']['head_sha'] == record['analyzed_comparison']['head_sha']
     assert record['task_id'] == 7 and record['evaluation_id'] == 99
     assert record['subscription_access'] == 'chatgpt-oauth'
+    assert active == 0 and peak_active == 1
+    assert record['configuration']['native']['codex']['fanout_concurrency'] == 1
     assert record['configuration']['native']['codex']['subscription_access'] == 'chatgpt-oauth'
     assert role_homes and all(not home.exists() for home in role_homes)
     assert any('Frozen supplied author explanation' in call['prompt'] for backend in backends for call in backend.calls)

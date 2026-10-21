@@ -47,7 +47,8 @@ def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tup
         raise PublicReviewerError('public reviewer PR metadata differs')
     reviewer = profile.get('reviewer')
     if (not isinstance(reviewer, dict) or not isinstance(reviewer.get('model'), str) or not reviewer['model'].strip()
-            or reviewer.get('reasoning_effort') not in {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}):
+            or reviewer.get('reasoning_effort') not in {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}
+            or type(reviewer.get('fanout_concurrency')) is not int or reviewer['fanout_concurrency'] != 1):
         raise PublicReviewerError('public reviewer model and effort must be explicit')
     title, body = pr.get('title', ''), pr.get('body', '')
     if (not isinstance(title, str) or not isinstance(body, str)
@@ -133,6 +134,7 @@ async def main(environment: Mapping[str, str]) -> int:
                     (role_home / 'config.toml').write_text('model_provider = "openai"\n'
                         'cli_auth_credentials_store = "file"\n')
                     controls = _reviewer_environment(environment, role_home)
+                    controls['DAYDREAM_FANOUT_CONCURRENCY'] = str(reviewer['fanout_concurrency'])
                     config = RunConfig(target=str(repository), backend='codex', model=reviewer['model'],
                         reasoning_effort=reviewer['reasoning_effort'], file_config=DaydreamFileConfig(),
                         review_profile=resolve_harbor_profile(candidate_env='DAYDREAM_RB_UNUSED', env={}),
@@ -147,7 +149,8 @@ async def main(environment: Mapping[str, str]) -> int:
 
                     native = BackendExecutionInput.from_environment(controls, backend='codex')
                     runtime = ({'codex': {'subscription_access': 'chatgpt-oauth', 'provider': 'openai',
-                                         'configuration': 'fresh-role-home'}},
+                                         'configuration': 'fresh-role-home',
+                                         'fanout_concurrency': native.fanout_concurrency}},
                                RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
                                                     backends={'codex': native}))
                     execution = await review_case(task.case, repository, config, 'daydream-native-codex',
