@@ -178,9 +178,15 @@ _AMBIENT_AGENT_DIR = object()
 
 
 def _configured_pi_model(
-    cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR
+    cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR,
+    execution_input: BackendExecutionInput | None = None,
 ) -> str | None:
-    """Resolve defaultModel with project settings taking precedence over global settings."""
+    """Resolve frozen defaults, otherwise project settings before global settings."""
+    if execution_input is not None:
+        if execution_input.pi_settings is not None:
+            return execution_input.pi_settings.get("defaultModel")
+        cwd = execution_input.pi_settings_root or cwd
+        agent_dir = execution_input.pi_agent_dir
     if agent_dir is _AMBIENT_AGENT_DIR:
         resolved_agent_dir: Path | None = Path(
             os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent")
@@ -643,15 +649,7 @@ class PiBackend:
         self._configured_cache: tuple[Path, str | None] | None = None
         configured: str | None = None
         if model is None and cwd is not None:
-            configured = (execution_input.pi_settings.get("defaultModel")
-                if execution_input is not None and execution_input.pi_settings is not None else _configured_pi_model(
-                (execution_input.pi_settings_root or cwd) if execution_input is not None else cwd,
-                agent_dir=(
-                    execution_input.pi_agent_dir
-                    if execution_input is not None
-                    else _AMBIENT_AGENT_DIR
-                ),
-            ))
+            configured = _configured_pi_model(cwd, execution_input=execution_input)
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
         if execution_input is not None:
@@ -911,16 +909,7 @@ class PiBackend:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
-                configured_model = (self._execution_input.pi_settings.get("defaultModel")
-                    if self._execution_input is not None and self._execution_input.pi_settings is not None
-                    else _configured_pi_model(
-                    (self._execution_input.pi_settings_root or cwd) if self._execution_input is not None else cwd,
-                    agent_dir=(
-                        self._execution_input.pi_agent_dir
-                        if self._execution_input is not None
-                        else _AMBIENT_AGENT_DIR
-                    ),
-                ))
+                configured_model = _configured_pi_model(cwd, execution_input=self._execution_input)
         self.model = self._model_override or ("pi-native" if review_context else configured_model or DEFAULT_PI_MODEL)
         settings_root = (None if self._execution_input is None or review_context is not None
                          else self._execution_input.pi_settings_root)
