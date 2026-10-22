@@ -584,14 +584,14 @@ def _handle_benchmark_command(argv: list[str]) -> int:
 
     parser = _build_benchmark_parser()
     native_args: list[str] = []
-    if argv[:2] == ['reviewbench', 'run'] and '--' in argv:
+    if argv[:2] == ['reviewbench', 'harbor-export'] and '--' in argv:
         boundary = argv.index('--')
         argv, native_args = argv[:boundary], argv[boundary + 1:]
     args = parser.parse_args(argv)
     if args.subcommand == 'reviewbench':
         from daydream.benchmark.reviewbench.cli import handle
 
-        if args.reviewbench_command == 'run':
+        if args.reviewbench_command == 'harbor-export':
             args.native_args = native_args
         return handle(args)
     sub = args.subcommand

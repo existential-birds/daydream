@@ -10,99 +10,158 @@ import copy
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
 from daydream import git_ops, runner
-from daydream.backends import BackendExecutionInput, resolve_fanout_concurrency
-from daydream.backends._subprocess import stream_idle_timeout_s
-from daydream.backends.pi import native_pi_settings
-from daydream.benchmark.reviewbench.candidate import selected_extension_identity
+from daydream.backends import BackendExecutionInput, create_backend
+from daydream.backends.pi import _configured_pi_model, native_pi_provider, native_pi_settings
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
 from daydream.github_app import GitHubExecutionInput
 from daydream.hunk_index import parse_hunks
-from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
-from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
+from daydream.run_config import (
+    FrozenAuthorDescription,
+    RunConfig,
+    _resolved_backend_name,
+    _resolved_model,
+    _resolved_reasoning_effort,
+)
 
 
-def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
-    """Freeze nonsecret native controls alongside an unpersisted auth capability.
+def parse_native_config(arguments: list[str]) -> RunConfig:
+    """Use the ordinary CLI's operator policy, with benchmark-owned outputs disabled."""
+    from daydream.commands import review
+    from daydream.run_artifacts import _resolve_review_profile
 
-    Only selected public Pi defaults are hashed; neither authentication files nor
-    arbitrary settings (which may contain credentials) are copied or fingerprinted.
+    config = review._parse_args(['--review', '--non-interactive', '--no-archive', '--no-eval',
+                                '--no-capture-data', *(arguments[1:] if arguments[:1] == ['--'] else arguments)])
+    if (config.base or config.branch or config.findings_out or config.flow_name or config.start_at != 'review'
+            or config.dump_artifacts or config.trajectory_path or config.trajectory_hub_repo
+            or config.dataset_store_path or config.dataset_capture or config.force_worktree
+            or config.pr_number is not None or config.pr_repo or config.approved_head_sha):
+        raise ValueError('benchmark owns source/output and disables publication, resumes and dataset capture')
+    config = replace(config, discover_github_provenance=False)
+    _resolve_review_profile(config)
+    return config
+
+
+def freeze_native_execution(
+    config: RunConfig, environment: Mapping[str, str] | None = None,
+) -> runner.RunnerExecutionInput:
+    """Freeze only runtime capabilities needed across the disposable checkout.
+
+    Pi settings retain project/global precedence and distinguish unavailable settings
+    from an explicitly empty frozen map. Osprey retains its ordinary ambient transport.
+    Credentials and transport settings never become benchmark configuration metadata.
     """
     root = Path(config.target or Path.cwd()).resolve()
+    controls = dict(os.environ if environment is None else environment)
+    if controls.get('PI_CODING_AGENT_DIR'):
+        controls['PI_CODING_AGENT_DIR'] = str(Path(controls['PI_CODING_AGENT_DIR']).resolve())
     phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
-    names = {_resolved_backend_name(config, phase) for phase in phases}
     inputs: dict[str, BackendExecutionInput | None] = {}
-    provenance: dict[str, Any] = {'extension': selected_extension_identity()}
-    for name in sorted(names):
-        selector_names = {
-            'pi': ('PI_CODING_AGENT_DIR',),
-            'codex': ('CODEX_HOME', 'OPENAI_BASE_URL'),
-            'claude': ('CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK',
-                       'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'AWS_REGION',
-                       'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                       'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL'),
-            'osprey': ('OSPREY_HOME', 'OSPREY_BINARY'),
-        }[name]
-        selectors: dict[str, Any] = {}
-        for key in selector_names:
-            value = os.environ.get(key)
-            if value and key.endswith('_BASE_URL'):
-                url = urlsplit(value)
-                selectors[key] = {'scheme': url.scheme, 'host': url.hostname, 'port': url.port,
-                                  'path': redact_text(url.path)}
-            else:
-                selectors[key] = value
-        home = Path(os.environ.get('HOME', str(Path.home())))
-        if name == 'codex':
-            selectors['CODEX_HOME'] = selectors['CODEX_HOME'] or str(home / '.codex')
-        elif name == 'claude':
-            selectors['CLAUDE_CONFIG_DIR'] = selectors['CLAUDE_CONFIG_DIR'] or str(home / '.claude')
-        if name == "osprey":
-            inputs[name] = None  # Osprey retains its supported ambient transport.
-            provenance[name] = {"binary": os.environ.get("OSPREY_BINARY", "osprey"), 'selectors': selectors,
-                'fanout_concurrency': resolve_fanout_concurrency('DAYDREAM_OSPREY_FANOUT_CONCURRENCY', 4),
-                'stream_idle_timeout_s': stream_idle_timeout_s(),
-                'limitations': ['Native client configuration files and internal provider choices remain opaque.']}
+    for name in sorted({_resolved_backend_name(config, phase) for phase in phases}):
+        if name == 'osprey':
+            inputs[name] = None
             continue
-        environment = dict(os.environ)
-        if name == 'pi' and environment.get('PI_CODING_AGENT_DIR'):
-            environment['PI_CODING_AGENT_DIR'] = str(Path(environment['PI_CODING_AGENT_DIR']).resolve())
-        native = BackendExecutionInput.from_environment(environment, backend=name)
-        selected = {}
-        if name == "pi":
-            selected = native_pi_settings(root, agent_dir=native.pi_agent_dir)
-            native = replace(native, pi_settings=selected)
-        inputs[name] = native
-        public = {"retry_policy": asdict(native.retry_policy), "fanout_concurrency": native.fanout_concurrency,
-            'selectors': selectors,
-            'limitations': ['Native client configuration files are retained without credential-bearing fingerprints.'],
-            "stream_idle_timeout_s": native.stream_idle_timeout_s,
-            "response_idle_timeout_s": native.pi_response_idle_timeout_s,
-            "terminal_drain_timeout_s": native.codex_terminal_drain_timeout_s,
-            "process_reap_timeout_s": native.codex_process_reap_timeout_s,
-            "cleanup_timeout_s": native.codex_cleanup_timeout_s}
-        if name == "pi":
-            selectors['PI_CODING_AGENT_DIR'] = None if native.pi_agent_dir is None else str(native.pi_agent_dir)
-            public.update(provider=native.pi_provider, thinking=native.pi_thinking, defaults=selected)
-        provenance[name] = public
+        capability = BackendExecutionInput.from_environment(controls, backend=name)
+        if name == 'pi':
+            capability = replace(capability, pi_settings=native_pi_settings(root, agent_dir=capability.pi_agent_dir))
+        inputs[name] = capability
     fallback = next((value for value in inputs.values() if value is not None), None)
     if fallback is None:
-        fallback = BackendExecutionInput.from_environment(dict(os.environ), backend="claude")
-    return provenance, runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends=inputs)
+        fallback = BackendExecutionInput.from_environment(controls, backend='claude')
+    return runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends=inputs)
+
+
+# These are ordinary review-policy overrides, not a second native configuration
+# resolver. Source, authentication, outputs, publication and transport stay host-owned.
+_REVIEW_OVERRIDES = ('stack', 'cleanup', 'quiet', 'diagram', 'backend', 'model', 'reasoning_effort',
+    'review_backend', 'review_model', 'parse_model', 'exploration_model', 'log_mode', 'latency_profile', 'shallow',
+    'shallow_fanout_threshold', 'precision_mode', 'ignore_paths',
+    'deep_shard_enabled', 'deep_shard_max_files', 'deep_shard_max_bytes', 'deep_shard_fanout_cap',
+    'deep_shard_frontier_max', 'review_cache_enabled', 'review_cache_max_entries', 'review_cache_max_bytes',
+    'review_cache_max_age_days')
+
+
+def freeze_reviewer(config: RunConfig) -> dict[str, Any]:
+    """Freeze bounded nonsecret producer policy independently of the supplied judge."""
+    from daydream.benchmark.reviewbench.harbor_profile import selected_reviewer_policy
+    from daydream.run_artifacts import _resolve_review_profile
+
+    _resolve_review_profile(config)
+    if (config.extra_copy or config.test_command or config.test_required_suites or config.approve_on_clean
+            or config.scope_issue_filing or (config.observability is not None and config.observability.destinations)):
+        raise ValueError('unsupported benchmark native policy: '
+                         'copying, tests, publication and tracing are not admitted')
+    execution = freeze_native_execution(config)
+    names = set(execution.backends)
+    backend = _resolved_backend_name(config, 'per_stack_review')
+    if backend not in {'pi', 'codex'} or names != {backend}:
+        raise ValueError('public ReviewBench requires one selected native Pi or Codex reviewer for every phase')
+    capability = execution.backends[backend]
+    assert capability is not None
+    root = Path(config.target or Path.cwd())
+    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    phase_models = {phase: create_backend(backend, model=_resolved_model(config, phase),
+        reasoning_effort=_resolved_reasoning_effort(config, phase), cwd=root, execution_input=capability).model
+        for phase in sorted(phases)}
+    settings = None if capability.pi_settings is None else dict(capability.pi_settings)
+    model_override = _resolved_model(config, 'per_stack_review')
+    provider = 'openai' if backend == 'codex' else native_pi_provider(root, execution_input=capability,
+        configured_model=None if model_override is not None else _configured_pi_model(root, execution_input=capability),
+        model_override=model_override, model=phase_models['per_stack_review'])
+    if backend == 'pi' and provider is None:
+        raise ValueError('selected native Pi model has no explicit operator provider')
+    file_config = {} if config.file_config is None else asdict(config.file_config)
+    file_config.pop('review_profile', None)
+    assert config.review_profile is not None
+    return selected_reviewer_policy({'backend': backend, 'model': phase_models['per_stack_review'],
+        'phase_models': phase_models,
+        'reasoning_effort': _resolved_reasoning_effort(config, 'per_stack_review'),
+        'provider': provider, 'thinking': capability.pi_thinking if backend == 'pi' else None,
+        'pi_settings': settings if backend == 'pi' else None,
+        'run_config': {name: copy.deepcopy(getattr(config, name)) for name in _REVIEW_OVERRIDES},
+        'file_config': file_config,
+        'profile': {'data': asdict(config.review_profile.profile), 'source_kind': config.review_profile.source_kind},
+        'fanout_concurrency': 1})
+
+
+def reviewer_config(reviewer: Mapping[str, Any], repository: Path) -> RunConfig:
+    """Rehydrate the frozen ordinary policy without reading reviewed-source settings."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.review_profile import Arbitration, Pipeline, ResolvedProfile, ReviewProfile, Strategy, Suppression
+
+    overrides = reviewer['run_config']
+    if not isinstance(overrides, dict) or set(overrides) != set(_REVIEW_OVERRIDES):
+        raise ValueError('incompatible frozen native reviewer configuration; regenerate the export')
+    frozen = reviewer['profile']
+    profile = frozen['data']
+    pipeline = profile['pipeline']
+    resolved_profile = ResolvedProfile(ReviewProfile(schema_version=profile['schema_version'], name=profile['name'],
+        strategies={name: Strategy(**strategy) for name, strategy in profile['strategies'].items()},
+        pipeline=Pipeline(**{**pipeline, 'arbitration': Arbitration(**pipeline['arbitration']),
+                             'suppression': Suppression(**pipeline['suppression'])})), frozen['source_kind'])
+    config = RunConfig(target=str(repository), **copy.deepcopy(overrides),
+        file_config=DaydreamFileConfig(**copy.deepcopy(reviewer['file_config'])), review_profile=resolved_profile,
+        output_mode='review', non_interactive=True, dataset_capture_disabled=True, archive=False, run_eval=False)
+    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    if {_resolved_backend_name(config, phase) for phase in phases} != {reviewer['backend']}:
+        raise ValueError('frozen reviewer requires an unavailable mixed native capability')
+    return config
 
 
 @dataclass(frozen=True)
 class PublicHarborTask:
-    """Host-admitted public task identity, separate from standalone origin admission.
+    """Host-admitted public task identity for origin-free frozen snapshots.
 
     Harbor constructs snapshots without origin. Its frozen task/profile supplies
     the identity; actual refs, HEAD and full patch still have to prove the input.
@@ -233,7 +292,8 @@ def _source_identity(repository: Path, case: Case) -> str:
 
 
 async def review_case(case: Case, repository: Path, config: RunConfig, producer: str, *,
-                      runtime: tuple[dict[str, Any], runner.RunnerExecutionInput] | None = None,
+                      execution_input: runner.RunnerExecutionInput | None = None,
+                      candidate_sha256: str | None = None,
                       public_task: PublicHarborTask | None = None,
                       evidence_directory: Path | None = None) -> CaseExecution:
     """Review one clean local frozen repository in a disposable independent checkout.
@@ -249,11 +309,10 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
     finalized: list[FinalizedReview] = []
     try:
         extension = selected_extension_identity()
-        public_native, native_execution = native_configuration(config) if runtime is None else runtime
-        public_native = copy.deepcopy(public_native)
-        if public_native.get('extension', extension) != extension:
-            raise ValueError('native extension differs from frozen configuration; create a fresh candidate plan')
-        public_native['extension'] = extension
+        admitted_candidate = candidate_package_digest()
+        if candidate_sha256 is not None and candidate_sha256 != admitted_candidate:
+            raise ValueError('candidate bytes changed before native review; create a fresh Harbor export')
+        native_execution = freeze_native_execution(config) if execution_input is None else execution_input
         if not producer.strip():
             raise ValueError("producer must be nonempty")
         git_ops.assert_is_worktree(repository)
@@ -304,10 +363,11 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 execution.terminal_result = result.terminal_result
                 execution.configuration = result.configuration
                 execution.usage = result.usage
-                execution.configuration['native'] = public_native
                 execution.retained_findings = result.items
             if selected_extension_identity() != extension:
-                raise ValueError('native extension changed during review; create a fresh candidate plan')
+                raise ValueError('native extension changed during review; create a fresh Harbor export')
+            if candidate_package_digest() != admitted_candidate:
+                raise ValueError('candidate bytes changed during native review; create a fresh Harbor export')
             if not finalized:
                 execution.diagnostics.append("native reviewer did not produce a finalized terminal result")
                 return execution

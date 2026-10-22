@@ -1,13 +1,34 @@
 # Review benchmarks
 
-Use `daydream benchmark [reviewbench] COMMAND --help` for flags. Planning/export
-performs no inference; generation and judging require experiment authorization.
-Keep benchmark inputs/results out of capture and training. Preserve failed evidence
-and use fresh output paths for retries or changed candidates/configuration.
+Use `daydream benchmark [reviewbench] COMMAND --help` for flags. Export performs
+no inference; benchmark generation and judging require separate experiment
+authorization. Keep all benchmark inputs/results out of capture and training.
+Preserve failed evidence and use fresh output paths for changed candidates or
+configuration.
 
-## Supplied ReviewBench setup
+## Supplied ReviewBench through Harbor
 
-Both ReviewBench workflows require an unchanged pinned source checkout and Node 20+:
+Harbor is the sole public ReviewBench workflow. The supplied exporter owns frozen
+corpus/context/snapshots, references, instructions and judging assets. Harbor owns
+selection, trial scheduling and independent attempts; the supplied ReviewBench
+plugin freezes task/evaluation/round membership. Its metric and completed-job
+checker own scoring and reports. Daydream supplies the ordinary native reviewer,
+conservative finalized-finding conversion and the necessary candidate,
+authentication, isolation and evidence integration.
+
+These are custom local evaluations, not official leaderboard submissions. The
+[comparison acceptance](https://github.com/existential-birds/daydream/issues/1672#issuecomment-6303577385)
+uses the exact supplied 25-task test set with three independent rounds per
+candidate (75 trials each). Full219 remains available through the same path.
+Keep the judge, supplied prompts/scorer and isolation fixed; identify each
+producer's package, profile and native settings. Test25 does not establish quality
+on roughly 20,000-line reviews. References are incomplete and augmented recall has
+an agent-dependent denominator; offline integration checks establish no quality or
+performance improvement.
+
+### Source and candidate setup
+
+Use a clean pinned source checkout with Node 20+:
 
 ```bash
 git clone https://github.com/review-bench/ReviewBench.git ~/ReviewBench
@@ -15,155 +36,138 @@ git -C ~/ReviewBench checkout --detach 4f04392d6bf4941ab6f8a3ea0c15b449f4458864
 (cd ~/ReviewBench && npm ci)
 ```
 
-Create and execute plans/exports from the candidate installation itself. Candidate
-identity includes shipped `daydream_ext`; package extensions and unset
-`DAYDREAM_EXT_DIR`. Changed package bytes require a new plan/export.
-Plans and evaluator receipts require `schema_version: 2`; Harbor policy and task
-profiles require `schema: 2` (`daydream-reviewbench-codex-subscription-v2`).
-Incompatible versions are rejected. Create fresh plans, evaluations and Harbor
-exports; preserve older evidence in its original directory without migration.
-These internal format changes preserve the CLI commands and options.
-
-The [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
-is sufficient for the before/after acceptance gate for
-[#1616](https://github.com/existential-birds/daydream/issues/1616). Use these exact
-25 frozen PR identities for both candidates, with three independent rounds per
-candidate (75 trials each). Keep reviewer/backend/model/effort, judge, scoring,
-architecture and isolation profile fixed. The [full 219-task corpus](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/manifest.json)
-remains supported for broader evaluation; it is not required for this gate.
-Retain missing, failed, complete-empty and scored membership and disclose null
-measurements rather than dropping them from the comparison.
-
-## Public Harbor with Codex subscription access
-
-Custom local evaluation: native Codex reviewer, separate upstream Pi judge,
-unchanged supplied scoring. Results support matched comparisons, not official
-leaderboard eligibility. Keep architecture and evaluation profile fixed across
-candidates; standalone and public Harbor judge profiles are distinct.
-
-Build the wheel and install it with
+Build the candidate wheel and install it with
 [`harbor-runtime.lock`](../daydream/benchmark/reviewbench/harbor-runtime.lock)
 in a separate Python environment. Released Harbor lacks the required metric API.
-Run these commands from that environment, using the same candidate wheel:
+Run export and launch from that candidate installation. Candidate identity binds
+all shipped code/resources and packaged `daydream_ext`; unset `DAYDREAM_EXT_DIR`.
+The host contains Harbor/ReviewBench. The reviewer image installs only the core
+Python graph plus its selected native executable; verifier sources, references and
+retained source caches stay out of it. The Pi reviewer has its own pinned npm
+dependency graph, independent from the supplied judge's Pi SDK.
+
+Export always keeps all 219 tasks and the full metric catalog. Select the host's
+supported Docker architecture (`linux/amd64` or `linux/arm64`). Actual nested
+Bubblewrap/seccomp and Harbor exact-host kernel isolation must work. The exporter
+receives separate reviewer/judge hosts; runtime egress stays confined to those
+exact hosts.
+
+Pass ordinary native reviewer arguments and an operator configuration root after
+`--`. Project/global settings and explicit model/provider/effort overrides retain
+native precedence. For example, freeze the configured Pi/Nous reviewer or native
+Codex reviewer into separate exports using the same candidate wheel:
 
 ```bash
-daydream benchmark reviewbench harbor-export /private/reviewbench-export \
+daydream benchmark reviewbench harbor-export /private/reviewbench-pi \
   --source ~/ReviewBench --wheel /path/to/candidate.whl --rounds 3 \
-  --platform linux/amd64
-reviewbench-check-dataset /private/reviewbench-export
+  --platform linux/arm64 -- --backend pi /path/to/operator-config-root
+
+daydream benchmark reviewbench harbor-export /private/reviewbench-codex \
+  --source ~/ReviewBench --wheel /path/to/candidate.whl --rounds 3 \
+  --platform linux/arm64 -- --backend codex /path/to/operator-config-root
+reviewbench-check-dataset /private/reviewbench-pi
+reviewbench-check-dataset /private/reviewbench-codex
 ```
 
-Export always includes the full supplied corpus. Select the host's supported
-Docker architecture explicitly (`linux/amd64` or `linux/arm64`); actual nested
-Bubblewrap/seccomp and Harbor exact-host kernel isolation must work. Preserve
-the frozen sandbox/network policy.
+The required Pi arm preserves the operator's `nous` /
+`deepseek/deepseek-v4.1-flash` configuration and native authentication, including
+its selected custom provider definition. It does not change ordinary fallback
+models. Unsupported selected capabilities fail before model work. Ordinary
+Claude/Osprey use remains available outside this public Pi/Codex integration;
+Osprey retains its ambient transport.
 
-For the #1616 gate, select the [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
-from that unchanged export. Generate exact task names using
-`[case.key for case in load_cases(source, "test")]` from
-[`contract.py`](../daydream/benchmark/reviewbench/contract.py), after
-`verify_source(source)`, and retain that membership alongside each candidate's
-job evidence. Harbor supports the complete list through a dataset's `task_names`
-configuration or repeated `-i` flags. Verify that the resolved
-selection contains exactly those 25 identities before any model work.
+### Independent authentication and judge
 
-The current `harbor-run` wrapper accepts only one `--task` name/glob and does not
-accept a Harbor configuration file or repeated names. `--n-tasks 25` selects the
-first 25 exported task directories in alphabetical order, which is a different
-set. A canonical selection launch must supply all 25 exact names to Harbor while
-preserving the wrapper's candidate/profile, runtime, credential, isolation and
-dataset checks, subscription-only environment, metric/plugin binding and
-completed-job verification. Do not substitute a count limit for that selection.
+Both reviewer arms use the same supplied Pi-path judge with explicit
+`openai-codex` / `gpt-6.1-sol` subscription policy, matcher/classifier settings,
+prompts and raw scoring. Reviewer selection never determines judge model/provider.
+Credentials stay in native role capabilities/mounts, outside profiles, hashes,
+agent kwargs, exports and jobs.
 
-Before launching, create two dedicated ChatGPT subscription logins with Codex
-pinned by [`harbor_build.py`](../daydream/benchmark/reviewbench/harbor_build.py)
-and Pi from the pinned source checkout:
+For the Codex arm, use a dedicated persistent auth-only `CODEX_HOME`. Create its
+subscription login separately with the pinned Codex CLI and file credential store.
+For the Pi arm, use its native reviewer authentication; keep its directory distinct
+from the judge. Do not convert/copy Codex sessions, force OpenRouter or change
+operator settings/billing routes.
 
-- Reviewer: fresh temporary `CODEX_HOME`; run Codex with
-  `-c 'cli_auth_credentials_store="file"' login --device-auth`, then `login status`.
-- Judge: fresh temporary `PI_CODING_AGENT_DIR`; use the pinned source checkout's
-  `node_modules/.bin/pi`, `/login` → ChatGPT Plus/Pro (Codex Subscription), `/quit`.
-- Move each `auth.json` into its own new persistent directory outside datasets/jobs;
-  retire temporary sources. Keep only auth and runtime lock sidecars there, with
-  directory/file permissions 700/600. Separate sign-ins may use the same account;
-  copied/converted sessions, API keys and provider fallback are inadmissible.
-- Reserve both stores for this workflow. Stop jobs before reauthentication; keep
-  active locks intact and unrelated Codex/Pi clients away from these stores.
+The independent judge directory uses the pinned supplied source's
+`node_modules/.bin/pi`: `/login` → ChatGPT Plus/Pro (Codex Subscription) → `/quit`.
+Reviewer and judge subscription stores need independently created sessions and
+native refresh locks. Keep stores outside exports/jobs, reserve them for this
+workflow and stop jobs before reauthentication. Do not change credentials merely
+to validate this integration.
 
-After authorization, prove one selected task before a comparison:
+### Exact selection and independent rounds
+
+After experiment authorization, the canonical test journey is:
 
 ```bash
-daydream benchmark reviewbench harbor-run /private/reviewbench-export \
-  --codex-home /private/reviewer-auth --pi-home /private/judge-auth \
-  --jobs-dir /private/reviewbench-jobs --job-name one-task --n-tasks 1 --rounds 1
+daydream benchmark reviewbench harbor-run /private/reviewbench-pi \
+  --reviewer-pi-home /private/pi-reviewer-auth --pi-home /private/judge-auth \
+  --jobs-dir /private/reviewbench-jobs --job-name pi-test25 --set test --rounds 3
+
+daydream benchmark reviewbench harbor-run /private/reviewbench-codex \
+  --codex-home /private/codex-reviewer-auth --pi-home /private/judge-auth \
+  --jobs-dir /private/reviewbench-jobs --job-name codex-test25 --set test --rounds 3
 ```
 
-The wrapper runs the supplied job checker. Live acceptance requires nonempty
-reviewer findings, a real semantic matcher request, an unmatched finding exercising
-the classifier, and a second fresh job reusing both stores. Verify model/effort,
-retained evidence and refresh persistence when rotation occurs. Export, empty
-reviews and offline tests cannot establish live integration success. For an
-authorized #1616 comparison, use the [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
-with three independent rounds per candidate. A broader full-corpus comparison
-omits task filters and uses `--rounds 3`.
+`--set test` selects the exact 25 full case identities from verified
+[`corpus/test/test.json`](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json).
+`--set full --rounds 3` selects all 219 (657 trials). The launcher checks delivered
+case/profile identities before model work and supplies exact names to Harbor.
+The plugin retains `source_prs=219` even for test25.
 
-Retain the complete job evidence, including plan/metric, native trajectories,
-execution, verifier logs/judge sessions and scores; exclude credentials. Preserve
-missing/failed/scored membership and null measurements. API-equivalent costs are
-not subscription charges.
+For a smaller smoke run, replace `--set test` with one or more repeated
+`--task EXACT_EXPORTED_NAME` flags and `--rounds 1`. Subsets are identified as
+subsets, not complete comparisons. Globs/count limits cannot name the supplied
+test set. Harbor attempts are independent rounds; retries/best-of are not a
+substitute. Keep all raw trial/round evidence.
 
-Change owners: [export/profile](../daydream/benchmark/reviewbench/harbor_profile.py),
-[launch/checks](../daydream/benchmark/reviewbench/harbor_cli.py),
-[reviewer](../daydream/benchmark/reviewbench/harbor_agent.py),
+After Harbor exits zero the launcher explicitly invokes the supplied completed-job
+checker. Harbor logs plugin-finalization exceptions as warnings, so plugin
+invocation alone cannot admit a successful comparison. The supplied metric
+computes round means, population standard deviations and null arithmetic; there
+is no second Daydream evaluator, receipt, averaging or report format.
+
+Retain plans/metrics, native terminal configuration/usage and joined trajectories,
+verifier logs/judge sessions, raw scores and supplied summary. Distinguish expected,
+produced, completed-empty, failed, incomplete, conversion-limited, missing and
+evaluated work; unconvertible findings remain visible omissions. Native ignore
+rules that change the analyzed patch cause a visible comparison failure. Missing
+measurements stay unavailable; observed zero remains zero. API-equivalent estimates
+are not subscription charges. Native private staging remains required before
+no-clobber publication to Harbor logs; the log mount is not native artifact storage.
+
+### Compatibility and offline checks
+
+This redesign removes PR-only standalone `plan`, `run`, `status`, `judge` and
+`report` commands, their receipts/readback and custom reporting. Only
+`harbor-export`/`harbor-run` remain. Ordinary native arguments replace the export's
+PR-only reviewer-model/effort flags, and exact `--set`/repeatable `--task` replaces
+`--n-tasks`. Policy/task profiles use schema 3: create fresh exports and preserve
+old evidence in its original directory. Incompatible formats are rejected without
+migration. No version bump is included; ordinary runtime interfaces are preserved.
+
+Source-backed offline checks:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" DAYDREAM_REVIEWBENCH_SOURCE=~/ReviewBench \
+  uv run pytest tests/test_reviewbench_*.py tests/test_templates_packaging.py tests/test_json_utils.py
+```
+
+Check `uv lock --check` first. `DAYDREAM_REVIEWBENCH_RUNTIME` selects a separately
+installed pinned host Python for actual Harbor/plugin planning proof;
+`DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE` enables real image/seccomp checks.
+`DAYDREAM_REVIEWBENCH_NATIVE_PI` selects the pinned native Pi package directory for
+authentication/lock checks. Build the current candidate wheel, rebind that runtime
+and rebuild its image before using these checks as evidence. Offline checks launch no benchmark inference.
+
+Change owners: [launch/selection](../daydream/benchmark/reviewbench/harbor_cli.py),
+[export/profile](../daydream/benchmark/reviewbench/harbor_profile.py),
+[native execution](../daydream/benchmark/reviewbench/native.py),
+[adapter](../daydream/benchmark/reviewbench/harbor_agent.py),
 [authentication](../daydream/benchmark/reviewbench/harbor_auth.py),
 [judge binding](../daydream/benchmark/reviewbench/judge_auth.mjs).
-
-## Supplied ReviewBench with native Daydream
-
-Evaluation-only ordinary native reviewer/configuration/authentication; arrange
-isolation separately. This workflow supplies no portal container/egress isolation
-or leaderboard eligibility.
-
-```bash
-daydream benchmark reviewbench plan ~/reviewbench-runs --source ~/ReviewBench \
-  --candidate native-current --producer daydream-native --set test --rounds 3
-daydream benchmark reviewbench status ~/reviewbench-runs/native-current
-# Generation and judging launch models; authorize each experiment first.
-for round in 1 2 3; do
-  daydream benchmark reviewbench run ~/reviewbench-runs/native-current --round "$round" \
-    -- --backend pi /path/to/operator-config-root
-  daydream benchmark reviewbench judge ~/reviewbench-runs/native-current --round "$round" \
-    --provider anthropic --model YOUR_JUDGE_MODEL
-done
-daydream benchmark reviewbench report ~/reviewbench-runs/native-current
-```
-
-Arguments after `--` retain native precedence. `--pr` is a zero-based selected-set
-index; `--repository` supplies that single case's frozen repository. Otherwise
-mirror commits are fetched. Inspect `status` and `outcomes/`: complete-empty,
-failed, missing and conversion-limited reviews remain distinct; only complete,
-convertible results are scorable.
-
-Each `round-N/findings/` is one evaluator input. Passing a multiple-round parent
-silently merges identical PR identities. Failed or interrupted judging retains
-its unique staging directory at the reported path, including partial results and
-checkpoints, without a valid `evaluator.json`. Preserve it and create a fresh
-plan; successful publication installs `evaluator.json` last and removes staging.
-
-For the #1616 before/after acceptance gate, create fresh `--set test --rounds 3`
-plans for the [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json).
-Independently run/judge rounds 1–3 for each candidate, then `report` averages
-corresponding supplied ratios. Broader full-corpus comparisons use
-`--set full --rounds 3`; they are not required for this gate. `RB_ATTEMPT` is a
-retry counter, not a round. Disclose subsets/nulls; augmented recall has an
-agent-dependent denominator.
-
-Change owners: [CLI](../daydream/benchmark/reviewbench/cli.py),
-[source/cases](../daydream/benchmark/reviewbench/contract.py),
-[native execution/conversion](../daydream/benchmark/reviewbench/native.py),
-[evaluation/reporting](../daydream/benchmark/reviewbench/evaluator.py).
-Source-backed offline tests:
-`DAYDREAM_REVIEWBENCH_SOURCE=~/ReviewBench uv run pytest tests/test_reviewbench_*.py`.
 
 ## Private Harbor benchmark
 

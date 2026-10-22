@@ -40,6 +40,9 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             'daydream/benchmark/reviewbench/reviewer-runtime.lock',
             'daydream/benchmark/reviewbench/harbor_entrypoint.py',
             'daydream/benchmark/reviewbench/harbor_auth.py',
+            'daydream/benchmark/reviewbench/reviewer_auth.mjs',
+            'daydream/benchmark/reviewbench/pi-reviewer/package.json',
+            'daydream/benchmark/reviewbench/pi-reviewer/package-lock.json',
         })
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
@@ -66,7 +69,11 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             'from daydream.benchmark.reviewbench.harbor_build import reviewer_build; '
             'suffix,assets,identity=reviewer_build(Path(sys.argv[1])); '
             '_,_,arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64"); '
-            'print(json.dumps({"identity":identity,"arm_identity":arm_identity,"assets":list(assets),"suffix":suffix}))'
+            'pi_suffix,pi_assets,pi_identity=reviewer_build(Path(sys.argv[1]),reviewer={"backend":"pi"}); '
+            '_,_,pi_arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64",reviewer={"backend":"pi"}); '
+            'print(json.dumps({"identity":identity,"arm_identity":arm_identity,"assets":list(assets),"suffix":suffix,'
+            '"pi_identity":pi_identity,"pi_arm_identity":pi_arm_identity,"pi_assets":list(pi_assets),'
+            '"pi_suffix":pi_suffix}))'
         )
         result = subprocess.run([sys.executable, '-c', script, str(wheels[0])], cwd=tmp,
                                 env={**os.environ, 'PYTHONPATH': str(installed)},
@@ -75,6 +82,12 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         assert build['identity']['platform'] == 'linux/amd64'
         assert build['arm_identity']['platform'] == 'linux/arm64'
         assert build['identity']['codex_cli'] == '0.163.0'
+        assert build['pi_identity']['pi_cli'] == '1.3.0'
+        assert build['pi_arm_identity']['platform'] == 'linux/arm64'
+        for name in ('package.json', 'package-lock.json', 'daydream-auth.mjs'):
+            assert 'pi-reviewer/' + name in build['pi_assets']
+        assert 'npm ci' in build['pi_suffix']
+        assert 'codex_cli' not in build['pi_identity']
         assert 'reviewer-runtime.lock' in build['assets']
         assert 'runtime.lock' not in build['assets']
         assert build['identity']['reviewer_runtime_lock_sha256'] != build['identity']['host_runtime_lock_sha256']

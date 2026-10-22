@@ -15,17 +15,14 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from daydream.benchmark.reviewbench.contract import Case
-from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case
-from daydream.config_file import DaydreamFileConfig
+from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case, reviewer_config
 from daydream.json_utils import atomic_create_bytes
 from daydream.redaction import redact_structured_text
-from daydream.review_profile import resolve_harbor_profile
-from daydream.run_config import RunConfig
 from daydream.trajectory import RUN_DOCUMENT_NAME, run_directory
 
 
@@ -36,7 +33,7 @@ class PublicReviewerError(ValueError):
 def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tuple[PublicHarborTask, dict[str, Any]]:
     """Bind exported profile bytes, supplied PR metadata and frozen public patch."""
     profile = json.loads(profile_path.read_text())
-    if not isinstance(profile, dict) or profile.get('schema') != 2:
+    if not isinstance(profile, dict) or profile.get('schema') != 3:
         raise PublicReviewerError('unsupported public reviewer profile; regenerate the export')
     digest = profile.get('profile_sha256')
     policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
@@ -49,23 +46,38 @@ def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tup
     if Case.from_dict(pr) != case or pr != profile['pr']:
         raise PublicReviewerError('public reviewer PR metadata differs')
     reviewer = profile.get('reviewer')
-    if (not isinstance(reviewer, dict) or not isinstance(reviewer.get('model'), str) or not reviewer['model'].strip()
-            or reviewer.get('reasoning_effort') not in {'none', 'minimal', 'low', 'medium', 'high', 'xhigh'}
+    if (not isinstance(reviewer, dict) or reviewer.get('backend') not in {'pi', 'codex'}
+            or not isinstance(reviewer.get('model'), str) or not reviewer['model'].strip()
             or type(reviewer.get('fanout_concurrency')) is not int or reviewer['fanout_concurrency'] != 1):
-        raise PublicReviewerError('public reviewer model and effort must be explicit')
+        raise PublicReviewerError('public reviewer backend and model must be explicit')
+    reviewer_config(reviewer, pr_path.parent)
     title, body = pr.get('title', ''), pr.get('body', '')
     if not isinstance(title, str) or not isinstance(body, str):
         raise PublicReviewerError('public reviewer author context differs from frozen profile')
     description = title + '\n\n' + body if title or body else None
     return PublicHarborTask(case, profile['upstream_revision'], patch_path.read_text(),
-                            profile['task_id'], profile['evaluation_id'], digest, description), reviewer
+                            profile['task_id'], profile['evaluation_id'], digest, description), profile
 
 
-def _reviewer_environment(source: Mapping[str, str], codex_home: Path) -> dict[str, str]:
-    """Give the native Codex transport only role-local subscription credentials."""
+def _reviewer_environment(
+    source: Mapping[str, str], role_home: Path, reviewer: Mapping[str, Any], canonical: Path,
+) -> dict[str, str]:
+    """Give only the selected native transport its independent credential capability."""
     result = {key: value for key, value in source.items()
               if key in {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}}
-    result['CODEX_HOME'] = str(codex_home)
+    if reviewer['backend'] == 'codex':
+        result['CODEX_HOME'] = str(role_home)
+        result['DAYDREAM_FANOUT_CONCURRENCY'] = str(reviewer['fanout_concurrency'])
+    else:
+        from daydream.benchmark.reviewbench.harbor_auth import REVIEWER_PI_BOOTSTRAP
+
+        result['PI_CODING_AGENT_DIR'] = str(role_home)
+        result['PI_PROVIDER'] = reviewer['provider']
+        if reviewer.get('thinking') is not None:
+            result['PI_THINKING'] = reviewer['thinking']
+        result['DAYDREAM_PI_FANOUT_CONCURRENCY'] = str(reviewer['fanout_concurrency'])
+        result['DAYDREAM_RB_PI_AUTH_PATH'] = str((canonical / 'auth.json').resolve())
+        result['NODE_OPTIONS'] = '--import=' + json.dumps(REVIEWER_PI_BOOTSTRAP)
     return result
 
 
@@ -128,15 +140,18 @@ async def main(environment: Mapping[str, str]) -> int:
     inputs = Path(environment.get('DAYDREAM_RB_INPUTS', '/work/pr'))
     output = Path(environment.get('DAYDREAM_RB_OUTPUT', '/work/out/findings.json'))
     evidence = Path(environment.get('DAYDREAM_RB_EVIDENCE', '/logs/agent/daydream'))
-    canonical = Path(environment.get('DAYDREAM_RB_CODEX_HOME', '/run/reviewbench-codex'))
     harbor_trajectory = evidence.parent / RUN_DOCUMENT_NAME
     started = time.monotonic()
     try:
         if (output.exists() or evidence.exists()
                 or harbor_trajectory.exists() or harbor_trajectory.is_symlink()):
             raise PublicReviewerError('prior reviewer artifacts exist; use a fresh trial')
-        task, reviewer = load_public_task(inputs / 'daydream-profile.json', inputs / 'pr.json', inputs / 'diff.patch')
-        # Import lazily: the ordinary standalone native adapter needs no lease.
+        task, profile = load_public_task(inputs / 'daydream-profile.json', inputs / 'pr.json', inputs / 'diff.patch')
+        reviewer = profile['reviewer']
+        backend = reviewer['backend']
+        canonical = Path(environment.get('DAYDREAM_RB_CODEX_HOME' if backend == 'codex'
+            else 'DAYDREAM_RB_REVIEWER_HOME', '/run/reviewbench-codex' if backend == 'codex'
+            else '/run/reviewbench-reviewer'))
         from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 
         execution = None
@@ -146,33 +161,28 @@ async def main(environment: Mapping[str, str]) -> int:
             staged = private / 'native-evidence'
             try:
                 with (_private_archive_directory(private / 'archive'),
-                      reviewer_credentials(canonical, private / 'codex') as role_home):
-                    # A fresh private home prevents user config, API providers and
-                    # project settings from changing this frozen subscription lane.
-                    (role_home / 'config.toml').write_text('model_provider = "openai"\n'
-                        'cli_auth_credentials_store = "file"\n')
-                    controls = _reviewer_environment(environment, role_home)
-                    controls['DAYDREAM_FANOUT_CONCURRENCY'] = str(reviewer['fanout_concurrency'])
-                    config = RunConfig(target=str(repository), backend='codex', model=reviewer['model'],
-                        reasoning_effort=reviewer['reasoning_effort'], file_config=DaydreamFileConfig(),
-                        review_profile=resolve_harbor_profile(candidate_env='DAYDREAM_RB_UNUSED', env={}),
-                        output_mode='review', non_interactive=True, dataset_capture_disabled=True,
-                        archive=False, run_eval=False)
-                    # Resolve native controls from the dedicated role environment;
-                    # there is no mutation of global authentication or provider state.
+                      reviewer_credentials(canonical, private / backend, backend=backend,
+                                           provider=reviewer['provider']) as role_home):
+                    if backend == 'codex':
+                        (role_home / 'config.toml').write_text('model_provider = "openai"\n'
+                            'cli_auth_credentials_store = "file"\n')
+                    elif reviewer.get('pi_models') is not None:
+                        (role_home / 'models.json').write_text(json.dumps(reviewer['pi_models']))
+                    controls = _reviewer_environment(environment, role_home, reviewer, canonical)
+                    config = reviewer_config(reviewer, repository)
                     from daydream.backends import BackendExecutionInput
                     from daydream.git_ops import StaticGitHubAuth
                     from daydream.github_app import GitHubExecutionInput
                     from daydream.runner import RunnerExecutionInput
 
-                    native = BackendExecutionInput.from_environment(controls, backend='codex')
-                    runtime = ({'codex': {'subscription_access': 'chatgpt-oauth', 'provider': 'openai',
-                                         'configuration': 'fresh-role-home',
-                                         'fanout_concurrency': native.fanout_concurrency}},
-                               RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
-                                                    backends={'codex': native}))
-                    execution = await review_case(task.case, repository, config, 'daydream-native-codex',
-                        runtime=runtime, public_task=task, evidence_directory=staged)
+                    native = BackendExecutionInput.from_environment(controls, backend=backend)
+                    if backend == 'pi':
+                        native = replace(native, pi_settings=reviewer['pi_settings'])
+                    capability = RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
+                                                      backends={backend: native})
+                    execution = await review_case(task.case, repository, config, 'daydream-native-' + backend,
+                        execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
+                        public_task=task, evidence_directory=staged)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
@@ -197,7 +207,8 @@ async def main(environment: Mapping[str, str]) -> int:
                     record = asdict(execution)
                     record.update(task_id=task.task_id, evaluation_id=task.evaluation_id,
                         profile_sha256=task.profile_sha256, elapsed_seconds=time.monotonic() - started,
-                        subscription_access='chatgpt-oauth',
+                        reviewer_backend=backend, reviewer_provider=reviewer['provider'],
+                        reviewer_authentication='chatgpt-oauth' if backend == 'codex' else 'native-pi',
                         cost_interpretation='API-equivalent estimate when available')
                     _write_new_json(evidence / 'execution.json', record)
         if execution is None:

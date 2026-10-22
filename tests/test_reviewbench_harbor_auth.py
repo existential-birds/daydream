@@ -20,7 +20,9 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.reviewbench import harbor_auth
-from tests.test_reviewbench_evaluator import supplied_source as supplied_source
+from daydream.benchmark.reviewbench.native import freeze_reviewer
+from daydream.run_config import RunConfig
+from tests.harness.reviewbench import supplied_source as supplied_source
 
 
 def _token(expiry: int = 1) -> str:
@@ -513,3 +515,109 @@ if(existsSync(process.env.PI_CODING_AGENT_DIR+'/auth.json')) throw Error('copied
                 pending.communicate(timeout=15)
     assert not (canonical / 'auth.json.lock').exists()
     assert json.loads((canonical / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-rotated'
+
+
+def test_native_pi_reviewer_uses_its_own_canonical_auth_and_native_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The native reviewer SDK differs from the supplied judge's pinned SDK.
+
+    Reusing its bootstrap against the bundled CLI leaves a different AuthStorage
+    class unbound. Use the actual published unbundled native module and its real
+    file locks, with synthetic credentials and no provider requests.
+    """
+    configured = os.environ.get('DAYDREAM_REVIEWBENCH_NATIVE_PI')
+    if not configured:
+        pytest.skip('set DAYDREAM_REVIEWBENCH_NATIVE_PI to the locked native Pi 1.3.0 package directory')
+    package = Path(configured).resolve()
+    assert json.loads((package / 'package.json').read_text())['version'] == '1.3.0'
+    model_ids = ['deepseek/deepseek-v4.1-flash', 'deepseek/deepseek-v4.1-flash-1017']
+    operator = tmp_path / 'operator'
+    operator.mkdir()
+    (operator / 'models.json').write_text(json.dumps({'providers': {'nous': {
+        'baseUrl': 'https://inference-api.nousresearch.com/v1', 'apiKey': 'synthetic-ignored-fallback',
+        'models': [{'id': name, 'name': name, 'api': 'openai-completions', 'reasoning': True,
+                    'input': ['text'], 'contextWindow': 1000000, 'maxTokens': 8192,
+                    'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}} for name in model_ids],
+    }}}))
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(operator))
+    monkeypatch.setenv('PI_PROVIDER', 'nous')
+    frozen = freeze_reviewer(RunConfig(target=str(tmp_path), backend='pi', model=model_ids[0],
+                                       parse_model=model_ids[1]))
+    for name in ('pi1', 'pi2'):
+        role = tmp_path / name
+        role.mkdir()
+        (role / 'models.json').write_text(json.dumps(frozen['pi_models']))
+    canonical, judge = tmp_path / 'native-auth', tmp_path / 'judge-auth'
+    canonical.mkdir()
+    (canonical / 'auth.json').write_text(json.dumps({'nous': {'type': 'api_key', 'key': 'synthetic-native-key'}}))
+    _pi_login(judge)
+    judge_bytes = (judge / 'auth.json').read_bytes()
+    harbor_auth.validate_credential_stores(canonical, judge, backend='pi', provider='nous')
+    runtime = tmp_path / 'native-runtime'
+    runtime.mkdir()
+    (runtime / 'dist').symlink_to(package / 'dist', target_is_directory=True)
+    binding = runtime / 'binding.mjs'
+    binding.write_bytes(Path(harbor_auth.__file__).with_name('reviewer_auth.mjs').read_bytes())
+    script = runtime / 'native.mjs'
+    script.write_text('''import {existsSync,writeFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
+import {AuthStorage,FileAuthStorageBackend} from './dist/core/auth-storage.js';
+import {createAgentSessionServices} from './dist/core/agent-session-services.js';
+const require=createRequire(import.meta.resolve('./dist/core/auth-storage.js'));
+const lockfile=require('proper-lockfile');
+globalThis.fetch=()=>{throw Error('native auth test attempted network');};
+const root=process.argv[2],mode=process.argv[3],path=process.env.DAYDREAM_RB_PI_AUTH_PATH;
+if(mode==='second') {
+ try {lockfile.lockSync(path,{realpath:false});throw Error('canonical lock did not contend');}
+ catch(error){if(error.code!=='ELOCKED')throw error;}
+ writeFileSync(root+'/blocked','');
+ while(!existsSync(root+'/release'))await new Promise(resolve=>setTimeout(resolve,10));
+}
+const services=await createAgentSessionServices({cwd:root,agentDir:process.env.PI_CODING_AGENT_DIR,
+ resourceLoaderOptions:{noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true}});
+if(services.diagnostics.some(item=>item.type==='error'))throw Error('native session setup failed');
+if(JSON.stringify(services.modelRuntime.getAllModels('nous').map(model=>model.id).sort())!==
+ JSON.stringify(['deepseek/deepseek-v4.1-flash','deepseek/deepseek-v4.1-flash-1017']))
+ throw Error('native phase model override unavailable');
+const storage=services.modelRuntime.credentials.store;
+if(storage.authPath!==path)throw Error('native factory lost canonical auth path');
+try {AuthStorage.create(root+'/unadmitted-auth.json');throw Error('unadmitted native auth path accepted');}
+catch(error){if(error.message!=='ReviewBench reviewer cannot select another credential store')throw error;}
+if(mode==='first') {
+ await new FileAuthStorageBackend(storage.authPath).withLockAsync(async current=>{
+  writeFileSync(root+'/locked','');
+  while(!existsSync(root+'/release'))await new Promise(resolve=>setTimeout(resolve,10));
+  const value=JSON.parse(current);value.nous.key='synthetic-native-rotated';
+  return {result:undefined,next:JSON.stringify(value)};
+ });
+} else {
+ const value=await storage.read('nous');
+ if(value.key!=='synthetic-native-rotated')throw Error('lost native credential rotation');
+}
+if(existsSync(process.env.PI_CODING_AGENT_DIR+'/auth.json'))throw Error('copied native credential');
+''')
+    command = ['node', '--import', str(binding), str(script), str(tmp_path)]
+    environment = {'PATH': os.environ['PATH'], 'HOME': str(tmp_path), 'PI_OFFLINE': '1',
+                   'DAYDREAM_RB_PI_AUTH_PATH': str(canonical / 'auth.json')}
+    first = subprocess.Popen([*command, 'first'], env={**environment, 'PI_CODING_AGENT_DIR': str(tmp_path / 'pi1')},
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    second = None
+    try:
+        _wait_for(tmp_path / 'locked', first)
+        second = subprocess.Popen([*command, 'second'],
+            env={**environment, 'PI_CODING_AGENT_DIR': str(tmp_path / 'pi2')},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _wait_for(tmp_path / 'blocked', second)
+        (tmp_path / 'release').touch()
+        for process in (first, second):
+            stdout, stderr = process.communicate(timeout=20)
+            assert process.returncode == 0, stdout + stderr
+    finally:
+        for pending in (first, second):
+            if pending is not None and pending.poll() is None:
+                pending.terminate()
+                pending.communicate(timeout=15)
+    assert (judge / 'auth.json').read_bytes() == judge_bytes
+    assert not (canonical / 'auth.json.lock').exists()
+    assert json.loads((canonical / 'auth.json').read_text())['nous']['key'] == 'synthetic-native-rotated'

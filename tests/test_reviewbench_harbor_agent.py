@@ -21,18 +21,20 @@ from daydream import git_ops, runner
 from daydream.artifacts import external
 from daydream.backends import AgentEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.codex import CodexBackend
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
+from daydream.benchmark.reviewbench.native import freeze_reviewer
 from daydream.trajectory import RUNS_DIRNAME, run_directory, run_document_path
-from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
 from tests.test_reviewbench_native import finding, frozen_case
 
 
-def public_input(tmp_path: Path) -> dict[str, str]:
-    repo, case = frozen_case(tmp_path)
+def public_input(tmp_path: Path, *, additional_sources: int = 0) -> dict[str, str]:
+    repo, case = frozen_case(tmp_path, additional_sources=additional_sources)
     git(repo, 'remote', 'remove', 'origin')
     git_ops.update_refs(repo, {'refs/reviewbench/base': case.base, 'refs/reviewbench/head': case.head})
     inputs = tmp_path / 'pr'
@@ -40,9 +42,11 @@ def public_input(tmp_path: Path) -> dict[str, str]:
     pr = {**asdict(case), 'title': 'Frozen supplied title', 'body': 'Frozen supplied author explanation'}
     (inputs / 'pr.json').write_text(json.dumps(pr))
     (inputs / 'diff.patch').write_text(git_ops.diff_paths(repo, case.base, case.head, ['.']))
-    profile = {'schema': 2, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
+    profile = {'schema': 3, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
                'task_id': 7, 'evaluation_id': 99,
-               'reviewer': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high', 'fanout_concurrency': 1}}
+               'reviewer': freeze_reviewer(empty_review_config(repo, tmp_path / 'ignored', backend='codex',
+                   model='gpt-6.1-sol', reasoning_effort='high')),
+               'candidate': {'artifact_sha256': candidate_package_digest()}}
     profile['profile_sha256'] = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'))
                                                .encode()).hexdigest()
     (inputs / 'daydream-profile.json').write_text(json.dumps(profile))
@@ -204,10 +208,11 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
     assert record['terminal_result']['analyzed_revision']['head_sha'] == record['analyzed_comparison']['head_sha']
     assert record['task_id'] == 7 and record['evaluation_id'] == 99
-    assert record['subscription_access'] == 'chatgpt-oauth'
+    assert record['reviewer_authentication'] == 'chatgpt-oauth'
     assert active == 0 and peak_active == 1
-    assert record['configuration']['native']['codex']['fanout_concurrency'] == 1
-    assert record['configuration']['native']['codex']['subscription_access'] == 'chatgpt-oauth'
+    assert record['reviewer_backend'] == 'codex' and record['reviewer_provider'] == 'openai'
+    assert record['configuration']['phases']['per_stack_review']['backend'] == 'codex'
+    assert record['configuration']['phases']['per_stack_review']['model'] == 'gpt-6.1-sol'
     assert role_homes and all(not home.exists() for home in role_homes)
     assert json.loads((Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').read_text())[
         'tokens']['refresh_token'] == 'private-rotated-canary'
