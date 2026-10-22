@@ -258,7 +258,7 @@ def handle(args: argparse.Namespace) -> int:
                     verified = load_evaluation(Path(plan['source']), round_dir / 'findings', round_dir / 'evaluation')
                     print(render_report(Path(plan['source']), round_dir / 'evaluation' / 'results.json'))
                     metrics.append(verified['metrics'])
-            if len(metrics) == 3 and plan['set'] == 'full' and complete:
+            if len(metrics) == 3 and complete:
                 print(json.dumps(average_rounds(metrics), indent=2))
             return 0 if complete else 1
         round_dir = _round(directory, args.round, plan)

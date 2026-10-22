@@ -325,11 +325,11 @@ def _stratified_means(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 
 def average_rounds(rounds: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Average corresponding supplied ratios across three independent full rounds.
+    """Average corresponding supplied ratios across three independent complete rounds.
 
     Counts and usage remain in each raw round. Null scores are unavailable, never
     zero; each mean records how many rounds measured that ratio. The caller owns
-    proof that these three isolated artifacts cover the selected full corpus.
+    proof that these three isolated artifacts cover the entire selected set.
     """
     if len(rounds) != 3:
         raise EvaluationError("Repeatability reporting requires exactly three independent rounds")

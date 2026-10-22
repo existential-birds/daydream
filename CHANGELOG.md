@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Average three complete ReviewBench rounds for the 25-task test set while
+  continuing to withhold averages for incomplete selections
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
 - Accept native HEAD finding locations even when the same line number exists
   in the old file, removing an overstrict ReviewBench conversion guard.
 
