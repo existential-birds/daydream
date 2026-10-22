@@ -1,0 +1,8 @@
+{
+  "name": "daydream-reviewbench-native-pi",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.3.0"
+  }
+}

@@ -9,23 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Run the pinned public ReviewBench corpus through the ordinary native reviewer,
-  standalone or in Harbor, with supplied judging and reports, complete failure and
-  missing-case accounting, and three-round comparisons for the exact 25-task test
-  set or full 219-task corpus. The Harbor profile adds separate persistent
-  reviewer/judge subscription logins, frozen isolation policy and retained private
-  native trajectories and sanitized judge evidence
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688),
+- Run the pinned public ReviewBench corpus through Harbor with ordinary native
+  Pi/Nous or Codex reviewers and an independent common Codex-subscription judge.
+  Use the exact supplied 25-task test set or full 219-task corpus, independent
+  rounds, supplied scoring/reports, isolated credentials and retained native/judge
+  evidence ([#1688](https://github.com/existential-birds/daydream/pull/1688),
   [#92](https://github.com/existential-birds/daydream/issues/92)).
-  This is additive functionality for a minor release; ordinary reviewer defaults
-  are unchanged. No version bump is included.
 
 ### Changed
 
-- ReviewBench plans, evaluator receipts and Harbor policy/task profiles use schema
-  2. Create fresh plans, evaluations and exports; preserve older evidence without
-  migration. CLI commands and options are unchanged. Harbor uses dedicated
-  `--codex-home` and `--pi-home` subscription stores
+- Make Harbor the sole public ReviewBench workflow. Remove this PR's standalone
+  `plan`, `run`, `status`, `judge` and `report` commands; use `harbor-export` and
+  `harbor-run`. Reviewer overrides use ordinary native arguments after export's
+  `--`; exact `--set`/repeatable `--task` selection replaces the count limit.
+  Policy/task profiles use schema 3 and require fresh exports; preserve older
+  evidence without migration. Ordinary reviewer behavior is unchanged. This
+  deliberately changes PR-only interfaces; no version bump is included
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 
 - Reduce the README to agent setup, code review, and research entry points; remove

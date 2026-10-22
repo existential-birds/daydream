@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from daydream.benchmark.reviewbench.contract import (
     REVIEWBENCH_REVISION,
@@ -30,13 +33,14 @@ JUDGE_HOME = '/run/reviewbench-pi'
 PROFILE_PATH = '/work/pr/daydream-profile.json'
 
 
-def _compose(platform: str, *, reviewer: bool) -> str:
+def _compose(platform: str, *, reviewer: bool, backend: str = 'codex') -> str:
     """Keep the judge on Docker's default syscall policy and share only auth."""
     security = ('    security_opt:\n'
                 '      - "seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}"\n'
                 if reviewer else '')
-    role = "CODEX" if reviewer else "PI"
-    target = "/run/reviewbench-codex" if reviewer else JUDGE_HOME
+    role = ("REVIEWER_PI" if backend == 'pi' else "CODEX") if reviewer else "PI"
+    target = (("/run/reviewbench-reviewer" if backend == 'pi' else "/run/reviewbench-codex")
+              if reviewer else JUDGE_HOME)
     return f'''services:
   main:
     platform: {platform}
@@ -94,14 +98,56 @@ def _image(value: str) -> str:
     return value
 
 
+def selected_reviewer_policy(reviewer: Mapping[str, Any], *,
+                             environment: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Bind the selected native endpoint/model, without reading authentication.
+
+    Nous is an operator-defined native Pi provider. Copy only its selected public
+    model definition; credentials remain in Pi's native auth store. Other native
+    providers need an explicit isolation contract before this public lane admits
+    them. Ordinary Daydream backend support is unaffected.
+    """
+    policy = dict(reviewer)
+    if policy.get('backend') == 'codex':
+        policy['allowed_hosts'] = ['chatgpt.com', 'auth.openai.com']
+        return policy
+    if policy.get('backend') != 'pi' or policy.get('provider') != 'nous':
+        raise ValueError('Public ReviewBench supports native Codex or the configured Pi nous provider')
+    env = os.environ if environment is None else environment
+    agent_dir = Path(env.get('PI_CODING_AGENT_DIR') or Path(env.get('HOME', str(Path.home()))) / '.pi/agent').resolve()
+    try:
+        providers = json.loads((agent_dir / 'models.json').read_text())['providers']
+        provider = providers['nous']
+        required = {policy['model'], *policy.get('phase_models', {}).values()}
+        catalog = {item['id']: item for item in provider['models']}
+        models = [catalog[name] for name in sorted(required)]
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        raise ValueError('Selected native Pi nous model definition is unavailable') from None
+    if set(provider) - {'apiKey', 'baseUrl', 'models', 'api'}:
+        raise ValueError('Selected Pi provider has unsupported routing or authentication extensions')
+    allowed_model = {'id', 'name', 'api', 'reasoning', 'input', 'cost', 'contextWindow', 'maxTokens',
+                     'compat', 'thinkingLevelMap'}
+    if any(set(model) - allowed_model for model in models):
+        raise ValueError('Selected Pi model has unsupported routing or authentication extensions')
+    address = urlsplit(provider.get('baseUrl', ''))
+    if (address.scheme != 'https' or not address.hostname or address.username or address.password
+            or address.query or address.fragment or address.port not in (None, 443)):
+        raise ValueError('Selected native Pi provider requires an exact HTTPS endpoint')
+    public_provider = {'baseUrl': provider['baseUrl'], 'models': models}
+    if 'api' in provider:
+        public_provider['api'] = provider['api']
+    policy['pi_models'] = {'providers': {'nous': public_provider}}
+    policy['allowed_hosts'] = [address.hostname]
+    return policy
+
+
 def export_harbor_profile(
     source: Path,
     output: Path,
     *,
     candidate: Mapping[str, Any],
     base_image: str,
-    reviewer_model: str = CODEX_MODEL,
-    reviewer_effort: str = 'high',
+    reviewer: Mapping[str, Any] | None = None,
     reviewer_dockerfile_suffix: str = '',
     reviewer_assets: Mapping[str, bytes] | None = None,
     rounds: int = 3,
@@ -120,7 +166,16 @@ def export_harbor_profile(
         raise ValueError('Export destination already exists; preserve existing evidence')
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
-    models = codex_models(reviewer_model)
+    models = codex_models()
+    if reviewer is None:
+        from daydream.benchmark.reviewbench.native import freeze_reviewer
+        from daydream.run_config import RunConfig
+
+        reviewer = freeze_reviewer(RunConfig(backend='codex', model=CODEX_MODEL, reasoning_effort='high'))
+    reviewer = dict(reviewer)
+    if (reviewer.get('backend') not in {'codex', 'pi'} or reviewer.get('fanout_concurrency') != 1
+            or not reviewer.get('allowed_hosts')):
+        raise ValueError('Reviewer must be an admitted frozen native configuration')
     if platform not in REVIEWBENCH_PLATFORMS:
         raise ValueError('Public ReviewBench requires an explicit supported Linux platform')
     if candidate.get('platform', platform) != platform:
@@ -128,8 +183,6 @@ def export_harbor_profile(
     if type(rounds) is not int or rounds < 1:
         raise ValueError('Independent comparison rounds must be positive')
     _image(base_image)
-    if reviewer_effort not in {'low', 'medium', 'high', 'xhigh'}:
-        raise ValueError('Unsupported native Codex reasoning effort')
     # No arbitrary kwargs/environment escape hatch: profile data is retained in
     # images and jobs. Explicitly refuse common credential-bearing identities.
     serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
@@ -145,17 +198,18 @@ def export_harbor_profile(
     seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
-    reviewer_compose = _compose(platform, reviewer=True)
+    reviewer_compose = _compose(platform, reviewer=True, backend=reviewer['backend'])
     verifier_compose = _compose(platform, reviewer=False)
     policy: dict[str, Any] = {
-        'schema': 2, 'name': 'daydream-reviewbench-codex-subscription-v2',
+        'schema': 3, 'name': 'daydream-reviewbench-native',
         'source': source_identity, 'source_prs': len(cases),
+        'cases': {case.key: asdict(case) for case in cases},
+        'test_tasks': [case.key for case in load_cases(source, 'test')],
         'candidate': dict(candidate), 'final_comparison_rounds': rounds,
         'trial_concurrency': 1,
-        'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': 900,
-                     'fanout_concurrency': 1},
+        'reviewer': reviewer,
         'judge': {
-            'provider': 'openai-codex', 'model': reviewer_model, 'auth': 'subscription-oauth',
+            'provider': 'openai-codex', 'model': CODEX_MODEL, 'auth': 'subscription-oauth',
             'matcher_effort': 'low', 'classifier_effort': 'medium',
             'call_timeout_ms': 600000, 'classifier_extra_per_finding_ms': 120000,
             'verifier_timeout_sec': 7200, 'models': models,
@@ -183,8 +237,9 @@ def export_harbor_profile(
         subprocess.run([
             'node', '--import', 'tsx', str(source / 'scripts/harbor/export.ts'),
             '--output', str(exported), '--organization', 'daydream-local', '--split', 'full',
-            '--judge-provider', 'openai-codex', '--judge-model', reviewer_model,
-            '--base-image', base_image, '--agent-host', 'chatgpt.com', '--agent-host', 'auth.openai.com',
+            '--judge-provider', 'openai-codex', '--judge-model', CODEX_MODEL,
+            '--base-image', base_image,
+            *[argument for host in reviewer['allowed_hosts'] for argument in ('--agent-host', host)],
             '--judge-host', 'chatgpt.com', '--judge-host', 'auth.openai.com',
             '--judge-env', 'DAYDREAM_RB_PI_AUTH_PATH=RB_HARBOR_PI_AUTH_PATH',
         ], cwd=source, check=True)
@@ -201,7 +256,7 @@ def export_harbor_profile(
             expected[str(task['task_id'])] = task['evaluation_id']
             _write_json(task_path, task)
             profile = {
-                'schema': 2, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
+                'schema': 3, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
                 'task_id': task['task_id'], 'evaluation_id': task['evaluation_id'],
                 'reviewer': policy['reviewer'], 'candidate': dict(candidate), 'policy_sha256': policy_sha,
             }
@@ -259,7 +314,7 @@ def export_harbor_profile(
         (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
         (exported / 'dataset.toml').write_text(
             'schema_version = "1.0"\n[dataset]\n'
-            f'name = {json.dumps("daydream-local/reviewbench-codex-subscription")}\n'
+            f'name = {json.dumps("daydream-local/reviewbench-native")}\n'
             'description = "Full public ReviewBench: 219 frozen PRs; custom subscription Codex judge."\n'
             'keywords = ["code-review", "reviewbench", "daydream"]\n\n'
             + '\n'.join(references) + '\n[[files]]\npath = "metric.py"\n'

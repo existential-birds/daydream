@@ -29,6 +29,8 @@ from typing import Any
 from daydream.json_utils import atomic_write_bytes, publish_staged_directory
 from daydream.redaction import redact_value
 
+REVIEWER_PI_BOOTSTRAP = '/opt/pi/node_modules/@earendil-works/pi-coding-agent/daydream-auth.mjs'
+
 
 class SubscriptionAuthError(ValueError):
     """An intentionally credential-free subscription capability failure."""
@@ -103,7 +105,18 @@ def validate_judge_home(home: Path) -> None:
         raise SubscriptionAuthError("judge subscription access token has no usable expiry")
 
 
-def validate_credential_stores(reviewer: Path, judge: Path) -> None:
+def validate_pi_reviewer_home(home: Path, provider: str | None) -> None:
+    """Require the selected native Pi credential without translating its format."""
+    if provider != 'nous':
+        raise SubscriptionAuthError('public Pi reviewer requires the configured nous provider')
+    credential = _read(home / 'auth.json').get(provider)
+    if not isinstance(credential, dict) or credential.get('type') != 'api_key':
+        raise SubscriptionAuthError('selected native Pi provider credential is unavailable')
+    _text(credential.get('key'))
+
+
+def validate_credential_stores(reviewer: Path, judge: Path, *,
+                               backend: str = 'codex', provider: str | None = None) -> None:
     """Require disjoint auth-only mounts and reject an obviously copied session.
 
     Different tokens cannot prove independent sign-ins; setup must create them.
@@ -114,18 +127,25 @@ def validate_credential_stores(reviewer: Path, judge: Path) -> None:
     for home, role in ((reviewer, "reviewer"), (judge, "judge")):
         if home.is_symlink() or not home.is_dir():
             raise SubscriptionAuthError("dedicated credential directory is unavailable")
-        allowed = {"auth.json", ".reviewer.lock"} if role == "reviewer" else {"auth.json", "auth.json.lock"}
+        allowed = ({"auth.json", ".reviewer.lock"} if role == "reviewer" and backend == 'codex'
+                   else {"auth.json", "auth.json.lock"})
         if any(path.name not in allowed or path.is_symlink() for path in home.iterdir()):
             raise SubscriptionAuthError("mount only dedicated credential state; remove configuration and sessions")
-    validate_subscription_home(reviewer)
     validate_judge_home(judge)
+    if backend == 'pi':
+        validate_pi_reviewer_home(reviewer, provider)
+        return
+    if backend != 'codex':
+        raise SubscriptionAuthError('unsupported native reviewer credential capability')
+    validate_subscription_home(reviewer)
     reviewer_refresh = _read(reviewer / "auth.json")["tokens"]["refresh_token"]
     if reviewer_refresh == _read(judge / "auth.json")["openai-codex"]["refresh"]:
         raise SubscriptionAuthError("copied OAuth session; create independent reviewer and judge sign-ins")
 
 
 @contextmanager
-def reviewer_credentials(canonical_home: Path, role_home: Path) -> Iterator[Path]:
+def reviewer_credentials(canonical_home: Path, role_home: Path, *,
+                          backend: str = 'codex', provider: str | None = None) -> Iterator[Path]:
     """Serialize native Codex invocations and link only the persistent credential.
 
     Codex 0.163.0 writes its file store in place. No credential copies, conversion,
@@ -137,6 +157,14 @@ def reviewer_credentials(canonical_home: Path, role_home: Path) -> Iterator[Path
         raise SubscriptionAuthError("canonical and private reviewer homes must be separate regular directories")
     role_home.mkdir(parents=True, exist_ok=True, mode=0o700)
     role_home.chmod(0o700)
+    if backend == 'pi':
+        validate_pi_reviewer_home(canonical_home, provider)
+        # The controlled Node bootstrap binds AuthStorage to the canonical path;
+        # Pi keeps its own refresh locks there while settings/sessions are private.
+        yield role_home
+        return
+    if backend != 'codex':
+        raise SubscriptionAuthError('unsupported native reviewer credential capability')
     role_path = role_home / "auth.json"
     if role_path.exists() or role_path.is_symlink():
         raise SubscriptionAuthError("refusing stale reviewer subscription credentials")

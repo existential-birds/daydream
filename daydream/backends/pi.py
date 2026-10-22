@@ -534,6 +534,56 @@ def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
     return path
 
 
+def native_pi_provider(
+    cwd: Path, *, execution_input: BackendExecutionInput | None, configured_model: str | None,
+    model_override: str | None, model: str,
+) -> str | None:
+    """Resolve the native provider once using the same policy as process dispatch."""
+    frozen_settings = None if execution_input is None else execution_input.pi_settings
+    provider = (
+        execution_input.pi_provider
+        if execution_input is not None
+        else os.environ.get("PI_PROVIDER")
+    )
+    if provider is None and frozen_settings is not None:
+        provider = frozen_settings.get("defaultProvider")
+        if (provider is None and configured_model is not None
+                and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None):
+            raise PiError("Case Pi provider conflicts with unavailable operator provider", category="AUTH_CONFIG")
+    if provider is None and configured_model is None:
+        provider = _PI_DEFAULT_PROVIDER
+        if model_override is not None and model.casefold().startswith("glm-"):
+            _warn_migration_mismatch_once(
+                f"glm-pin:{model}",
+                "Explicit model %r is a z.ai-hosted GLM model, but the "
+                "Pi backend now defaults to the %s provider and "
+                "PI_PROVIDER is unset; the pinned model will fail at "
+                "runtime unless PI_PROVIDER=zai is set or the model is "
+                "migrated to the %s registry.",
+                model,
+                _PI_DEFAULT_PROVIDER,
+                _PI_DEFAULT_PROVIDER,
+            )
+    elif (
+        model_override is None and configured_model is None
+        and provider and provider != _PI_DEFAULT_PROVIDER
+    ):
+        _warn_migration_mismatch_once(
+            f"fallback-provider:{provider}",
+            "PI_PROVIDER=%r is set with no configured model, so the Pi "
+            "backend falls back to %r, which is served by the %s "
+            "provider; if %r does not serve that model the run will "
+            "fail at runtime. Unset PI_PROVIDER or set it to %s to "
+            "adopt the new default, or configure a model explicitly.",
+            provider,
+            model,
+            _PI_DEFAULT_PROVIDER,
+            provider,
+            _PI_DEFAULT_PROVIDER,
+        )
+    return provider
+
+
 class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
@@ -641,47 +691,8 @@ class PiBackend:
         frozen_settings = None if self._execution_input is None else self._execution_input.pi_settings
         if self._model_override is not None or configured_model is None or frozen_settings is not None:
             args.extend(["--model", self.model])
-        provider = (
-            self._execution_input.pi_provider
-            if self._execution_input is not None
-            else os.environ.get("PI_PROVIDER")
-        )
-        if provider is None and frozen_settings is not None:
-            provider = frozen_settings.get("defaultProvider")
-            if (provider is None and configured_model is not None
-                    and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None):
-                raise PiError("Case Pi provider conflicts with unavailable operator provider", category="AUTH_CONFIG")
-        if provider is None and configured_model is None:
-            provider = _PI_DEFAULT_PROVIDER
-            if self._model_override is not None and self.model.casefold().startswith("glm-"):
-                _warn_migration_mismatch_once(
-                    f"glm-pin:{self.model}",
-                    "Explicit model %r is a z.ai-hosted GLM model, but the "
-                    "Pi backend now defaults to the %s provider and "
-                    "PI_PROVIDER is unset; the pinned model will fail at "
-                    "runtime unless PI_PROVIDER=zai is set or the model is "
-                    "migrated to the %s registry.",
-                    self.model,
-                    _PI_DEFAULT_PROVIDER,
-                    _PI_DEFAULT_PROVIDER,
-                )
-        elif (
-            self._model_override is None and configured_model is None
-            and provider and provider != _PI_DEFAULT_PROVIDER
-        ):
-            _warn_migration_mismatch_once(
-                f"fallback-provider:{provider}",
-                "PI_PROVIDER=%r is set with no configured model, so the Pi "
-                "backend falls back to %r, which is served by the %s "
-                "provider; if %r does not serve that model the run will "
-                "fail at runtime. Unset PI_PROVIDER or set it to %s to "
-                "adopt the new default, or configure a model explicitly.",
-                provider,
-                self.model,
-                _PI_DEFAULT_PROVIDER,
-                provider,
-                _PI_DEFAULT_PROVIDER,
-            )
+        provider = native_pi_provider(cwd, execution_input=self._execution_input, configured_model=configured_model,
+            model_override=self._model_override, model=self.model)
 
         child_env = (
             self._execution_input.child_environment()

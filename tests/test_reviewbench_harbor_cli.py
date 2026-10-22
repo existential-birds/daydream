@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,8 +25,9 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.reviewbench import harbor_build, harbor_cli
+from daydream.benchmark.reviewbench.contract import Case, load_cases
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
-from tests.test_reviewbench_evaluator import supplied_source as supplied_source
+from tests.harness.reviewbench import supplied_source as supplied_source
 from tests.test_reviewbench_seccomp import moby_policy as moby_policy
 
 
@@ -46,7 +48,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         '  sys.argv = [checker, *sys.argv[3:]]\n'
         '  runpy.run_path(checker, run_name="__main__")\n'
         ' else:\n'
-        '  pathlib.Path(sys.argv[-1]).write_text(json.dumps({"complete": 1}))\n'
+        '  pass  # Argument/environment tests make no scoring assertion.\n'
         ' raise SystemExit(0)\n'
         'assert sys.argv[1:3] == ["-m", "reviewbench_harbor.check-format"]\n'
         'assert (pathlib.Path(sys.argv[3]) / "daydream-profile.json").is_file()\n'
@@ -62,8 +64,11 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'job.mkdir(parents=True)\n'
         'if results := os.environ.get("DAYDREAM_TEST_HARBOR_RESULTS"):\n'
         ' shutil.copytree(results, job, dirs_exist_ok=True)\n'
-        'record = {"args": args, "metric_config": json.loads(pathlib.Path(args[args.index("-c") + 1]).read_text()),\n'
-        ' "environment": {key: os.environ[key] for key in ("RB_HARBOR_CODEX_AUTH_DIR", "RB_HARBOR_PI_AUTH_DIR",\n'
+        'record = {"args": args, "metric_config": json.loads('
+        'pathlib.Path(args[args.index("-c") + 1]).read_text()),\n'
+        ' "environment": {key: os.environ[key] for key in ("RB_HARBOR_CODEX_AUTH_DIR",\n'
+        ' "RB_HARBOR_REVIEWER_PI_AUTH_DIR",\n'
+        ' "RB_HARBOR_PI_AUTH_DIR",\n'
         ' "RB_HARBOR_PI_AUTH_PATH", "RB_HARBOR_SECCOMP_PROFILE", "DOCKER_DEFAULT_PLATFORM", "OPENAI_API_KEY",\n'
         ' "OPENAI_BASE_URL", "CODEX_BEARER_TOKEN", "OPENAI_WORKLOAD_IDENTITY_TOKEN") if key in os.environ}}\n'
         '(job / "launch.json").write_text(json.dumps(record))\n'
@@ -94,14 +99,31 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'expires': 1, 'accountId': 'test-account',
     }}))
     candidate = {'artifact_sha256': 'a' * 64, 'version': '0.30.0'}
-    policy = {'schema': 2, 'source_prs': 219, 'final_comparison_rounds': 3, 'candidate': candidate}
-    (dataset / 'daydream-profile.json').write_text(json.dumps({**policy, 'policy_sha256': canonical_digest(policy)}))
+    monkeypatch.setattr(harbor_cli, 'candidate_identity', lambda: candidate)
+    cases = [Case('https://github.com/example/repository', number, 'b' * 40, f'{number:040x}')
+             for number in range(1, 220)]
+    policy = {'schema': 3, 'source_prs': 219, 'final_comparison_rounds': 3, 'candidate': candidate,
+              'reviewer': {'backend': 'codex', 'provider': None},
+              'judge': {'provider': 'openai-codex', 'model': 'gpt-6.1-sol', 'authentication': 'subscription'},
+              'cases': {case.key: asdict(case) for case in cases},
+              'test_tasks': [case.key for case in cases[::8]][:25]}
+    policy_sha = canonical_digest(policy)
+    (dataset / 'daydream-profile.json').write_text(json.dumps({**policy, 'policy_sha256': policy_sha}))
+    for number, case in enumerate(cases, 1):
+        directory = dataset / case.key
+        (directory / 'tests').mkdir(parents=True)
+        (directory / 'environment').mkdir()
+        (directory / 'task.toml').touch()
+        task = {'pr': asdict(case), 'task_id': number, 'evaluation_id': number + 219}
+        (directory / 'tests/task.json').write_text(json.dumps(task))
+        (directory / 'environment/daydream-profile.json').write_text(json.dumps({
+            **task, 'policy_sha256': policy_sha,
+        }))
     parser = argparse.ArgumentParser()
     harbor_cli.add_parsers(parser.add_subparsers(dest='reviewbench_command', required=True))
     args = parser.parse_args([
         'harbor-run', str(dataset), '--codex-home', str(source), '--pi-home', str(judge),
-        '--jobs-dir', str(tmp_path / 'jobs'), '--job-name', 'selected-case', '--task', 'owner_repo*',
-        '--n-tasks', '1',
+        '--jobs-dir', str(tmp_path / 'jobs'), '--job-name', 'selected-case', '--task', cases[0].key,
     ])
     return args, candidate
 
@@ -128,7 +150,7 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
                  '-a', 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
                  '-n', '1', '-k', str(rounds), '-r', '0', '-o', str(args.jobs_dir.resolve()),
                  '--job-name', args.job_name, '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
-                 '-i', 'owner_repo*', '-l', '1'],
+                 '-i', args.task[0]],
         'metric_config': {'metrics': [{'type': 'uv-script',
                                       'kwargs': {'script_path': str(args.directory.resolve() / 'metric.py')}}]},
         'environment': {'RB_HARBOR_CODEX_AUTH_DIR': str(args.codex_home.resolve()),
@@ -139,7 +161,106 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
     assert (args.directory / 'format-checked').is_file()
 
 
-@pytest.mark.parametrize('schema', [None, 1, 3])
+@pytest.mark.parametrize('backend', ['pi', 'codex'])
+def test_selected_reviewer_delivers_native_auth_separately_from_common_judge(
+    launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    """Selecting Nous must preserve native credentials and the common judge lane."""
+    args, candidate = launch
+    path = args.directory / 'daydream-profile.json'
+    profile = json.loads(path.read_text())
+    judge = dict(profile['judge'])
+    if backend == 'pi':
+        home = args.codex_home.parent / 'native-pi'
+        home.mkdir()
+        (home / 'auth.json').write_text(json.dumps({'nous': {'type': 'api_key', 'key': 'synthetic-nous-native'}}))
+        args.codex_home, args.reviewer_pi_home = None, home
+        profile.pop('policy_sha256')
+        profile['reviewer'] = {'backend': 'pi', 'provider': 'nous', 'model': 'deepseek/deepseek-v4.1-flash'}
+        profile['policy_sha256'] = canonical_digest(profile)
+        path.write_text(json.dumps(profile))
+        for name in profile['cases']:
+            delivered_path = args.directory / name / 'environment/daydream-profile.json'
+            delivered = json.loads(delivered_path.read_text())
+            delivered['policy_sha256'] = profile['policy_sha256']
+            delivered_path.write_text(json.dumps(delivered))
+    monkeypatch.setenv('RB_HARBOR_REVIEWER_PI_AUTH_DIR' if backend == 'codex' else 'RB_HARBOR_CODEX_AUTH_DIR',
+                       '/unrelated/private/credentials')
+    assert harbor_cli.handle(args, candidate) == 0
+    actual = json.loads((args.jobs_dir / args.job_name / 'launch.json').read_text())
+    environment = actual['environment']
+    selected = 'RB_HARBOR_CODEX_AUTH_DIR' if backend == 'codex' else 'RB_HARBOR_REVIEWER_PI_AUTH_DIR'
+    unselected = 'RB_HARBOR_REVIEWER_PI_AUTH_DIR' if backend == 'codex' else 'RB_HARBOR_CODEX_AUTH_DIR'
+    assert environment[selected] == str((args.codex_home if backend == 'codex' else args.reviewer_pi_home).resolve())
+    assert unselected not in environment
+    assert environment['RB_HARBOR_PI_AUTH_DIR'] == str(args.pi_home.resolve())
+    assert environment['RB_HARBOR_PI_AUTH_PATH'] == '/run/reviewbench-pi/auth.json'
+    assert profile['judge'] == judge == {
+        'provider': 'openai-codex', 'model': 'gpt-6.1-sol', 'authentication': 'subscription',
+    }
+    assert 'synthetic-nous-native' not in json.dumps(actual) + path.read_text()
+
+
+@pytest.mark.parametrize('selection', ['test', 'full'])
+def test_launch_passes_exact_supplied_membership_to_harbor(
+    launch: tuple[argparse.Namespace, dict[str, Any]], selection: str,
+) -> None:
+    """A count limit or glob cannot stand in for the source-selected starter set."""
+    args, candidate = launch
+    args.task, args.set, args.rounds = None, selection, 3
+    profile = json.loads((args.directory / 'daydream-profile.json').read_text())
+    assert harbor_cli.handle(args, candidate) == 0
+    actual = json.loads((args.jobs_dir / args.job_name / 'launch.json').read_text())
+    selected = [actual['args'][index + 1] for index, token in enumerate(actual['args']) if token == '-i']
+    assert selected == sorted(profile['test_tasks'] if selection == 'test' else profile['cases'])
+    assert len(selected) == (25 if selection == 'test' else 219)
+    assert actual['args'][actual['args'].index('-k') + 1] == '3'
+    assert '-l' not in actual['args']
+
+
+@pytest.mark.parametrize('fault', ['foreign', 'glob', 'duplicate', 'missing-task', 'base', 'head', 'evaluation'])
+def test_launch_rejects_changed_exact_selection_before_models(
+    launch: tuple[argparse.Namespace, dict[str, Any]], fault: str,
+) -> None:
+    """Unselected task identity changes also invalidate a full-corpus export."""
+    args, candidate = launch
+    profile = json.loads((args.directory / 'daydream-profile.json').read_text())
+    if fault in {'foreign', 'glob', 'duplicate'}:
+        args.task = ['foreign'] if fault == 'foreign' else (['*'] if fault == 'glob' else args.task * 2)
+    else:
+        directory = args.directory / sorted(profile['cases'])[-1]
+        if fault == 'missing-task':
+            (directory / 'task.toml').unlink()
+        else:
+            path = directory / 'tests/task.json'
+            task = json.loads(path.read_text())
+            if fault == 'evaluation':
+                task['evaluation_id'] += 1
+            else:
+                task['pr'][fault] = 'c' * 40
+            path.write_text(json.dumps(task))
+    with pytest.raises(ValueError, match='exact|identity|membership'):
+        harbor_cli.handle(args, candidate)
+    assert not args.jobs_dir.exists() and not (args.directory / 'format-checked').exists()
+
+
+@pytest.mark.parametrize('boundary', ['preflight', 'process'])
+def test_launch_rechecks_candidate_after_preflight_and_process(
+    launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, boundary: str,
+) -> None:
+    """Host wheel/profile identity must remain current around external work."""
+    args, candidate = launch
+    marker = args.directory / 'format-checked' if boundary == 'preflight' else args.jobs_dir / args.job_name
+    monkeypatch.setattr(harbor_cli, 'candidate_identity', lambda: (
+        {**candidate, 'artifact_sha256': 'changed'} if marker.exists() else candidate
+    ))
+    with pytest.raises(ValueError, match='candidate changed'):
+        harbor_cli.handle(args, candidate)
+    assert (args.jobs_dir / args.job_name / 'launch.json').exists() is (boundary == 'process')
+    assert (args.jobs_dir / args.job_name / 'checker-invoked').exists() is (boundary == 'process')
+
+
+@pytest.mark.parametrize('schema', [None, 1, 2])
 def test_launch_rejects_incompatible_profile_before_process_delivery(
     launch: tuple[argparse.Namespace, dict[str, Any]], schema: int | None,
 ) -> None:
@@ -237,9 +358,10 @@ def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str
         harbor_build.reviewer_build(changed)
 
 
+@pytest.mark.parametrize('selection', ['test', 'full'])
 def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_models(
     launch: tuple[argparse.Namespace, dict[str, Any]], tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch, supplied_source: Path, moby_policy: bytes,
+    monkeypatch: pytest.MonkeyPatch, supplied_source: Path, moby_policy: bytes, selection: str,
 ) -> None:
     """A local -p export needs explicit metrics before the upstream plugin can plan.
 
@@ -257,7 +379,7 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     assert runtime.is_file()
     args, candidate = launch
     args.directory = tmp_path / 'actual-full-export'
-    args.task = None
+    args.task, args.set, args.rounds = None, selection, 3
     export_harbor_profile(supplied_source, args.directory, candidate=candidate, base_image=harbor_build.NODE_IMAGE)
     monkeypatch.setattr(harbor_cli, 'sys', SimpleNamespace(executable=str(runtime)))
     script = tmp_path / 'resolve-plan.py'
@@ -287,11 +409,34 @@ async def main():
         PluginConfig(import_path="reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin"),
     ])
     plan = json.loads((job.job_dir / "reviewbench-plan.json").read_text())
-    assert plan["source_prs"] == 219 and len(plan["expected_tasks"]) == 1
-    assert plan["n_attempts"] == 1 and len(plan["trials"]) == 1
+    expected = json.loads(Path(sys.argv[3]).read_text())
+    assert plan["source_prs"] == 219 and plan["expected_tasks"] == expected["tasks"]
+    assert plan["n_attempts"] == 3 and len(plan["trials"]) == len(expected["tasks"]) * 3
+    assert {(row["task_id"], row["evaluation_id"], row["round"]) for row in plan["trials"].values()} == {
+        (int(task), evaluation, number) for task, evaluation in expected["tasks"].items() for number in (1, 2, 3)
+    }
+    assert set(config.datasets[0].task_names) == set(expected["cases"])
+    for trial in job._trial_configs:
+        downloaded = job._task_download_results[trial.task.get_task_id()]
+        task = json.loads((downloaded.path / "tests/task.json").read_text())
+        actual_case = {key: task["pr"][key] for key in ("repo", "pr_number", "base", "head")}
+        assert actual_case == expected["cases"][downloaded.path.name]
     metric_digest = hashlib.sha256(Path(config.metrics[0].kwargs["script_path"]).read_bytes()).hexdigest()
     assert plan["source_metric_sha256"] == [metric_digest]
     assert all(isinstance(metric, RoundMetric) for group in job._metrics.values() for metric in group)
+    metric = next(metric for group in job._metrics.values() for metric in group)
+    rewards = [{
+        "rb_schema": 1, "rb_task": row["task_id"], "rb_evaluation": row["evaluation_id"],
+        "rb_round": row["round"], "rb_failed": 0,
+        "overall.candidate_count": 0, "overall.golden_tp_count": 1, "overall.matched_count": 0,
+        "overall.matched_tp_count": 0, "overall.unmatched_count": 0, "overall.unmatched_tp_count": 0,
+        "overall.unmatched_fp_count": 0, "overall.golden_covered_count": 0,
+    } for row in plan["trials"].values()]
+    computed = metric.compute(rewards)
+    assert computed["complete"] == 1 and computed["expected_trials"] == len(rewards)
+    assert computed["source_prs"] == 219 and computed["completed_rounds"] == 3
+    assert computed["summary.micro.overall.grounded_precision.defined_rounds"] == 0
+    assert "summary.micro.overall.grounded_precision.mean" not in computed
     assert (job.job_dir / "reviewbench-metric.py").is_file()
     assert job.config.n_concurrent_trials == 1
     Path(sys.argv[2]).write_text(json.dumps({"plan": plan, "metric": config.metrics[0].model_dump(mode="json")}))
@@ -301,6 +446,14 @@ asyncio.run(main())
     result_path = tmp_path / 'resolved-plan.json'
     merged_config = tmp_path / 'resolved-config.json'
     repository = Path(__file__).resolve().parents[1]
+    cases = load_cases(supplied_source, selection)
+    expected: dict[str, Any] = {'cases': {case.key: asdict(case) for case in cases}, 'tasks': {}}
+    for case in cases:
+        task = json.loads((args.directory / case.key / 'tests/task.json').read_text())
+        assert Case.from_dict(task['pr']) == case
+        expected['tasks'][str(task['task_id'])] = task['evaluation_id']
+    expected_path = tmp_path / 'expected-selection.json'
+    expected_path.write_text(json.dumps(expected))
 
     def resolve_only(command: list[str], *, env: dict[str, str]) -> int:
         # --print-config returns before execution. No Job.run, Trial.create,
@@ -309,8 +462,8 @@ asyncio.run(main())
         printed = subprocess.run([*command, '--print-config'], env=environment, check=True,
                                  text=True, capture_output=True, timeout=60)
         merged_config.write_text(printed.stdout)
-        subprocess.run([str(runtime), str(script), str(merged_config), str(result_path)], env=environment,
-                       check=True, text=True, capture_output=True, timeout=120)
+        subprocess.run([str(runtime), str(script), str(merged_config), str(result_path), str(expected_path)],
+                       env=environment, check=True, text=True, capture_output=True, timeout=120)
         return 0
 
     monkeypatch.setattr(subprocess, 'call', resolve_only)
@@ -319,12 +472,16 @@ asyncio.run(main())
     assert harbor_cli.handle(args, candidate) == 1
     actual = json.loads(result_path.read_text())
     assert actual['plan']['source_prs'] == 219
-    assert len(actual['plan']['expected_tasks']) == 1
+    assert actual['plan']['expected_tasks'] == expected['tasks']
+    assert len(actual['plan']['trials']) == (75 if selection == 'test' else 657)
     assert actual['metric'] == {'type': 'uv-script', 'kwargs': {'script_path': str(args.directory / 'metric.py')}}
     assert len(list(args.jobs_dir.glob('daydream-reviewbench-launch-*.json'))) == 1
 
 
-@pytest.mark.parametrize('outcome', ['complete', 'reviewer-error', 'missing-score', 'wrong-round', 'transport-error'])
+@pytest.mark.parametrize('outcome', [
+    'complete', 'reviewer-error', 'missing-score', 'missing-trial', 'wrong-round', 'duplicate', 'null',
+    'transport-error',
+])
 def test_successful_harbor_process_requires_actual_complete_retained_job(
     launch: tuple[argparse.Namespace, dict[str, Any]], supplied_source: Path,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
@@ -337,20 +494,21 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     """
     args, candidate = launch
     retained = tmp_path / 'harbor-results'
-    (retained / 'trial').mkdir(parents=True)
+    retained.mkdir()
     metric = (supplied_source / 'scripts/harbor/metric.py').read_text().replace(
         'EXPECTED_TASKS = {}', 'EXPECTED_TASKS = {"1": 2}',
     )
     (retained / 'reviewbench-metric.py').write_text(metric)
     metric_sha = hashlib.sha256(metric.encode()).hexdigest()
     job: dict[str, Any] = {
-        'id': 'fixture-job', 'finished_at': '2026-10-21T00:00:00Z', 'n_total_trials': 1,
+        'id': 'fixture-job', 'finished_at': '2026-10-21T00:00:00Z', 'n_total_trials': 3,
         'stats': {'n_errored_trials': 0, 'n_running_trials': 0, 'n_pending_trials': 0, 'n_cancelled_trials': 0},
     }
     plan = {
         'schema_version': 1, 'job_id': job['id'], 'metric_sha256': metric_sha,
-        'source_metric_sha256': [metric_sha], 'expected_tasks': {'1': 2}, 'n_attempts': 1, 'source_prs': 219,
-        'trials': {'trial': {'task_id': 1, 'evaluation_id': 2, 'round': 1}},
+        'source_metric_sha256': [metric_sha], 'expected_tasks': {'1': 2}, 'n_attempts': 3, 'source_prs': 219,
+        'trials': {f'trial-{number}': {'task_id': 1, 'evaluation_id': 2, 'round': number}
+                   for number in (1, 2, 3)},
     }
     reward = {
         'rb_schema': 1, 'rb_task': 1, 'rb_evaluation': 2, 'rb_round': 1, 'rb_failed': 0,
@@ -359,7 +517,7 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
         'overall.unmatched_fp_count': 0, 'overall.golden_covered_count': 1,
     }
     trial: dict[str, Any] = {
-        'trial_name': 'trial', 'finished_at': job['finished_at'], 'exception_info': None,
+        'trial_name': 'trial-1', 'finished_at': job['finished_at'], 'exception_info': None,
         'verifier_environment_mode': 'separate', 'step_results': [], 'verifier_result': {'rewards': reward},
     }
     if outcome == 'reviewer-error':
@@ -368,11 +526,25 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     elif outcome == 'missing-score':
         trial['verifier_result'] = None
     elif outcome == 'wrong-round':
-        reward['rb_round'] = 3
+        reward['rb_round'] = 4
+    elif outcome == 'null':
+        for key in reward:
+            if key.startswith('overall.') and key != 'overall.golden_tp_count':
+                reward[key] = 0
     elif outcome == 'transport-error':
         monkeypatch.setenv('DAYDREAM_TEST_HARBOR_EXIT', '23')
-    for relative, value in [('result.json', job), ('reviewbench-plan.json', plan), ('trial/result.json', trial)]:
+    for relative, value in [('result.json', job), ('reviewbench-plan.json', plan)]:
         (retained / relative).write_text(json.dumps(value))
+    for number in (1, 2, 3):
+        if outcome == 'missing-trial' and number == 3:
+            continue
+        current = json.loads(json.dumps(trial))
+        current['trial_name'] = f'trial-{1 if outcome == "duplicate" else number}'
+        if outcome != 'wrong-round' and current['verifier_result']:
+            current['verifier_result']['rewards']['rb_round'] = number
+        directory = retained / f'trial-{number}'
+        directory.mkdir()
+        (directory / 'result.json').write_text(json.dumps(current))
     prior_name = 'daydream-reviewbench-check-prior.json'
     (retained / prior_name).write_text('preserve prior report bytes')
     monkeypatch.setenv('DAYDREAM_TEST_HARBOR_RESULTS', str(retained))
@@ -382,16 +554,39 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     assert (job_directory / prior_name).read_text() == 'preserve prior report bytes'
     assert (job_directory / 'result.json').read_bytes() == (retained / 'result.json').read_bytes()
     reports = [path for path in job_directory.glob('daydream-reviewbench-check-*.json') if path.name != prior_name]
-    if outcome == 'complete':
+    if outcome in {'complete', 'null'}:
         assert result == 0 and len(reports) == 1
         report = json.loads(reports[0].read_text())
-        assert report['complete'] == 1 and report['scored_trials'] == report['expected_trials'] == 1
+        assert report['complete'] == 1 and report['scored_trials'] == report['expected_trials'] == 3
         assert report['source_prs'] == 219 and report['expected_prs'] == 1
-        assert report['n_attempts'] == 1 and report['failed_trials'] == 0
+        assert report['n_attempts'] == 3 and report['failed_trials'] == 0
+        assert report['completed_rounds'] == 3
+        assert report['summary.micro.overall.grounded_precision.defined_rounds'] == (0 if outcome == 'null' else 3)
+        if outcome == 'null':
+            assert 'summary.micro.overall.grounded_precision.mean' not in report
+        else:
+            assert report['summary.micro.overall.grounded_precision.mean'] == 1
     else:
         assert result == (23 if outcome == 'transport-error' else 1)
         assert reports == []
     assert (job_directory / 'checker-invoked').exists() is (outcome != 'transport-error')
+
+
+def test_supplied_findings_validator_preserves_completed_empty_and_rejects_malformed(
+    supplied_source: Path, tmp_path: Path,
+) -> None:
+    """Validate native candidate bytes with the unchanged supplied admission tool."""
+    case = load_cases(supplied_source, 'test')[0]
+    metadata = tmp_path / 'pr.json'
+    metadata.write_text(json.dumps(asdict(case)))
+    candidate = tmp_path / 'findings.json'
+    candidate.write_text(json.dumps({'pr': asdict(case), 'agent': 'native-empty', 'findings': []}))
+    command = ['npm', 'run', 'harbor:validate-findings', '--', '--candidate', str(candidate), '--pr', str(metadata)]
+    result = subprocess.run(command, cwd=supplied_source, check=True, capture_output=True, text=True)
+    assert 'No judging or inference performed' in result.stdout
+    candidate.write_text('{bad')
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(command, cwd=supplied_source, check=True, capture_output=True, text=True)
 
 
 @pytest.mark.parametrize('selection', ['environment', 'importable-default'])

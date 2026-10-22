@@ -1,4 +1,4 @@
-"""Frozen source, supplied case membership and independent execution accounting."""
+"""Frozen source and supplied case membership."""
 
 from __future__ import annotations
 
@@ -79,27 +79,3 @@ def load_cases(source: Path, selection: str) -> list[Case]:
         if any(full.get(case.key) != case for case in cases):
             raise ValueError('starter identity differs from full manifest')
     return cases
-
-
-def execution_accounting(expected: list[str], outcomes: Mapping[str, Mapping[str, Any]],
-                         produced: list[str], evaluated: list[str] | None = None) -> dict[str, Any]:
-    """Keep omitted work visible independently of upstream overlap-only scoring."""
-    if len(expected) != len(set(expected)) or set(outcomes) - set(expected) or set(produced) - set(expected):
-        raise ValueError('unexpected or duplicate case membership')
-    completed = [key for key in expected if outcomes.get(key, {}).get('status') in {'complete', 'completed_empty'}]
-    failed = [key for key in expected if key in outcomes and key not in completed]
-    missing = [key for key in expected if key not in outcomes]
-    missing_artifacts = [key for key in completed if key not in produced]
-    conversion_limited = [key for key in expected if outcomes.get(key, {}).get('status') == 'conversion_limited']
-    omitted_findings = sum(len(outcome.get('conversion_omissions', [])) for outcome in outcomes.values())
-    scored = evaluated if evaluated is not None else []
-    if len(scored) != len(set(scored)) or set(scored) - set(produced):
-        raise ValueError('unexpected evaluated case membership')
-    accounting = {'expected': expected, 'produced': produced, 'completed': completed,
-                  'completed_empty': [key for key in completed if outcomes[key]['status'] == 'completed_empty'],
-                  'failed': failed, 'missing': missing, 'missing_artifacts': missing_artifacts, 'evaluated': scored,
-                  'conversion_limited': conversion_limited}
-    return {**accounting, 'counts': {**{key: len(values) for key, values in accounting.items()},
-                                    'conversion_omitted_findings': omitted_findings},
-            'complete_generation': not failed and not missing and set(produced) == set(expected),
-            'complete_evaluation': not failed and not missing and set(scored) == set(expected)}

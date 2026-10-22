@@ -10,6 +10,7 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -17,9 +18,16 @@ import pytest
 
 from daydream import git_ops, runner
 from daydream.backends import AgentEvent, CostEvent, EffectiveRequestConfig, RequestEvent
-from daydream.benchmark.reviewbench.candidate import selected_extension_identity
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
 from daydream.benchmark.reviewbench.contract import Case
-from daydream.benchmark.reviewbench.native import convert_findings, native_configuration, review_case
+from daydream.benchmark.reviewbench.native import (
+    convert_findings,
+    freeze_native_execution,
+    freeze_reviewer,
+    parse_native_config,
+    review_case,
+    reviewer_config,
+)
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
 from daydream.review_result import FinalizedReview, deliver_finalized_review
@@ -33,13 +41,15 @@ from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import review_stage_state, stage_result
 
 
-def frozen_case(tmp_path: Path) -> tuple[Path, Case]:
+def frozen_case(tmp_path: Path, *, additional_sources: int = 0) -> tuple[Path, Case]:
     repo = tmp_path / "frozen-input"
     init_repo(repo)
     write_and_stage(repo, "README.md", "Synthetic native ReviewBench integration fixture.\n")
     base = commit(repo, "base")
     git(repo, "checkout", "-b", "candidate")
     write_and_stage(repo, "api.py", "def resolve(value):\n    return value[0]\n")
+    for index in range(additional_sources):
+        write_and_stage(repo, f"source_{index}.py", f"VALUE = {index}\n")
     head = commit(repo, "candidate")
     git(repo, "remote", "add", "origin", "https://github.com/example/project.git")
     return repo, Case("https://github.com/example/project", 7, base, head)
@@ -170,6 +180,76 @@ async def test_frozen_input_is_verified_before_native_dispatch(
         assert result.candidate is None and result.terminal_result is None and result.diagnostics
 
 
+@pytest.mark.parametrize('profile_source', ['explicit', 'env', 'repo', 'default', 'escape', 'symlink'])
+async def test_frozen_native_profile_preserves_operator_precedence_and_confines_repository_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, profile_source: str,
+) -> None:
+    """Freeze the ordinary CLI policy, then execute it after operator paths disappear.
+
+    Transferred from the removed standalone plan/status journey. Native transport
+    tests cover provider defaults, but not CLI/env/repository profile precedence or
+    repository profile traversal. The runner must see the frozen selected profile.
+    """
+    from daydream.review_profile import ProfileError
+
+    repo, case = frozen_case(tmp_path)
+    root = tmp_path / 'operator'
+    root.mkdir()
+    monkeypatch.delenv('DAYDREAM_REVIEW_PROFILE', raising=False)
+    for path, name in ((root / 'repo.toml', 'repository-policy'),
+                       (tmp_path / 'env.toml', 'environment-policy'),
+                       (tmp_path / 'explicit.toml', 'explicit-policy')):
+        path.write_text(f'schema_version=1\nname="{name}"\n')
+    selected = '../env.toml' if profile_source == 'escape' else 'repo.toml'
+    if profile_source == 'symlink':
+        (root / 'linked.toml').symlink_to(tmp_path / 'env.toml')
+        selected = 'linked.toml'
+    (root / '.daydream.toml').write_text('backend="codex"\nsupervisor="llm"\n'
+        + ('' if profile_source == 'default' else f'review_profile="{selected}"\n')
+        + '[phases.per_stack_review]\nbackend="codex"\nmodel="phase-model"\n')
+    if profile_source in {'explicit', 'env'}:
+        monkeypatch.setenv('DAYDREAM_REVIEW_PROFILE', str(tmp_path / 'env.toml'))
+    arguments = [str(root), '--backend', 'codex', '--model', 'explicit-model', '--diagram', 'off']
+    if profile_source == 'explicit':
+        arguments += ['--review-profile', str(tmp_path / 'explicit.toml')]
+    if profile_source in {'escape', 'symlink'}:
+        with pytest.raises(ProfileError, match='escapes the repository root'):
+            parse_native_config(arguments)
+        return
+    frozen = freeze_reviewer(parse_native_config(arguments))
+    assert frozen['file_config']['phases']['per_stack_review']['model'] == 'phase-model'
+    for path in (root / 'repo.toml', tmp_path / 'env.toml', tmp_path / 'explicit.toml'):
+        path.unlink()
+    config = reviewer_config(json.loads(json.dumps(frozen)), repo)
+    monkeypatch.setattr(runner, 'create_backend', lambda *_args, **_kwargs: EmptyReviewBackend(repo))
+    result = await review_case(case, repo, config, 'native-profile-fixture')
+    assert result.status == 'completed_empty', result.diagnostics
+    assert result.configuration['phases']['per_stack_review']['model'] == 'explicit-model'
+    profile = result.configuration['profile']
+    assert profile['source_kind'] == profile_source
+    if profile_source != 'default':
+        assert profile['name'] == {'explicit': 'explicit-policy', 'env': 'environment-policy',
+                                   'repo': 'repository-policy'}[profile_source]
+    assert not fake_gh.calls('POST')
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--copy', 'extra.py'], ['--test-command', 'true'], ['--approve-on-clean'],
+    ['--file-scope-issues'], ['--trace-to', 'otlp'],
+])
+def test_export_refuses_native_controls_without_an_admitted_runtime_capability(
+    tmp_path: Path, arguments: list[str],
+) -> None:
+    """Reject accepted ordinary CLI controls instead of silently dropping their effects.
+
+    The profile journey covers policy that the image carries; none of its rows
+    asks for copying host files, tests, GitHub publication, or trace egress.
+    """
+    config = parse_native_config([str(tmp_path), '--backend', 'codex', *arguments])
+    with pytest.raises(ValueError, match='unsupported benchmark native policy'):
+        freeze_reviewer(config)
+
+
 def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(tmp_path: Path) -> None:
     """Convert proven HEAD locations and retain explicit omissions for unsafe hints."""
     repo, initial = frozen_case(tmp_path)
@@ -202,15 +282,33 @@ async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, m
     config = empty_review_config(repo, report.parent / 'trajectory', file_config=DaydreamFileConfig(
         backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
     expected_extension = selected_extension_identity()
-    frozen = native_configuration(config)
+    selected_mutation = extension if not mutation.startswith('core-') else (
+        extension.parent.parent / 'daydream/backends/pi_structured_output.ts')
+    mutation = mutation.removeprefix('core-')
+    measured_calls = 0
+
+    class MeasuredBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            nonlocal measured_calls
+            measured_calls += 1
+            yield CostEvent(cost_usd=0.25, input_tokens=11, output_tokens=3, cached_tokens=2)
+            async for event in super().execute(*args, **kwargs):
+                yield event
+
+    frozen = freeze_native_execution(config)
+    frozen_candidate = candidate_package_digest()
     if mutation == 'before':
-        extension.write_text(extension.read_text() + '\n# changed before generation\n')
+        selected_mutation.write_text(selected_mutation.read_text() + (
+            '\n# changed before generation\n' if selected_mutation.suffix == '.py'
+            else '\n// changed before generation\n'))
 
     def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
         assert kwargs['execution_input'].retry_policy.base_delay_s == (10.0 if name == 'pi' else 2.0)
         if mutation == 'during' and not created:
-            extension.write_text(extension.read_text() + '\n# changed during the admitted run\n')
-        backend = EmptyReviewBackend(kwargs.get('cwd', repo), forbid_merge=False, forbid_supervise=False,
+            selected_mutation.write_text(selected_mutation.read_text() + ('\n# changed during the admitted run\n'
+                if selected_mutation.suffix == '.py' else '\n// changed during the admitted run\n'))
+        backend = (MeasuredBackend if mutation == 'during' else EmptyReviewBackend)(
+            kwargs.get('cwd', repo), forbid_merge=False, forbid_supervise=False,
             review_by_stack={'structure': [finding()]} if mutation == 'during' else {})
         backend.model = kwargs['model']
         backend.merge_echo_records = True
@@ -219,14 +317,16 @@ async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, m
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(runner, 'create_backend', create)
-        result = await review_case(case, repo, config, 'fixture', runtime=frozen)
+        result = await review_case(case, repo, config, 'fixture', execution_input=frozen,
+                                   candidate_sha256=frozen_candidate)
     report.write_text(json.dumps({'execution': asdict(result), 'frozen_extension': expected_extension,
-        'created': len(created), 'custom_phase_called': any(name == 'claude' and backend.calls
+        'created': len(created), 'measured_calls': measured_calls,
+        'custom_phase_called': any(name == 'claude' and backend.calls
             for name, backend in created), 'prompt_override_called': any('PACKAGED_PROMPT_OVERRIDE' in call['prompt']
             for _, backend in created for call in backend.calls)}))
 
 
-@pytest.mark.parametrize('mutation', ['none', 'before', 'during'])
+@pytest.mark.parametrize('mutation', ['none', 'before', 'during', 'core-before', 'core-during'])
 async def test_native_packaged_extension_is_bound_before_and_after_real_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, mutation: str,
 ) -> None:
@@ -283,17 +383,21 @@ async def test_native_packaged_extension_is_bound_before_and_after_real_review(
         assert result['candidate'] is not None
     else:
         assert result['status'] == 'failed' and result['candidate'] is None
-    if mutation == 'before':
+    if mutation in {'before', 'core-before'}:
         assert observed['created'] == 0 and result['terminal_result'] is None
-        assert 'native extension differs from frozen configuration' in result['diagnostics'][0]
+        assert 'candidate bytes changed before native review' in result['diagnostics'][0]
     else:
         assert observed['custom_phase_called'] and observed['prompt_override_called']
         assert result['configuration']['phases']['extension-review']['model'] == 'claude-sonnet-5'
-        assert result['configuration']['native']['extension'] == observed['frozen_extension']
-    if mutation == 'during':
+    if mutation in {'during', 'core-during'}:
         assert result['terminal_result']['analysis_state'] == 'complete'
         assert result['retained_findings']
-        assert 'native extension changed during review' in result['diagnostics'][0]
+        assert ('native extension changed during review' if mutation == 'during' else
+                'candidate bytes changed during native review') in result['diagnostics'][0]
+        assert observed['measured_calls'] > 0
+        assert result['usage'] == {'prompt_tokens': 11 * observed['measured_calls'],
+            'completion_tokens': 3 * observed['measured_calls'], 'cached_tokens': 2 * observed['measured_calls'],
+            'total_tokens': 14 * observed['measured_calls'], 'cost_usd': 0.25 * observed['measured_calls']}
     assert not fake_gh.calls('POST')
 
 
@@ -302,13 +406,14 @@ async def test_native_explicit_runtime_cannot_admit_external_extension_override(
 ) -> None:
     """Public callers supplying capabilities must still pass host extension admission.
 
-    Native configuration is bypassed by an explicit runtime tuple; this boundary
+    Explicit runtime capabilities bypass ambient configuration; this boundary
     must reject an external selector before scanning arbitrary operator files or
     invoking its register function, even when backend capabilities are frozen.
     """
     repo, case = frozen_case(tmp_path)
     config = empty_review_config(repo, tmp_path / 'trajectory', backend='codex')
-    frozen = native_configuration(config)
+    frozen = freeze_native_execution(config)
+    frozen_candidate = candidate_package_digest()
     extension = tmp_path / 'operator-directory'
     extension.mkdir()
     marker = tmp_path / 'extension-executed'
@@ -329,7 +434,7 @@ async def test_native_explicit_runtime_cannot_admit_external_extension_override(
         pytest.fail('external extension selection reached generation')
 
     monkeypatch.setattr(runner, 'create_backend', forbidden)
-    result = await review_case(case, repo, config, 'fixture', runtime=frozen)
+    result = await review_case(case, repo, config, 'fixture', execution_input=frozen, candidate_sha256=frozen_candidate)
     assert result.status == 'failed' and result.candidate is None and result.terminal_result is None
     assert not marker.exists()
     assert 'DAYDREAM_EXT_DIR' in result.diagnostics[0]
@@ -358,7 +463,7 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
 
     config = empty_review_config(operator, tmp_path / 'trajectory', backend='pi')
-    _, execution = native_configuration(config)
+    execution = freeze_native_execution(config)
     backend = PiBackend(cwd=repo, execution_input=execution.backends['pi'])
     with pytest.raises(PiError, match='Case Pi thinking conflicts with unavailable operator effort'):
         async for _ in backend.execute(repo, 'Review this change'):
@@ -368,13 +473,26 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
 @pytest.mark.parametrize(("selection", "provider"), [
     ("explicit", "nous"), ("project", "nous"), ("project_phase", "nous"),
     ("project_cli", "openrouter"), ("project_cli_missing", "nous"), ("project_env", "nous"), ("agent_relative", "nous"),
+    ("harbor", "nous"), ("harbor_phase", "nous"),
 ])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str, provider: str,
 ) -> None:
     """Freeze operator configuration and cwd-relative credentials across isolated runs."""
-    repo, case = frozen_case(tmp_path)
-    if selection in {"explicit", "project_env"}:
+    is_public = selection in {'harbor', 'harbor_phase'}
+    public_environment = None
+    if is_public:
+        from tests.test_reviewbench_harbor_agent import public_input
+
+        # Ordinary Pi uses deterministic author context for <=3 source files.
+        # Four real changed sources require the intent phase to execute, proving
+        # its distinct native model reaches the subprocess and observed evidence.
+        public_environment = public_input(tmp_path, additional_sources=3 if selection == 'harbor_phase' else 0)
+        repo = Path(public_environment['DAYDREAM_RB_REPOSITORY'])
+        case = Case.from_dict(json.loads((Path(public_environment['DAYDREAM_RB_INPUTS']) / 'pr.json').read_text()))
+    else:
+        repo, case = frozen_case(tmp_path)
+    if selection in {"explicit", "project_env"} or is_public:
         monkeypatch.setenv("PI_PROVIDER", "nous")
     else:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -391,6 +509,11 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         monkeypatch.delenv('NOUS_API_KEY')
         monkeypatch.delenv('OPENROUTER_API_KEY')
     agent_dir.mkdir()
+    if is_public:
+        (agent_dir / 'models.json').write_text(json.dumps({'providers': {'nous': {
+            'baseUrl': 'https://inference-api.nousresearch.com/v1', 'api': 'openai-completions',
+            'models': [{'id': model, 'name': model, 'reasoning': True, 'contextWindow': 100000, 'maxTokens': 8192}
+                       for model in ('deepseek/deepseek-v4.1-flash', 'native-intent-model')]}}}))
     auth_body = '{"nous":{"type":"api_key","key":"offline-file-auth-canary"}}'
     (agent_dir / 'auth.json').write_text(auth_body)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", '.operator-pi' if selection == 'agent_relative' else str(agent_dir))
@@ -401,7 +524,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     operator = tmp_path / "operator"
     operator.mkdir()
     overridden = selection in {"project_cli", "project_phase", "project_cli_missing"}
-    if selection != "explicit":
+    if selection != "explicit" and not is_public:
         settings_dir = agent_dir if selection == 'agent_relative' else operator / '.pi'
         settings_dir.mkdir(parents=True, exist_ok=True)
         settings = {"defaultModel": "operator-default-model" if overridden else "deepseek/deepseek-v4.1-flash",
@@ -417,8 +540,16 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
             return cast(MagicMock, await real_exec(*args, **kwargs))
         argv = [str(arg) for arg in args]
         captured.append((argv, kwargs))
-        auth_path = Path(kwargs['cwd']) / kwargs['env']['PI_CODING_AGENT_DIR'] / 'auth.json'
+        auth_path = (Path(kwargs['env']['DAYDREAM_RB_PI_AUTH_PATH']) if is_public else
+                     Path(kwargs['cwd']) / kwargs['env']['PI_CODING_AGENT_DIR'] / 'auth.json')
         auth_bodies.append(auth_path.read_text() if auth_path.is_file() else None)
+        if is_public:
+            models = json.loads((Path(kwargs['env']['PI_CODING_AGENT_DIR']) / 'models.json').read_text())
+            delivered_models = {item['id'] for item in models['providers']['nous']['models']}
+            assert delivered_models == ({'deepseek/deepseek-v4.1-flash', 'native-intent-model'}
+                                        if selection == 'harbor_phase' else {'deepseek/deepseek-v4.1-flash'})
+            assert argv[argv.index('--model') + 1] in delivered_models
+
         prompt = Path(argv[-1][1:]).read_text()
         stage = review_stage_state(prompt)
         if stage is None and "--extension" not in argv:
@@ -443,23 +574,47 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
 
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", native_process)
     config = empty_review_config(repo, tmp_path / "trajectory", backend="pi",
-        file_config=DaydreamFileConfig(model="deepseek/deepseek-v4.1-flash", reasoning_effort="low")
-        if selection == "explicit" else DaydreamFileConfig())
-    if selection != "explicit":
+        file_config=DaydreamFileConfig(model="deepseek/deepseek-v4.1-flash", reasoning_effort="low",
+            phases={"intent": {"model": "native-intent-model"}} if selection == "harbor_phase" else {})
+        if selection == "explicit" or is_public else DaydreamFileConfig())
+    if selection != "explicit" and not is_public:
         config.target = str(operator)
     if selection in {"project_cli", "project_cli_missing"}:
         config.model = "deepseek/deepseek-v4.1-flash"
     elif selection == "project_phase":
         config.file_config = DaydreamFileConfig(phases={"per_stack_review": {"model": "deepseek/deepseek-v4.1-flash"}})
-    result = await review_case(case, repo, config, "native-pi-fixture")
+    if is_public:
+        from daydream.benchmark.reviewbench.harbor_entrypoint import main
+        from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
+
+        assert public_environment is not None
+        profile_path = Path(public_environment['DAYDREAM_RB_INPUTS']) / 'daydream-profile.json'
+        profile = json.loads(profile_path.read_text())
+        profile['reviewer'] = freeze_reviewer(config)
+        assert profile['reviewer']['phase_models']['intent'] == (
+            'native-intent-model' if selection == 'harbor_phase' else 'deepseek/deepseek-v4.1-flash')
+        profile['profile_sha256'] = canonical_digest({key: value for key, value in profile.items()
+                                                      if key != 'profile_sha256'})
+        profile_path.write_text(json.dumps(profile))
+        public_environment['DAYDREAM_RB_REVIEWER_HOME'] = str(agent_dir)
+        assert await main(public_environment) == 0
+        evidence = Path(public_environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json'
+        result: Any = SimpleNamespace(**json.loads(evidence.read_text()))
+        assert result.reviewer_backend == 'pi' and result.reviewer_provider == 'nous'
+        assert result.reviewer_authentication == 'native-pi'
+    else:
+        result = await review_case(case, repo, config, "native-pi-fixture")
     assert result.status == "completed_empty", result.diagnostics
     assert captured
     assert auth_bodies == [auth_body] * len(captured)
     expected_models = {"deepseek/deepseek-v4.1-flash"}
+    if selection == "harbor_phase":
+        expected_models.add("native-intent-model")
     for argv, kwargs in captured:
         assert argv[argv.index("--provider") + 1] == provider
-        assert argv[argv.index("--thinking") + 1] in ({"low"} if selection == "explicit" else {"low", "medium"})
-        if selection != 'agent_relative':
+        efforts = {"low"} if selection == "explicit" or is_public else {"low", "medium"}
+        assert argv[argv.index("--thinking") + 1] in efforts
+        if selection != 'agent_relative' and not is_public:
             assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
             if provider == "openrouter":
                 assert kwargs["env"]["OPENROUTER_API_KEY"] == "offline-other-auth-canary"
@@ -473,22 +628,19 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     assert {row['provider'] for row in result.configuration['observed_requests']} == {provider}
     assert {row['model'] for row in result.configuration['observed_requests']} == expected_models
     assert {'wonder', 'arbiter', 'parse'} <= result.configuration['phases'].keys()
-    if selection == "explicit":
+    if selection == "explicit" or is_public:
         assert config.file_config is not None and config.file_config.model == "deepseek/deepseek-v4.1-flash"
         assert os.environ["PI_PROVIDER"] == "nous"
     else:
-        if selection != "project_cli_missing":
-            assert result.configuration['native']['pi']['defaults']['defaultProvider'] == (
-                "openrouter" if selection == "project_env" else provider)
         assert 'must-not-fingerprint-this-secret' not in json.dumps(asdict(result), default=str)
         if selection == "project_env":
             assert os.environ["PI_PROVIDER"] == "nous"
         else:
             assert 'PI_PROVIDER' not in os.environ
-    assert "offline-native-auth-canary" not in json.dumps(asdict(result), default=str)
-    assert "offline-other-auth-canary" not in json.dumps(asdict(result), default=str)
-    assert 'offline-file-auth-canary' not in json.dumps(asdict(result), default=str)
-    assert result.configuration['native']['pi']['selectors']['PI_CODING_AGENT_DIR'] == str(agent_dir)
+    retained = json.dumps(vars(result) if is_public else asdict(result), default=str)
+    assert 'offline-native-auth-canary' not in retained
+    assert 'offline-other-auth-canary' not in retained
+    assert 'offline-file-auth-canary' not in retained
     assert os.environ['PI_CODING_AGENT_DIR'] == ('.operator-pi' if selection == 'agent_relative' else str(agent_dir))
 
 

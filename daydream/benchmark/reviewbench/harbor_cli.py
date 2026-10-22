@@ -1,4 +1,4 @@
-"""Explicit public Harbor export and subscription-backed local execution."""
+"""The single supplied ReviewBench workflow: native export and Harbor launch."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from daydream.benchmark.reviewbench.candidate import candidate_identity
+from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.harbor_build import (
     HARBOR_REVISION,
     NODE_IMAGE,
@@ -21,26 +23,32 @@ from daydream.benchmark.reviewbench.harbor_build import (
 
 
 def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    export = commands.add_parser('harbor-export', help='export all 219 custom Codex tasks; no inference')
+    export = commands.add_parser(
+        'harbor-export', help='export all 219 tasks with a selected native reviewer; no inference',
+    )
     export.add_argument('directory', type=Path)
     export.add_argument('--source', type=Path, required=True)
     export.add_argument('--wheel', type=Path, required=True)
-    export.add_argument('--reviewer-model', default='gpt-6.1-sol')
-    export.add_argument('--reviewer-effort', choices=('low', 'medium', 'high', 'xhigh'), default='high')
+    export.epilog = 'Append -- followed by ordinary native review flags and configuration root.'
     export.add_argument('--base-image', default=NODE_IMAGE)
     export.add_argument('--platform', choices=REVIEWBENCH_PLATFORMS, default='linux/amd64',
                         help='frozen task architecture')
     export.add_argument('--rounds', type=int, choices=(1, 3), default=3)
     run = commands.add_parser('harbor-run', help='run the exported public profile; launches models')
     run.add_argument('directory', type=Path)
-    run.add_argument('--codex-home', type=Path, required=True,
+    run.add_argument('--codex-home', type=Path,
                      help='persistent auth-only directory with a dedicated Codex subscription login')
+    run.add_argument('--reviewer-pi-home', type=Path,
+                     help='dedicated native Pi reviewer credential directory, separate from the judge')
     run.add_argument('--pi-home', type=Path, required=True,
                      help='persistent auth-only directory with an independently signed-in Pi judge login')
     run.add_argument('--jobs-dir', type=Path, required=True)
     run.add_argument('--job-name', required=True)
-    run.add_argument('--task', help='supplied task name/glob, applied to the full export')
-    run.add_argument('--n-tasks', type=int)
+    selection = run.add_mutually_exclusive_group()
+    selection.add_argument('--set', choices=('test', 'full'),
+                           help='exact supplied test25 or full219 membership; default full')
+    selection.add_argument('--task', action='append',
+                           help='exact task name for an explicitly identified subset; repeatable')
     run.add_argument('--rounds', type=int, choices=(1, 3), default=1)
 
 
@@ -99,15 +107,63 @@ def _check_completed_job(job_directory: Path) -> int:
     return result.returncode
 
 
+def _selected_tasks(dataset: Path, profile: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    """Admit full frozen case identities before Harbor resolves the chosen trials.
+
+    Harbor and the supplied plugin own task resolution and round/evaluation
+    membership. This boundary checks that the exact names sent to Harbor still
+    refer to the full supplied PR identities frozen by the exporter.
+    """
+    raw_cases = profile.get('cases')
+    test_tasks = profile.get('test_tasks')
+    if not isinstance(raw_cases, dict) or len(raw_cases) != 219:
+        raise ValueError('Full supplied case identity catalog differs; create a fresh Harbor export')
+    cases = {key: Case.from_dict(value) for key, value in raw_cases.items()}
+    if any(key != case.key for key, case in cases.items()):
+        raise ValueError('Frozen task names differ from their supplied full case identities')
+    if (not isinstance(test_tasks, list) or len(test_tasks) != 25
+            or len(set(test_tasks)) != 25 or any(key not in cases for key in test_tasks)):
+        raise ValueError('Exact supplied test25 membership differs; create a fresh Harbor export')
+    actual_names = {path.name for path in dataset.iterdir() if path.is_dir() and (path / 'task.toml').is_file()}
+    if actual_names != set(cases):
+        raise ValueError('Delivered task membership differs from the frozen full219 catalog')
+    for key, case in cases.items():
+        task = json.loads((dataset / key / 'tests/task.json').read_text())
+        delivered = json.loads((dataset / key / 'environment/daydream-profile.json').read_text())
+        if (Case.from_dict(task['pr']) != case or Case.from_dict(delivered['pr']) != case
+                or delivered.get('policy_sha256') != profile['policy_sha256']
+                or any(type(task.get(field)) is not int or delivered.get(field) != task[field]
+                       for field in ('task_id', 'evaluation_id'))):
+            raise ValueError(f'Delivered task differs from its frozen full identity: {key}')
+    requested = args.task
+    if requested:
+        if len(set(requested)) != len(requested) or any(key not in cases for key in requested):
+            raise ValueError('--task requires distinct exact exported task names; '
+                             'globs and foreign names are unsupported')
+        selected, scope = sorted(requested), 'explicit-subset'
+    elif args.set == 'test':
+        selected, scope = sorted(test_tasks), 'supplied-test25'
+    else:
+        selected, scope = sorted(cases), 'supplied-full219'
+    print(f'ReviewBench selection: {scope}; {len(selected)} PRs x {args.rounds} independent rounds')
+    return selected
+
+
+def _current_candidate(candidate: dict[str, Any]) -> None:
+    if candidate_identity() != candidate:
+        raise ValueError('Executing candidate changed during Harbor launch; retain evidence and use a fresh export')
+
+
 def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     if args.reviewbench_command == 'harbor-export':
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
+        from daydream.benchmark.reviewbench.native import freeze_reviewer, parse_native_config
 
-        suffix, assets, identity = reviewer_build(args.wheel.resolve(), platform=args.platform)
+        reviewer = freeze_reviewer(parse_native_config(getattr(args, 'native_args', [])))
+        suffix, assets, identity = reviewer_build(args.wheel.resolve(), platform=args.platform, reviewer=reviewer)
         result = export_harbor_profile(
             args.source, args.directory, candidate={**candidate, **identity}, base_image=args.base_image,
-            reviewer_model=args.reviewer_model, reviewer_effort=args.reviewer_effort,
-            reviewer_dockerfile_suffix=suffix, reviewer_assets=assets, rounds=args.rounds,
+            reviewer=reviewer, reviewer_dockerfile_suffix=suffix, reviewer_assets=assets, rounds=args.rounds,
             platform=args.platform,
         )
         print(json.dumps(result, indent=2))
@@ -118,17 +174,13 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     from daydream.benchmark.reviewbench.harbor_auth import subscription_environment, validate_credential_stores
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
-    reviewer_home, judge_home = args.codex_home.resolve(), args.pi_home.resolve()
-    for home in (reviewer_home, judge_home):
-        if any(home.is_relative_to(root.resolve()) or root.resolve().is_relative_to(home)
-               for root in (args.directory, args.jobs_dir)):
-            raise ValueError('Private credential stores must be outside dataset and job evidence')
-    validate_credential_stores(reviewer_home, judge_home)
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
-    if profile.get('schema') != 2:
+    if profile.get('schema') != 3:
         raise ValueError('Incompatible public profile schema; create a fresh Harbor export')
-    policy_sha = profile.pop('policy_sha256')
-    if canonical_digest(profile) != policy_sha or profile.get('source_prs') != 219:
+    policy_sha = profile['policy_sha256']
+    if canonical_digest({key: value for key, value in profile.items() if key != 'policy_sha256'}) != policy_sha:
+        raise ValueError('Full public profile identity differs')
+    if profile.get('source_prs') != 219:
         raise ValueError('Full public profile identity differs')
     frozen_candidate = profile.get('candidate', {})
     if any(not candidate.get(key) or frozen_candidate.get(key) != candidate[key]
@@ -136,8 +188,20 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         raise ValueError('Executing candidate differs from the frozen public profile')
     if args.rounds > profile['final_comparison_rounds']:
         raise ValueError('Requested rounds exceed the frozen profile')
-    if args.n_tasks is not None and args.n_tasks < 1:
-        raise ValueError('Task count must be positive')
+    backend = profile['reviewer']['backend']
+    if backend not in {'codex', 'pi'}:
+        raise ValueError('Selected reviewer has no supported native Harbor capability')
+    reviewer_path = args.codex_home if backend == 'codex' else args.reviewer_pi_home
+    unused_path = args.reviewer_pi_home if backend == 'codex' else args.codex_home
+    if reviewer_path is None or unused_path is not None:
+        raise ValueError('Supply only the selected reviewer credential directory: --codex-home or --reviewer-pi-home')
+    reviewer_home, judge_home = reviewer_path.resolve(), args.pi_home.resolve()
+    for home in (reviewer_home, judge_home):
+        if any(home.is_relative_to(root.resolve()) or root.resolve().is_relative_to(home)
+               for root in (args.directory, args.jobs_dir)):
+            raise ValueError('Private credential stores must be outside dataset and job evidence')
+    selected = _selected_tasks(args.directory.resolve(), profile, args)
+    validate_credential_stores(reviewer_home, judge_home, backend=backend, provider=profile['reviewer'].get('provider'))
     if not DockerEnvironment._egress_control_kernel_support():
         raise ValueError('Docker kernel lacks Harbor exact-host isolation support')
     # Schema and package validation precede credential delivery and model work.
@@ -149,17 +213,22 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
                '-n', '1', '-k', str(args.rounds), '-r', '0',
                '-o', str(args.jobs_dir.resolve()), '--job-name', args.job_name,
                '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin']
-    if args.task:
-        command.extend(['-i', args.task])
-    if args.n_tasks is not None:
-        command.extend(['-l', str(args.n_tasks)])
+    for task in selected:
+        command.extend(['-i', task])
     environment = subscription_environment(os.environ)
     # Harbor's sidecar retains host-native architecture; task platform is frozen.
     environment.pop('DOCKER_DEFAULT_PLATFORM', None)
-    environment.update(RB_HARBOR_CODEX_AUTH_DIR=str(reviewer_home), RB_HARBOR_PI_AUTH_DIR=str(judge_home))
+    for variable in ('RB_HARBOR_CODEX_AUTH_DIR', 'RB_HARBOR_REVIEWER_PI_AUTH_DIR'):
+        environment.pop(variable, None)
+    auth_variable = 'RB_HARBOR_CODEX_AUTH_DIR' if backend == 'codex' else 'RB_HARBOR_REVIEWER_PI_AUTH_DIR'
+    environment[auth_variable] = str(reviewer_home)
+    environment['RB_HARBOR_PI_AUTH_DIR'] = str(judge_home)
     environment['RB_HARBOR_PI_AUTH_PATH'] = '/run/reviewbench-pi/auth.json'
     environment['RB_HARBOR_SECCOMP_PROFILE'] = str(args.directory.resolve() / 'reviewer-seccomp.json')
+    _current_candidate(candidate)
     returncode = subprocess.call(command, env=environment)
     if returncode:
         return returncode
-    return _check_completed_job(args.jobs_dir.resolve() / args.job_name)
+    checked = _check_completed_job(args.jobs_dir.resolve() / args.job_name)
+    _current_candidate(candidate)
+    return checked

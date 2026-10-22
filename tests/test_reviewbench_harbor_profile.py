@@ -20,22 +20,43 @@ from daydream.benchmark.reviewbench import harbor_profile
 from daydream.benchmark.reviewbench.contract import verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
-from tests.test_reviewbench_evaluator import supplied_source as supplied_source
+from daydream.benchmark.reviewbench.native import freeze_reviewer
+from daydream.run_config import RunConfig
+from tests.harness.reviewbench import supplied_source as supplied_source
 from tests.test_reviewbench_seccomp import moby_policy as moby_policy
 
 pytestmark = pytest.mark.usefixtures('moby_policy')
 
 
-@pytest.fixture(params=['linux/amd64', 'linux/arm64'])
-def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.FixtureRequest) -> Path:
+@pytest.fixture(params=[('linux/amd64', 'codex'), ('linux/arm64', 'codex'),
+                        ('linux/amd64', 'pi'), ('linux/arm64', 'pi')])
+def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.FixtureRequest,
+                   monkeypatch: pytest.MonkeyPatch) -> Path:
     """Use real supplied inputs/export process, not a fake task generator."""
     output = tmp_path / 'public'
+    platform, backend = request.param
+    model = 'gpt-6-sol' if backend == 'codex' else 'deepseek/deepseek-v4.1-flash'
+    model_ids = [model] if backend == 'codex' else [model, 'deepseek/deepseek-v4.1-flash-1017']
+    agent = tmp_path / 'operator-pi'
+    agent.mkdir()
+    (agent / 'models.json').write_text(json.dumps({'providers': {'nous': {
+        'baseUrl': 'https://inference-api.nousresearch.com/v1', 'apiKey': 'synthetic-native-secret',
+        'models': [{'id': name, 'name': name, 'api': 'openai-completions', 'reasoning': True,
+                    'input': ['text'], 'contextWindow': 1000000, 'maxTokens': 8192,
+                    'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0}} for name in model_ids],
+    }}}))
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(agent))
+    monkeypatch.setenv('PI_PROVIDER', 'nous')
+    reviewer = freeze_reviewer(RunConfig(target=str(tmp_path), backend=backend, model=model,
+                                        parse_model=model_ids[-1],
+                                        reasoning_effort='high'))
     export_harbor_profile(
         supplied_source, output,
-        candidate={'revision': 'test-candidate', 'wheel_sha256': 'a' * 64, 'platform': request.param},
+        candidate={'revision': 'test-candidate', 'wheel_sha256': 'a' * 64, 'platform': platform},
+        reviewer=reviewer,
         base_image=NODE_IMAGE, reviewer_assets={'runtime.lock': b'offline test build input\n'},
         reviewer_dockerfile_suffix='\nCOPY runtime.lock /opt/runtime.lock\n',
-        **({'platform': request.param} if request.param != 'linux/amd64' else {}),
+        platform=platform,
     )
     return output
 
@@ -49,7 +70,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
 ) -> None:
     """A judge-bootstrap change must update task, evaluation, metric and dataset versions.
 
-    Existing standalone tests never package Harbor tasks; stale upstream digests
+    Native execution tests never package Harbor tasks; stale upstream digests
     would make the delivered custom export unusable before any model call.
     """
     subprocess.run(['python', str(supplied_source / 'scripts/harbor/check-format.py'), str(public_profile)], check=True)
@@ -57,10 +78,18 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     manifest = json.loads((supplied_source / 'corpus/manifest.json').read_text())
     assert len(dataset['tasks']) == len(manifest) == 219
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
-    assert policy['schema'] == 2
+    assert policy['schema'] == 3
     assert policy['source_prs'] == 219
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
+    assert policy['judge']['model'] == 'gpt-6.1-sol'
+    assert policy['reviewer']['model'] != policy['judge']['model']
+    if policy['reviewer']['backend'] == 'pi':
+        assert {model['id'] for model in policy['reviewer']['pi_models']['providers']['nous']['models']} == {
+            'deepseek/deepseek-v4.1-flash', 'deepseek/deepseek-v4.1-flash-1017'}
+    assert 'synthetic-native-secret' not in (public_profile / 'daydream-profile.json').read_text()
+    assert len(policy['cases']) == 219
+    assert len(policy['test_tasks']) == 25
     assert policy['judge']['max_output_tokens_enforced'] is False
     assert policy['reviewer']['fanout_concurrency'] == 1
     assert policy['runtime']['platform'] == policy['candidate']['platform']
@@ -75,7 +104,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         task = json.loads((directory / 'tests/task.json').read_text())
         assert expected[str(task['task_id'])] == task['evaluation_id']
         exported = json.loads((directory / 'environment/daydream-profile.json').read_text())
-        assert exported['schema'] == 2
+        assert exported['schema'] == 3
         digest = exported.pop('profile_sha256')
         encoded = json.dumps(exported, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
         assert hashlib.sha256(encoded).hexdigest() == digest
@@ -85,7 +114,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         assert not (directory / 'environment/golden').exists()
         task_config = tomllib.loads((directory / 'task.toml').read_text())
         assert task_config['verifier']['environment_mode'] == 'separate'
-        assert task_config['agent']['allowed_hosts'] == ['chatgpt.com', 'auth.openai.com']
+        assert task_config['agent']['allowed_hosts'] == policy['reviewer']['allowed_hosts']
         assert task_config['verifier']['allowed_hosts'] == ['chatgpt.com', 'auth.openai.com']
     for reference in dataset['files']:
         assert reference['digest'] == f'sha256:{_hash(public_profile / reference["path"])}'
@@ -97,7 +126,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     """A custom provider without usable Pi metadata can silently skip actual judging.
 
     Prove model resolution using the pinned real SDK, and protect upstream source
-    parity independently of the evaluator's standalone fixtures.
+    parity independently of native backend replay fixtures.
     """
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
@@ -155,7 +184,9 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert set(reviewer) == {'platform', 'security_opt', 'volumes'}
     assert set(verifier) == {'platform', 'volumes'}
     assert reviewer['platform'] == verifier['platform'] == policy['runtime']['platform']
-    for role, config, target in [('CODEX', reviewer, '/run/reviewbench-codex'),
+    reviewer_role = 'REVIEWER_PI' if policy['reviewer']['backend'] == 'pi' else 'CODEX'
+    reviewer_target = '/run/reviewbench-reviewer' if reviewer_role == 'REVIEWER_PI' else '/run/reviewbench-codex'
+    for role, config, target in [(reviewer_role, reviewer, reviewer_target),
                                  ('PI', verifier, '/run/reviewbench-pi')]:
         assert config['volumes'] == [{
             'type': 'bind', 'source': '${RB_HARBOR_' + role + '_AUTH_DIR:?Set a dedicated '
@@ -171,7 +202,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
 
 
 @pytest.mark.parametrize('option', [
-    {'reviewer_model': 'stale-model'}, {'reviewer_effort': 'unsupported'}, {'rounds': 0},
+    {'reviewer': {'backend': 'unsupported'}}, {'rounds': 0},
     {'base_image': 'node:latest'},
     {'candidate': {'refresh_token': 'must-never-be-retained'}},
     {'reviewer_assets': {'../escaped': b'bytes'}},
@@ -225,3 +256,36 @@ def test_competing_export_destination_preserves_the_winning_profile(
             for path in output.rglob('*') if path.is_file()} == winning_files
     assert not (output / 'dataset').exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
+
+
+@pytest.mark.parametrize('change', ['missing-model', 'http', 'model-host', 'headers'])
+def test_native_pi_export_rejects_unavailable_or_unisolated_operator_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """Native operator routing must be admitted before exporting a runnable profile.
+
+    Codex's fixed hosts cannot expose a lost Nous model or a hidden secondary
+    endpoint. Preserve real operator files and enter through native freezing.
+    """
+    provider: dict[str, Any] = {'baseUrl': 'https://inference-api.nousresearch.com/v1',
+        'apiKey': 'synthetic-native-secret', 'models': [{'id': 'deepseek/deepseek-v4.1-flash',
+                                                       'api': 'openai-completions'}]}
+    if change == 'missing-model':
+        provider['models'] = []
+    elif change == 'http':
+        provider['baseUrl'] = 'http://inference-api.nousresearch.com/v1'
+    elif change == 'model-host':
+        provider['models'][0]['baseUrl'] = 'https://secondary.invalid/v1'
+    else:
+        provider['headers'] = {'Authorization': 'synthetic-header-secret'}
+    operator = tmp_path / 'operator'
+    operator.mkdir()
+    path = operator / 'models.json'
+    original = json.dumps({'providers': {'nous': provider}})
+    path.write_text(original)
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(operator))
+    monkeypatch.setenv('PI_PROVIDER', 'nous')
+    with pytest.raises(ValueError) as caught:
+        freeze_reviewer(RunConfig(target=str(tmp_path), backend='pi', model='deepseek/deepseek-v4.1-flash'))
+    assert 'synthetic-' not in str(caught.value)
+    assert path.read_text() == original
