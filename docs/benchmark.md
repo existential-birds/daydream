@@ -52,7 +52,7 @@ and default extensions resolving outside the candidate package: package the
 desired extension as `daydream_ext` and unset the override. Ordinary Daydream
 extension loading is unchanged. Extension identity is checked again after
 generation; changed executable inputs make the review unscorable.
-Public reviewer admission, sandbox probing and execution use isolated Python
+Public reviewer admission and execution use isolated Python
 startup, so task checkout modules and `PYTHONPATH` cannot replace the installed
 adapter. The native reviewer still works in the frozen task repository.
 Choose the native Docker architecture explicitly. The default `linux/amd64`
@@ -64,10 +64,9 @@ policy and provenance are frozen in the exported dataset; running it needs no
 policy download. The reviewer uses this pinned Docker seccomp profile with
 only the namespace bootstrap allowances required by Codex's nested Bubblewrap
 sandbox. Docker capabilities stay at their default, and Codex applies its own
-read-only filesystem and seccomp restrictions. Reviewer setup checks those
-restrictions without model calls before inference. Emulation must support the
-actual sandbox, including nested seccomp; running an amd64 binary alone is
-insufficient.
+read-only filesystem and seccomp restrictions. The selected architecture must
+support the actual sandbox, including nested seccomp; running an amd64 binary
+alone is insufficient.
 
 Harbor's exact-host kernel isolation is also required. Both roles allow only
 `chatgpt.com` and `auth.openai.com`; the runner checks isolation before inference
@@ -80,11 +79,10 @@ auth directory outside results; it never mounts the personal home. Do not run
 other Codex clients with that login while the job owns it. One exclusive lease
 covers each complete reviewer/judge invocation, and rotated credentials are
 reconciled into the canonical store before another role starts. Account inference
-therefore serializes. Host admission queues whole trials before their timed
-phases, so lease waiting cannot consume the supplied review/judge allowance.
-`--concurrency` is an upper bound: with one subscription login, effective trial
-concurrency is one, recorded alongside the requested limit in the job's admission
-policy. Native reviewer fan-out is also frozen at one through Daydream's
+therefore serializes. Harbor runs one complete trial at a time, so lease waiting
+cannot consume the supplied review/judge allowance. Its resolved job configuration
+records trial concurrency as one. Native reviewer fan-out is also frozen at one
+through Daydream's
 supported concurrency setting: separate Codex CLI processes have process-local
 refresh locks, so sharing an auth file alone cannot prevent simultaneous token
 rotation. The ordinary review phases and native transport remain in use. At job
@@ -104,7 +102,7 @@ task from the full export for integration proof:
 /tmp/reviewbench-runtime/bin/daydream benchmark reviewbench harbor-run \
   /tmp/reviewbench-full --codex-home "$HOME/.codex" \
   --auth-runtime /tmp/reviewbench-private-auth-1 --jobs-dir /tmp/reviewbench-jobs \
-  --job-name one-task --n-tasks 1 --concurrency 1 --rounds 1
+  --job-name one-task --n-tasks 1 --rounds 1
 /tmp/reviewbench-runtime/bin/reviewbench-check-job \
   /tmp/reviewbench-jobs/one-task \
   /tmp/reviewbench-jobs/one-task/reviewbench-metric.py \

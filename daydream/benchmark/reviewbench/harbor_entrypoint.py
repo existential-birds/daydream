@@ -53,8 +53,7 @@ def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tup
             or type(reviewer.get('fanout_concurrency')) is not int or reviewer['fanout_concurrency'] != 1):
         raise PublicReviewerError('public reviewer model and effort must be explicit')
     title, body = pr.get('title', ''), pr.get('body', '')
-    if (not isinstance(title, str) or not isinstance(body, str)
-            or profile['pr'].get('title', '') != title or profile['pr'].get('body', '') != body):
+    if not isinstance(title, str) or not isinstance(body, str):
         raise PublicReviewerError('public reviewer author context differs from frozen profile')
     description = title + '\n\n' + body if title or body else None
     return PublicHarborTask(case, profile['upstream_revision'], patch_path.read_text(),

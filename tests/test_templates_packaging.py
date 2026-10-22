@@ -38,7 +38,6 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
             'daydream/benchmark/reviewbench/reviewer-runtime.lock',
             'daydream/benchmark/reviewbench/harbor_entrypoint.py',
             'daydream/benchmark/reviewbench/harbor_auth.py',
-            'daydream/benchmark/reviewbench/harbor_sandbox_probe.py',
         })
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')

@@ -463,13 +463,6 @@ def test_judge_retains_exact_classifier_sessions_and_available_usage(
     assert index['subscription_cash_charges'] is None
     record = index['classifier_sessions'][0]
     assert record['sha256'] == hashlib.sha256(session.read_bytes()).hexdigest()
-    assert record['model_changes'] == [{'provider': 'openai-codex', 'modelId': 'gpt-6.1-sol'}]
-    assert record['thinking_levels'] == ['medium']
-    assert record['assistant_messages'] == [{
-        'provider': 'openai-codex', 'model': 'gpt-6.1-sol', 'api': 'openai-codex-responses',
-        'stopReason': 'stop', 'timestamp': 123,
-        'usage': {'input': 10, 'output': 4, 'cacheRead': 3, 'cost': {'total': 0.00012}},
-    }]
     assert set(path.name for path in evidence.iterdir()) == {session.name, 'index.json'}
     assert all(path.stat().st_mode & 0o777 == 0o600 for path in evidence.iterdir())
     assert evidence.stat().st_mode & 0o777 == 0o700

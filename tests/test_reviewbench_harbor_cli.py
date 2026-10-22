@@ -26,7 +26,7 @@ import pytest
 from daydream.benchmark.reviewbench import harbor_build, harbor_cli
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
-from tests.test_reviewbench_sandbox_probe import moby_policy as moby_policy
+from tests.test_reviewbench_seccomp import moby_policy as moby_policy
 
 
 @pytest.fixture
@@ -112,7 +112,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     args = parser.parse_args([
         'harbor-run', str(dataset), '--codex-home', str(source), '--auth-runtime', str(tmp_path / 'private-auth'),
         '--jobs-dir', str(tmp_path / 'jobs'), '--job-name', 'selected-case', '--task', 'owner_repo*',
-        '--n-tasks', '1', '--concurrency', '2',
+        '--n-tasks', '1',
     ])
     return args, candidate
 
@@ -139,10 +139,9 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
         'metric_config': {'metrics': [{'type': 'uv-script',
                                       'kwargs': {'script_path': str(args.directory.resolve() / 'metric.py')}}]},
         'agent': 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
-        'concurrency': '2', 'rounds': str(rounds), 'retries': '0', 'jobs': str(args.jobs_dir.resolve()),
+        'concurrency': '1', 'rounds': str(rounds), 'retries': '0', 'jobs': str(args.jobs_dir.resolve()),
         'job': args.job_name, 'yes': True, 'plugins': [
-            'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
-            'daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin'],
+            'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin'],
         'task': 'owner_repo*', 'limit': '1', 'round_membership': list(range(1, rounds + 1)),
         'auth_home': '/run/reviewbench-codex', 'platform': None, 'forbidden_env': [],
         'seccomp_profile': str(args.directory.resolve() / 'reviewer-seccomp.json'),
@@ -246,7 +245,7 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     """A local -p export needs explicit metrics before the upstream plugin can plan.
 
     The argv replay cannot detect Harbor's different metric resolution for local
-    and Hub datasets. Resolve the actual CLI configuration, Job and both plugins
+    and Hub datasets. Resolve the actual CLI configuration, Job and the upstream plugin
     in the pinned optional runtime without running any trial or container. The
     identical empty-metrics control reproduces the observed pre-inference failure.
     """
@@ -287,7 +286,6 @@ async def main():
     job = await Job.create(config)
     await attach_job_plugins(job, [
         PluginConfig(import_path="reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin"),
-        PluginConfig(import_path="daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin"),
     ])
     plan = json.loads((job.job_dir / "reviewbench-plan.json").read_text())
     assert plan["source_prs"] == 219 and len(plan["expected_tasks"]) == 1
@@ -296,7 +294,7 @@ async def main():
     assert plan["source_metric_sha256"] == [metric_digest]
     assert all(isinstance(metric, RoundMetric) for group in job._metrics.values() for metric in group)
     assert (job.job_dir / "reviewbench-metric.py").is_file()
-    assert json.loads((job.job_dir / "daydream-subscription-admission.json").read_text())["effective_concurrency"] == 1
+    assert job.config.n_concurrent_trials == 1
     Path(sys.argv[2]).write_text(json.dumps({"plan": plan, "metric": config.metrics[0].model_dump(mode="json")}))
 
 asyncio.run(main())

@@ -98,14 +98,10 @@ def export_harbor_profile(
     *,
     candidate: Mapping[str, Any],
     base_image: str,
-    reviewer_image: str | None = None,
     reviewer_model: str = CODEX_MODEL,
     reviewer_effort: str = 'high',
-    reviewer_timeout: int = 900,
-    verifier_timeout: int = 7200,
     reviewer_dockerfile_suffix: str = '',
     reviewer_assets: Mapping[str, bytes] | None = None,
-    organization: str = 'daydream-local',
     rounds: int = 3,
     platform: str = 'linux/amd64',
 ) -> dict[str, Any]:
@@ -130,20 +126,14 @@ def export_harbor_profile(
     if type(rounds) is not int or rounds < 1:
         raise ValueError('Independent comparison rounds must be positive')
     _image(base_image)
-    if reviewer_image is not None:
-        _image(reviewer_image)
     if reviewer_effort not in {'low', 'medium', 'high', 'xhigh'}:
         raise ValueError('Unsupported native Codex reasoning effort')
-    if (type(reviewer_timeout) is not int or reviewer_timeout < 1
-            or type(verifier_timeout) is not int or verifier_timeout < 1):
-        raise ValueError('Reviewer and verifier wall budgets must be positive integers')
     # No arbitrary kwargs/environment escape hatch: profile data is retained in
     # images and jobs. Explicitly refuse common credential-bearing identities.
     serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
     if re.search(r'(?i)(api.?key|access.?token|refresh.?token|id.?token|password|secret)', serialized_candidate):
         raise ValueError('Candidate identity must contain no credentials or secret fields')
     from daydream import credential_patterns, json_utils, redaction
-    from daydream.benchmark.reviewbench.harbor_subscription_plugin import ADMISSION_POLICY
 
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
     atomic_asset = Path(json_utils.__file__).read_bytes()
@@ -152,23 +142,21 @@ def export_harbor_profile(
     seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
-    probe_sha = hashlib.sha256(Path(__file__).with_name('harbor_sandbox_probe.py').read_bytes()).hexdigest()
     reviewer_compose = _compose(platform, reviewer=True)
     verifier_compose = _compose(platform, reviewer=False)
     policy: dict[str, Any] = {
         'schema': 1, 'name': 'daydream-reviewbench-codex-subscription-v1',
         'source': source_identity, 'source_prs': len(cases),
         'candidate': dict(candidate), 'final_comparison_rounds': rounds,
-        'subscription_admission': {**ADMISSION_POLICY, 'plugin_sha256': hashlib.sha256(
-            Path(__file__).with_name('harbor_subscription_plugin.py').read_bytes()).hexdigest()},
+        'trial_concurrency': 1,
         'profile_builder_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': reviewer_timeout,
+        'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': 900,
                      'fanout_concurrency': 1},
         'judge': {
             'provider': 'openai-codex', 'model': reviewer_model, 'auth': 'subscription-oauth',
             'matcher_effort': 'low', 'classifier_effort': 'medium',
             'call_timeout_ms': 600000, 'classifier_extra_per_finding_ms': 120000,
-            'verifier_timeout_sec': verifier_timeout, 'models': models,
+            'verifier_timeout_sec': 7200, 'models': models,
             'max_output_tokens_enforced': False, 'cost_source': 'api-equivalent-estimate',
             'auth_bootstrap_sha256': hashlib.sha256(auth_asset).hexdigest(),
             'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
@@ -189,8 +177,8 @@ def export_harbor_profile(
                     'reviewer_seccomp_sha256': seccomp_sha,
                     'reviewer_seccomp_provenance_sha256': hashlib.sha256(seccomp_provenance_asset).hexdigest(),
                     'reviewer_seccomp_provenance': seccomp_provenance,
-                    'sandbox_probe_sha256': probe_sha, 'verifier_seccomp': 'docker-default',
-                    'verifier_image': base_image, 'reviewer_image': reviewer_image or base_image,
+                    'verifier_seccomp': 'docker-default',
+                    'base_image': base_image,
                     'reviewer_build_suffix_sha256': hashlib.sha256(reviewer_dockerfile_suffix.encode()).hexdigest(),
                     'reviewer_assets': {key: hashlib.sha256(value).hexdigest()
                                         for key, value in sorted((reviewer_assets or {}).items())}},
@@ -201,12 +189,11 @@ def export_harbor_profile(
         exported = Path(temporary) / 'dataset'
         subprocess.run([
             'node', '--import', 'tsx', str(source / 'scripts/harbor/export.ts'),
-            '--output', str(exported), '--organization', organization, '--split', 'full',
+            '--output', str(exported), '--organization', 'daydream-local', '--split', 'full',
             '--judge-provider', 'openai-codex', '--judge-model', reviewer_model,
             '--base-image', base_image, '--agent-host', 'chatgpt.com', '--agent-host', 'auth.openai.com',
             '--judge-host', 'chatgpt.com', '--judge-host', 'auth.openai.com',
             '--judge-env', 'DAYDREAM_SUBSCRIPTION_HOME=RB_HARBOR_SUBSCRIPTION_HOME',
-            '--verifier-timeout', str(verifier_timeout),
         ], cwd=source, check=True)
         expected: dict[str, int] = {}
         references: list[str] = []
@@ -225,15 +212,13 @@ def export_harbor_profile(
                 'task_id': task['task_id'], 'evaluation_id': task['evaluation_id'],
                 'reviewer': policy['reviewer'], 'candidate': dict(candidate), 'policy_sha256': policy_sha,
                 'runtime': {key: policy['runtime'][key] for key in (
-                    'platform', 'reviewer_seccomp_sha256', 'reviewer_seccomp_provenance_sha256', 'sandbox_probe_sha256',
+                    'platform', 'reviewer_seccomp_sha256', 'reviewer_seccomp_provenance_sha256',
                 )},
             }
             profile['profile_sha256'] = canonical_digest(profile)
             _write_json(task_dir / 'environment/daydream-profile.json', profile)
             docker_path = task_dir / 'environment/Dockerfile'
             docker = docker_path.read_text()
-            if reviewer_image:
-                docker = docker.replace(f'FROM {base_image}\n', f'FROM {reviewer_image}\n', 1)
             docker = docker.replace('RUN git init -q .', reviewer_dockerfile_suffix + '\nRUN git init -q .', 1)
             docker += '\nCOPY daydream-profile.json /work/pr/daydream-profile.json\n'
             docker_path.write_text(docker, encoding='utf-8')
@@ -266,11 +251,10 @@ def export_harbor_profile(
             )
             (task_dir / 'tests/test.sh').write_text(bootstrap, encoding='utf-8')
             toml_path = task_dir / 'task.toml'
-            toml = toml_path.read_text().replace('[agent]\ntimeout_sec = 900\n',
-                                                  f'[agent]\ntimeout_sec = {reviewer_timeout}\n')
+            toml = toml_path.read_text()
             toml = toml.replace('[metadata]\n', f'[metadata]\ndaydream_policy_sha256 = "{policy_sha}"\n')
             toml_path.write_text(toml, encoding='utf-8')
-            references.append(f'[[tasks]]\nname = {json.dumps(organization + "/" + case.key)}\n'
+            references.append(f'[[tasks]]\nname = {json.dumps("daydream-local/" + case.key)}\n'
                               f'digest = "sha256:{package_digest(task_dir)}"\n')
         metric = (source / 'scripts/harbor/metric.py').read_text().replace(
             'EXPECTED_TASKS = {}', 'EXPECTED_TASKS = ' + json.dumps(expected, sort_keys=True),
@@ -283,7 +267,7 @@ def export_harbor_profile(
         (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
         (exported / 'dataset.toml').write_text(
             'schema_version = "1.0"\n[dataset]\n'
-            f'name = {json.dumps(organization + "/reviewbench-codex-subscription")}\n'
+            f'name = {json.dumps("daydream-local/reviewbench-codex-subscription")}\n'
             'description = "Full public ReviewBench: 219 frozen PRs; custom subscription Codex judge."\n'
             'keywords = ["code-review", "reviewbench", "daydream"]\n\n'
             + '\n'.join(references) + '\n[[files]]\npath = "metric.py"\n'

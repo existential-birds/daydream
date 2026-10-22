@@ -20,7 +20,7 @@ from daydream.benchmark.reviewbench.contract import verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
-from tests.test_reviewbench_sandbox_probe import moby_policy as moby_policy
+from tests.test_reviewbench_seccomp import moby_policy as moby_policy
 
 pytestmark = pytest.mark.usefixtures('moby_policy')
 
@@ -65,8 +65,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     assert policy['runtime']['reviewer_seccomp_sha256'] == _hash(public_profile / 'reviewer-seccomp.json')
     assert policy['runtime']['reviewer_seccomp_provenance']['policy_sha256'] == (
         policy['runtime']['reviewer_seccomp_sha256'])
-    assert policy['subscription_admission']['effective_concurrency'] == 1
-    assert policy['subscription_admission']['scope'] == 'whole-trial-before-create-and-phase-timers'
+    assert policy['trial_concurrency'] == 1
     expected = runpy.run_path(str(public_profile / 'metric.py'))['EXPECTED_TASKS']
     assert len(expected) == 219
     for reference in dataset['tasks']:
@@ -163,7 +162,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
 
 @pytest.mark.parametrize('option', [
     {'reviewer_model': 'stale-model'}, {'reviewer_effort': 'unsupported'}, {'rounds': 0},
-    {'base_image': 'node:latest'}, {'reviewer_timeout': 0}, {'verifier_timeout': 0},
+    {'base_image': 'node:latest'},
     {'candidate': {'refresh_token': 'must-never-be-retained'}},
     {'reviewer_assets': {'../escaped': b'bytes'}},
     {'platform': 'linux/ppc64le'}, {'platform': 'linux/arm64', 'candidate': {'platform': 'linux/amd64'}},

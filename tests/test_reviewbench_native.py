@@ -396,13 +396,20 @@ async def test_native_explicit_runtime_cannot_admit_external_extension_override(
     assert 'do-not-read-or-fingerprint' not in json.dumps(asdict(result))
 
 
-async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+async def test_frozen_pi_defaults_refuse_case_thinking_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Case-local effort cannot replace an unavailable operator default."""
-    repo, case = frozen_case(tmp_path)
+    """Pi must reject case-local effort when the frozen operator defaults omit it.
+
+    The native success cases freeze explicit effort; they miss inheritance of a
+    case setting when no operator effort was selected. Exercise the actual
+    backend guard that owns native argument selection before spawning Pi.
+    """
+    from daydream.backends.pi import PiBackend, PiError
+
+    repo, _ = frozen_case(tmp_path)
     write_and_stage(repo, '.pi/settings.json', '{"defaultThinkingLevel":"high"}')
-    case = replace(case, head=commit(repo, 'case-local thinking default'))
+    commit(repo, 'case-local thinking default')
     operator = tmp_path / 'operator'
     (operator / '.pi').mkdir(parents=True)
     (operator / '.pi/settings.json').write_text(
@@ -410,15 +417,12 @@ async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
     monkeypatch.delenv('PI_THINKING', raising=False)
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
 
-    def no_backend(*_args: Any, **_kwargs: Any) -> None:
-        pytest.fail("a conflicting case must fail before backend creation")
-
-    monkeypatch.setattr(runner, "create_backend", no_backend)
     config = empty_review_config(operator, tmp_path / 'trajectory', backend='pi')
-    result = await review_case(case, repo, config, 'fixture')
-    assert result.status == 'failed' and result.candidate is None
-    assert result.terminal_result is None
-    assert 'Case Pi thinking conflicts with unavailable operator effort' in result.diagnostics
+    _, execution = native_configuration(config)
+    backend = PiBackend(cwd=repo, execution_input=execution.backends['pi'])
+    with pytest.raises(PiError, match='Case Pi thinking conflicts with unavailable operator effort'):
+        async for _ in backend.execute(repo, 'Review this change'):
+            pytest.fail('case-local effort reached the Pi transport')
 
 
 @pytest.mark.parametrize(("selection", "provider"), [

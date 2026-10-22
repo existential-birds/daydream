@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -351,7 +352,10 @@ def test_supplied_validator_and_empty_real_judge_work_offline(supplied_source: P
         "pr_key": case.key, "pr": asdict(case),
         "findings": [{**_finding(), "tp_fp": "tp", "severity": "high", "category": "security"}],
     })
-    assert "No judging or inference performed" in evaluator.validate_findings(supplied_source, candidate, pr_metadata)
+    validation_command = ["npm", "run", "harbor:validate-findings", "--",
+                          "--candidate", str(candidate), "--pr", str(pr_metadata)]
+    validation = subprocess.run(validation_command, cwd=supplied_source, check=True, capture_output=True, text=True)
+    assert "No judging or inference performed" in validation.stdout
     result = evaluator.evaluate_round(
         supplied_source, candidates, tmp_path / "scores", provider="not-a-provider", model="not-a-model",
         expected_keys=[case.key], golden_dir=golden, manifest=manifest, snapshot_dir=repo,
@@ -371,5 +375,5 @@ def test_supplied_validator_and_empty_real_judge_work_offline(supplied_source: P
     assert "Grounded:  P=50.0%  R=100.0%" in summary
     assert "By Severity (macro)" in summary and "By Category (macro)" in summary
     candidate.write_text("{bad", encoding="utf-8")
-    with pytest.raises(evaluator.EvaluationError):
-        evaluator.validate_findings(supplied_source, candidate, pr_metadata)
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(validation_command, cwd=supplied_source, check=True, capture_output=True, text=True)

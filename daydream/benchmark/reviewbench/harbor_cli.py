@@ -29,7 +29,7 @@ def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
     export.add_argument('--reviewer-effort', choices=('low', 'medium', 'high', 'xhigh'), default='high')
     export.add_argument('--base-image', default=NODE_IMAGE)
     export.add_argument('--platform', choices=REVIEWBENCH_PLATFORMS, default='linux/amd64',
-                        help='frozen task architecture; native sandbox preflight must pass')
+                        help='frozen task architecture')
     export.add_argument('--rounds', type=int, choices=(1, 3), default=3)
     run = commands.add_parser('harbor-run', help='run the exported public profile; launches models')
     run.add_argument('directory', type=Path)
@@ -40,7 +40,6 @@ def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
     run.add_argument('--job-name', required=True)
     run.add_argument('--task', help='supplied task name/glob, applied to the full export')
     run.add_argument('--n-tasks', type=int)
-    run.add_argument('--concurrency', type=int, default=1)
     run.add_argument('--rounds', type=int, choices=(1, 3), default=1)
 
 
@@ -131,8 +130,8 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         raise ValueError('Executing candidate differs from the frozen public profile')
     if args.rounds > profile['final_comparison_rounds']:
         raise ValueError('Requested rounds exceed the frozen profile')
-    if args.concurrency < 1 or (args.n_tasks is not None and args.n_tasks < 1):
-        raise ValueError('Concurrency and task count must be positive')
+    if args.n_tasks is not None and args.n_tasks < 1:
+        raise ValueError('Task count must be positive')
     if not DockerEnvironment._egress_control_kernel_support():
         raise ValueError('Docker kernel lacks Harbor exact-host isolation support')
     # Schema and package validation precede credential delivery and model work.
@@ -141,10 +140,9 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     command = [str(Path(sys.executable).with_name('harbor')), 'run', '--yes', '-c', str(local_config),
                '-p', str(args.directory.resolve()),
                '-a', 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
-               '-n', str(args.concurrency), '-k', str(args.rounds), '-r', '0',
+               '-n', '1', '-k', str(args.rounds), '-r', '0',
                '-o', str(args.jobs_dir.resolve()), '--job-name', args.job_name,
-               '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
-               '--plugin', 'daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin']
+               '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin']
     if args.task:
         command.extend(['-i', args.task])
     if args.n_tasks is not None:

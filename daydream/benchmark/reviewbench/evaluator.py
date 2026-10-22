@@ -62,16 +62,6 @@ def _object(path: Path) -> dict[str, Any]:
     return value
 
 
-def validate_findings(source: Path, candidate: Path, pr_metadata: Path) -> str:
-    """Use the supplied no-inference parser against the actual frozen PR metadata."""
-    source = source.resolve()
-    verify_source(source)
-    return _run([
-        "npm", "run", "harbor:validate-findings", "--", "--candidate", str(candidate.resolve()),
-        "--pr", str(pr_metadata.resolve()),
-    ], source, timeout=120).stdout
-
-
 def _candidate_membership(candidate_dir: Path) -> tuple[dict[str, Case], dict[str, str]]:
     if not candidate_dir.is_dir():
         raise EvaluationError("Candidate input must be one round's findings directory")
