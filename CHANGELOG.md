@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed result schema 1 and extension API 8.
 - Export and run the complete public ReviewBench corpus through Harbor with the
   ordinary native Codex reviewer and a separate subscription-backed Codex judge.
-  Freeze custom task/runtime identities, coordinate OAuth refresh across roles,
+  Freeze custom task/runtime identities, isolate OAuth refresh by role,
   and retain private joined native trajectories, classifier session evidence and supplied
   independent-round metrics
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This is compatible new functionality; reviewer defaults are unchanged.
 
 ### Changed
+
+- Give public Harbor reviewers and Pi judges independent persistent subscription
+  logins. Replace `harbor-run --auth-runtime` with `--pi-home`; preserve native
+  refresh locks and remove shared credential conversion and copyback. Existing
+  exports require regeneration and fresh dedicated sign-ins.
 
 - Generate the public benchmark's Docker seccomp policy at export from a
   hash-verified, pinned upstream profile instead of vendoring JSON assets.
@@ -84,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- Accept native HEAD finding locations even when the same line number exists
+  in the old file, removing an overstrict ReviewBench conversion guard.
+
 - Reject standalone benchmark candidate changes between cases or during review
   before publishing scorable findings
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
@@ -97,7 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed candidate before admission or review
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Preserve relative Pi credential directories during isolated ReviewBench runs
-  and reject ambiguous renamed-file line hints using the original source path
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into

@@ -169,7 +169,7 @@ async def test_frozen_input_is_verified_before_native_dispatch(
         assert result.candidate is None and result.terminal_result is None and result.diagnostics
 
 
-def test_head_conversion_retains_logical_records_and_exposes_ambiguous_locations(tmp_path: Path) -> None:
+def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(tmp_path: Path) -> None:
     """Convert proven HEAD locations and retain explicit omissions for unsafe hints."""
     repo, initial = frozen_case(tmp_path)
     # A later frozen PR includes a same-number replacement, unchanged context,
@@ -186,74 +186,13 @@ def test_head_conversion_retains_logical_records_and_exposes_ambiguous_locations
         finding(id=9, line=4, description="", rationale="", evidence="")]
     converted, omitted = convert_findings(items, repository=repo, case=case, producer="fixture",
         comparison=git_ops.diff_paths(repo, base, head, ["."]))
-    assert [(row["start_line"], row["end_line"]) for row in converted] == [(1, 1), (3, 3)]
+    assert [(row["start_line"], row["end_line"]) for row in converted] == [(1, 1), (2, 2), (3, 3)]
     assert all(row["producer"] == "fixture" and row["file"] == "api.py" for row in converted)
     assert {row["id"]: row["reason"] for row in omitted} == {
-        2: "ambiguous_old_or_new_side_line_hint", 4: "location_absent_from_head_regular_file",
+        4: "location_absent_from_head_regular_file",
         5: "missing_repository_relative_positive_location", 6: "location_absent_from_head_regular_file",
         7: "native_location_was_relocated_or_distrusted", 8: "missing_repository_relative_positive_location",
         9: "missing_finding_message"}
-
-
-def test_head_conversion_checks_old_coordinates_outside_captured_hunks(tmp_path: Path) -> None:
-    """Old-file coordinates remain ambiguous beyond the captured old hunk."""
-    repo, initial = frozen_case(tmp_path)
-    old_contents = "".join(f"# original {number}\n" for number in range(1, 41))
-    write_and_stage(repo, "api.py", old_contents)
-    base = commit(repo, "long old file")
-    write_and_stage(repo, "api.py", "".join(f"# inserted {number}\n" for number in range(1, 11)) + old_contents)
-    head = commit(repo, "insert lines at start")
-    case = replace(initial, base=base, head=head)
-    comparison = git_ops.diff_paths(repo, base, head, ["."])
-    assert "@@ -1,3 +1,13 @@" in comparison
-    converted, omitted = convert_findings([finding(line=10)], repository=repo, case=case,
-        producer="fixture", comparison=comparison)
-    assert converted == []
-    assert omitted == [{"uid": None, "id": 1, "reason": "ambiguous_old_or_new_side_line_hint"}]
-
-
-@pytest.mark.parametrize('old_path', ['api.py', 'old\té.py'])
-async def test_native_renamed_file_uses_original_source_for_coordinate_ambiguity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, old_path: str,
-) -> None:
-    """A rename must not make a replacement's old coordinate look absent.
-
-    Existing conversion fixtures retain the same path on both sides; they miss
-    destination absence at the base, including Git-quoted original filenames.
-    Unchanged context and new-only coordinates remain defensible after a rename.
-    """
-    repo, initial = frozen_case(tmp_path)
-    new_path = 'renamed.py'
-    if old_path != 'api.py':
-        git(repo, 'mv', 'api.py', old_path)
-    old_contents = 'def resolve(value):\n    return value[0]\n' + ''.join(
-        f'# original {number}\n' for number in range(3, 41))
-    write_and_stage(repo, old_path, old_contents)
-    base = commit(repo, 'long original source')
-    git(repo, 'mv', old_path, new_path)
-    write_and_stage(repo, new_path, old_contents.replace('value[0]', 'value[-1]') + '# new\n# tail\n')
-    case = replace(initial, base=base, head=commit(repo, 'rename with replacement and added tail'))
-    comparison = git_ops.diff_paths(repo, case.base, case.head, ['.'])
-    assert 'rename from ' in comparison and 'rename to ' in comparison
-    if '\t' in old_path:
-        assert '--- "a/old\\t\\303\\251.py"' in comparison
-
-    def create(*_args: Any, **kwargs: Any) -> EmptyReviewBackend:
-        backend = EmptyReviewBackend(kwargs['cwd'], forbid_merge=False, forbid_supervise=False,
-            review_by_stack={'structure': [finding(file=new_path, line=line,
-                description=f'Native finding at line {line}', evidence=f'{new_path}:{line}') for line in (1, 2, 42)]})
-        backend.merge_echo_records = True
-        return backend
-
-    monkeypatch.setattr(runner, 'create_backend', create)
-    result = await review_case(case, repo, empty_review_config(repo, tmp_path / 'trajectory', backend='pi'), 'fixture')
-    assert result.status == 'conversion_limited', result.diagnostics
-    assert result.terminal_result is not None and result.terminal_result['analysis_state'] == 'complete'
-    assert {item['line'] for item in result.retained_findings} == {1, 2, 42}
-    assert result.candidate is not None
-    assert [(item['file'], item['start_line']) for item in result.candidate['findings']] == [
-        (new_path, 1), (new_path, 42)]
-    assert [item['reason'] for item in result.conversion_omissions] == ['ambiguous_old_or_new_side_line_hint']
 
 
 async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, mutation: str, report: Path) -> None:

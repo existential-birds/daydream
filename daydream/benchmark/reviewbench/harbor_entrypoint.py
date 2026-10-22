@@ -151,7 +151,7 @@ async def main(environment: Mapping[str, str]) -> int:
             raise PublicReviewerError('prior reviewer artifacts exist; use a fresh trial')
         task, reviewer = load_public_task(inputs / 'daydream-profile.json', inputs / 'pr.json', inputs / 'diff.patch')
         # Import lazily: the ordinary standalone native adapter needs no lease.
-        from daydream.benchmark.reviewbench.harbor_auth import subscription_lease
+        from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 
         execution = None
         cancelled = False
@@ -160,7 +160,7 @@ async def main(environment: Mapping[str, str]) -> int:
             staged = private / 'native-evidence'
             try:
                 with (_private_archive_directory(private / 'archive'),
-                      subscription_lease(canonical, private / 'codex', role='reviewer') as role_home):
+                      reviewer_credentials(canonical, private / 'codex') as role_home):
                     # A fresh private home prevents user config, API providers and
                     # project settings from changing this frozen subscription lane.
                     (role_home / 'config.toml').write_text('model_provider = "openai"\n'
@@ -194,7 +194,7 @@ async def main(environment: Mapping[str, str]) -> int:
                 if execution is not None:
                     execution.status = 'failed'
                     execution.candidate = None
-                    execution.diagnostics.append('subscription credential lease did not finalize')
+                    execution.diagnostics.append('reviewer credential invocation did not finalize')
                 raise
             finally:
                 if execution is not None or staged.exists():
