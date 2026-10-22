@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from functools import singledispatchmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -16,7 +16,6 @@ from daydream.backends import (
     CodexRequestConfig,
     CostEvent,
     DiagnosticEvent,
-    EffectiveRequestConfig,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
@@ -29,6 +28,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    request_config_controls,
 )
 from daydream.backends.lifecycle import BackendLifecycleSnapshot, current_backend_lifecycle
 from daydream.redaction import redact_value as redact_value
@@ -444,12 +444,9 @@ class Invocation:
         # No prompt, environment, credential or native settings file contents.
         backend = {PiRequestConfig: 'pi', CodexRequestConfig: 'codex', ClaudeRequestConfig: 'claude',
                    OspreyRequestConfig: 'osprey'}.get(type(event.config))
-        controls = asdict(event.config) if type(event.config) in (
-            EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, PiRequestConfig, OspreyRequestConfig,
-        ) else {}
         self._requests.append({"backend": backend,
             "model": event.model_name, "provider": event.provider_name, "reasoning_effort": event.reasoning_effort,
-            "controls": controls})
+            "controls": request_config_controls(event.config)})
 
     @_dispatch.register
     def _observe_metrics(self, event: MetricsEvent) -> None:

@@ -610,6 +610,14 @@ _CONFIG_CHECKS = {
 }
 
 
+def request_config_controls(config: EffectiveRequestConfig) -> dict[str, Any]:
+    """Project exact built-in controls; custom subclasses may contain secrets.
+
+    Persistence and export owners must still redact their complete evidence.
+    """
+    return {name: getattr(config, name) for name, _check in _CONFIG_CHECKS.get(type(config), ())}
+
+
 @dataclass
 class RequestEvent:
     """Effective Daydream request, after adapter transformations.

@@ -125,6 +125,8 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
             raise ValueError('Private credential stores must be outside dataset and job evidence')
     validate_credential_stores(reviewer_home, judge_home)
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
+    if profile.get('schema') != 2:
+        raise ValueError('Incompatible public profile schema; create a fresh Harbor export')
     policy_sha = profile.pop('policy_sha256')
     if canonical_digest(profile) != policy_sha or profile.get('source_prs') != 219:
         raise ValueError('Full public profile identity differs')

@@ -115,6 +115,20 @@ def atomic_write_bytes(
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 
 
+def atomic_create_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+    """Install flushed bytes only at an absent path, preserving competing output.
+
+    Stage beside the destination so the no-clobber hard link stays on its
+    filesystem. Clean staging on success or failure; never replace final bytes.
+    """
+    tmp = _stage_bytes(path, content, fsync=True, mode=mode)
+    try:
+        os.link(tmp, path, follow_symlinks=False)
+    finally:
+        with suppress(OSError):
+            tmp.unlink()
+
+
 def atomic_write_pair(
     first: tuple[Path, bytes],
     second: tuple[Path, bytes],

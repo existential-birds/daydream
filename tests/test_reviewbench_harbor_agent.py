@@ -40,7 +40,7 @@ def public_input(tmp_path: Path) -> dict[str, str]:
     pr = {**asdict(case), 'title': 'Frozen supplied title', 'body': 'Frozen supplied author explanation'}
     (inputs / 'pr.json').write_text(json.dumps(pr))
     (inputs / 'diff.patch').write_text(git_ops.diff_paths(repo, case.base, case.head, ['.']))
-    profile = {'schema': 1, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
+    profile = {'schema': 2, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
                'task_id': 7, 'evaluation_id': 99,
                'reviewer': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high', 'fanout_concurrency': 1}}
     profile['profile_sha256'] = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'))
@@ -246,7 +246,7 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     assert not fake_gh.calls('POST')
 
 
-@pytest.mark.parametrize('fault', ['profile', 'patch', 'refs', 'origin', 'stale', 'stale_trajectory', 'auth'])
+@pytest.mark.parametrize('fault', ['schema', 'profile', 'patch', 'refs', 'origin', 'stale', 'stale_trajectory', 'auth'])
 async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_inference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
@@ -254,10 +254,16 @@ async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_in
     environment = public_input(tmp_path)
     prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
     inputs = Path(environment['DAYDREAM_RB_INPUTS'])
-    if fault == 'profile':
+    if fault in {'schema', 'profile'}:
         profile_path = inputs / 'daydream-profile.json'
         profile = json.loads(profile_path.read_text())
-        profile['reviewer']['model'] = 'unfrozen-model'
+        if fault == 'schema':
+            profile['schema'] = 1
+            policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
+            profile['profile_sha256'] = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'))
+                                                      .encode()).hexdigest()
+        else:
+            profile['reviewer']['model'] = 'unfrozen-model'
         profile_path.write_text(json.dumps(profile))
     elif fault == 'patch':
         (inputs / 'diff.patch').write_text('unrelated supplied patch')

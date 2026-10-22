@@ -12,7 +12,6 @@ import argparse
 import base64
 import fcntl
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -27,17 +26,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from daydream.json_utils import atomic_write_bytes, publish_staged_directory
 from daydream.redaction import redact_value
-
-try:
-    from daydream.json_utils import atomic_write_bytes, publish_staged_directory
-except ModuleNotFoundError as missing:
-    if missing.name not in {"daydream", "daydream.json_utils"}:
-        raise
-    # The verifier ships this exact shared-owner module beside its bootstrap.
-    shared_writer = importlib.import_module("daydream_json_utils")
-    atomic_write_bytes = shared_writer.atomic_write_bytes
-    publish_staged_directory = shared_writer.publish_staged_directory
 
 
 class SubscriptionAuthError(ValueError):

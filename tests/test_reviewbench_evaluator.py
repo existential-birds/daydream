@@ -16,8 +16,7 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.reviewbench import evaluator
-from daydream.benchmark.reviewbench.contract import Case, verify_source
-from tests.harness.git_helpers import git, init_repo, seeded_commit, write_and_stage
+from daydream.benchmark.reviewbench.contract import Case, load_cases, verify_source
 
 
 def _write_json(path: Path, value: Any) -> Path:
@@ -120,13 +119,13 @@ def test_standalone_evaluator_preserves_selected_model_and_raw_metrics(
     source, candidates, case = external_evaluator
     output = tmp_path / "scores" / "candidate" / "round-1"
     result = evaluator.evaluate_round(
-        source, candidates, output, provider="chosen-provider", model="chosen-model", expected_keys=[case.key],
+        source, candidates, output, provider="chosen-provider", model="chosen-model",
     )
     assert evaluator.load_evaluation(source, candidates, output) == result
     assert result["metrics"] == _metrics(case)
     assert result["evaluator"]["workflow"] == "supplied-standalone"
-    assert result["evaluator"]["case_keys"] == [case.key]
-    assert result["evaluator"]["candidate_files"] == {
+    assert result["evaluator"]["snapshot"]["cases"] == {case.key: asdict(case)}
+    assert result["evaluator"]["snapshot"]["candidate_files"] == {
         f"{case.key}.json": hashlib.sha256((candidates / f"{case.key}.json").read_bytes()).hexdigest(),
     }
     args = json.loads((source / "args.json").read_text())
@@ -139,7 +138,7 @@ def test_standalone_evaluator_preserves_selected_model_and_raw_metrics(
 
 @pytest.mark.parametrize("fault", [
     "results", "details", "candidate", "manifest", "reference", "missing-provenance",
-    "source", "membership", "model", "fingerprints", "swapped-round", "checkpoint",
+    "source", "membership", "model", "swapped-output", "swapped-candidates", "checkpoint", "old-schema",
 ])
 def test_saved_evaluation_must_remain_bound_to_current_round_evidence(
     external_evaluator: tuple[Path, Path, Case], tmp_path: Path, fault: str,
@@ -161,21 +160,23 @@ def test_saved_evaluation_must_remain_bound_to_current_round_evidence(
         (output / "evaluator.json").unlink()
     elif fault == "checkpoint":
         _write_json(output / "results.checkpoint.json", {})
-    elif fault == "swapped-round":
+    elif fault == "swapped-candidates":
         other_candidates = tmp_path / "other-candidate" / "round-1" / "findings"
         shutil.copytree(candidates, other_candidates)
+        candidates = other_candidates
+    elif fault == "swapped-output":
         other_output = tmp_path / "scores" / "other-round"
         evaluator.evaluate_round(
-            source, other_candidates, other_output, provider="chosen-provider", model="chosen-model",
+            source, candidates, other_output, provider="chosen-provider", model="chosen-model",
         )
         for filename in ("evaluator.json", "results.json", "results.details.json"):
             shutil.copyfile(other_output / filename, output / filename)
     else:
         target, key, replacement = {
-            "source": (provenance["source"], "revision", "different-source"),
-            "membership": (provenance, "case_keys", []),
+            "source": (provenance["snapshot"]["source"], "revision", "different-source"),
+            "membership": (provenance["snapshot"], "cases", {}),
             "model": (provenance, "provider", "another-provider"),
-            "fingerprints": (provenance["eval_config"], "golden_hash", "different-reference"),
+            "old-schema": (provenance, "schema_version", 1),
         }[fault]
         target[key] = replacement
         _write_json(output / "evaluator.json", provenance)
@@ -241,19 +242,17 @@ def test_evaluator_preserves_existing_and_concurrently_published_output(
 
 
 @pytest.mark.parametrize("change", [
-    "missing-case", "duplicate", "nested-rounds", "wrong-scored-key", "wrong-judge", "wrong-hash",
+    "duplicate", "nested-rounds", "wrong-scored-key", "wrong-judge", "wrong-hash",
     "wrong-base", "head-prefix-collision", "missing-metric", "invalid-count", "invalid-ratio",
+    "nonfinite",
 ])
 def test_evaluator_refuses_merged_rounds_or_mismatched_scoring_identities(
     external_evaluator: tuple[Path, Path, Case], tmp_path: Path, change: str,
 ) -> None:
     """Upstream recursive merging and overlap-only scoring cannot label an incomplete round complete."""
     source, candidates, case = external_evaluator
-    expected = [case.key]
     payload = _metrics(case)
-    if change == "missing-case":
-        expected.append("missing")
-    elif change == "duplicate":
+    if change == "duplicate":
         (candidates / "duplicate.json").write_bytes((candidates / f"{case.key}.json").read_bytes())
     elif change == "nested-rounds":
         _write_json(candidates / "another-round" / "findings.json", {"pr": asdict(case)})
@@ -273,51 +272,84 @@ def test_evaluator_refuses_merged_rounds_or_mismatched_scoring_identities(
             "wrong-hash": (payload["eval_config"], "evaluated_prs_hash", "0" * 64),
             "invalid-count": (payload["micro"]["overall"], "candidate_count", -1),
             "invalid-ratio": (payload["micro"]["overall"], "grounded_precision", "0.5"),
+            "nonfinite": (payload["macro"]["overall"], "grounded_precision", float("nan")),
         }[change]
         target[key] = replacement
     _write_json(source / "payload.json", payload)
     output = tmp_path / "new-scores"
     with pytest.raises(evaluator.EvaluationError):
         evaluator.evaluate_round(
-            source, candidates, output, provider="chosen-provider", model="chosen-model", expected_keys=expected,
+            source, candidates, output, provider="chosen-provider", model="chosen-model",
         )
     assert not output.exists()
 
 
-def test_three_round_report_averages_only_corresponding_supplied_ratios() -> None:
+def test_three_round_report_averages_only_corresponding_supplied_ratios(
+    external_evaluator: tuple[Path, Path, Case], tmp_path: Path,
+) -> None:
     """Independent repeats retain nulls and raw counts instead of pooling or averaging metric denominators."""
-    case = Case("https://github.com/example/repo", 7, "1" * 40, "2" * 40)
-    rounds = [_metrics(case) for _ in range(3)]
-    for result, ratio in zip(rounds, [0.25, 0.5, 0.75], strict=True):
+    source, candidates, case = external_evaluator
+    other = Case(case.repo, 8, case.base, case.head)
+    _write_json(source / "corpus" / "manifest.json", [asdict(case), asdict(other)])
+    _write_json(source / "golden" / f"{other.key}.json", {"pr": asdict(other), "findings": []})
+    _write_json(candidates / f"{other.key}.json", {"pr": asdict(other), "findings": []})
+    evaluations = []
+    for number, ratio in enumerate([0.25, 0.5, 0.75]):
+        result = _metrics(case)
+        result["per_pr"].append(_metrics(other)["per_pr"][0])
+        result["per_pr"][1]["metrics"]["overall"]["grounded_precision"] = 1.0
+        result["per_pr"][0]["metrics"]["overall"]["grounded_precision"] = ratio
+        if number == 1:
+            result["per_pr"].reverse()
+            result["macro"]["overall"]["augmented_precision"] = None
+        result["pr_count"] = 2
+        result["eval_config"]["evaluated_prs_hash"] = hashlib.sha256(
+            "\n".join(sorted([case.key, other.key])).encode(),
+        ).hexdigest()
         result["macro"]["overall"]["grounded_precision"] = ratio
         result["micro"]["overall"]["grounded_precision"] = None
-    rounds[1]["macro"]["overall"]["augmented_precision"] = None
-    averaged = evaluator.average_rounds(rounds)
-    assert averaged["round_count"] == 3 and averaged["case_keys"] == [case.key]
+        _write_json(source / "payload.json", result)
+        evaluations.append(evaluator.evaluate_round(
+            source, candidates, tmp_path / f"scores-{number}", provider="chosen-provider", model="chosen-model",
+        ))
+    averaged = evaluator.average_rounds(evaluations)
+    assert averaged["round_count"] == 3 and averaged["case_keys"] == sorted([case.key, other.key])
     assert averaged["macro"]["overall"]["grounded_precision"] == {"mean": 0.5, "available_rounds": 3}
     assert averaged["macro"]["overall"]["augmented_precision"] == {"mean": 0.5, "available_rounds": 2}
     assert averaged["micro"]["overall"]["grounded_precision"] == {"mean": None, "available_rounds": 0}
     assert "candidate_count" not in averaged["macro"]["overall"]
-    assert averaged["rounds"] == rounds
+    assert averaged["rounds"] == [evaluation["metrics"] for evaluation in evaluations]
+    assert averaged["per_pr"][0]["metrics"]["overall"]["grounded_precision"] == {
+        "mean": 0.5, "available_rounds": 3,
+    }
+    assert averaged["per_pr"][1]["metrics"]["overall"]["grounded_precision"] == {
+        "mean": 1.0, "available_rounds": 3,
+    }
     assert averaged["per_pr"][0]["metrics"]["by_category"]["security"]["augmented_recall"]["mean"] == 1.0
 
 
-@pytest.mark.parametrize("change", ["round-count", "membership", "evaluator", "reference", "prompt", "nonfinite"])
-def test_repeatability_report_refuses_incompatible_rounds(change: str) -> None:
-    """Averages must not hide a changed judge/reference/prompt, missing case or invalid score."""
-    case = Case("https://github.com/example/repo", 7, "1" * 40, "2" * 40)
-    rounds = [_metrics(case) for _ in range(3)]
-    if change == "round-count":
-        rounds.pop()
-    elif change == "membership":
-        rounds[1]["per_pr"][0]["pr_key"] = "missing-original-pr"
-    elif change == "nonfinite":
-        rounds[1]["macro"]["overall"]["grounded_precision"] = float("nan")
-    else:
-        key = {"evaluator": "matcher_model", "reference": "golden_hash", "prompt": "matcher_prompt_hash"}[change]
-        rounds[1]["eval_config"][key] = "different"
+@pytest.mark.parametrize("change", ["round-count", "membership", "evaluator", "reference", "prompt"])
+def test_repeatability_report_refuses_incompatible_rounds(
+    external_evaluator: tuple[Path, Path, Case], tmp_path: Path, change: str,
+) -> None:
+    """Individually admitted rounds still cannot average incompatible membership or judge configuration."""
+    source, candidates, case = external_evaluator
+    evaluations = []
+    for number in range(2 if change == "round-count" else 3):
+        model = "different" if change == "evaluator" and number == 1 else "chosen-model"
+        selected = Case(case.repo, 8, case.base, case.head) if change == "membership" and number == 1 else case
+        _write_json(source / "corpus" / "manifest.json", [asdict(selected)])
+        _write_json(source / "golden" / f"{selected.key}.json", {"pr": asdict(selected), "findings": []})
+        _write_json(candidates / f"{case.key}.json", {"pr": asdict(selected), "findings": []})
+        result = _metrics(selected, model=model)
+        if number == 1 and change in {"reference", "prompt"}:
+            result["eval_config"]["golden_hash" if change == "reference" else "matcher_prompt_hash"] = "different"
+        _write_json(source / "payload.json", result)
+        evaluations.append(evaluator.evaluate_round(
+            source, candidates, tmp_path / f"scores-{number}", provider="chosen-provider", model=model,
+        ))
     with pytest.raises(evaluator.EvaluationError):
-        evaluator.average_rounds(rounds)
+        evaluator.average_rounds(evaluations)
 
 
 @pytest.fixture
@@ -333,24 +365,12 @@ def supplied_source() -> Path:
 
 
 def test_supplied_validator_and_empty_real_judge_work_offline(supplied_source: Path, tmp_path: Path) -> None:
-    """A real clean Git case proves empty success through the supplied parser/judge without any valid model."""
-    repo = tmp_path / "snapshot"
-    init_repo(repo)
-    write_and_stage(repo, "main.py", "VALUE = 1\n")
-    base = seeded_commit(repo, "base")
-    write_and_stage(repo, "main.py", "VALUE = 2\n")
-    head = seeded_commit(repo, "head")
-    case = Case("https://github.com/example/repo", 7, base, head)
+    """A supplied case completes empty validation/judging before model creation, without a checkout."""
+    case = load_cases(supplied_source, "test")[0]
     pr_metadata = _write_json(tmp_path / "pr.json", asdict(case))
     candidates = tmp_path / "candidate" / "round-1" / "findings"
     candidate = _write_json(candidates / f"{case.key}.json", {
         "pr": asdict(case), "agent": "synthetic-completed-empty", "findings": [], "usage": {"time_in_ms": 12},
-    })
-    manifest = _write_json(tmp_path / "manifest.json", [asdict(case)])
-    golden = tmp_path / "golden"
-    _write_json(golden / f"{case.key}.json", {
-        "pr_key": case.key, "pr": asdict(case),
-        "findings": [{**_finding(), "tp_fp": "tp", "severity": "high", "category": "security"}],
     })
     validation_command = ["npm", "run", "harbor:validate-findings", "--",
                           "--candidate", str(candidate), "--pr", str(pr_metadata)]
@@ -358,7 +378,6 @@ def test_supplied_validator_and_empty_real_judge_work_offline(supplied_source: P
     assert "No judging or inference performed" in validation.stdout
     result = evaluator.evaluate_round(
         supplied_source, candidates, tmp_path / "scores", provider="not-a-provider", model="not-a-model",
-        expected_keys=[case.key], golden_dir=golden, manifest=manifest, snapshot_dir=repo,
     )
     metrics = result["metrics"]
     assert metrics["pr_count"] == 1
@@ -368,8 +387,9 @@ def test_supplied_validator_and_empty_real_judge_work_offline(supplied_source: P
     assert metrics["candidate_usage"]["total"]["time_in_ms"] == 12
     assert metrics["candidate_usage"]["total"]["completion_tokens"] is None
     assert metrics["eval_config"]["matcher_model"] == "not-a-provider/not-a-model"
-    assert "0c, 1g_tp" in evaluator.render_report(supplied_source, tmp_path / "scores" / "results.json")
-    assert not git(repo, "remote") and not git(repo, "status", "--porcelain", "--ignored")
+    golden_count = metrics["micro"]["overall"]["golden_tp_count"]
+    assert golden_count > 0
+    assert f"0c, {golden_count}g_tp" in evaluator.render_report(supplied_source, tmp_path / "scores" / "results.json")
     nonempty = _write_json(tmp_path / "nonempty-metrics.json", _metrics(case))
     summary = evaluator.render_report(supplied_source, nonempty)
     assert "Grounded:  P=50.0%  R=100.0%" in summary

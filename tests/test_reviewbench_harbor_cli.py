@@ -56,33 +56,16 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     harbor = binary / 'harbor'
     harbor.write_text(
         f'#!{interpreter}\n'
-        'import argparse, json, os, pathlib, shutil\n'
-        'parser = argparse.ArgumentParser()\n'
-        'parser.add_argument("command", choices=["run"])\n'
-        'for flag, name in [("-c", "config"), ("-p", "dataset"), ("-a", "agent"), ("-n", "concurrency"),\n'
-        ' ("-k", "rounds"), ("-r", "retries"), ("-o", "jobs"),\n'
-        ' ("--job-name", "job"), ("-i", "task"), ("-l", "limit")]:\n'
-        ' parser.add_argument(flag, dest=name)\n'
-        'parser.add_argument("--yes", action="store_true")\n'
-        'parser.add_argument("--plugin", dest="plugins", action="append")\n'
-        'args = parser.parse_args()\n'
-        'auth_dir = pathlib.Path(os.environ["RB_HARBOR_CODEX_AUTH_DIR"])\n'
-        'auth = json.loads((auth_dir / "auth.json").read_text())\n'
-        'assert auth["auth_mode"] == "chatgpt" and not auth["OPENAI_API_KEY"]\n'
-        'auth["tokens"]["refresh_token"] = "synthetic-process-rotation"\n'
-        '(auth_dir / "auth.json").write_text(json.dumps(auth))\n'
-        'job = pathlib.Path(args.jobs) / args.job\n'
+        'import json, os, pathlib, shutil, sys\n'
+        'args = sys.argv[1:]\n'
+        'job = pathlib.Path(args[args.index("-o") + 1]) / args[args.index("--job-name") + 1]\n'
         'job.mkdir(parents=True)\n'
         'if results := os.environ.get("DAYDREAM_TEST_HARBOR_RESULTS"):\n'
         ' shutil.copytree(results, job, dirs_exist_ok=True)\n'
-        'record = vars(args)\n'
-        'record["metric_config"] = json.loads(pathlib.Path(args.config).read_text())\n'
-        'record.update(round_membership=list(range(1, int(args.rounds) + 1)),\n'
-        ' judge_auth_dir=os.environ["RB_HARBOR_PI_AUTH_DIR"],\n'
-        ' seccomp_profile=os.environ["RB_HARBOR_SECCOMP_PROFILE"],\n'
-        ' platform=os.environ.get("DOCKER_DEFAULT_PLATFORM"),\n'
-        ' forbidden_env=sorted(k for k in os.environ if k in ["OPENAI_API_KEY",\n'
-        ' "OPENAI_BASE_URL", "CODEX_BEARER_TOKEN", "OPENAI_WORKLOAD_IDENTITY_TOKEN"]))\n'
+        'record = {"args": args, "metric_config": json.loads(pathlib.Path(args[args.index("-c") + 1]).read_text()),\n'
+        ' "environment": {key: os.environ[key] for key in ("RB_HARBOR_CODEX_AUTH_DIR", "RB_HARBOR_PI_AUTH_DIR",\n'
+        ' "RB_HARBOR_PI_AUTH_PATH", "RB_HARBOR_SECCOMP_PROFILE", "DOCKER_DEFAULT_PLATFORM", "OPENAI_API_KEY",\n'
+        ' "OPENAI_BASE_URL", "CODEX_BEARER_TOKEN", "OPENAI_WORKLOAD_IDENTITY_TOKEN") if key in os.environ}}\n'
         '(job / "launch.json").write_text(json.dumps(record))\n'
         'raise SystemExit(int(os.environ.get("DAYDREAM_TEST_HARBOR_EXIT", "0")))\n'
     )
@@ -111,7 +94,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'expires': 1, 'accountId': 'test-account',
     }}))
     candidate = {'artifact_sha256': 'a' * 64, 'version': '0.30.0'}
-    policy = {'source_prs': 219, 'final_comparison_rounds': 3, 'candidate': candidate}
+    policy = {'schema': 2, 'source_prs': 219, 'final_comparison_rounds': 3, 'candidate': candidate}
     (dataset / 'daydream-profile.json').write_text(json.dumps({**policy, 'policy_sha256': canonical_digest(policy)}))
     parser = argparse.ArgumentParser()
     harbor_cli.add_parsers(parser.add_subparsers(dest='reviewbench_command', required=True))
@@ -124,11 +107,11 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
 
 
 @pytest.mark.parametrize(('rounds', 'exit_code'), [(1, 0), (3, 23)])
-def test_launch_delivers_selection_independent_rounds_and_persists_refresh(
+def test_launch_delivers_selection_rounds_and_subscription_environment(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
     rounds: int, exit_code: int,
 ) -> None:
-    """A valid export alone misses launch flag drift, inherited billing and failed-job rotation loss."""
+    """A valid export alone misses launch flag drift, inherited billing and process exit handling."""
     args, candidate = launch
     args.rounds = rounds
     monkeypatch.setenv('DAYDREAM_TEST_HARBOR_EXIT', str(exit_code))
@@ -138,25 +121,39 @@ def test_launch_delivers_selection_independent_rounds_and_persists_refresh(
         monkeypatch.setenv(key, 'synthetic-forbidden-route')
     assert harbor_cli.handle(args, candidate) == exit_code
     actual = json.loads((args.jobs_dir / args.job_name / 'launch.json').read_text())
-    local_config = Path(actual.pop('config'))
+    local_config = Path(actual['args'][actual['args'].index('-c') + 1])
     assert local_config.parent == args.jobs_dir.resolve() and local_config.is_file()
     assert actual == {
-        'command': 'run', 'dataset': str(args.directory.resolve()),
+        'args': ['run', '--yes', '-c', str(local_config), '-p', str(args.directory.resolve()),
+                 '-a', 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
+                 '-n', '1', '-k', str(rounds), '-r', '0', '-o', str(args.jobs_dir.resolve()),
+                 '--job-name', args.job_name, '--plugin', 'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin',
+                 '-i', 'owner_repo*', '-l', '1'],
         'metric_config': {'metrics': [{'type': 'uv-script',
                                       'kwargs': {'script_path': str(args.directory.resolve() / 'metric.py')}}]},
-        'agent': 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
-        'concurrency': '1', 'rounds': str(rounds), 'retries': '0', 'jobs': str(args.jobs_dir.resolve()),
-        'job': args.job_name, 'yes': True, 'plugins': [
-            'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin'],
-        'task': 'owner_repo*', 'limit': '1', 'round_membership': list(range(1, rounds + 1)),
-        'judge_auth_dir': str(args.pi_home.resolve()), 'platform': None, 'forbidden_env': [],
-        'seccomp_profile': str(args.directory.resolve() / 'reviewer-seccomp.json'),
+        'environment': {'RB_HARBOR_CODEX_AUTH_DIR': str(args.codex_home.resolve()),
+                        'RB_HARBOR_PI_AUTH_DIR': str(args.pi_home.resolve()),
+                        'RB_HARBOR_PI_AUTH_PATH': '/run/reviewbench-pi/auth.json',
+                        'RB_HARBOR_SECCOMP_PROFILE': str(args.directory.resolve() / 'reviewer-seccomp.json')},
     }
     assert (args.directory / 'format-checked').is_file()
-    assert json.loads((args.pi_home / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-refresh'
-    source = json.loads((args.codex_home / 'auth.json').read_text())
-    assert source['tokens']['refresh_token'] == 'synthetic-process-rotation'
-    assert 'synthetic-process-rotation' not in (args.jobs_dir / args.job_name / 'launch.json').read_text()
+
+
+@pytest.mark.parametrize('schema', [None, 1, 3])
+def test_launch_rejects_incompatible_profile_before_process_delivery(
+    launch: tuple[argparse.Namespace, dict[str, Any]], schema: int | None,
+) -> None:
+    """A valid policy digest cannot authorize an incompatible internal export format."""
+    args, candidate = launch
+    path = args.directory / 'daydream-profile.json'
+    profile = json.loads(path.read_text())
+    profile.pop('policy_sha256')
+    profile['schema'] = schema
+    path.write_text(json.dumps({**profile, 'policy_sha256': canonical_digest(profile)}))
+    with pytest.raises(ValueError, match='Incompatible public profile schema; create a fresh Harbor export'):
+        harbor_cli.handle(args, candidate)
+    assert not (args.directory / 'format-checked').exists()
+    assert not args.jobs_dir.exists()
 
 
 @pytest.mark.parametrize('wrong', ['released', 'different-commit', 'different-reviewbench'])
@@ -395,11 +392,6 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
         assert result == (23 if outcome == 'transport-error' else 1)
         assert reports == []
     assert (job_directory / 'checker-invoked').exists() is (outcome != 'transport-error')
-    # Authentication refresh still persists before result validation, including
-    # when the retained job subsequently fails its strict completion checks.
-    source_auth = json.loads((args.codex_home / 'auth.json').read_text())
-    assert source_auth['tokens']['refresh_token'] == 'synthetic-process-rotation'
-    assert json.loads((args.pi_home / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-refresh'
 
 
 @pytest.mark.parametrize('selection', ['environment', 'importable-default'])
@@ -467,7 +459,7 @@ def test_packaged_extension_code_and_resources_bind_candidate_and_reviewer_wheel
     environment.pop('DAYDREAM_EXT_DIR', None)
     script = '''import json,sys
 from pathlib import Path
-from daydream.benchmark.reviewbench.cli import candidate_identity
+from daydream.benchmark.reviewbench.candidate import candidate_identity
 from daydream.benchmark.reviewbench.harbor_build import reviewer_build
 from daydream.extensions.loader import build_registry
 error=None

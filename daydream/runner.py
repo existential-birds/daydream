@@ -74,7 +74,7 @@ from daydream.phases.inputs import (
     _git_branch,
     _git_log,
 )
-from daydream.review_result import FinalizedReview, bind_review_result_handler
+from daydream.review_result import FinalizedReview
 from daydream.run_artifacts import (
     _finalize_run_artifacts,
     _open_recorder,
@@ -318,7 +318,7 @@ async def run(
 
         def create_for_context(
             flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None = None,
+            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None,
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
@@ -343,8 +343,8 @@ async def run(
         interactive=_resolve_interactive(config),
         quiet=quiet,
         log_mode=config.log_mode,
-    ))
-    with bind_run_context(run_context), bind_review_result_handler(review_result_handler):
+    ), review_result_handler=review_result_handler)
+    with bind_run_context(run_context):
         try:
             return await _run_with_context(
                 config, private_roots=private_roots, run_context=run_context,

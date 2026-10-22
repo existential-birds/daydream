@@ -129,7 +129,7 @@ def test_new_outputs_preserve_prior_bytes_on_install_failure(
     assert list(output_directory.iterdir()) == ([path] if fault == 'prior' else [])
 
 
-@pytest.mark.parametrize('fault', ['plan', 'outcome', 'profile', 'base'])
+@pytest.mark.parametrize('fault', ['plan', 'old-plan', 'outcome', 'profile', 'base'])
 def test_malformed_operator_inputs_report_failure_without_launching_review(
     supplied_source: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str,
 ) -> None:
@@ -144,6 +144,10 @@ def test_malformed_operator_inputs_report_failure_without_launching_review(
     command = ['reviewbench', 'status', str(directory)]
     if fault == 'plan':
         (directory / 'plan.json').write_text('[]')
+    elif fault == 'old-plan':
+        plan = json.loads((directory / 'plan.json').read_text())
+        plan['schema_version'] = 1
+        (directory / 'plan.json').write_text(json.dumps(plan))
     elif fault == 'outcome':
         outcomes = directory / 'round-1' / 'outcomes'
         outcomes.mkdir(parents=True)
@@ -164,6 +168,8 @@ def test_malformed_operator_inputs_report_failure_without_launching_review(
     assert 'ReviewBench:' in error
     if fault == 'base':
         assert 'benchmark owns' in error
+    elif fault == 'old-plan':
+        assert 'create a fresh candidate plan' in error
     assert not (directory / 'round-1' / 'findings').exists()
 
 
@@ -342,7 +348,7 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
         outcome = json.loads((round_dir / 'outcomes' / f'{case.key}.json').read_text())
         assert outcome['status'] == 'failed' and 'candidate bytes changed' in outcome['diagnostics'][0]
         assert not (round_dir / 'findings' / f'{case.key}.json').exists()
-        accounting = cli._accounting(round_dir, load_cases(supplied_source, 'test'), supplied_source)
+        accounting, _ = cli._accounting(round_dir, load_cases(supplied_source, 'test'), supplied_source)
         assert accounting['failed'] == [case.key] and not accounting['produced']
         if mutation == 'before':
             assert 'terminal_result' not in outcome

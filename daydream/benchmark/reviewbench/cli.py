@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import json
-import os
 import re
 import sys
 import tempfile
@@ -16,7 +14,7 @@ from typing import Any
 import anyio
 
 from daydream import git_ops
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
+from daydream.benchmark.reviewbench.candidate import candidate_identity
 from daydream.benchmark.reviewbench.contract import (
     Case,
     execution_accounting,
@@ -26,37 +24,16 @@ from daydream.benchmark.reviewbench.contract import (
 )
 from daydream.commands import review
 from daydream.git_ops.process import _run_git
+from daydream.json_utils import atomic_create_bytes
 from daydream.review_profile import ProfileError
 from daydream.run_artifacts import _resolve_review_profile
 from daydream.run_config import RunConfig
 
 
-def candidate_identity() -> dict[str, Any]:
-    """Identify the executing package bytes, including editable candidate changes."""
-    package = Path(__file__).resolve().parents[2]
-    artifact_sha = candidate_package_digest()
-    extension = selected_extension_identity()
-    try:
-        revision: str | None = git_ops.head_sha(package)
-        dirty: bool | None = bool(_run_git(package.parent, ['status', '--porcelain', '--untracked-files=all', '--',
-                                                  'daydream', 'daydream_ext', 'daydream_ext.py'],
-                                           error_context='candidate source status failed').stdout)
-    except git_ops.GitError:
-        revision = None
-        dirty = None
-    return {'version': importlib.metadata.version('daydream'), 'revision': revision,
-            'source_dirty': dirty, 'artifact_sha256': artifact_sha, 'default_extension': extension}
-
-
 def _write_new(path: Path, value: Any) -> None:
     """Install absent output only; competing/prior bytes must survive."""
     payload = (json.dumps(value, indent=2, ensure_ascii=False, default=str) + '\n').encode()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f'.{path.name}-') as staging:
-        staging.write(payload)
-        staging.flush()
-        os.fsync(staging.fileno())
-        os.link(staging.name, path, follow_symlinks=False)
+    atomic_create_bytes(path, payload)
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -93,13 +70,12 @@ def _plan(args: argparse.Namespace) -> int:
         raise ValueError('candidate must be a simple directory label and producer must be nonempty')
     source = args.source.resolve()
     provenance = verify_source(source)
-    cases = load_cases(source, args.set)
+    load_cases(source, args.set)
     directory = args.directory.resolve() / args.candidate
     directory.mkdir(parents=True, exist_ok=False)
-    manifest = {'schema_version': 1, 'benchmark': provenance, 'source': str(source),
+    manifest = {'schema_version': 2, 'benchmark': provenance, 'source': str(source),
                 'set': args.set, 'rounds': args.rounds, 'producer': args.producer,
-                'candidate': candidate_identity(), 'candidate_label': args.candidate,
-                'cases': [asdict(case) for case in cases]}
+                'candidate': candidate_identity(), 'candidate_label': args.candidate}
     _write_new(directory / 'plan.json', manifest)
     print(directory)
     return 0
@@ -107,15 +83,12 @@ def _plan(args: argparse.Namespace) -> int:
 
 def _load(directory: Path) -> tuple[dict[str, Any], list[Case]]:
     plan = json.loads((directory / 'plan.json').read_text())
-    if not isinstance(plan, dict) or plan.get('schema_version') != 1 or plan.get('rounds') not in (1, 3):
-        raise ValueError('unsupported ReviewBench plan')
+    if not isinstance(plan, dict) or plan.get('schema_version') != 2 or plan.get('rounds') not in (1, 3):
+        raise ValueError('unsupported ReviewBench plan; create a fresh candidate plan')
     source = Path(plan['source'])
     if verify_source(source) != plan['benchmark']:
         raise ValueError('ReviewBench source differs from frozen plan')
-    cases = [Case.from_dict(raw) for raw in plan['cases']]
-    if cases != load_cases(source, plan['set']):
-        raise ValueError('planned membership differs from supplied set')
-    return plan, cases
+    return plan, load_cases(source, plan['set'])
 
 
 def _round(directory: Path, number: int, plan: dict[str, Any]) -> Path:
@@ -124,7 +97,7 @@ def _round(directory: Path, number: int, plan: dict[str, Any]) -> Path:
     return directory / f'round-{number}'
 
 
-def _accounting(directory: Path, cases: list[Case], source: Path) -> dict[str, Any]:
+def _accounting(directory: Path, cases: list[Case], source: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
     outcomes = {path.stem: json.loads(path.read_text()) for path in (directory / 'outcomes').glob('*.json')}
     if any(not isinstance(outcome, dict) for outcome in outcomes.values()):
         raise ValueError('ReviewBench outcomes must be objects')
@@ -138,13 +111,13 @@ def _accounting(directory: Path, cases: list[Case], source: Path) -> dict[str, A
                 or Case.from_dict(json.loads(path.read_text())['pr']) != expected[key]):
             raise ValueError(f'unpaired, changed or mismatched candidate artifact: {key}')
     evaluation = directory / 'evaluation'
-    evaluated = None
+    verified = None
     if evaluation.exists():
         from daydream.benchmark.reviewbench.evaluator import load_evaluation
 
         verified = load_evaluation(source, directory / 'findings', evaluation)
-        evaluated = [row['pr_key'] for row in verified['metrics']['per_pr']]
-    return execution_accounting([case.key for case in cases], outcomes, produced, evaluated)
+    evaluated = [row['pr_key'] for row in verified['metrics']['per_pr']] if verified else None
+    return execution_accounting([case.key for case in cases], outcomes, produced, evaluated), verified
 
 
 def _native_config(args: list[str]) -> RunConfig:
@@ -225,7 +198,7 @@ async def _generate(args: argparse.Namespace, plan: dict[str, Any], cases: list[
         except (OSError, ValueError, git_ops.GitError) as exc:
             if not outcome_path.exists():
                 _write_new(outcome_path, {'status': 'failed', 'diagnostics': [str(exc)]})
-    accounting = _accounting(directory, cases, Path(plan['source']))
+    accounting, _ = _accounting(directory, cases, Path(plan['source']))
     print(json.dumps(accounting, indent=2))
     completed_outputs = set(accounting['completed']) & set(accounting['produced'])
     return 0 if all(case.key in completed_outputs for case in selected) else 1
@@ -243,35 +216,33 @@ def handle(args: argparse.Namespace) -> int:
         directory = args.directory.resolve()
         plan, cases = _load(directory)
         if args.reviewbench_command == 'report':
-            from daydream.benchmark.reviewbench.evaluator import average_rounds, load_evaluation, render_report
+            from daydream.benchmark.reviewbench.evaluator import average_rounds, render_report
 
             rounds = [_round(directory, number, plan) for number in range(1, plan['rounds'] + 1)]
-            metrics = []
+            evaluations = []
             complete = True
             for round_dir in rounds:
-                accounting = _accounting(round_dir, cases, Path(plan['source']))
+                accounting, verified = _accounting(round_dir, cases, Path(plan['source']))
                 complete = complete and accounting['complete_evaluation']
                 print(json.dumps({'set': plan['set'], 'round': round_dir.name,
                                   'scope': 'complete-set' if accounting['complete_evaluation'] else 'subset',
                                   **accounting}, indent=2))
-                if (round_dir / 'evaluation').exists():
-                    verified = load_evaluation(Path(plan['source']), round_dir / 'findings', round_dir / 'evaluation')
+                if verified is not None:
                     print(render_report(Path(plan['source']), round_dir / 'evaluation' / 'results.json'))
-                    metrics.append(verified['metrics'])
-            if len(metrics) == 3 and complete:
-                print(json.dumps(average_rounds(metrics), indent=2))
+                    evaluations.append(verified)
+            if len(evaluations) == 3 and complete:
+                print(json.dumps(average_rounds(evaluations), indent=2))
             return 0 if complete else 1
         round_dir = _round(directory, args.round, plan)
         if args.reviewbench_command == 'run':
             return anyio.run(_generate, args, plan, cases, round_dir)
-        accounting = _accounting(round_dir, cases, Path(plan['source']))
+        accounting, _ = _accounting(round_dir, cases, Path(plan['source']))
         if args.reviewbench_command == 'judge':
             from daydream.benchmark.reviewbench.evaluator import evaluate_round
 
             evaluate_round(Path(plan['source']), round_dir / 'findings', round_dir / 'evaluation',
-                           provider=args.provider, model=args.model, concurrency=args.concurrency,
-                           expected_keys=accounting['produced'])
-            accounting = _accounting(round_dir, cases, Path(plan['source']))
+                           provider=args.provider, model=args.model, concurrency=args.concurrency)
+            accounting, _ = _accounting(round_dir, cases, Path(plan['source']))
         print(json.dumps(accounting, indent=2))
         return 0 if accounting['complete_generation'] else 1
     except (OSError, ValueError, KeyError, TypeError, ProfileError, git_ops.GitError) as exc:

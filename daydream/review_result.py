@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field as dataclass_field
 from enum import StrEnum
 from typing import Any
@@ -20,6 +18,7 @@ from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
+from daydream.run_context import current_run_context
 
 REVIEW_CONFIGURATION_PHASES = ('review', 'intent', 'exploration', 'alternatives', 'per_stack_review',
                                'parse', 'wonder', 'merge', 'arbiter', 'suppression', 'supervise', 'diagram')
@@ -39,25 +38,11 @@ class FinalizedReview:
     usage: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
-_result_handler: ContextVar[Callable[[FinalizedReview], None] | None] = ContextVar(
-    "native_review_result_handler", default=None,
-)
-
-
-@contextmanager
-def bind_review_result_handler(handler: Callable[[FinalizedReview], None] | None) -> Iterator[None]:
-    """Scope an embedded consumer to this invocation, including concurrent runs."""
-    token = _result_handler.set(handler)
-    try:
-        yield
-    finally:
-        _result_handler.reset(token)
-
-
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
                              configuration: dict[str, Any], *, usage: dict[str, Any] | None = None) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
-    handler = _result_handler.get()
+    context = current_run_context()
+    handler = None if context is None else context.review_result_handler
     if handler is not None:
         validate_terminal_result(result)
         handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(configuration),

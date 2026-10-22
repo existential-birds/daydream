@@ -7,10 +7,14 @@ against the reviewer wheel without traversing arbitrary operator directories.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import os
 from pathlib import Path
 from typing import Any
+
+from daydream import git_ops
+from daydream.git_ops.process import _run_git
 
 _EXTENSION_GUIDANCE = (
     'Controlled ReviewBench requires a packaged daydream_ext beside Daydream; '
@@ -84,3 +88,20 @@ def candidate_package_files() -> dict[str, Path]:
 def candidate_package_digest() -> str:
     """Hash both shipped package namespaces and all their ordinary resources."""
     return _digest(candidate_package_files())
+
+
+def candidate_identity() -> dict[str, Any]:
+    """Identify the executing package bytes, including editable candidate changes."""
+    package = Path(__file__).resolve().parents[2]
+    artifact_sha = candidate_package_digest()
+    extension = selected_extension_identity()
+    try:
+        revision: str | None = git_ops.head_sha(package)
+        dirty: bool | None = bool(_run_git(package.parent, ['status', '--porcelain', '--untracked-files=all', '--',
+                                                  'daydream', 'daydream_ext', 'daydream_ext.py'],
+                                           error_context='candidate source status failed').stdout)
+    except git_ops.GitError:
+        revision = None
+        dirty = None
+    return {'version': importlib.metadata.version('daydream'), 'revision': revision,
+            'source_dirty': dirty, 'artifact_sha256': artifact_sha, 'default_extension': extension}
