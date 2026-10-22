@@ -1135,6 +1135,8 @@ async def test_runner_pending_count_cap_drains_children_stay_unbilled(
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """At the 512-draft cap, end every draft, bill the attempt, and retain only a count diagnostic."""
+    # Allow encoding and loopback delivery of a full 512-span batch under CI load.
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "5")
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _PendingCapBackend(),
     )
