@@ -7,8 +7,7 @@
     "url": "https://raw.githubusercontent.com/moby/profiles/4b8214fc4971e06172938a1f1554ccff6647ee80/seccomp/default.json",
     "sha256": "6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6",
     "canonical_sha256": "a894b5730caa168d88da7fffe8ace974ad05fb84547e1766fa879d75d3ac6ba2",
-    "license": "Apache-2.0",
-    "license_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    "license": "Apache-2.0"
   },
   "policy_sha256": "86d8f7209c16119513c966930de385bb2b87bcd0f90411e586b5c4284c512926",
   "modification_notice": "Modified by Daydream: retain all pinned Moby default rules and append only argument-bounded namespace/mount bootstrap allowances needed by native Codex bubblewrap. No added container capabilities. Reviewer only; verifier retains Docker default seccomp.",
