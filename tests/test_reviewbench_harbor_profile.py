@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -256,6 +258,65 @@ def test_competing_export_destination_preserves_the_winning_profile(
             for path in output.rglob('*') if path.is_file()} == winning_files
     assert not (output / 'dataset').exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
+
+
+@pytest.mark.parametrize('mutation', ['before-admission', 'during-bootstrap', 'before-publication'])
+def test_export_refuses_changed_candidate_before_publication(
+    supplied_source: Path, tmp_path: Path, mutation: str,
+) -> None:
+    """The executing candidate must still own every shipped export helper.
+
+    Real wheel capture protects the reviewer install, while source-pin checks
+    protect supplied inputs. Neither detects a candidate helper changing while
+    an actual supplied export is assembled. Mutate only an isolated package.
+    """
+    copied = tmp_path / 'candidate'
+    copied.mkdir()
+    package = Path(harbor_profile.__file__).resolve().parents[2]
+    shutil.copytree(package, copied / 'daydream', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    script = '''import json,sys
+from pathlib import Path
+from daydream.benchmark.reviewbench import harbor_profile
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest
+from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
+from daydream.benchmark.reviewbench.native import freeze_reviewer
+from daydream.run_config import RunConfig
+root,source,mutation=Path.cwd(),Path(sys.argv[1]),sys.argv[2]
+reviewer=freeze_reviewer(RunConfig(target=str(root),backend='codex',model='gpt-6.1-sol'))
+admitted=candidate_package_digest()
+helper=root/'daydream/benchmark/reviewbench/harbor_auth.py'
+marker=b'\\n# competing candidate helper bytes\\n'
+verify=harbor_profile.verify_source
+checks=0
+def mutate(path):
+ global checks
+ identity=verify(path);checks+=1
+ if (checks==1 and mutation=='during-bootstrap') or (checks==2 and mutation=='before-publication'):
+  helper.write_bytes(helper.read_bytes()+marker)
+ return identity
+harbor_profile.verify_source=mutate
+# This HTTP-only dependency does not own candidate or supplied-source identity.
+harbor_profile.seccomp_profile=lambda:(b'{}\\n',b'{"policy_sha256":"synthetic-control"}\\n')
+if mutation=='before-admission':helper.write_bytes(helper.read_bytes()+marker)
+output=root/'exported'
+error=None
+try:
+ harbor_profile.export_harbor_profile(source,output,candidate={'artifact_sha256':admitted},
+  base_image=NODE_IMAGE,reviewer=reviewer)
+except ValueError as exc:error=str(exc)
+print(json.dumps({'error':error,'published':output.exists(),'source_checks':checks,
+ 'competing_bytes_preserved':helper.read_bytes().endswith(marker),
+ 'staging_preserved':bool(list(root.glob('.reviewbench-export-*')))}))
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(supplied_source), mutation], cwd=copied,
+        env={**os.environ, 'PYTHONPATH': str(copied)}, check=True, capture_output=True, text=True)
+    evidence = json.loads(result.stdout.splitlines()[-1])
+    assert evidence['error'] == ('Executing candidate differs from the frozen export identity'
+                                 if mutation == 'before-admission' else 'Executing candidate changed during export')
+    assert evidence['source_checks'] == (0 if mutation == 'before-admission' else 2)
+    assert evidence['competing_bytes_preserved'] is True
+    assert evidence['published'] is False
+    assert evidence['staging_preserved'] is False
 
 
 @pytest.mark.parametrize('change', ['missing-model', 'http', 'model-host', 'headers'])

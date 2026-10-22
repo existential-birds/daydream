@@ -109,8 +109,9 @@ def validate_pi_reviewer_home(home: Path, provider: str | None) -> None:
     """Require the selected native Pi credential without translating its format."""
     if provider != 'nous':
         raise SubscriptionAuthError('public Pi reviewer requires the configured nous provider')
-    credential = _read(home / 'auth.json').get(provider)
-    if not isinstance(credential, dict) or credential.get('type') != 'api_key':
+    value = _read(home / 'auth.json')
+    credential = value.get(provider)
+    if set(value) != {provider} or not isinstance(credential, dict) or credential.get('type') != 'api_key':
         raise SubscriptionAuthError('selected native Pi provider credential is unavailable')
     _text(credential.get('key'))
 

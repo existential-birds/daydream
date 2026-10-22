@@ -92,6 +92,31 @@ def test_subscription_only_rejects_unusable_auth_without_exposing_it(
     assert "synthetic-secret" not in str(caught.value)
 
 
+@pytest.mark.parametrize('extra_provider', ['same-judge', 'other-provider'])
+def test_native_pi_reviewer_store_refuses_unrelated_credentials(
+    tmp_path: Path, extra_provider: str,
+) -> None:
+    """A separate directory cannot isolate judge credentials copied inside its file.
+
+    Native Pi mounts the entire auth file. Existing disjoint-path and selected
+    provider checks admit an additional judge login unless membership is closed.
+    """
+    reviewer, judge = tmp_path / 'reviewer', tmp_path / 'judge'
+    reviewer.mkdir()
+    judge_auth = _pi_login(judge)
+    native = {'nous': {'type': 'api_key', 'key': 'synthetic-nous-secret'}}
+    if extra_provider == 'same-judge':
+        native.update(judge_auth)
+    else:
+        native['other-provider'] = {'type': 'api_key', 'key': 'synthetic-other-secret'}
+    (reviewer / 'auth.json').write_text(json.dumps(native))
+    originals = {path: path.read_bytes() for path in (reviewer / 'auth.json', judge / 'auth.json')}
+    with pytest.raises(harbor_auth.SubscriptionAuthError) as caught:
+        harbor_auth.validate_credential_stores(reviewer, judge, backend='pi', provider='nous')
+    assert 'synthetic' not in str(caught.value)
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
 @pytest.mark.parametrize('role', ['reviewer', 'judge'])
 def test_admission_tolerates_native_in_place_rotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str,

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest
 from daydream.benchmark.reviewbench.contract import (
     REVIEWBENCH_REVISION,
     load_cases,
@@ -164,6 +165,9 @@ def export_harbor_profile(
     output = output.absolute()
     if output.exists():
         raise ValueError('Export destination already exists; preserve existing evidence')
+    candidate_sha = candidate.get('artifact_sha256')
+    if candidate_sha is not None and candidate_package_digest() != candidate_sha:
+        raise ValueError('Executing candidate differs from the frozen export identity')
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
     models = codex_models()
@@ -330,6 +334,8 @@ def export_harbor_profile(
         # changes cannot silently claim the originally admitted revision.
         if verify_source(source) != source_identity:
             raise ValueError('Supplied source changed during export')
+        if candidate_sha is not None and candidate_package_digest() != candidate_sha:
+            raise ValueError('Executing candidate changed during export')
         shutil.copytree(exported, output)
     return {'tasks': len(cases), 'policy_sha256': policy_sha, 'metric_sha256': metric_sha,
             'output': str(output), 'profile': policy}
