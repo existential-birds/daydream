@@ -26,6 +26,7 @@ import pytest
 from daydream.benchmark.reviewbench import harbor_build, harbor_cli
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
+from tests.test_reviewbench_sandbox_probe import moby_policy as moby_policy
 
 
 @pytest.fixture
@@ -240,7 +241,7 @@ def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str
 
 def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_models(
     launch: tuple[argparse.Namespace, dict[str, Any]], tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch, supplied_source: Path,
+    monkeypatch: pytest.MonkeyPatch, supplied_source: Path, moby_policy: bytes,
 ) -> None:
     """A local -p export needs explicit metrics before the upstream plugin can plan.
 

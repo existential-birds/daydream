@@ -51,11 +51,12 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
             'daydream/benchmark/reviewbench/harbor_entrypoint.py',
             'daydream/benchmark/reviewbench/harbor_auth.py',
             'daydream/benchmark/reviewbench/harbor_sandbox_probe.py',
-            'daydream/benchmark/reviewbench/harbor-seccomp.json',
-            'daydream/benchmark/reviewbench/harbor-seccomp-provenance.json',
         })
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
+            # Seccomp assets are generated at export, not shipped as copied JSON.
+            assert not any(name.endswith(('harbor-seccomp.json', 'harbor-seccomp-provenance.json'))
+                           for name in names_in_wheel)
             installed = Path(tmp) / 'installed'
             zf.extractall(installed)
         assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "

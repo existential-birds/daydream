@@ -11,10 +11,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
-from daydream.benchmark.reviewbench import harbor_sandbox_probe as probe
+from daydream.benchmark.reviewbench import harbor_sandbox_probe as probe, harbor_seccomp
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
+
+
+@pytest.fixture
+def moby_policy(monkeypatch: pytest.MonkeyPatch) -> bytes:
+    """Replace only upstream HTTP; preserve real policy generation and export."""
+    upstream = b'{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}'
+    monkeypatch.setattr(harbor_seccomp, 'MOBY_SHA256', hashlib.sha256(upstream).hexdigest())
+    monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
+        200, content=upstream, request=httpx.Request('GET', url)))
+    return upstream
 
 
 @pytest.mark.parametrize('outcome', ['unavailable', 'unverified', 'verified'])
@@ -78,20 +89,20 @@ async def test_public_agent_setup_rejects_failed_native_sandbox_before_run(tmp_p
     assert (tmp_path / 'sandbox-preflight.log').read_text() == 'native seccomp unavailable'
 
 
-def test_shipped_seccomp_preserves_pinned_default_and_only_declared_bootstrap_additions() -> None:
+def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_additions(moby_policy: bytes) -> None:
     """A profile update must not silently replace Docker's default-deny policy.
 
     The provenance binds unchanged upstream rules and the exact appended delta;
-    this is shipped isolation material independently of task/export bookkeeping.
+    this is runtime isolation material independently of task/export bookkeeping.
     """
-    root = Path(probe.__file__).parent
-    policy_bytes = (root / 'harbor-seccomp.json').read_bytes()
+    policy_bytes, provenance_bytes = harbor_seccomp.seccomp_profile()
     policy = json.loads(policy_bytes)
-    provenance = json.loads((root / 'harbor-seccomp-provenance.json').read_text())
+    provenance = json.loads(provenance_bytes)
     assert hashlib.sha256(policy_bytes).hexdigest() == provenance['policy_sha256']
     additions = provenance['appended_rules']
     assert policy['syscalls'][-len(additions):] == additions
     policy['syscalls'] = policy['syscalls'][:-len(additions)]
+    assert policy == json.loads(moby_policy)
     base = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()
     assert hashlib.sha256(base).hexdigest() == provenance['upstream']['canonical_sha256']
     assert policy['defaultAction'] == 'SCMP_ACT_ERRNO'
@@ -105,8 +116,20 @@ def test_shipped_seccomp_preserves_pinned_default_and_only_declared_bootstrap_ad
         assert len(indices) == len(set(indices)), rule
 
 
-def test_shipped_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
-    """Exercise the shipped filter through Docker/runc, without auth or models.
+@pytest.mark.parametrize('status', [200, 404])
+def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    """Generation must fail rather than silently accept changed or missing rules.
+
+    Shipped-file tests never exercised the new network trust boundary.
+    """
+    monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
+        status, content=b'{}', request=httpx.Request('GET', url)))
+    with pytest.raises(ValueError if status == 200 else httpx.HTTPStatusError):
+        harbor_seccomp.seccomp_profile()
+
+
+def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
+    """Exercise the generated filter through Docker/runc, without auth or models.
 
     A positive native sandbox probe also passes a broadened outer mount rule.
     Distinct denied errno makes actual filter rejection observable independently
@@ -115,7 +138,7 @@ def test_shipped_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bit
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to a built public reviewer image')
-    policy = json.loads(Path(probe.__file__).with_name('harbor-seccomp.json').read_bytes())
+    policy = json.loads(harbor_seccomp.seccomp_profile()[0])
     policy['defaultErrnoRet'] = 99
     diagnostic = tmp_path / 'seccomp-denied-errno99.json'
     diagnostic.write_text(json.dumps(policy))

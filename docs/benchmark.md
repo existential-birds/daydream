@@ -58,7 +58,10 @@ adapter. The native reviewer still works in the frozen task repository.
 Choose the native Docker architecture explicitly. The default `linux/amd64`
 matches upstream's documented platform; `--platform linux/arm64` selects the
 custom native ARM64 profile. Keep that choice fixed across the before/after
-comparison. The reviewer uses a shipped, pinned Docker seccomp profile with
+comparison. Export downloads Moby's Docker seccomp profile at a pinned revision,
+verifies its SHA-256, and adds the bounded Codex bootstrap rules. The complete
+policy and provenance are frozen in the exported dataset; running it needs no
+policy download. The reviewer uses this pinned Docker seccomp profile with
 only the namespace bootstrap allowances required by Codex's nested Bubblewrap
 sandbox. Docker capabilities stay at their default, and Codex applies its own
 read-only filesystem and seccomp restrictions. Reviewer setup checks those

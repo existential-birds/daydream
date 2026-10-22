@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Generate the public benchmark's Docker seccomp policy at export from a
+  hash-verified, pinned upstream profile instead of vendoring JSON assets.
+  Exports retain the complete policy and provenance for reproducible execution
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
 
