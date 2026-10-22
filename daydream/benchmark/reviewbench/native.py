@@ -7,8 +7,6 @@ coordinates that the finalized native result did not establish.
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import os
 import re
 import tempfile
@@ -30,7 +28,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, parse_hunks
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
-from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name, _resolved_reasoning_effort
+from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
 
 
 def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
@@ -82,7 +80,7 @@ def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.Runn
         selected = {}
         if name == "pi":
             selected = native_pi_settings(root, agent_dir=native.pi_agent_dir)
-            native = replace(native, pi_settings_root=root, pi_settings=selected)
+            native = replace(native, pi_settings=selected)
         inputs[name] = native
         public = {"retry_policy": asdict(native.retry_policy), "fanout_concurrency": native.fanout_concurrency,
             'selectors': selectors,
@@ -94,8 +92,7 @@ def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.Runn
             "cleanup_timeout_s": native.codex_cleanup_timeout_s}
         if name == "pi":
             selectors['PI_CODING_AGENT_DIR'] = None if native.pi_agent_dir is None else str(native.pi_agent_dir)
-            public.update(provider=native.pi_provider, thinking=native.pi_thinking, defaults=selected,
-                defaults_sha256=hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest())
+            public.update(provider=native.pi_provider, thinking=native.pi_thinking, defaults=selected)
         provenance[name] = public
     fallback = next((value for value in inputs.values() if value is not None), None)
     if fallback is None:
@@ -310,8 +307,6 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
         public_native['extension'] = extension
         if not producer.strip():
             raise ValueError("producer must be nonempty")
-        if any(re.fullmatch(r"[0-9a-f]{40}", oid) is None for oid in (case.base, case.head)):
-            raise ValueError("supplied base and head must be full commit identities")
         git_ops.assert_is_worktree(repository)
         if git_ops.status_porcelain(repository).strip():
             raise ValueError("source repository is not clean")
@@ -336,14 +331,6 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             # lazily fetch later repository history during review.
             if git_ops.head_sha(checkout) != case.head or git_ops.status_porcelain(checkout).strip():
                 raise ValueError("isolated checkout does not match supplied clean head")
-            pi = native_execution.backends.get('pi')
-            phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
-            if (pi is not None and pi.pi_settings is not None and pi.pi_thinking is None
-                    and 'defaultThinkingLevel' not in pi.pi_settings
-                    and native_pi_settings(checkout, agent_dir=None).get('defaultThinkingLevel') is not None
-                    and any(_resolved_backend_name(config, phase) == 'pi'
-                            and _resolved_reasoning_effort(config, phase) is None for phase in phases)):
-                raise ValueError('Case Pi thinking conflicts with unavailable operator effort')
             merge_base = git_ops.merge_base(checkout, case.base, case.head)
             if merge_base is None:
                 raise ValueError("supplied comparison has no merge base")

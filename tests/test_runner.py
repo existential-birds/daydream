@@ -1559,7 +1559,7 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
 
 
 @pytest.mark.parametrize(("source", "expected_model"), [
-    ("frozen", "operator-frozen-model"), ("empty", DEFAULT_PI_MODEL), ("root", "operator-file-model"),
+    ("frozen", "operator-frozen-model"), ("empty", DEFAULT_PI_MODEL),
     ("cwd", "case-model"), ("ambient", "case-model"), ("explicit", "phase-explicit-model"),
 ])
 def test_manifest_pi_model_preserves_native_execution_precedence(
@@ -1570,18 +1570,15 @@ def test_manifest_pi_model_preserves_native_execution_precedence(
     The per-stack tier tests above cover RunConfig overrides but miss native Pi
     model resolution from an embedded execution capability in another cwd.
     """
-    case, operator = tmp_path / "case", tmp_path / "operator"
-    for root, model in ((case, "case-model"), (operator, "operator-file-model")):
-        (root / ".pi").mkdir(parents=True)
-        (root / ".pi/settings.json").write_text(json.dumps({"defaultModel": model}))
+    case = tmp_path / "case"
+    (case / ".pi").mkdir(parents=True)
+    (case / ".pi/settings.json").write_text(json.dumps({"defaultModel": "case-model"}))
     agent_dir = tmp_path / "agent"
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
     execution = BackendExecutionInput.from_environment({"PI_CODING_AGENT_DIR": str(agent_dir)}, backend="pi")
     if source in {"frozen", "empty", "explicit"}:
-        execution = replace(execution, pi_settings_root=operator,
+        execution = replace(execution,
                             pi_settings={} if source == "empty" else {"defaultModel": "operator-frozen-model"})
-    elif source == "root":
-        execution = replace(execution, pi_settings_root=operator)
     config = RunConfig(backend="pi", model="phase-explicit-model" if source == "explicit" else None)
     identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), case,
                                             execution_input=None if source == "ambient" else execution)

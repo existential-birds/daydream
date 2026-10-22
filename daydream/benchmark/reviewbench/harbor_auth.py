@@ -327,22 +327,8 @@ def _retain_classifier_sessions(source: Path, destination: Path, credentials: se
                 content = ("\n".join(json.dumps(entry) for entry in sanitized) + "\n").encode("utf-8")
             if b"[REDACTION_FAILED]" in content or any(value.encode() in content for value in session_credentials):
                 raise SubscriptionAuthError("classifier session credential redaction failed")
-            metadata: dict[str, Any] = {"name": path.name, "sha256": hashlib.sha256(content).hexdigest(),
-                                      "format": "sanitized-pi-jsonl", "redacted": sanitized != entries,
-                                      "model_changes": [], "thinking_levels": [], "assistant_messages": []}
-            for entry in sanitized:
-                if entry.get("type") == "model_change":
-                    metadata["model_changes"].append({key: entry[key] for key in ("provider", "modelId")
-                                                      if key in entry})
-                elif entry.get("type") == "thinking_level_change":
-                    if "thinkingLevel" in entry:
-                        metadata["thinking_levels"].append(entry["thinkingLevel"])
-                elif entry.get("type") == "message":
-                    message = entry.get("message")
-                    if isinstance(message, dict) and message.get("role") == "assistant":
-                        metadata["assistant_messages"].append({key: message[key] for key in (
-                            "provider", "model", "api", "stopReason", "timestamp", "usage",
-                        ) if key in message})
+            metadata = {"name": path.name, "sha256": hashlib.sha256(content).hexdigest(),
+                        "format": "sanitized-pi-jsonl", "redacted": sanitized != entries}
             atomic_write_bytes(staged / path.name, content, mode=0o600)
             sessions.append(metadata)
         index = {"schema_version": 1, "classifier_sessions": sessions,

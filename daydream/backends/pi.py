@@ -144,7 +144,6 @@ def _configured_pi_model(
     if execution_input is not None:
         if execution_input.pi_settings is not None:
             return execution_input.pi_settings.get("defaultModel")
-        cwd = execution_input.pi_settings_root or cwd
         agent_dir = execution_input.pi_agent_dir
     if agent_dir is _AMBIENT_AGENT_DIR:
         resolved_agent_dir: Path | None = Path(
@@ -665,16 +664,15 @@ class PiBackend:
             else:
                 configured_model = _configured_pi_model(cwd, execution_input=self._execution_input)
         self.model = self._model_override if self._model_override is not None else configured_model or DEFAULT_PI_MODEL
-        settings_root = None if self._execution_input is None else self._execution_input.pi_settings_root
-        frozen_settings = ({} if self._execution_input is None else self._execution_input.pi_settings or {})
-        if self._model_override is not None or configured_model is None or settings_root is not None:
+        frozen_settings = None if self._execution_input is None else self._execution_input.pi_settings
+        if self._model_override is not None or configured_model is None or frozen_settings is not None:
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
             if self._execution_input is not None
             else os.environ.get("PI_PROVIDER")
         )
-        if provider is None and settings_root is not None:
+        if provider is None and frozen_settings is not None:
             provider = frozen_settings.get("defaultProvider")
             if (provider is None and configured_model is not None
                     and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None):
@@ -722,7 +720,7 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
-        if thinking is None and settings_root is not None:
+        if thinking is None and frozen_settings is not None:
             thinking = frozen_settings.get("defaultThinkingLevel")
             if thinking is None and native_pi_settings(cwd, agent_dir=None).get("defaultThinkingLevel") is not None:
                 raise PiError("Case Pi thinking conflicts with unavailable operator effort", category="AUTH_CONFIG")

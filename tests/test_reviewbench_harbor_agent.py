@@ -68,7 +68,7 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
     Direct entrypoint tests import the operator's package before selecting a
     repository, so they miss Python's cwd/PYTHONPATH precedence at process startup.
     Both a candidate-named package and a default extension in the reviewed source
-    must stay unexecuted, including the initial setup import before sandbox checks.
+    must stay unexecuted, including the initial setup import.
     """
     environment = public_input(tmp_path)
     repository = Path(environment['DAYDREAM_RB_REPOSITORY'])
@@ -78,11 +78,10 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
         package.mkdir()
         (package / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
             + ').write_text("reviewed package executed")\nraise RuntimeError("hostile source imported")\n')
-    # A real CLI stand-in is always incapable of model inference, even if a
-    # machine happens to have the image-only /work/pr profile path available.
+    # Setup only checks CLI availability; this stand-in cannot run inference.
     binary = tmp_path / 'bin' / 'codex'
     binary.parent.mkdir()
-    binary.write_text(f'#!{sys.executable}\nimport sys\nassert "exec" not in sys.argv\nprint("unverified probe")\n')
+    binary.write_text(f'#!{sys.executable}\nraise SystemExit("unexpected CLI execution")\n')
     binary.chmod(0o755)
     (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
     child_environment = {**os.environ, **environment, 'PYTHONPATH': str(repository),
@@ -103,9 +102,7 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
     logs = tmp_path / 'agent'
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
     if stage == 'setup':
-        with pytest.raises(RuntimeError, match='native Codex sandbox preflight failed'):
-            await agent.setup(Environment())
-        assert 'Public ReviewBench sandbox preflight failed' in (logs / 'sandbox-preflight.log').read_text()
+        await agent.setup(Environment())
     else:
         with pytest.raises(RuntimeError, match='native reviewer failed'):
             await agent.run('supplied task', Environment(), SimpleNamespace())
