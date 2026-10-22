@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 import zipfile
 from pathlib import Path
@@ -24,7 +25,8 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64') -> tuple[str, 
         raise ValueError('An actual Daydream wheel is required')
     if not re.fullmatch(r'daydream-[A-Za-z0-9_.-]+\.whl', wheel.name):
         raise ValueError('Unsafe Daydream wheel filename')
-    with zipfile.ZipFile(wheel) as archive:
+    wheel_bytes = wheel.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
         metadata = [name for name in archive.namelist() if name.endswith('.dist-info/METADATA')]
         if len(metadata) != 1 or '\nName: daydream\n' not in archive.read(metadata[0]).decode():
             raise ValueError('Reviewer wheel must contain the Daydream distribution')
@@ -42,7 +44,7 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64') -> tuple[str, 
                 raise ValueError('Export must execute the same candidate package as its reviewer wheel')
     requirements = Path(__file__).with_name('reviewer-runtime.lock').read_bytes()
     host_requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
-    assets = {wheel.name: wheel.read_bytes(), 'reviewer-runtime.lock': requirements}
+    assets = {wheel.name: wheel_bytes, 'reviewer-runtime.lock': requirements}
     # Only the host installs Harbor/ReviewBench. Their Git source distributions
     # include reference answers, including in uv's retained source checkout.
     # Install the hash-locked core graph without caches, then only our own wheel.
