@@ -52,4 +52,8 @@ For agents working on data or experiments: [dataset workflow](docs/runbooks/reco
 [training](docs/training-launch.md), [benchmarks](docs/benchmark.md).
 `daydream benchmark reviewbench` integrates the supplied frozen ReviewBench cases
 with the native reviewer and supplied reports; generation and judging are separate
-explicit operator actions. The private Harbor benchmark remains a separate workflow.
+explicit operator actions. The before/after [#1616 acceptance gate](https://github.com/existential-birds/daydream/issues/1616)
+uses the upstream [25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
+with three independent rounds per candidate; the full 219-task
+corpus is not required for that gate. The private Harbor benchmark remains a
+separate workflow.
