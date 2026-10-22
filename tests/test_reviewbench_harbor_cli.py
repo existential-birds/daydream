@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from daydream.benchmark.reviewbench import harbor_build, harbor_cli
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest
 from daydream.benchmark.reviewbench.contract import Case, load_cases
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 from tests.harness.reviewbench import supplied_source as supplied_source
@@ -378,6 +379,7 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     runtime = Path(selected).absolute()
     assert runtime.is_file()
     args, candidate = launch
+    candidate['artifact_sha256'] = candidate_package_digest()
     args.directory = tmp_path / 'actual-full-export'
     args.task, args.set, args.rounds = None, selection, 3
     export_harbor_profile(supplied_source, args.directory, candidate=candidate, base_image=harbor_build.NODE_IMAGE)
