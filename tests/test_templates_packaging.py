@@ -102,7 +102,7 @@ def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')
-    from daydream.benchmark.reviewbench.cli import candidate_identity
+    from daydream.benchmark.reviewbench.candidate import candidate_identity
 
     script = '''import importlib.util, json
 from pathlib import Path
@@ -116,7 +116,7 @@ for root in (Path("/root"), Path("/opt"), Path("/tmp")):
                     "scripts/classifier/classify.ts", "golden/*.json"):
         assert not list(root.rglob(pattern)), f"verifier material visible under {root}: {pattern}"
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
-from daydream.benchmark.reviewbench.cli import candidate_identity
+from daydream.benchmark.reviewbench.candidate import candidate_identity
 print(json.dumps({"candidate": candidate_identity(), "verifier_material_absent": True}))
 '''
     result = subprocess.run([

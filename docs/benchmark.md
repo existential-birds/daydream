@@ -18,6 +18,11 @@ git -C ~/ReviewBench checkout --detach 4f04392d6bf4941ab6f8a3ea0c15b449f4458864
 Create and execute plans/exports from the candidate installation itself. Candidate
 identity includes shipped `daydream_ext`; package extensions and unset
 `DAYDREAM_EXT_DIR`. Changed package bytes require a new plan/export.
+Plans and evaluator receipts require `schema_version: 2`; Harbor policy and task
+profiles require `schema: 2` (`daydream-reviewbench-codex-subscription-v2`).
+Incompatible versions are rejected. Create fresh plans, evaluations and Harbor
+exports; preserve older evidence in its original directory without migration.
+These internal format changes preserve the CLI commands and options.
 
 The [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
 is sufficient for the before/after acceptance gate for

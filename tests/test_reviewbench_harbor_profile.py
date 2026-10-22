@@ -7,6 +7,7 @@ import json
 import runpy
 import shlex
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     manifest = json.loads((supplied_source / 'corpus/manifest.json').read_text())
     assert len(dataset['tasks']) == len(manifest) == 219
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
+    assert policy['schema'] == 2
     assert policy['source_prs'] == 219
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
@@ -73,12 +75,12 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         task = json.loads((directory / 'tests/task.json').read_text())
         assert expected[str(task['task_id'])] == task['evaluation_id']
         exported = json.loads((directory / 'environment/daydream-profile.json').read_text())
+        assert exported['schema'] == 2
         digest = exported.pop('profile_sha256')
         encoded = json.dumps(exported, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
         assert hashlib.sha256(encoded).hexdigest() == digest
         assert exported['evaluation_id'] == task['evaluation_id']
         assert exported['policy_sha256'] == policy['policy_sha256']
-        assert exported['runtime']['platform'] == policy['runtime']['platform']
         assert _hash(directory / 'environment/reviewer-seccomp.json') == policy['runtime']['reviewer_seccomp_sha256']
         assert not (directory / 'environment/golden').exists()
         task_config = tomllib.loads((directory / 'task.toml').read_text())
@@ -100,10 +102,13 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
     judge = task_dir / 'tests/judge'
-    atomic_asset = task_dir / 'tests/daydream_json_utils.py'
+    atomic_asset = task_dir / 'tests/daydream/json_utils.py'
     assert atomic_asset.read_bytes() == Path(json_utils.__file__).read_bytes()
+    # Execute only the shipped verifier package, without host site-packages or
+    # PYTHONPATH. Byte parity cannot catch an unusable package/import layout.
+    subprocess.run([sys.executable, '-E', '-S', str(task_dir / 'tests/daydream-auth.py'), '--help'],
+                   cwd=public_profile, check=True, capture_output=True)
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
-    assert policy['judge']['atomic_writer_sha256'] == _hash(atomic_asset)
     redaction_asset = task_dir / 'tests/daydream/redaction.py'
     credential_patterns_asset = task_dir / 'tests/daydream/credential_patterns.py'
     assert redaction_asset.read_bytes() == Path(redaction.__file__).read_bytes()
@@ -121,7 +126,6 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert policy['judge']['evidence'] == {
         'classifier_sessions_source': source, 'classifier_sessions_destination': destination,
         'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
-        'redaction_sha256': _hash(redaction_asset), 'credential_patterns_sha256': _hash(credential_patterns_asset),
         'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
         'monetary_usage_source': 'api-equivalent-estimate',
     }
@@ -161,7 +165,6 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert arguments[arguments.index('--pi-bootstrap') + 1] == '/tests/judge/daydream-auth.mjs'
     binding = (judge / 'daydream-auth.mjs').read_bytes()
     assert binding == Path(harbor_profile.__file__).with_name('judge_auth.mjs').read_bytes()
-    assert policy['judge']['storage_binding_sha256'] == hashlib.sha256(binding).hexdigest()
     assert reviewer['security_opt'] == [
         'seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}',
     ]

@@ -9,34 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Export and run the complete public ReviewBench corpus through Harbor with the
-  ordinary native Codex reviewer and a separate subscription-backed Codex judge.
-  Freeze custom task/runtime identities, isolate OAuth refresh by role,
-  and retain private joined native trajectories, classifier session evidence and supplied
-  independent-round metrics
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-
-- Run supplied, revision-pinned ReviewBench cases through the ordinary native
-  reviewer, with isolated candidate/round outputs, typed completion and source
-  verification, visible conversion/failure/missing-case accounting, and supplied
-  evaluator reports ([#92](https://github.com/existential-birds/daydream/issues/92)).
-  This is compatible new functionality; reviewer defaults are unchanged.
+- Run the pinned public ReviewBench corpus through the ordinary native reviewer,
+  standalone or in Harbor, with supplied judging and reports, complete failure and
+  missing-case accounting, and three-round comparisons for the exact 25-task test
+  set or full 219-task corpus. The Harbor profile adds separate persistent
+  reviewer/judge subscription logins, frozen isolation policy and retained private
+  native trajectories and sanitized judge evidence
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688),
+  [#92](https://github.com/existential-birds/daydream/issues/92)).
+  This is additive functionality for a minor release; ordinary reviewer defaults
+  are unchanged. No version bump is included.
 
 ### Changed
 
-- Use upstream ReviewBench's [25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
-  for the before/after [#1616 acceptance gate](https://github.com/existential-birds/daydream/issues/1616),
-  retaining three independent rounds per candidate. The full 219-task corpus is
-  not required for that gate.
-
-- Give public Harbor reviewers and Pi judges independent persistent subscription
-  logins. Replace `harbor-run --auth-runtime` with `--pi-home`; preserve native
-  refresh locks and remove shared credential conversion and copyback. Existing
-  exports require regeneration and fresh dedicated sign-ins.
-
-- Generate the public benchmark's Docker seccomp policy at export from a
-  hash-verified, pinned upstream profile instead of vendoring JSON assets.
-  Exports retain the complete policy and provenance for reproducible execution
+- ReviewBench plans, evaluator receipts and Harbor policy/task profiles use schema
+  2. Create fresh plans, evaluations and exports; preserve older evidence without
+  migration. CLI commands and options are unchanged. Harbor uses dedicated
+  `--codex-home` and `--pi-home` subscription stores
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 
 - Reduce the README to agent setup, code review, and research entry points; remove
@@ -49,27 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Average three complete ReviewBench rounds for the 25-task test set while
-  continuing to withhold averages for incomplete selections
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-
-- Accept native HEAD finding locations even when the same line number exists
-  in the old file, removing an overstrict ReviewBench conversion guard.
-
-- Reject standalone benchmark candidate changes between cases or during review
-  before publishing scorable findings
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-- Preserve native arbiter effort overrides in embedded reviews and correctly
-  combine the public reviewer's mount-flag constraints
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-- Bind controlled benchmark identities and wheel checks to packaged executable
-  extensions, and reject external extension overrides or changes during review
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-- Isolate public Harbor adapter imports so a task checkout cannot shadow the
-  installed candidate before admission or review
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
-- Preserve relative Pi credential directories during isolated ReviewBench runs
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

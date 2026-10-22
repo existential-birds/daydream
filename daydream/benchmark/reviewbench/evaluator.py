@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,19 @@ def _reference_inputs(manifest: Path, golden_dir: Path, cases: dict[str, Case]) 
         raise EvaluationError(f"Invalid supplied evaluator reference inputs: {exc}") from exc
 
 
+def _snapshot(source: Path, candidate_dir: Path) -> dict[str, Any]:
+    """Validate and bind every input to the fixed supplied standalone evaluator."""
+    source_identity = verify_source(source)
+    cases, hashes = _candidate_membership(candidate_dir)
+    manifest = source / "corpus" / "manifest.json"
+    return {
+        "source": source_identity, "cases": {key: asdict(case) for key, case in sorted(cases.items())},
+        "candidate_files": hashes, "candidate_directory": str(candidate_dir),
+        "reference_files": _reference_inputs(manifest, source / "golden", cases),
+        "manifest_sha256": file_digest(manifest),
+    }
+
+
 def _result_keys(metrics: dict[str, Any]) -> list[str]:
     per_pr = metrics.get("per_pr")
     if not isinstance(per_pr, list) or not all(isinstance(row, dict) for row in per_pr):
@@ -168,13 +182,12 @@ def load_evaluation(source: Path, candidate_dir: Path, output_dir: Path) -> dict
     directory bindings prevent swapping equal-looking rounds or candidates.
     """
     source, candidate_dir, output_dir = source.resolve(), candidate_dir.resolve(), output_dir.resolve()
-    source_identity = verify_source(source)
     provenance = _object(output_dir / "evaluator.json")
-    cases, candidate_hashes = _candidate_membership(candidate_dir)
-    keys = sorted(cases)
-    if (provenance.get("workflow") != "supplied-standalone" or provenance.get("source") != source_identity
-            or provenance.get("case_keys") != keys or provenance.get("candidate_files") != candidate_hashes
-            or provenance.get("candidate_directory") != str(candidate_dir)
+    if provenance.get("schema_version") != 2:
+        raise EvaluationError("Unsupported ReviewBench evaluation; create a fresh evaluation directory")
+    snapshot = _snapshot(source, candidate_dir)
+    keys = sorted(snapshot["cases"])
+    if (provenance.get("workflow") != "supplied-standalone" or provenance.get("snapshot") != snapshot
             or provenance.get("output_directory") != str(output_dir)):
         raise EvaluationError("Stored evaluation provenance differs from the current candidate round or source")
     provider, model = provenance.get("provider"), provenance.get("model")
@@ -185,17 +198,11 @@ def load_evaluation(source: Path, candidate_dir: Path, output_dir: Path) -> dict
         if (provenance.get("results_sha256") != file_digest(output)
                 or provenance.get("details_sha256") != file_digest(details)):
             raise EvaluationError("Stored evaluator results or details differ from their recorded hashes")
-        manifest, golden_dir = Path(provenance["manifest"]), Path(provenance["golden_directory"])
-        if (provenance.get("manifest_sha256") != file_digest(manifest)
-                or provenance.get("reference_files") != _reference_inputs(manifest, golden_dir, cases)):
-            raise EvaluationError("Stored evaluation reference inputs differ from their recorded hashes")
-    except (OSError, KeyError, TypeError) as exc:
+    except OSError as exc:
         raise EvaluationError("Stored evaluation evidence is missing or malformed") from exc
     metrics = _object(output)
     _validate_metrics(metrics, keys, provider=provider, model=model)
     _validate_details(details, keys)
-    if provenance.get("eval_config") != metrics["eval_config"]:
-        raise EvaluationError("Stored evaluator fingerprints differ from their paired metrics")
     if (output_dir / "results.checkpoint.json").exists():
         raise EvaluationError("Stored evaluator has an incomplete checkpoint")
     return {"metrics": metrics, "evaluator": provenance, "output_dir": str(output_dir)}
@@ -208,52 +215,34 @@ def evaluate_round(
     *,
     provider: str,
     model: str,
-    expected_keys: Sequence[str] | None = None,
-    golden_dir: Path | None = None,
-    manifest: Path | None = None,
-    snapshot_dir: Path | None = None,
-    repo_dir: Path | None = None,
     concurrency: int = 1,
 ) -> dict[str, Any]:
     """Run the explicitly selected supplied standalone judge for one isolated round.
 
     Caller-owned generation accounting remains independent: this evaluator scores
-    only produced candidates. ``expected_keys`` can require complete membership.
+    only produced candidates.
     Existing output directories, including previous successes, are never reused.
     An install failure can leave an incomplete directory without evaluator.json;
     preserve it and select a fresh output directory before retrying.
     """
     source, candidate_dir, output_dir = source.resolve(), candidate_dir.resolve(), output_dir.resolve()
-    source_identity = verify_source(source)
     if not provider.strip() or not model.strip():
         raise EvaluationError("An explicit standalone evaluator provider and model are required")
     if type(concurrency) is not int or concurrency < 1:
         raise EvaluationError("Evaluator concurrency must be a positive integer")
     if output_dir.exists():
         raise EvaluationError("Evaluator output directory already exists; select a new candidate/round output")
-    cases, candidate_hashes = _candidate_membership(candidate_dir)
-    keys = sorted(cases)
-    if expected_keys is not None and (len(set(expected_keys)) != len(expected_keys) or sorted(expected_keys) != keys):
-        raise EvaluationError("Produced candidates differ from expected round membership; refusing a partial score")
-    golden_dir = (golden_dir or source / "golden").resolve()
-    manifest = (manifest or source / "corpus" / "manifest.json").resolve()
-    if not golden_dir.is_dir() or not manifest.is_file():
-        raise EvaluationError("The selected reference directory and corpus manifest must exist")
-    reference_hashes = _reference_inputs(manifest, golden_dir, cases)
-    manifest_hash = file_digest(manifest)
+    snapshot = _snapshot(source, candidate_dir)
+    keys = sorted(snapshot["cases"])
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:
         output = staged / "results.json"
         command = [
-            "npm", "run", "judge", "--", "--candidate", str(candidate_dir), "--golden", str(golden_dir),
-            "--manifest", str(manifest), "--provider", provider, "--model", model,
+            "npm", "run", "judge", "--", "--candidate", str(candidate_dir), "--golden", str(source / "golden"),
+            "--manifest", str(source / "corpus" / "manifest.json"), "--provider", provider, "--model", model,
             "--output", str(output), "--concurrency", str(concurrency), "--strict", "--allow-empty",
         ]
-        if snapshot_dir is not None:
-            command.extend(["--snapshot-dir", str(snapshot_dir.resolve())])
-        if repo_dir is not None:
-            command.extend(["--repo-dir", str(repo_dir.resolve())])
         result = _run(command, source)
         metrics = _object(output)
         _validate_metrics(metrics, keys, provider=provider, model=model)
@@ -261,19 +250,12 @@ def evaluate_round(
         _validate_details(details_path, keys)
         if (staged / "results.checkpoint.json").exists():
             raise EvaluationError("Supplied evaluator retained an incomplete checkpoint")
-        if _candidate_membership(candidate_dir) != (cases, candidate_hashes):
-            raise EvaluationError("Candidate findings changed while the evaluator was running")
-        if (file_digest(manifest) != manifest_hash or _reference_inputs(manifest, golden_dir, cases) != reference_hashes
-                or verify_source(source) != source_identity):
-            raise EvaluationError("Supplied source or reference inputs changed during evaluation")
+        if _snapshot(source, candidate_dir) != snapshot:
+            raise EvaluationError("Candidate findings, supplied source or reference inputs changed during evaluation")
         provenance = {
-            "workflow": "supplied-standalone", "provider": provider, "model": model,
-            "source": source_identity, "candidate_files": candidate_hashes, "case_keys": keys,
-            "candidate_directory": str(candidate_dir), "output_directory": str(output_dir),
-            "manifest": str(manifest), "golden_directory": str(golden_dir),
-            "manifest_sha256": manifest_hash, "reference_files": reference_hashes,
-            "eval_config": metrics["eval_config"],
-            "results_sha256": file_digest(output), "details_sha256": file_digest(details_path), "command": command,
+            "schema_version": 2, "workflow": "supplied-standalone", "provider": provider, "model": model,
+            "snapshot": snapshot, "output_directory": str(output_dir), "concurrency": concurrency,
+            "results_sha256": file_digest(output), "details_sha256": file_digest(details_path),
         }
         (staged / "evaluator.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
         (staged / "evaluator.stdout.log").write_text(result.stdout, encoding="utf-8")
@@ -307,8 +289,6 @@ def _ratio_means(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     means: dict[str, Any] = {}
     for key in _RATIOS:
         values = [row.get(key) for row in rows]
-        if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value)) for value in values):
-            raise EvaluationError(f"Invalid supplied score: {key}")
         available = [value for value in values if value is not None]
         means[key] = {
             "mean": sum(available) / len(available) if available else None, "available_rounds": len(available),
@@ -324,36 +304,30 @@ def _stratified_means(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def average_rounds(rounds: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Average corresponding supplied ratios across three independent complete rounds.
+def average_rounds(evaluations: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Average metrics admitted by evaluate_round/load_evaluation for three complete rounds.
 
     Counts and usage remain in each raw round. Null scores are unavailable, never
     zero; each mean records how many rounds measured that ratio. The caller owns
     proof that these three isolated artifacts cover the entire selected set.
     """
-    if len(rounds) != 3:
+    if len(evaluations) != 3:
         raise EvaluationError("Repeatability reporting requires exactly three independent rounds")
-    keys = _result_keys(rounds[0])
-    config = rounds[0].get("eval_config")
-    if not isinstance(config, dict) or any(
-        _result_keys(row) != keys or row.get("eval_config") != config for row in rounds
+    rounds = [evaluation["metrics"] for evaluation in evaluations]
+    keys = sorted(row["pr_key"] for row in rounds[0]["per_pr"])
+    config = rounds[0]["eval_config"]
+    if any(
+        sorted(row["pr_key"] for row in result["per_pr"]) != keys or result["eval_config"] != config
+        for result in rounds
     ):
         raise EvaluationError("Round membership, reference, prompts and evaluator identities must agree")
-    try:
-        for result in rounds:
-            _validate_stratified(result["macro"])
-            _validate_stratified(result["micro"])
-            for row in result["per_pr"]:
-                _validate_stratified(row["metrics"])
-        per_round = [{row["pr_key"]: row["metrics"] for row in result["per_pr"]} for result in rounds]
-        return {
-            "round_count": 3, "case_keys": keys, "eval_config": config,
-            "macro": _stratified_means([row["macro"] for row in rounds]),
-            "micro": _stratified_means([row["micro"] for row in rounds]),
-            "per_pr": [
-                {"pr_key": key, "metrics": _stratified_means([row[key] for row in per_round])} for key in keys
-            ],
-            "rounds": list(rounds),
-        }
-    except (KeyError, TypeError) as exc:
-        raise EvaluationError("Malformed supplied round metrics") from exc
+    per_round = [{row["pr_key"]: row["metrics"] for row in result["per_pr"]} for result in rounds]
+    return {
+        "round_count": 3, "case_keys": keys, "eval_config": config,
+        "macro": _stratified_means([row["macro"] for row in rounds]),
+        "micro": _stratified_means([row["micro"] for row in rounds]),
+        "per_pr": [
+            {"pr_key": key, "metrics": _stratified_means([row[key] for row in per_round])} for key in keys
+        ],
+        "rounds": rounds,
+    }

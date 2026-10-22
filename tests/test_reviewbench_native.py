@@ -22,7 +22,8 @@ from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import convert_findings, native_configuration, review_case
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
-from daydream.review_result import FinalizedReview, bind_review_result_handler, deliver_finalized_review
+from daydream.review_result import FinalizedReview, deliver_finalized_review
+from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
@@ -616,8 +617,36 @@ def test_result_delivery_preserves_caller_owned_nested_values() -> None:
         result.items[0]["source_uids"].append("observer-source")
         result.configuration["phases"]["per_stack_review"]["model"] = "observer-model"
 
-    with bind_review_result_handler(observe):
+    with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=observe)):
         deliver_finalized_review(terminal_result(), items, configuration)
     assert len(received) == 1
     assert items[0]["source_uids"] == ["native-source"]
     assert configuration["phases"]["per_stack_review"]["model"] == "native-model"
+
+
+async def test_result_delivery_follows_nested_and_concurrent_run_contexts() -> None:
+    """Nested ordinary runs mask observers; sibling tasks keep their own deliveries."""
+    received: dict[str, list[str]] = {name: [] for name in ("first", "second")}
+
+    def fail(_result: FinalizedReview) -> None:
+        raise RuntimeError("consumer failed")
+
+    async def deliver(name: str) -> None:
+        def observe(result: FinalizedReview) -> None:
+            received[name].append(result.configuration["owner"])
+
+        with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=observe)):
+            with bind_run_context(RunContext(InteractionPolicy())):
+                deliver_finalized_review(terminal_result(), [], {"owner": "nested"})
+            await asyncio.sleep(0)
+            deliver_finalized_review(terminal_result(), [], {"owner": name})
+            with pytest.raises(RuntimeError, match="consumer failed"):
+                with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=fail)):
+                    deliver_finalized_review(terminal_result(), [], {})
+            deliver_finalized_review(terminal_result(), [], {"owner": name})
+
+    async with asyncio.TaskGroup() as tasks:
+        for name in received:
+            tasks.create_task(deliver(name))
+    deliver_finalized_review(terminal_result(), [], {"owner": "outside"})
+    assert received == {name: [name, name] for name in received}

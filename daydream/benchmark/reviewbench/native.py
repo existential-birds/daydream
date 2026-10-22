@@ -301,11 +301,11 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 execution.diagnostics.append(f"native reviewer raised {type(exc).__name__}")
             result = finalized[0] if len(finalized) == 1 else None
             if result is not None:
-                execution.terminal_result = copy.deepcopy(result.terminal_result)
-                execution.configuration = copy.deepcopy(result.configuration)
-                execution.usage = copy.deepcopy(result.usage)
-                execution.configuration['native'] = copy.deepcopy(public_native)
-                execution.retained_findings = copy.deepcopy(result.items)
+                execution.terminal_result = result.terminal_result
+                execution.configuration = result.configuration
+                execution.usage = result.usage
+                execution.configuration['native'] = public_native
+                execution.retained_findings = result.items
             if selected_extension_identity() != extension:
                 raise ValueError('native extension changed during review; create a fresh candidate plan')
             if not finalized:

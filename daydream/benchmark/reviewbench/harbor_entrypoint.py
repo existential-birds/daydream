@@ -22,6 +22,7 @@ from typing import Any
 from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case
 from daydream.config_file import DaydreamFileConfig
+from daydream.json_utils import atomic_create_bytes
 from daydream.redaction import redact_structured_text
 from daydream.review_profile import resolve_harbor_profile
 from daydream.run_config import RunConfig
@@ -35,8 +36,8 @@ class PublicReviewerError(ValueError):
 def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tuple[PublicHarborTask, dict[str, Any]]:
     """Bind exported profile bytes, supplied PR metadata and frozen public patch."""
     profile = json.loads(profile_path.read_text())
-    if not isinstance(profile, dict) or profile.get('schema') != 1:
-        raise PublicReviewerError('invalid public reviewer profile schema')
+    if not isinstance(profile, dict) or profile.get('schema') != 2:
+        raise PublicReviewerError('unsupported public reviewer profile; regenerate the export')
     digest = profile.get('profile_sha256')
     policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
     calculated = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
@@ -68,24 +69,9 @@ def _reviewer_environment(source: Mapping[str, str], codex_home: Path) -> dict[s
     return result
 
 
-def _write_new_bytes(destination: Path, body: bytes) -> None:
-    """Install finalized bytes without replacing a prior attempt's artifact."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix='.daydream-', dir=destination.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(descriptor, 'wb') as output:
-            output.write(body)
-            output.flush()
-            os.fsync(output.fileno())
-        os.link(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def _write_new_json(destination: Path, value: Any) -> None:
     body = redact_structured_text(json.dumps(value, indent=2, allow_nan=False)) + '\n'
-    _write_new_bytes(destination, body.encode('utf-8'))
+    atomic_create_bytes(destination, body.encode('utf-8'))
 
 
 @contextmanager
@@ -130,10 +116,10 @@ def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Pa
         if source.is_symlink():
             raise PublicReviewerError('native evidence contains an unexpected symlink')
         if source.is_file():
-            _write_new_bytes(bundle / source.relative_to(staged), source.read_bytes())
+            atomic_create_bytes(bundle / source.relative_to(staged), source.read_bytes())
     if trajectory.is_file():
-        _write_new_bytes(evidence / RUN_DOCUMENT_NAME, trajectory.read_bytes())
-        _write_new_bytes(harbor_trajectory, trajectory.read_bytes())
+        atomic_create_bytes(evidence / RUN_DOCUMENT_NAME, trajectory.read_bytes())
+        atomic_create_bytes(harbor_trajectory, trajectory.read_bytes())
 
 
 async def main(environment: Mapping[str, str]) -> int:

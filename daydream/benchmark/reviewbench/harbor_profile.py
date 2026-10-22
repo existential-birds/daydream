@@ -148,11 +148,10 @@ def export_harbor_profile(
     reviewer_compose = _compose(platform, reviewer=True)
     verifier_compose = _compose(platform, reviewer=False)
     policy: dict[str, Any] = {
-        'schema': 1, 'name': 'daydream-reviewbench-codex-subscription-v1',
+        'schema': 2, 'name': 'daydream-reviewbench-codex-subscription-v2',
         'source': source_identity, 'source_prs': len(cases),
         'candidate': dict(candidate), 'final_comparison_rounds': rounds,
         'trial_concurrency': 1,
-        'profile_builder_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'reviewer': {'model': reviewer_model, 'reasoning_effort': reviewer_effort, 'timeout_sec': 900,
                      'fanout_concurrency': 1},
         'judge': {
@@ -161,31 +160,21 @@ def export_harbor_profile(
             'call_timeout_ms': 600000, 'classifier_extra_per_finding_ms': 120000,
             'verifier_timeout_sec': 7200, 'models': models,
             'max_output_tokens_enforced': False, 'cost_source': 'api-equivalent-estimate',
-            'auth_bootstrap_sha256': hashlib.sha256(auth_asset).hexdigest(),
-            'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
             'refresh_policy': 'independent-native-stores-pi-canonical-locks',
-            'storage_binding_sha256': hashlib.sha256(judge_bootstrap).hexdigest(),
             'evidence': {
                 'classifier_sessions_source': '/tests/judge/classifier-output/sessions',
                 'classifier_sessions_destination': '/logs/verifier/judge-sessions',
                 'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
-                'redaction_sha256': hashlib.sha256(redaction_asset).hexdigest(),
-                'credential_patterns_sha256': hashlib.sha256(credential_patterns_asset).hexdigest(),
                 'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
                 'monetary_usage_source': 'api-equivalent-estimate',
             },
         },
         'runtime': {'platform': platform,
-                    'reviewer_compose_sha256': hashlib.sha256(reviewer_compose.encode()).hexdigest(),
-                    'verifier_compose_sha256': hashlib.sha256(verifier_compose.encode()).hexdigest(),
                     'reviewer_seccomp_sha256': seccomp_sha,
                     'reviewer_seccomp_provenance_sha256': hashlib.sha256(seccomp_provenance_asset).hexdigest(),
                     'reviewer_seccomp_provenance': seccomp_provenance,
                     'verifier_seccomp': 'docker-default',
-                    'base_image': base_image,
-                    'reviewer_build_suffix_sha256': hashlib.sha256(reviewer_dockerfile_suffix.encode()).hexdigest(),
-                    'reviewer_assets': {key: hashlib.sha256(value).hexdigest()
-                                        for key, value in sorted((reviewer_assets or {}).items())}},
+                    'base_image': base_image},
     }
     policy_sha = canonical_digest(policy)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -212,12 +201,9 @@ def export_harbor_profile(
             expected[str(task['task_id'])] = task['evaluation_id']
             _write_json(task_path, task)
             profile = {
-                'schema': 1, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
+                'schema': 2, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
                 'task_id': task['task_id'], 'evaluation_id': task['evaluation_id'],
                 'reviewer': policy['reviewer'], 'candidate': dict(candidate), 'policy_sha256': policy_sha,
-                'runtime': {key: policy['runtime'][key] for key in (
-                    'platform', 'reviewer_seccomp_sha256', 'reviewer_seccomp_provenance_sha256',
-                )},
             }
             profile['profile_sha256'] = canonical_digest(profile)
             _write_json(task_dir / 'environment/daydream-profile.json', profile)
@@ -236,9 +222,9 @@ def export_harbor_profile(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
             (task_dir / 'tests/daydream-auth.py').write_bytes(auth_asset)
-            (task_dir / 'tests/daydream_json_utils.py').write_bytes(atomic_asset)
             (task_dir / 'tests/daydream').mkdir()
             (task_dir / 'tests/daydream/__init__.py').write_bytes(b'')
+            (task_dir / 'tests/daydream/json_utils.py').write_bytes(atomic_asset)
             (task_dir / 'tests/daydream/redaction.py').write_bytes(redaction_asset)
             (task_dir / 'tests/daydream/credential_patterns.py').write_bytes(credential_patterns_asset)
             (task_dir / 'environment/docker-compose.yaml').write_text(reviewer_compose, encoding='utf-8')

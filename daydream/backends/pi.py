@@ -121,45 +121,19 @@ def _pi_process_exit_message(stderr_lines: list[str], returncode: int) -> str:
     return process_exit_message(display="Pi", returncode=returncode, lines=stderr_lines)
 
 
-def _read_pi_default_model(path: Path) -> str | None:
-    """Read Pi's configured default model, ignoring malformed settings."""
-    try:
-        with path.open(encoding="utf-8") as settings_file:
-            settings = json.load(settings_file)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    model = settings.get("defaultModel") if isinstance(settings, dict) else None
-    return model.strip() if isinstance(model, str) and model.strip() else None
-
-
-_AMBIENT_AGENT_DIR = object()
-
-
 def _configured_pi_model(
-    cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR,
-    execution_input: BackendExecutionInput | None = None,
+    cwd: Path, *, execution_input: BackendExecutionInput | None = None,
 ) -> str | None:
     """Resolve frozen defaults, otherwise project settings before global settings."""
     if execution_input is not None:
         if execution_input.pi_settings is not None:
             return execution_input.pi_settings.get("defaultModel")
         agent_dir = execution_input.pi_agent_dir
-    if agent_dir is _AMBIENT_AGENT_DIR:
-        resolved_agent_dir: Path | None = Path(
+    else:
+        agent_dir = Path(
             os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent")
         )
-    else:
-        assert agent_dir is None or isinstance(agent_dir, Path)
-        resolved_agent_dir = agent_dir
-    settings_paths = [cwd / ".pi" / "settings.json"]
-    if resolved_agent_dir is not None:
-        settings_paths.append(resolved_agent_dir / "settings.json")
-    for settings_path in settings_paths:
-        model = _read_pi_default_model(settings_path)
-        if model:
-            return model
-    return None
+    return native_pi_settings(cwd, agent_dir=agent_dir).get("defaultModel")
 
 
 def native_pi_settings(cwd: Path, *, agent_dir: Path | None) -> dict[str, str]:

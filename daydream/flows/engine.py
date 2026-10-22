@@ -6,9 +6,10 @@ unchanged, leaving error policy with each step.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from daydream.extensions.api import (
     BreakLoop,
@@ -34,13 +35,7 @@ if TYPE_CHECKING:
 type BackendCache = dict[tuple[str, str | None, str | None, Path | None], Backend]
 
 
-class BackendFactory(Protocol):
-    """Resolve a phase using run-owned capabilities and optional group effort."""
-
-    def __call__(
-        self, config: RunConfig, phase: str, cache: BackendCache, cwd: Path,
-        audit: AuditWorkspace | None, effort_override: str | None = None, /,
-    ) -> Backend: ...
+type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspace | None, str | None], Backend]
 
 
 @dataclass
@@ -81,12 +76,8 @@ class FlowContext:
     def _backend(self, phase: str, *, effort: str | None = None) -> Backend:
         """Resolve ``phase``'s backend, honoring a runner-bound factory seam."""
         if self._backend_factory is not None:
-            if effort is not None:
-                return self._backend_factory(
-                    self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace, effort,
-                )
             return self._backend_factory(
-                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
+                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace, effort,
             )
 
         from daydream.runner import _resolve_backend
