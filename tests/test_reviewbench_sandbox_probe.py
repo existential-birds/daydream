@@ -89,8 +89,6 @@ def test_shipped_seccomp_preserves_pinned_default_and_only_declared_bootstrap_ad
     policy = json.loads(policy_bytes)
     provenance = json.loads((root / 'harbor-seccomp-provenance.json').read_text())
     assert hashlib.sha256(policy_bytes).hexdigest() == provenance['policy_sha256']
-    assert hashlib.sha256((root / 'harbor-seccomp-LICENSE').read_bytes()).hexdigest() == (
-        provenance['upstream']['license_sha256'])
     additions = provenance['appended_rules']
     assert policy['syscalls'][-len(additions):] == additions
     policy['syscalls'] = policy['syscalls'][:-len(additions)]

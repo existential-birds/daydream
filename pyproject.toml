@@ -81,7 +81,6 @@ include = [
     "daydream/benchmark/reviewbench/reviewer-runtime.lock",
     "daydream/benchmark/reviewbench/harbor-seccomp.json",
     "daydream/benchmark/reviewbench/harbor-seccomp-provenance.json",
-    "daydream/benchmark/reviewbench/harbor-seccomp-LICENSE",
 ]
 
 [tool.mypy]

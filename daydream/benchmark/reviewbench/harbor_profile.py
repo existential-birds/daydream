@@ -150,7 +150,6 @@ def export_harbor_profile(
     credential_patterns_asset = Path(credential_patterns.__file__).read_bytes()
     seccomp_asset = Path(__file__).with_name('harbor-seccomp.json').read_bytes()
     seccomp_provenance_asset = Path(__file__).with_name('harbor-seccomp-provenance.json').read_bytes()
-    seccomp_license_asset = Path(__file__).with_name('harbor-seccomp-LICENSE').read_bytes()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
     if seccomp_provenance['policy_sha256'] != seccomp_sha:
@@ -191,7 +190,6 @@ def export_harbor_profile(
                     'verifier_compose_sha256': hashlib.sha256(verifier_compose.encode()).hexdigest(),
                     'reviewer_seccomp_sha256': seccomp_sha,
                     'reviewer_seccomp_provenance_sha256': hashlib.sha256(seccomp_provenance_asset).hexdigest(),
-                    'reviewer_seccomp_license_sha256': hashlib.sha256(seccomp_license_asset).hexdigest(),
                     'reviewer_seccomp_provenance': seccomp_provenance,
                     'sandbox_probe_sha256': probe_sha, 'verifier_seccomp': 'docker-default',
                     'verifier_image': base_image, 'reviewer_image': reviewer_image or base_image,
@@ -243,7 +241,6 @@ def export_harbor_profile(
             docker_path.write_text(docker, encoding='utf-8')
             (task_dir / 'environment/reviewer-seccomp.json').write_bytes(seccomp_asset)
             (task_dir / 'environment/reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
-            (task_dir / 'environment/reviewer-seccomp-LICENSE').write_bytes(seccomp_license_asset)
             for relative, content in (reviewer_assets or {}).items():
                 relative_path = Path(relative)
                 if relative_path.is_absolute() or '..' in relative_path.parts:
@@ -286,7 +283,6 @@ def export_harbor_profile(
         profile_sha = hashlib.sha256((exported / 'daydream-profile.json').read_bytes()).hexdigest()
         (exported / 'reviewer-seccomp.json').write_bytes(seccomp_asset)
         (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
-        (exported / 'reviewer-seccomp-LICENSE').write_bytes(seccomp_license_asset)
         (exported / 'dataset.toml').write_text(
             'schema_version = "1.0"\n[dataset]\n'
             f'name = {json.dumps(organization + "/reviewbench-codex-subscription")}\n'
@@ -299,9 +295,7 @@ def export_harbor_profile(
             '\n[[files]]\npath = "reviewer-seccomp.json"\n'
             f'digest = "sha256:{seccomp_sha}"\n'
             '\n[[files]]\npath = "reviewer-seccomp-provenance.json"\n'
-            f'digest = "sha256:{hashlib.sha256(seccomp_provenance_asset).hexdigest()}"\n'
-            '\n[[files]]\npath = "reviewer-seccomp-LICENSE"\n'
-            f'digest = "sha256:{hashlib.sha256(seccomp_license_asset).hexdigest()}"\n', encoding='utf-8',
+            f'digest = "sha256:{hashlib.sha256(seccomp_provenance_asset).hexdigest()}"\n', encoding='utf-8',
         )
         # Recheck the supplied checkout after generation so concurrent source
         # changes cannot silently claim the originally admitted revision.

@@ -41,7 +41,6 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
             'daydream/benchmark/reviewbench/harbor_sandbox_probe.py',
             'daydream/benchmark/reviewbench/harbor-seccomp.json',
             'daydream/benchmark/reviewbench/harbor-seccomp-provenance.json',
-            'daydream/benchmark/reviewbench/harbor-seccomp-LICENSE',
         })
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
