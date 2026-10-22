@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Use upstream ReviewBench's [25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
+  for the before/after [#1616 acceptance gate](https://github.com/existential-birds/daydream/issues/1616),
+  retaining three independent rounds per candidate. The full 219-task corpus is
+  not required for that gate.
+
 - Give public Harbor reviewers and Pi judges independent persistent subscription
   logins. Replace `harbor-run --auth-runtime` with `--pi-home`; preserve native
   refresh locks and remove shared credential conversion and copyback. Existing
