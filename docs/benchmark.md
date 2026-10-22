@@ -72,24 +72,82 @@ Harbor's exact-host kernel isolation is also required. Both roles allow only
 `chatgpt.com` and `auth.openai.com`; the runner checks isolation before inference
 and preserves that network policy.
 
-Reserve an existing file-backed **ChatGPT subscription login** for the whole job.
-`codex login status` must report ChatGPT access. API-key login and API fallbacks
-are rejected. The runner borrows only `CODEX_HOME/auth.json` into a new private
-auth directory outside results; it never mounts the personal home. Do not run
-other Codex clients with that login while the job owns it. One exclusive lease
-covers each complete reviewer/judge invocation, and rotated credentials are
-reconciled into the canonical store before another role starts. Account inference
-therefore serializes. Harbor runs one complete trial at a time, so lease waiting
-cannot consume the supplied review/judge allowance. Its resolved job configuration
-records trial concurrency as one. Native reviewer fan-out is also frozen at one
-through Daydream's
-supported concurrency setting: separate Codex CLI processes have process-local
-refresh locks, so sharing an auth file alone cannot prevent simultaneous token
-rotation. The ordinary review phases and native transport remain in use. At job
-exit, refresh updates return to the original auth file. Conflicting external
-updates or a killed lease preserve private recovery credentials in the mounted
-auth directory and fail closed; recover the
-reserved login before starting a new session. Never archive the auth directory.
+Create **two dedicated ChatGPT subscription logins**, one with native Codex and
+one with the pinned Pi CLI. They may use the same ChatGPT account, but must come
+from separate sign-in flows. Copying or converting one session into two stores
+does not make it independent. API-key logins, API fallback, and alternate
+providers remain prohibited. These directories must contain only `auth.json`
+and runtime lock sidecars, outside all dataset and result directories.
+
+The following setup launches sign-in flows, not inference. Use new, empty
+destinations; do not overwrite an existing login. Sign in to ChatGPT for Codex:
+
+```bash
+umask 077
+mkdir -p "$HOME/.local/share/daydream/reviewbench"
+mkdir "$HOME/.local/share/daydream/reviewbench/reviewer"
+reviewbench_codex_setup=$(mktemp -d)
+CODEX_HOME="$reviewbench_codex_setup" npx --yes --package @openai/codex@0.163.0 \
+  codex -c 'cli_auth_credentials_store="file"' login --device-auth
+CODEX_HOME="$reviewbench_codex_setup" npx --yes --package @openai/codex@0.163.0 \
+  codex -c 'cli_auth_credentials_store="file"' login status
+mv "$reviewbench_codex_setup/auth.json" "$HOME/.local/share/daydream/reviewbench/reviewer/auth.json"
+rm -r "$reviewbench_codex_setup"
+unset reviewbench_codex_setup
+```
+
+Next, use the clean pinned ReviewBench checkout with `npm ci` completed. Its
+`node_modules/.bin/pi` is **0.75.5**, separate from any globally installed Pi.
+Start Pi, enter `/login`, choose **ChatGPT Plus/Pro (Codex Subscription)**, complete a
+new sign-in, then `/quit`. Do not send a prompt or import Codex credentials.
+
+```bash
+mkdir "$HOME/.local/share/daydream/reviewbench/judge"
+reviewbench_pi_setup=$(mktemp -d)
+PI_CODING_AGENT_DIR="$reviewbench_pi_setup" /path/to/ReviewBench/node_modules/.bin/pi
+# After completing /login and /quit:
+mv "$reviewbench_pi_setup/auth.json" "$HOME/.local/share/daydream/reviewbench/judge/auth.json"
+rm -r "$reviewbench_pi_setup"
+unset reviewbench_pi_setup
+chmod 700 "$HOME/.local/share/daydream/reviewbench/"{reviewer,judge}
+chmod 600 "$HOME/.local/share/daydream/reviewbench/"{reviewer,judge}/auth.json
+```
+
+Run each block only after the preceding command succeeds. These one-time moves
+retire the temporary sources; do not copy a session and leave another active
+consumer. Reserve both stores for this workflow. Reauthentication follows the
+same separate sign-in procedure with all jobs stopped; never delete an active
+lock or run an unrelated Codex/Pi client against these stores. The launcher
+rejects identical refresh tokens, but cannot prove that different tokens came
+from independent sign-ins.
+
+The reviewer mounts only its persistent credential directory at
+`/run/reviewbench-codex`. A reviewer-only `flock` covers the whole invocation,
+since native Codex does not provide cross-process refresh coordination. Its
+fresh private `CODEX_HOME` links directly to persistent `auth.json`; pinned Codex
+writes that file in place. There is no source borrowing, conversion, copyback,
+or cross-runtime lease. Rotation survives failed invocations and disposable-home
+cleanup. Native fan-out and Harbor trial concurrency remain frozen at one.
+
+The verifier mounts only the Pi credential directory at `/run/reviewbench-pi`.
+Every judge process uses `/run/reviewbench-pi/auth.json`, with Pi's lock sidecars
+on the same writable mount. Pi's existing storage backend owns refresh and lock
+recovery. A tiny Node preload binds the pinned evaluator's zero-argument
+`AuthStorage.create()` calls to its supported storage API at that path; upstream Pi and
+evaluator files remain unchanged. Controlled `NODE_OPTIONS` propagates the preload
+through the verifier's evaluator subprocess; inherited Node options are scrubbed.
+The binding retries Pi's short synchronous startup lock acquisition for up to
+60 seconds so a concurrent refresh cannot masquerade as missing authentication.
+Pi still owns every lock and refresh. `PI_CODING_AGENT_DIR` still points to a new
+temporary directory for each invocation's models/configuration. Sessions,
+workspaces, logs and role homes remain fresh and isolated, and only sanitized
+classifier evidence is retained. No credential store is archived.
+
+This changes the unreleased public launch interface: replace `--auth-runtime`
+with `--pi-home`, and point `--codex-home` at the dedicated persistent reviewer
+store. Re-export datasets with the new candidate wheel because bootstrap,
+compose and evaluation identities change. Old shared leases are not migrated;
+create fresh independent logins rather than reusing ambiguous recovery state.
 
 `--reviewer-effort` configures the native base effort. Ordinary phase-specific
 and arbitration effort overrides remain in effect. Retained invocation evidence
@@ -100,8 +158,9 @@ task from the full export for integration proof:
 
 ```bash
 /tmp/reviewbench-runtime/bin/daydream benchmark reviewbench harbor-run \
-  /tmp/reviewbench-full --codex-home "$HOME/.codex" \
-  --auth-runtime /tmp/reviewbench-private-auth-1 --jobs-dir /tmp/reviewbench-jobs \
+  /tmp/reviewbench-full \
+  --codex-home "$HOME/.local/share/daydream/reviewbench/reviewer" \
+  --pi-home "$HOME/.local/share/daydream/reviewbench/judge" --jobs-dir /tmp/reviewbench-jobs \
   --job-name one-task --n-tasks 1 --rounds 1
 /tmp/reviewbench-runtime/bin/reviewbench-check-job \
   /tmp/reviewbench-jobs/one-task \
@@ -143,6 +202,16 @@ also needs genuine solver findings and at least one real semantic Codex request.
 Classifier execution is conditional on unmatched findings. Supplied null metrics
 stay null; token counts and API-equivalent cost estimates are evidence, not
 subscription cash charges. Benchmark data never enters capture/training.
+
+Remaining live validation after setup: authorize one selected task, confirm a
+nonempty reviewer result triggers a genuine semantic matcher request, and choose
+an unmatched finding to exercise the classifier. Confirm model/effort and
+retained evidence with the supplied checker. Run a second fresh job using the
+same two stores to verify authenticated reuse; verify native refresh persistence
+when rotation occurs, without printing or retaining tokens. Synthetic offline
+tests cover rotation and contention; they cannot establish account availability,
+real provider refresh, Docker mount ownership, or the supported sandbox on the
+operator's host. Never infer live success from an empty review or export alone.
 
 ## Supplied ReviewBench with native Daydream
 
@@ -224,8 +293,8 @@ that change the analyzed patch produce a visible comparison failure. It consumes
 actual finalized terminal result without manufacturing a publication PR.
 Complete empty, incomplete, failed and absent results remain distinct. Retained
 partial findings and conversion limitations remain in `outcomes/`. Canonical
-line hints are converted only when the captured diff proves a HEAD coordinate;
-deleted-side-only, ambiguous, relocated and unlocatable hints are omissions.
+line hints refer to HEAD and are checked against the captured new-side diff.
+Deleted-file, relocated and unlocatable hints remain omissions.
 Any omission marks the case `conversion_limited` and excludes it from scorable
 findings, rather than presenting discarded findings as a successful empty review.
 

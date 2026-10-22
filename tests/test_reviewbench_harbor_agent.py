@@ -119,7 +119,7 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     """A successful subprocess alone must not publish partial or discarded findings.
 
     The existing native tests do not exercise public origin-free snapshots,
-    subscription leases, private trajectory retention or Harbor candidate output.
+    reviewer credential locking, private trajectory retention or Harbor candidate output.
     Only the external generation transport is replaced; runner and Git stay real.
     """
     environment = public_input(tmp_path)
@@ -173,7 +173,10 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
         home = Path(child['CODEX_HOME'])
         role_homes.append(home)
         assert home != Path(environment['DAYDREAM_RB_CODEX_HOME'])
-        assert json.loads((home / 'auth.json').read_text())['auth_mode'] == 'chatgpt'
+        auth = json.loads((home / 'auth.json').read_text())
+        assert auth['auth_mode'] == 'chatgpt'
+        auth['tokens']['refresh_token'] = 'private-rotated-canary'
+        (home / 'auth.json').write_text(json.dumps(auth))
         # StubBackend's target is only a fixture root for non-review replies;
         # actual native review passes its independent checkout to execute().
         backend = SerializedBackend(Path(environment['DAYDREAM_RB_REPOSITORY']),
@@ -206,6 +209,8 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     assert record['configuration']['native']['codex']['fanout_concurrency'] == 1
     assert record['configuration']['native']['codex']['subscription_access'] == 'chatgpt-oauth'
     assert role_homes and all(not home.exists() for home in role_homes)
+    assert json.loads((Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').read_text())[
+        'tokens']['refresh_token'] == 'private-rotated-canary'
     assert any('Frozen supplied author explanation' in call['prompt'] for backend in backends for call in backend.calls)
     assert 'private-refresh-canary' not in (evidence / 'execution.json').read_text()
     assert 'forbidden-api-canary' not in (evidence / 'trajectory.json').read_text()
@@ -230,6 +235,7 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     for path in evidence.rglob('*'):
         if path.is_file():
             assert b'private-refresh-canary' not in path.read_bytes()
+            assert b'private-rotated-canary' not in path.read_bytes()
             assert b'forbidden-api-canary' not in path.read_bytes()
             assert path.name != 'auth.json'
     output = Path(environment['DAYDREAM_RB_OUTPUT'])
@@ -338,6 +344,7 @@ async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_prop
     """
     environment = public_input(tmp_path)
     entered, joined = asyncio.Event(), asyncio.Event()
+    role_homes: list[Path] = []
     monkeypatch.delenv('DAYDREAM_ARCHIVE_DIR', raising=False)
     prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
     emitted = 'Synthetic generation stream before cancellation'
@@ -369,8 +376,15 @@ async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_prop
             finally:
                 joined.set()
 
-    monkeypatch.setattr(runner, 'create_backend', lambda *args, **kwargs:
-                        BlockedBackend(Path(environment['DAYDREAM_RB_REPOSITORY'])))
+    def create(*args: Any, **kwargs: Any) -> EmptyReviewBackend:
+        home = Path(kwargs['execution_input'].child_environment()['CODEX_HOME'])
+        role_homes.append(home)
+        auth = json.loads((home / 'auth.json').read_text())
+        auth['tokens']['refresh_token'] = 'private-cancelled-rotation'
+        (home / 'auth.json').write_text(json.dumps(auth))
+        return BlockedBackend(Path(environment['DAYDREAM_RB_REPOSITORY']))
+
+    monkeypatch.setattr(runner, 'create_backend', create)
     running = asyncio.create_task(main(environment))
     await asyncio.wait_for(entered.wait(), timeout=5)
     running.cancel()
@@ -399,3 +413,10 @@ async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_prop
     assert record['status'] == 'cancelled' and record['terminal_result'] is None
     assert 'cancelled before returning' in record['diagnostics'][0]
     assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+
+    assert role_homes and all(not home.exists() for home in role_homes)
+    from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
+
+    canonical = Path(environment['DAYDREAM_RB_CODEX_HOME'])
+    with reviewer_credentials(canonical, tmp_path / 'after-cancel') as home:
+        assert json.loads((home / 'auth.json').read_text())['tokens']['refresh_token'] == 'private-cancelled-rotation'

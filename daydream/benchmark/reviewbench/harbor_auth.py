@@ -1,11 +1,9 @@
 """Role-private ChatGPT subscription credentials for the public Harbor profile.
 
 This file is also copied verbatim into the verifier image and runs on Python 3.11+.
-One persistent canonical Codex auth directory is shared by both environments.
-An exclusive lease lasts for the *whole invocation*: native Codex and Pi each own
-refresh, so locking just the initial copy would race their rotating credentials.
-Harbor trial concurrency can queue, but this account's model invocations serialize.
-The dedicated canonical login must not be used by unrelated Codex processes.
+Each runtime owns an independently signed-in persistent store. Native Codex
+invocations serialize under a reviewer-only lock; Pi owns its refresh locking
+at one canonical path, including shared sidecars. Only credential state persists.
 Credential contents are never configuration, fingerprints, or retained evidence.
 """
 from __future__ import annotations
@@ -19,14 +17,15 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from daydream.redaction import redact_value
 
@@ -46,15 +45,22 @@ class SubscriptionAuthError(ValueError):
 
 
 def _read(path: Path) -> dict[str, Any]:
-    try:
-        if path.is_symlink() or not path.is_file():
-            raise SubscriptionAuthError("subscription auth must be a regular private file")
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise SubscriptionAuthError("invalid subscription auth object")
-        return value
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise SubscriptionAuthError("subscription auth is unavailable or malformed") from None
+    # Both native stores write in place. Read-only admission and redaction
+    # snapshots can overlap another process's locked truncate/write. Tolerate
+    # that short window without adding a second refresh-lock implementation.
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise SubscriptionAuthError("subscription auth must be a regular private file")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise SubscriptionAuthError("invalid subscription auth object")
+            return value
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            if time.monotonic() >= deadline:
+                raise SubscriptionAuthError("subscription auth is unavailable or malformed") from None
+            time.sleep(0.01)
 
 
 def _text(value: Any) -> str:
@@ -86,7 +92,7 @@ def _codex_auth(value: dict[str, Any]) -> dict[str, Any]:
     if type(claims.get("exp")) not in (int, float):
         raise SubscriptionAuthError("subscription access token has no usable expiry")
     # Expired access is admissible only with refresh capability; the owning native
-    # client performs refresh under the invocation lease, including failure cases.
+    # client performs refresh under the reviewer lock, including failure cases.
     return value
 
 
@@ -95,134 +101,67 @@ def validate_subscription_home(home: Path) -> None:
     _codex_auth(_read(home / "auth.json"))
 
 
-def _write(path: Path, value: dict[str, Any]) -> None:
-    if path.is_symlink():
-        raise SubscriptionAuthError("refusing a symlink subscription auth destination")
-    owner = (path if path.exists() else path.parent).stat()
-    atomic_write_bytes(path, json.dumps(value).encode("utf-8"), fsync=True, mode=0o600,
-                       owner=(owner.st_uid, owner.st_gid))
+def validate_judge_home(home: Path) -> None:
+    """Admit only Pi's native subscription credential, never API fallback state."""
+    value = _read(home / "auth.json")
+    credential = value.get("openai-codex")
+    if set(value) != {"openai-codex"} or not isinstance(credential, dict) or credential.get("type") != "oauth":
+        raise SubscriptionAuthError("judge requires a dedicated Pi openai-codex OAuth login")
+    for key in ("access", "refresh", "accountId"):
+        _text(credential.get(key))
+    if type(credential.get("expires")) not in (int, float):
+        raise SubscriptionAuthError("judge subscription access token has no usable expiry")
 
 
-def _judge_auth(codex: dict[str, Any]) -> dict[str, Any]:
-    tokens = codex["tokens"]
-    return {"openai-codex": {
-        "type": "oauth", "access": tokens["access_token"], "refresh": tokens["refresh_token"],
-        "expires": _claims(tokens["access_token"])["exp"] * 1000,
-        "accountId": tokens["account_id"],
-    }}
+def validate_credential_stores(reviewer: Path, judge: Path) -> None:
+    """Require disjoint auth-only mounts and reject an obviously copied session.
 
-
-def _judge_update(codex: dict[str, Any], judge: dict[str, Any]) -> dict[str, Any]:
-    credential = judge.get("openai-codex")
-    if not isinstance(credential, dict) or credential.get("type") != "oauth":
-        raise SubscriptionAuthError("judge lost its subscription OAuth capability")
-    access, refresh, account = (_text(credential.get(key)) for key in ("access", "refresh", "accountId"))
-    if account != codex["tokens"]["account_id"]:
-        raise SubscriptionAuthError("judge subscription account changed during invocation")
-    if (access, refresh) != (codex["tokens"]["access_token"], codex["tokens"]["refresh_token"]):
-        codex["tokens"].update(access_token=access, refresh_token=refresh)
-        codex["last_refresh"] = datetime.now(timezone.utc).isoformat()
-    return _codex_auth(codex)
+    Different tokens cannot prove independent sign-ins; setup must create them.
+    Lock sidecars belong beside their auth file and must survive invocations.
+    """
+    if reviewer == judge or reviewer.is_relative_to(judge) or judge.is_relative_to(reviewer):
+        raise SubscriptionAuthError("reviewer and judge credential stores must be separate")
+    for home, role in ((reviewer, "reviewer"), (judge, "judge")):
+        if home.is_symlink() or not home.is_dir():
+            raise SubscriptionAuthError("dedicated credential directory is unavailable")
+        allowed = {"auth.json", ".reviewer.lock"} if role == "reviewer" else {"auth.json", "auth.json.lock"}
+        if any(path.name not in allowed or path.is_symlink() for path in home.iterdir()):
+            raise SubscriptionAuthError("mount only dedicated credential state; remove configuration and sessions")
+    validate_subscription_home(reviewer)
+    validate_judge_home(judge)
+    reviewer_refresh = _read(reviewer / "auth.json")["tokens"]["refresh_token"]
+    if reviewer_refresh == _read(judge / "auth.json")["openai-codex"]["refresh"]:
+        raise SubscriptionAuthError("copied OAuth session; create independent reviewer and judge sign-ins")
 
 
 @contextmanager
-def subscription_lease(
-    canonical_home: Path, role_home: Path, *, role: Literal["reviewer", "judge"] = "reviewer",
-) -> Iterator[Path]:
-    """Borrow exact OAuth capability and reconcile refresh even after model failure.
+def reviewer_credentials(canonical_home: Path, role_home: Path) -> Iterator[Path]:
+    """Serialize native Codex invocations and link only the persistent credential.
 
-    The canonical directory is an explicit runtime mount, never the personal home.
-    Role directories must be private and contain no earlier auth. Their auth file
-    links to a private durable credential file on the canonical mount: the pinned
-    Codex 0.163.0 file store and Pi 0.75.5 file store update auth in place. Their
-    conversations, configuration and logs remain in ephemeral role directories.
-    A failed writeback or process death retains the durable role-format auth and
-    marker for recovery even after the role directory/container is removed.
+    Codex 0.163.0 writes its file store in place. No credential copies, conversion,
+    reconciliation or recovery markers are needed. Configuration and sessions
+    remain disposable. The OS releases the lock on failure or process death.
     """
-    if role not in {"reviewer", "judge"}:
-        raise SubscriptionAuthError("unsupported subscription role")
     if (canonical_home.resolve() == role_home.resolve() or canonical_home.is_symlink()
-            or role_home.is_symlink()):
-        raise SubscriptionAuthError("canonical and private role homes must be separate")
-    if not canonical_home.is_dir():
-        raise SubscriptionAuthError("canonical subscription home is unavailable")
+            or role_home.is_symlink() or not canonical_home.is_dir()):
+        raise SubscriptionAuthError("canonical and private reviewer homes must be separate regular directories")
     role_home.mkdir(parents=True, exist_ok=True, mode=0o700)
     role_home.chmod(0o700)
     role_path = role_home / "auth.json"
     if role_path.exists() or role_path.is_symlink():
-        raise SubscriptionAuthError("refusing stale role subscription credentials")
-    lock_path = canonical_home / ".lease.lock"
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        raise SubscriptionAuthError("refusing stale reviewer subscription credentials")
+    descriptor = os.open(canonical_home / ".reviewer.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "r+") as lock:
         owner, current = canonical_home.stat(), os.fstat(lock.fileno())
         if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
             os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        state = canonical_home / ".lease-state.json"
-        durable = canonical_home / ".lease-auth.json"
-        if state.exists() or durable.exists():
-            raise SubscriptionAuthError("interrupted subscription lease requires credential recovery")
-        original = _codex_auth(_read(canonical_home / "auth.json"))
-        _write(state, {"role": role, "credential_file": durable.name})
-        _write(durable, original if role == "reviewer" else _judge_auth(original))
-        # Pinned Codex file-store save uses OpenOptions::truncate/write (not
-        # rename), and pinned Pi FileAuthStorageBackend uses writeFileSync.
-        # Only credential bytes follow this link; sessions stay in role_home.
-        # github.com/openai/codex/blob/rust-v0.163.0/codex-rs/login/src/auth/storage.rs
-        role_path.symlink_to(durable.resolve())
+        validate_subscription_home(canonical_home)
+        role_path.symlink_to((canonical_home / "auth.json").resolve())
         try:
             yield role_home
         finally:
-            if _read(canonical_home / "auth.json") != original:
-                raise SubscriptionAuthError("canonical auth changed outside the reserved subscription lease")
-            updated = _read(durable)
-            updated = _codex_auth(updated) if role == "reviewer" else _judge_update(original, updated)
-            if updated["tokens"]["account_id"] != original["tokens"]["account_id"]:
-                raise SubscriptionAuthError("reviewer subscription account changed during invocation")
-            _write(canonical_home / "auth.json", updated)
-            role_path.unlink()
-            durable.unlink()
-            state.unlink()
-
-
-
-@contextmanager
-def subscription_session(source_home: Path, canonical_home: Path) -> Iterator[Path]:
-    """Import only auth for one host job, then return native refresh updates.
-
-    The source lock coordinates other public ReviewBench jobs, but cannot control
-    unrelated Codex clients. The operator must reserve this login for the session.
-    Source settings and all unrelated personal files stay outside the containers.
-    On reconciliation failure canonical credentials remain available for recovery.
-    """
-    if source_home.resolve() == canonical_home.resolve() or canonical_home.is_symlink():
-        raise SubscriptionAuthError("source and canonical auth homes must be separate")
-    validate_subscription_home(source_home)
-    canonical_home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if any(canonical_home.iterdir()):
-        raise SubscriptionAuthError("canonical subscription session requires a fresh directory")
-    canonical_home.chmod(0o700)
-    descriptor = os.open(source_home / ".reviewbench-subscription.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "r+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        original = _codex_auth(_read(source_home / "auth.json"))
-        _write(canonical_home / "auth.json", original)
-        try:
-            yield canonical_home
-        finally:
-            if (canonical_home / ".lease-state.json").exists():
-                raise SubscriptionAuthError("interrupted subscription lease prevents source credential reconciliation")
-            current = _codex_auth(_read(source_home / "auth.json"))
-            # Never clobber credentials updated by an unrelated, noncooperating
-            # client. Preserve both stores instead and require reconciliation.
-            if current != original:
-                raise SubscriptionAuthError("source auth changed outside the reserved benchmark session")
-            updated = _codex_auth(_read(canonical_home / "auth.json"))
-            if updated["tokens"]["account_id"] != original["tokens"]["account_id"]:
-                raise SubscriptionAuthError("canonical subscription account changed during session")
-            if updated != original:
-                _write(source_home / "auth.json", updated)
-            (canonical_home / "auth.json").unlink()
+            role_path.unlink(missing_ok=True)
 
 
 def subscription_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -341,12 +280,44 @@ def _retain_classifier_sessions(source: Path, destination: Path, credentials: se
         destination.chmod(0o700)
 
 
+def _run_judge(command: Sequence[str], environment: Mapping[str, str]) -> int:
+    """Join the complete judge process group before removing private state."""
+    def terminate(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        with subprocess.Popen(command, env=environment, start_new_session=True) as process:
+            try:
+                return process.wait()
+            finally:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    except ProcessLookupError:
+                        pass
+                # A leader can exit while a tool descendant ignores SIGTERM.
+                # Terminate the remaining group before disposing of its state,
+                # including descendants left behind after an ordinary exit.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the unchanged upstream judge under the same refresh lease as Codex."""
+    """Run the unchanged upstream judge using its own persistent Pi credential store."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("role", choices=("judge",))
     parser.add_argument("--canonical-home", type=Path, required=True)
     parser.add_argument("--models", type=Path, required=True)
+    parser.add_argument("--pi-bootstrap", type=Path, required=True)
     parser.add_argument("--classifier-sessions", type=Path)
     parser.add_argument("--judge-evidence", type=Path)
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -363,21 +334,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="daydream-judge-") as temporary:
             home = Path(temporary)
             shutil.copyfile(args.models, home / "models.json")
-            with subscription_lease(args.canonical_home, home, role="judge"):
-                environment = subscription_environment(os.environ)
-                environment["PI_CODING_AGENT_DIR"] = str(home)
-                credentials: set[str] = set()
+            validate_judge_home(args.canonical_home)
+            environment = subscription_environment(os.environ)
+            environment["PI_CODING_AGENT_DIR"] = str(home)
+            environment["DAYDREAM_RB_PI_AUTH_PATH"] = str((args.canonical_home / "auth.json").resolve())
+            # verify.ts spawns eval.ts with process.execPath and fresh execArgv.
+            # Controlled NODE_OPTIONS reaches that child too; ambient options
+            # were scrubbed above. This path contains code, never credentials.
+            environment["NODE_OPTIONS"] = "--import=" + json.dumps(str(args.pi_bootstrap.resolve(strict=True)))
+            credentials = _credential_values(_read(args.canonical_home / "auth.json"))
+            try:
+                return _run_judge(command, environment)
+            finally:
                 if args.classifier_sessions is not None:
-                    # The role path is an intentional symlink; read only its
-                    # admitted regular durable target while this lease is held.
-                    credentials.update(_credential_values(_read(args.canonical_home / ".lease-auth.json")))
                     credentials.update(_credential_values(_read(args.canonical_home / "auth.json")))
-                try:
-                    return subprocess.call(command, env=environment)
-                finally:
-                    if args.classifier_sessions is not None:
-                        credentials.update(_credential_values(_read(args.canonical_home / ".lease-auth.json")))
-                        _retain_classifier_sessions(args.classifier_sessions, args.judge_evidence, credentials)
+                    _retain_classifier_sessions(args.classifier_sessions, args.judge_evidence, credentials)
     except (OSError, UnicodeError, SubscriptionAuthError):
         print("ReviewBench judge authentication, execution, or evidence retention failed; "
               "no API fallback was attempted.", file=sys.stderr)

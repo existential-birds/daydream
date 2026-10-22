@@ -25,7 +25,7 @@ from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
 from daydream.github_app import GitHubExecutionInput
-from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, parse_hunks
+from daydream.hunk_index import parse_hunks
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name
@@ -166,53 +166,18 @@ def _path(value: Any) -> str | None:
     return value
 
 
-def _diff_coordinates(comparison: str) -> tuple[dict[str, str], dict[str, set[int]]]:
-    """Resolve original paths and context whose old and new coordinates agree."""
-    original_paths: dict[str, str] = {}
-    result: dict[str, set[int]] = {}
-    path: str | None = None
-    old_path: str | None = None
-    old = new = 0
-    in_hunk = False
-    for raw in comparison.split("\n"):
-        if raw.startswith("diff --git "):
-            path, old_path, in_hunk = None, None, False
-        elif raw.startswith('--- ') and not in_hunk:
-            old_path = _unquote_git_path(raw[4:].rstrip('\t')).removeprefix('a/')
-        elif raw.startswith("+++ ") and not in_hunk:
-            path, in_hunk = _header_path(raw), False
-            if path is not None and old_path not in {None, '/dev/null'}:
-                original_paths[path] = old_path
-        elif (header := _HUNK_HEADER.match(raw)) is not None:
-            old, new, in_hunk = int(header[1]), int(header[3]), True
-        elif path is not None and in_hunk:
-            if raw.startswith(" "):
-                if old == new:
-                    result.setdefault(path, set()).add(new)
-                old, new = old + 1, new + 1
-            elif raw.startswith("-"):
-                old += 1
-            elif raw.startswith("+"):
-                new += 1
-    return original_paths, result
-
-
 def convert_findings(
     items: list[dict[str, Any]], *, repository: Path, case: Case, producer: str, comparison: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Project only hints whose captured diff proves an unambiguous HEAD location.
+    """Project native HEAD line hints onto the captured new-side diff.
 
-    Native canonical findings currently carry a line hint, without a source side.
-    A number present on both sides is safe only for unchanged context with
-    identical coordinates. Replacements, deleted-side citations, whole-file findings, and native
-    location snapping remain visible omissions rather than invented locations.
+    Whole-file, relocated, distrusted and unlocatable findings remain visible
+    omissions rather than invented locations.
     """
     hunks = parse_hunks(comparison)
-    original_paths, same_context = _diff_coordinates(comparison)
     findings: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []
     sources: dict[tuple[str, str], list[bytes] | None] = {}
-    absent: set[tuple[str, str]] = set()
 
     def source(revision: str, path: str) -> list[bytes] | None:
         key = revision, path
@@ -221,16 +186,10 @@ def convert_findings(
                 _, body = frozen_source(repository, revision, path)
                 sources[key] = (body.split(b"\n")[:-1] if body.endswith(b"\n")
                                 else body.split(b"\n") if body else [])
-            except git_ops.PathAbsentError:
-                sources[key] = None
-                absent.add(key)
             except (git_ops.GitError, OSError, UnicodeError, ValueError):
                 sources[key] = None
         return sources[key]
 
-    merge_base = git_ops.merge_base(repository, case.base, case.head)
-    if merge_base is None:
-        raise ValueError("supplied comparison has no merge base")
     for item in items:
         path, line = _path(item.get("file")), item.get("line")
         reason: str | None = None
@@ -242,20 +201,10 @@ def convert_findings(
             head_lines = source(case.head, path)
             ranges = hunks.get(path, {}).get("hunks", [])
             new_side = any(h["new_start"] <= line <= h["new_end"] for h in ranges)
-            old_path = original_paths.get(path, path)
-            old_lines = source(merge_base, old_path)
             if head_lines is None or line > len(head_lines):
                 reason = "location_absent_from_head_regular_file"
             elif not new_side:
                 reason = "no_new_side_location_in_captured_diff"
-            elif line not in same_context.get(path, set()):
-                # A bare hint may cite any old source line, not only one visible
-                # in an old hunk. Only verified absence or actual line count can
-                # establish that this coordinate exists exclusively at HEAD.
-                if old_lines is None and (merge_base, old_path) not in absent:
-                    reason = "old_source_location_unavailable"
-                elif old_lines is not None and line <= len(old_lines):
-                    reason = "ambiguous_old_or_new_side_line_hint"
         if reason is not None:
             omissions.append(_omission(item, reason))
             continue

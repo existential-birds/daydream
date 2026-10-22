@@ -33,9 +33,10 @@ def add_parsers(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
     export.add_argument('--rounds', type=int, choices=(1, 3), default=3)
     run = commands.add_parser('harbor-run', help='run the exported public profile; launches models')
     run.add_argument('directory', type=Path)
-    run.add_argument('--codex-home', type=Path, required=True, help='existing subscription login; exclusively borrowed')
-    run.add_argument('--auth-runtime', type=Path, required=True,
-                     help='new private credential directory outside results')
+    run.add_argument('--codex-home', type=Path, required=True,
+                     help='persistent auth-only directory with a dedicated Codex subscription login')
+    run.add_argument('--pi-home', type=Path, required=True,
+                     help='persistent auth-only directory with an independently signed-in Pi judge login')
     run.add_argument('--jobs-dir', type=Path, required=True)
     run.add_argument('--job-name', required=True)
     run.add_argument('--task', help='supplied task name/glob, applied to the full export')
@@ -114,12 +115,15 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     verify_runtime()
     from harbor.environments.docker.docker import DockerEnvironment
 
-    from daydream.benchmark.reviewbench.harbor_auth import subscription_environment, subscription_session
+    from daydream.benchmark.reviewbench.harbor_auth import subscription_environment, validate_credential_stores
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
-    auth_directory = args.auth_runtime.resolve()
-    if any(auth_directory.is_relative_to(root.resolve()) for root in (args.directory, args.jobs_dir)):
-        raise ValueError('Private auth runtime must be outside dataset and job evidence')
+    reviewer_home, judge_home = args.codex_home.resolve(), args.pi_home.resolve()
+    for home in (reviewer_home, judge_home):
+        if any(home.is_relative_to(root.resolve()) or root.resolve().is_relative_to(home)
+               for root in (args.directory, args.jobs_dir)):
+            raise ValueError('Private credential stores must be outside dataset and job evidence')
+    validate_credential_stores(reviewer_home, judge_home)
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
     policy_sha = profile.pop('policy_sha256')
     if canonical_digest(profile) != policy_sha or profile.get('source_prs') != 219:
@@ -147,14 +151,13 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         command.extend(['-i', args.task])
     if args.n_tasks is not None:
         command.extend(['-l', str(args.n_tasks)])
-    with subscription_session(args.codex_home.resolve(), args.auth_runtime.resolve()) as home:
-        environment = subscription_environment(os.environ)
-        # Task-authored main platform is frozen; Harbor's network sidecar must
-        # retain the host-native architecture rather than inherit an override.
-        environment.pop('DOCKER_DEFAULT_PLATFORM', None)
-        environment.update(RB_HARBOR_AUTH_DIR=str(home), RB_HARBOR_SUBSCRIPTION_HOME='/run/reviewbench-codex')
-        environment['RB_HARBOR_SECCOMP_PROFILE'] = str(args.directory.resolve() / 'reviewer-seccomp.json')
-        returncode = subprocess.call(command, env=environment)
+    environment = subscription_environment(os.environ)
+    # Harbor's sidecar retains host-native architecture; task platform is frozen.
+    environment.pop('DOCKER_DEFAULT_PLATFORM', None)
+    environment.update(RB_HARBOR_CODEX_AUTH_DIR=str(reviewer_home), RB_HARBOR_PI_AUTH_DIR=str(judge_home))
+    environment['RB_HARBOR_PI_AUTH_PATH'] = '/run/reviewbench-pi/auth.json'
+    environment['RB_HARBOR_SECCOMP_PROFILE'] = str(args.directory.resolve() / 'reviewer-seccomp.json')
+    returncode = subprocess.call(command, env=environment)
     if returncode:
         return returncode
     return _check_completed_job(args.jobs_dir.resolve() / args.job_name)

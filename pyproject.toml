@@ -74,6 +74,7 @@ include = [
     "daydream/benchmark/harbor/templates/**",
     "daydream/benchmark/harbor/runtime-requirements.lock",
     "daydream/benchmark/reviewbench/report.ts",
+    "daydream/benchmark/reviewbench/judge_auth.mjs",
     "daydream/benchmark/reviewbench/harbor-runtime.in",
     "daydream/benchmark/reviewbench/harbor-runtime.lock",
     "daydream/benchmark/reviewbench/reviewer-runtime.lock",

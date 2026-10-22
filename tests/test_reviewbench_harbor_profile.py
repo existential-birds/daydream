@@ -151,10 +151,17 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert set(reviewer) == {'platform', 'security_opt', 'volumes'}
     assert set(verifier) == {'platform', 'volumes'}
     assert reviewer['platform'] == verifier['platform'] == policy['runtime']['platform']
-    assert reviewer['volumes'] == verifier['volumes'] == [{
-        'type': 'bind', 'source': '${RB_HARBOR_AUTH_DIR:?Set a dedicated subscription runtime directory}',
-        'target': '/run/reviewbench-codex',
-    }]
+    for role, config, target in [('CODEX', reviewer, '/run/reviewbench-codex'),
+                                 ('PI', verifier, '/run/reviewbench-pi')]:
+        assert config['volumes'] == [{
+            'type': 'bind', 'source': '${RB_HARBOR_' + role + '_AUTH_DIR:?Set a dedicated '
+                                    + role + ' credential directory}', 'target': target,
+        }]
+    assert arguments[arguments.index('--canonical-home') + 1] == '/run/reviewbench-pi'
+    assert arguments[arguments.index('--pi-bootstrap') + 1] == '/tests/judge/daydream-auth.mjs'
+    binding = (judge / 'daydream-auth.mjs').read_bytes()
+    assert binding == Path(harbor_profile.__file__).with_name('judge_auth.mjs').read_bytes()
+    assert policy['judge']['storage_binding_sha256'] == hashlib.sha256(binding).hexdigest()
     assert reviewer['security_opt'] == [
         'seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}',
     ]

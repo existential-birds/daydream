@@ -66,7 +66,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'parser.add_argument("--yes", action="store_true")\n'
         'parser.add_argument("--plugin", dest="plugins", action="append")\n'
         'args = parser.parse_args()\n'
-        'auth_dir = pathlib.Path(os.environ["RB_HARBOR_AUTH_DIR"])\n'
+        'auth_dir = pathlib.Path(os.environ["RB_HARBOR_CODEX_AUTH_DIR"])\n'
         'auth = json.loads((auth_dir / "auth.json").read_text())\n'
         'assert auth["auth_mode"] == "chatgpt" and not auth["OPENAI_API_KEY"]\n'
         'auth["tokens"]["refresh_token"] = "synthetic-process-rotation"\n'
@@ -78,7 +78,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'record = vars(args)\n'
         'record["metric_config"] = json.loads(pathlib.Path(args.config).read_text())\n'
         'record.update(round_membership=list(range(1, int(args.rounds) + 1)),\n'
-        ' auth_home=os.environ["RB_HARBOR_SUBSCRIPTION_HOME"],\n'
+        ' judge_auth_dir=os.environ["RB_HARBOR_PI_AUTH_DIR"],\n'
         ' seccomp_profile=os.environ["RB_HARBOR_SECCOMP_PROFILE"],\n'
         ' platform=os.environ.get("DOCKER_DEFAULT_PLATFORM"),\n'
         ' forbidden_env=sorted(k for k in os.environ if k in ["OPENAI_API_KEY",\n'
@@ -104,13 +104,19 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
             'account_id': 'test-account', 'id_token': 'synthetic-id',
         },
     }))
+    judge = tmp_path / 'judge-auth'
+    judge.mkdir()
+    (judge / 'auth.json').write_text(json.dumps({'openai-codex': {
+        'type': 'oauth', 'access': 'synthetic-pi-access', 'refresh': 'synthetic-pi-refresh',
+        'expires': 1, 'accountId': 'test-account',
+    }}))
     candidate = {'artifact_sha256': 'a' * 64, 'version': '0.30.0'}
     policy = {'source_prs': 219, 'final_comparison_rounds': 3, 'candidate': candidate}
     (dataset / 'daydream-profile.json').write_text(json.dumps({**policy, 'policy_sha256': canonical_digest(policy)}))
     parser = argparse.ArgumentParser()
     harbor_cli.add_parsers(parser.add_subparsers(dest='reviewbench_command', required=True))
     args = parser.parse_args([
-        'harbor-run', str(dataset), '--codex-home', str(source), '--auth-runtime', str(tmp_path / 'private-auth'),
+        'harbor-run', str(dataset), '--codex-home', str(source), '--pi-home', str(judge),
         '--jobs-dir', str(tmp_path / 'jobs'), '--job-name', 'selected-case', '--task', 'owner_repo*',
         '--n-tasks', '1',
     ])
@@ -118,7 +124,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
 
 
 @pytest.mark.parametrize(('rounds', 'exit_code'), [(1, 0), (3, 23)])
-def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
+def test_launch_delivers_selection_independent_rounds_and_persists_refresh(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
     rounds: int, exit_code: int,
 ) -> None:
@@ -143,11 +149,11 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
         'job': args.job_name, 'yes': True, 'plugins': [
             'reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin'],
         'task': 'owner_repo*', 'limit': '1', 'round_membership': list(range(1, rounds + 1)),
-        'auth_home': '/run/reviewbench-codex', 'platform': None, 'forbidden_env': [],
+        'judge_auth_dir': str(args.pi_home.resolve()), 'platform': None, 'forbidden_env': [],
         'seccomp_profile': str(args.directory.resolve() / 'reviewer-seccomp.json'),
     }
     assert (args.directory / 'format-checked').is_file()
-    assert not (args.auth_runtime / 'auth.json').exists()
+    assert json.loads((args.pi_home / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-refresh'
     source = json.loads((args.codex_home / 'auth.json').read_text())
     assert source['tokens']['refresh_token'] == 'synthetic-process-rotation'
     assert 'synthetic-process-rotation' not in (args.jobs_dir / args.job_name / 'launch.json').read_text()
@@ -168,7 +174,6 @@ def test_unpinned_runtime_refuses_before_process_or_credential_delivery(
     with pytest.raises(ValueError, match='pinned Harbor|reviewbench-harbor'):
         harbor_cli.handle(args, candidate)
     assert not (args.directory / 'format-checked').exists()
-    assert not args.auth_runtime.exists()
     assert not args.jobs_dir.exists()
 
 
@@ -178,10 +183,9 @@ def test_auth_mount_cannot_live_in_retained_dataset_or_job_evidence(
 ) -> None:
     """A valid OAuth capability must never be published under recursive evidence roots."""
     args, candidate = launch
-    args.auth_runtime = (args.directory if boundary == 'dataset' else args.jobs_dir) / 'credentials'
+    args.pi_home = (args.directory if boundary == 'dataset' else args.jobs_dir) / 'credentials'
     with pytest.raises(ValueError, match='outside dataset and job evidence'):
         harbor_cli.handle(args, candidate)
-    assert not args.auth_runtime.exists()
     assert not (args.directory / 'format-checked').exists()
 
 
@@ -193,7 +197,6 @@ def test_launch_refuses_changed_executing_candidate_before_models(
     args, candidate = launch
     with pytest.raises(ValueError, match='Executing candidate differs'):
         harbor_cli.handle(args, {**candidate, changed: 'different'})
-    assert not args.auth_runtime.exists()
     assert not (args.directory / 'format-checked').exists()
 
 
@@ -207,7 +210,6 @@ def test_kernel_isolation_failure_stops_before_auth_delivery(
     monkeypatch.setattr(DockerEnvironment, '_egress_control_kernel_support', staticmethod(lambda: False))
     with pytest.raises(ValueError, match='exact-host isolation'):
         harbor_cli.handle(args, candidate)
-    assert not args.auth_runtime.exists()
     assert not (args.directory / 'format-checked').exists()
 
 
@@ -393,11 +395,11 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
         assert result == (23 if outcome == 'transport-error' else 1)
         assert reports == []
     assert (job_directory / 'checker-invoked').exists() is (outcome != 'transport-error')
-    # Authentication refresh still reconciles before result validation, including
+    # Authentication refresh still persists before result validation, including
     # when the retained job subsequently fails its strict completion checks.
     source_auth = json.loads((args.codex_home / 'auth.json').read_text())
     assert source_auth['tokens']['refresh_token'] == 'synthetic-process-rotation'
-    assert not (args.auth_runtime / 'auth.json').exists()
+    assert json.loads((args.pi_home / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-refresh'
 
 
 @pytest.mark.parametrize('selection', ['environment', 'importable-default'])
@@ -507,3 +509,34 @@ print(json.dumps({"candidate":candidate_identity(), "wheel_error":error,
             previous['candidate']['default_extension']['sha256'])
         assert 'same candidate package' in changed['wheel_error']
         previous = changed
+
+
+@pytest.mark.parametrize('fault', ['same-store', 'nested-store', 'copied-session', 'personal-home', 'judge-api'])
+def test_launch_refuses_shared_sessions_or_broad_credential_mounts(
+    launch: tuple[argparse.Namespace, dict[str, Any]], fault: str,
+) -> None:
+    """Dedicated-store admission prevents shared refresh sessions and personal-state exposure.
+
+    Existing launch tests own evidence-root placement and env scrubbing; neither
+    can catch copied refresh tokens or an otherwise valid auth beside user state.
+    """
+    args, candidate = launch
+    if fault == 'same-store':
+        args.pi_home = args.codex_home
+    elif fault == 'nested-store':
+        args.pi_home = args.codex_home / 'judge'
+    elif fault == 'copied-session':
+        path = args.pi_home / 'auth.json'
+        auth = json.loads(path.read_text())
+        auth['openai-codex']['refresh'] = 'synthetic-original-refresh'
+        path.write_text(json.dumps(auth))
+    elif fault == 'personal-home':
+        (args.codex_home / 'config.toml').write_text('model = "unrelated"')
+    else:
+        (args.pi_home / 'auth.json').write_text(json.dumps({'openai-codex': {
+            'type': 'api_key', 'key': 'synthetic-forbidden-key',
+        }}))
+    with pytest.raises(ValueError, match='separate|copied OAuth|mount only|dedicated Pi'):
+        harbor_cli.handle(args, candidate)
+    assert not (args.directory / 'format-checked').exists()
+    assert not args.jobs_dir.exists()

@@ -26,7 +26,7 @@ from daydream.benchmark.reviewbench.harbor_build import REVIEWBENCH_PLATFORMS
 from daydream.benchmark.reviewbench.harbor_seccomp import seccomp_profile
 
 CODEX_MODEL = 'gpt-6.1-sol'
-SUBSCRIPTION_HOME = '/run/reviewbench-codex'
+JUDGE_HOME = '/run/reviewbench-pi'
 PROFILE_PATH = '/work/pr/daydream-profile.json'
 
 
@@ -35,13 +35,15 @@ def _compose(platform: str, *, reviewer: bool) -> str:
     security = ('    security_opt:\n'
                 '      - "seccomp=${RB_HARBOR_SECCOMP_PROFILE:?Set the frozen reviewer seccomp profile}"\n'
                 if reviewer else '')
+    role = "CODEX" if reviewer else "PI"
+    target = "/run/reviewbench-codex" if reviewer else JUDGE_HOME
     return f'''services:
   main:
     platform: {platform}
 {security}    volumes:
       - type: bind
-        source: ${{RB_HARBOR_AUTH_DIR:?Set a dedicated subscription runtime directory}}
-        target: /run/reviewbench-codex
+        source: ${{RB_HARBOR_{role}_AUTH_DIR:?Set a dedicated {role} credential directory}}
+        target: {target}
 '''
 
 
@@ -136,6 +138,7 @@ def export_harbor_profile(
     from daydream import credential_patterns, json_utils, redaction
 
     auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
+    judge_bootstrap = Path(__file__).with_name('judge_auth.mjs').read_bytes()
     atomic_asset = Path(json_utils.__file__).read_bytes()
     redaction_asset = Path(redaction.__file__).read_bytes()
     credential_patterns_asset = Path(credential_patterns.__file__).read_bytes()
@@ -160,7 +163,8 @@ def export_harbor_profile(
             'max_output_tokens_enforced': False, 'cost_source': 'api-equivalent-estimate',
             'auth_bootstrap_sha256': hashlib.sha256(auth_asset).hexdigest(),
             'atomic_writer_sha256': hashlib.sha256(atomic_asset).hexdigest(),
-            'refresh_policy': 'canonical-exclusive-full-invocation-lease',
+            'refresh_policy': 'independent-native-stores-pi-canonical-locks',
+            'storage_binding_sha256': hashlib.sha256(judge_bootstrap).hexdigest(),
             'evidence': {
                 'classifier_sessions_source': '/tests/judge/classifier-output/sessions',
                 'classifier_sessions_destination': '/logs/verifier/judge-sessions',
@@ -193,7 +197,7 @@ def export_harbor_profile(
             '--judge-provider', 'openai-codex', '--judge-model', reviewer_model,
             '--base-image', base_image, '--agent-host', 'chatgpt.com', '--agent-host', 'auth.openai.com',
             '--judge-host', 'chatgpt.com', '--judge-host', 'auth.openai.com',
-            '--judge-env', 'DAYDREAM_SUBSCRIPTION_HOME=RB_HARBOR_SUBSCRIPTION_HOME',
+            '--judge-env', 'DAYDREAM_RB_PI_AUTH_PATH=RB_HARBOR_PI_AUTH_PATH',
         ], cwd=source, check=True)
         expected: dict[str, int] = {}
         references: list[str] = []
@@ -240,13 +244,15 @@ def export_harbor_profile(
             (task_dir / 'environment/docker-compose.yaml').write_text(reviewer_compose, encoding='utf-8')
             (task_dir / 'tests/docker-compose.yaml').write_text(verifier_compose, encoding='utf-8')
             _write_json(task_dir / 'tests/judge/.daydream-codex/models.json', models)
+            (task_dir / 'tests/judge/daydream-auth.mjs').write_bytes(judge_bootstrap)
             bootstrap = (
                 '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
                 'exec python3 /tests/daydream-auth.py judge '
-                f'--canonical-home {SUBSCRIPTION_HOME} '
+                f'--canonical-home {JUDGE_HOME} '
                 '--classifier-sessions /tests/judge/classifier-output/sessions '
                 '--judge-evidence /logs/verifier/judge-sessions '
-                '--models /tests/judge/.daydream-codex/models.json -- '
+                '--models /tests/judge/.daydream-codex/models.json '
+                '--pi-bootstrap /tests/judge/daydream-auth.mjs -- '
                 'node --import tsx scripts/harbor/verify.ts /tests/task.json\n'
             )
             (task_dir / 'tests/test.sh').write_text(bootstrap, encoding='utf-8')
