@@ -82,10 +82,12 @@ def external_evaluator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
         "root = pathlib.Path.cwd()\n"
         "(root / 'args.json').write_text(json.dumps(args))\n"
         "mode = os.environ.get('DAYDREAM_TEST_EVAL_MODE', 'success')\n"
+        "out = pathlib.Path(args[args.index('--output') + 1])\n"
         "if mode == 'failure':\n"
+        "    out.write_text('{\"partial\": true}\\n')\n"
+        "    out.with_name('results.checkpoint.json').write_text('{\"completed\": []}\\n')\n"
         "    print('synthetic evaluator process failed', file=sys.stderr)\n"
         "    raise SystemExit(9)\n"
-        "out = pathlib.Path(args[args.index('--output') + 1])\n"
         "if mode == 'missing': raise SystemExit(0)\n"
         "payload = json.loads((root / 'payload.json').read_text())\n"
         "out.write_text('{bad' if mode == 'malformed' else json.dumps(payload))\n"
@@ -186,19 +188,47 @@ def test_saved_evaluation_must_remain_bound_to_current_round_evidence(
 
 @pytest.mark.parametrize("mode", [
     "failure", "missing", "malformed", "missing-details", "checkpoint", "mutated-candidate",
-    "mutated-reference", "mutated-manifest",
+    "mutated-reference", "mutated-manifest", "interrupted",
 ])
 def test_failed_or_incomplete_evaluator_cannot_publish(
     external_evaluator: tuple[Path, Path, Case], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Native reports must not consume missing/malformed/partial output as a successful round."""
+    """Failed/interrupted judging retains its actual partial files without admitting them as a completed round."""
     source, candidates, _ = external_evaluator
     output = tmp_path / "scores" / "new-round"
-    monkeypatch.setenv("DAYDREAM_TEST_EVAL_MODE", mode)
-    with pytest.raises(evaluator.EvaluationError):
+    monkeypatch.setenv("DAYDREAM_TEST_EVAL_MODE", "checkpoint" if mode == "interrupted" else mode)
+    if mode == "interrupted":
+        read_text = Path.read_text
+
+        def interrupt_after_judging(path: Path, *args: Any, **kwargs: Any) -> str:
+            contents = read_text(path, *args, **kwargs)
+            if path.name == "results.json":
+                raise KeyboardInterrupt
+            return contents
+
+        monkeypatch.setattr(Path, "read_text", interrupt_after_judging)
+    with pytest.raises(KeyboardInterrupt if mode == "interrupted" else evaluator.EvaluationError):
         evaluator.evaluate_round(source, candidates, output, provider="chosen-provider", model="chosen-model")
     assert not output.exists()
-    assert not list(output.parent.glob(".new-round-*"))
+    retained, = output.parent.glob(".new-round-*")
+    assert str(retained) in capsys.readouterr().err
+    assert not (retained / "evaluator.json").exists()
+    if mode == "failure":
+        assert (retained / "results.json").read_bytes() == b'{"partial": true}\n'
+        assert (retained / "results.checkpoint.json").read_bytes() == b'{"completed": []}\n'
+        with pytest.raises(evaluator.EvaluationError):
+            evaluator.evaluate_round(source, candidates, output, provider="chosen-provider", model="chosen-model")
+        assert len(list(output.parent.glob(".new-round-*"))) == 2
+        assert (retained / "results.json").read_bytes() == b'{"partial": true}\n'
+    elif mode in {"checkpoint", "interrupted"}:
+        assert (retained / "results.checkpoint.json").read_bytes() == b'{}'
+        assert (retained / "results.json").read_bytes() == (source / "payload.json").read_bytes()
+        assert (retained / "results.details.json").is_file()
+    elif mode == "malformed":
+        assert (retained / "results.json").read_bytes() == b'{bad'
+    with pytest.raises(evaluator.EvaluationError, match="evaluator.json"):
+        evaluator.load_evaluation(source, candidates, retained)
 
 
 def test_evaluator_preserves_existing_and_concurrently_published_output(
@@ -238,7 +268,12 @@ def test_evaluator_preserves_existing_and_concurrently_published_output(
     with pytest.raises(evaluator.EvaluationError, match="evaluator.json"):
         evaluator.load_evaluation(source, candidates, partial)
     assert {path.name: path.read_bytes() for path in output.iterdir()} == before
-    assert not list(partial.parent.glob(".round-3-*"))
+    retained, = partial.parent.glob(".round-3-*")
+    assert (retained / "results.json").read_bytes() == (source / "payload.json").read_bytes()
+    assert (retained / "results.details.json").read_bytes() == (partial / "results.details.json").read_bytes()
+    assert not (retained / "evaluator.json").exists()
+    with pytest.raises(evaluator.EvaluationError, match="evaluator.json"):
+        evaluator.load_evaluation(source, candidates, retained)
 
 
 @pytest.mark.parametrize("change", [

@@ -145,8 +145,10 @@ failed, missing and conversion-limited reviews remain distinct; only complete,
 convertible results are scorable.
 
 Each `round-N/findings/` is one evaluator input. Passing a multiple-round parent
-silently merges identical PR identities. Preserve interrupted evaluations and
-create a fresh plan; `evaluator.json` is published last.
+silently merges identical PR identities. Failed or interrupted judging retains
+its unique staging directory at the reported path, including partial results and
+checkpoints, without a valid `evaluator.json`. Preserve it and create a fresh
+plan; successful publication installs `evaluator.json` last and removes staging.
 
 For the #1616 before/after acceptance gate, create fresh `--set test --rounds 3`
 plans for the [supplied 25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json).

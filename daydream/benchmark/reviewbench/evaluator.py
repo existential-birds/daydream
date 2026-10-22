@@ -13,8 +13,10 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -222,8 +224,8 @@ def evaluate_round(
     Caller-owned generation accounting remains independent: this evaluator scores
     only produced candidates.
     Existing output directories, including previous successes, are never reused.
-    An install failure can leave an incomplete directory without evaluator.json;
-    preserve it and select a fresh output directory before retrying.
+    Failed/interrupted staging is retained without evaluator.json. An install
+    failure can also leave an incomplete output directory; select a fresh one.
     """
     source, candidate_dir, output_dir = source.resolve(), candidate_dir.resolve(), output_dir.resolve()
     if not provider.strip() or not model.strip():
@@ -268,10 +270,13 @@ def evaluate_round(
             raise EvaluationError(
                 "Evaluation publication failed; preserve incomplete artifacts and select a fresh output directory"
             ) from exc
-        return {"metrics": metrics, "evaluator": provenance, "output_dir": str(output_dir)}
-    finally:
-        if staged.exists():
-            shutil.rmtree(staged)
+    except BaseException:
+        with suppress(OSError):
+            (staged / "evaluator.json").unlink(missing_ok=True)
+        print(f"Incomplete ReviewBench evaluation evidence retained at {staged}", file=sys.stderr)
+        raise
+    shutil.rmtree(staged)
+    return {"metrics": metrics, "evaluator": provenance, "output_dir": str(output_dir)}
 
 
 def render_report(source: Path, metrics_file: Path) -> str:
