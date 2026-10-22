@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -166,17 +167,27 @@ def test_malformed_operator_inputs_report_failure_without_launching_review(
     assert not (directory / 'round-1' / 'findings').exists()
 
 
-def test_incomplete_full_round_reports_remain_visible_without_a_full_set_average(
+@pytest.mark.parametrize(('selection', 'complete'), [('full', False), ('test', True)],
+                         ids=['incomplete-full', 'complete-test'])
+def test_three_round_reports_average_only_complete_selected_membership(
     supplied_source: Path, external_evaluator: tuple[Path, Path, Case], tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], selection: str, complete: bool,
 ) -> None:
-    """The CLI must show three scored subsets without printing a full-corpus average."""
-    del external_evaluator  # installs only the external npm substitute; source pin remains real below
-    case = load_cases(supplied_source, 'full')[0]
+    """Average complete selected rounds while keeping three incomplete subsets visibly unaveraged."""
+    del external_evaluator  # installs offline npm and synthetic evaluator provenance
+    cases = load_cases(supplied_source, selection)
+    selected = cases if complete else cases[:1]
     write_and_stage(supplied_source, '.gitignore', 'node_modules/\nargs.json\npayload.json\n')
-    write_and_stage(supplied_source, f'golden/{case.key}.json', json.dumps({'pr': asdict(case), 'findings': []}))
+    for case in selected:
+        write_and_stage(supplied_source, f'golden/{case.key}.json', json.dumps({'pr': asdict(case), 'findings': []}))
     monkeypatch.setattr(contract, 'REVIEWBENCH_REVISION', commit(supplied_source, 'synthetic evaluator references'))
-    (supplied_source / 'payload.json').write_text(json.dumps(_metrics(case)))
+    metrics = _metrics(selected[0])
+    metrics['pr_count'] = len(selected)
+    metrics['per_pr'] = [{**metrics['per_pr'][0], 'pr_key': case.key} for case in selected]
+    metrics['eval_config']['evaluated_prs_hash'] = hashlib.sha256(
+        '\n'.join(sorted(case.key for case in selected)).encode(),
+    ).hexdigest()
+    (supplied_source / 'payload.json').write_text(json.dumps(metrics))
     renderer = supplied_source / 'node_modules' / '.bin' / 'tsx'
     renderer.parent.mkdir(parents=True)
     renderer.write_text(f'#!{sys.executable}\nprint("supplied fixture summary")\n')
@@ -184,24 +195,32 @@ def test_incomplete_full_round_reports_remain_visible_without_a_full_set_average
     root = tmp_path / 'runs'
     assert _handle_benchmark_command([
         'reviewbench', 'plan', str(root), '--source', str(supplied_source), '--candidate', 'native',
-        '--producer', 'fixture', '--set', 'full', '--rounds', '3',
+        '--producer', 'fixture', '--set', selection, '--rounds', '3',
     ]) == 0
     directory = root / 'native'
     capsys.readouterr()
     for number in range(1, 4):
         round_dir = directory / f'round-{number}'
-        candidate = round_dir / 'findings' / f'{case.key}.json'
-        cli._write_new(candidate, {'pr': asdict(case), 'agent': 'fixture', 'findings': [_finding()]})
-        cli._write_new(round_dir / 'outcomes' / f'{case.key}.json', {
-            'status': 'complete', 'candidate_sha256': contract.file_digest(candidate),
-        })
-        evaluator.evaluate_round(supplied_source, candidate.parent, round_dir / 'evaluation',
+        for case in selected:
+            candidate = round_dir / 'findings' / f'{case.key}.json'
+            cli._write_new(candidate, {'pr': asdict(case), 'agent': 'fixture', 'findings': [_finding()]})
+            cli._write_new(round_dir / 'outcomes' / f'{case.key}.json', {
+                'status': 'complete', 'candidate_sha256': contract.file_digest(candidate),
+            })
+        evaluator.evaluate_round(supplied_source, round_dir / 'findings', round_dir / 'evaluation',
                                  provider='chosen-provider', model='chosen-model')
-    assert _handle_benchmark_command(['reviewbench', 'report', str(directory)]) == 1
+    assert _handle_benchmark_command(['reviewbench', 'report', str(directory)]) == (0 if complete else 1)
     output = capsys.readouterr().out
-    assert output.count('"scope": "subset"') == 3
     assert output.count('supplied fixture summary') == 3
-    assert '"round_count"' not in output and '"scope": "complete-set"' not in output
+    if complete:
+        assert output.count('"scope": "complete-set"') == 3
+        assert '"round_count"' in output, 'three complete test-set rounds must include an average'
+        averaged = json.loads(output.rsplit('supplied fixture summary', 1)[1])
+        assert averaged['round_count'] == 3 and averaged['case_keys'] == sorted(case.key for case in cases)
+        assert averaged['macro']['overall']['grounded_precision'] == {'mean': 0.5, 'available_rounds': 3}
+    else:
+        assert output.count('"scope": "subset"') == 3
+        assert '"round_count"' not in output and '"scope": "complete-set"' not in output
 
 
 @pytest.mark.parametrize('profile_source', [
