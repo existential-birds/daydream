@@ -20,6 +20,9 @@ from daydream.benchmark.reviewbench.contract import verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from tests.test_reviewbench_evaluator import supplied_source as supplied_source
+from tests.test_reviewbench_sandbox_probe import moby_policy as moby_policy
+
+pytestmark = pytest.mark.usefixtures('moby_policy')
 
 
 @pytest.fixture(params=['linux/amd64', 'linux/arm64'])

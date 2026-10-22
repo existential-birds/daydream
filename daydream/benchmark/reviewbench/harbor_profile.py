@@ -23,6 +23,7 @@ from daydream.benchmark.reviewbench.contract import (
     verify_source,
 )
 from daydream.benchmark.reviewbench.harbor_build import REVIEWBENCH_PLATFORMS
+from daydream.benchmark.reviewbench.harbor_seccomp import seccomp_profile
 
 CODEX_MODEL = 'gpt-6.1-sol'
 SUBSCRIPTION_HOME = '/run/reviewbench-codex'
@@ -148,12 +149,9 @@ def export_harbor_profile(
     atomic_asset = Path(json_utils.__file__).read_bytes()
     redaction_asset = Path(redaction.__file__).read_bytes()
     credential_patterns_asset = Path(credential_patterns.__file__).read_bytes()
-    seccomp_asset = Path(__file__).with_name('harbor-seccomp.json').read_bytes()
-    seccomp_provenance_asset = Path(__file__).with_name('harbor-seccomp-provenance.json').read_bytes()
+    seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
-    if seccomp_provenance['policy_sha256'] != seccomp_sha:
-        raise ValueError('Reviewer seccomp profile differs from its frozen provenance')
     probe_sha = hashlib.sha256(Path(__file__).with_name('harbor_sandbox_probe.py').read_bytes()).hexdigest()
     reviewer_compose = _compose(platform, reviewer=True)
     verifier_compose = _compose(platform, reviewer=False)

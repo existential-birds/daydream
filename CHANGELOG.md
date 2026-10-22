@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evaluator reports ([#92](https://github.com/existential-birds/daydream/issues/92)).
   This is compatible new functionality; reviewer defaults are unchanged.
 
+### Changed
+
+- Generate the public benchmark's Docker seccomp policy at export from a
+  hash-verified, pinned upstream profile instead of vendoring JSON assets.
+  Exports retain the complete policy and provenance for reproducible execution
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
 ### Fixed
 
 - **pi:** retain provider HTTP status and selected request/retry headers with
