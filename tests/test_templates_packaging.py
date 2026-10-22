@@ -5,6 +5,7 @@ Check discovery and secret/variable-name agreement with the shipped YAML.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from daydream import config
+from daydream.benchmark.reviewbench import harbor_build
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
@@ -30,7 +32,7 @@ def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
         assert secret in single
     assert config.BOT_HANDLE_VAR in single
 
-def test_templates_and_native_tools_present_in_built_wheel() -> None:
+def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build a real wheel and confirm shipped templates and the native tool are included.
 
     The editable-install tests above exercise importlib.resources against the source tree; they would pass even if
@@ -89,6 +91,34 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
         assert '--wheel' in help_result.stdout
         assert '--source' in help_result.stdout
         assert '--platform' in help_result.stdout
+        # A concurrent path replacement after package validation must not change
+        # the admitted wheel delivered to the reviewer or its frozen identity.
+        wheel = wheels[0]
+        admitted = wheel.read_bytes()
+        replacement = Path(tmp) / 'replacement.whl'
+        replacement_bytes = b'competing unvalidated wheel bytes'
+        replacement.write_bytes(replacement_bytes)
+        runtime_lock = Path(harbor_build.__file__).with_name('reviewer-runtime.lock')
+        read_bytes = Path.read_bytes
+        lock_reads = 0
+
+        def replace_after_validation(path: Path) -> bytes:
+            nonlocal lock_reads
+            content = read_bytes(path)
+            if path == runtime_lock:
+                lock_reads += 1
+                # The first read validates this packaged resource against the
+                # wheel; the next captures the runtime after archive validation.
+                if lock_reads == 2:
+                    os.replace(replacement, wheel)
+            return content
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'read_bytes', replace_after_validation)
+            _, assets, identity = harbor_build.reviewer_build(wheel)
+        assert wheel.read_bytes() == replacement_bytes
+        assert identity['wheel_sha256'] == hashlib.sha256(admitted).hexdigest()
+        assert assets[wheel.name] == admitted
 
 
 def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
