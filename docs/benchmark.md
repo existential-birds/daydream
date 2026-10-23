@@ -177,6 +177,9 @@ children, and permits bounded writer joining, export and output collection.
 The original host cancellation propagates to Harbor: only Harbor can distinguish
 its `AgentTimeoutError` from an independent `CancelledError`. Cleanup time is
 separate from inference allowance and does not authorize more model work.
+The executable cancels its AnyIO run scope on SIGTERM, preserving shielded writer
+joining before native export. A writer that does not finish remains subject to
+the supervisor's existing hard-stop bound and last-valid-checkpoint fallback.
 An exec collector timeout or transport exception also stops the owned invocation,
 then propagates that original exception. Its host/process receipts identify
 `host_execution_failed` separately from task cancellation; failed collection does

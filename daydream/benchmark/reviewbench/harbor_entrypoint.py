@@ -21,6 +21,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case, reviewer_config
 from daydream.json_utils import atomic_create_bytes
@@ -222,11 +224,17 @@ async def main(environment: Mapping[str, str]) -> int:
                         execution = await review_case(task.case, repository, config, 'daydream-native-' + backend,
                             execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
                             public_task=task, evidence_directory=staged)
+                        await anyio.lowlevel.checkpoint_if_cancelled()
                     finally:
                         checkpoint_task.cancel()
-                        await asyncio.gather(checkpoint_task, return_exceptions=True)
+                        with anyio.CancelScope(shield=True):
+                            await asyncio.gather(checkpoint_task, return_exceptions=True)
             except asyncio.CancelledError:
                 cancelled = True
+                if execution is not None:
+                    execution.status = 'cancelled'
+                    execution.candidate = None
+                    execution.diagnostics.append('native reviewer cancelled after returning an execution result')
                 raise
             except Exception:
                 if execution is not None:
@@ -277,25 +285,26 @@ async def _checkpoint_loop() -> None:
 async def _executable_main() -> int:
     """Translate SIGTERM once into cancellation with ordinary joined finalization."""
     loop = asyncio.get_running_loop()
-    reviewer = asyncio.create_task(main(dict(os.environ)))
     requested = False
-
-    def interrupt() -> None:
-        nonlocal requested
-        if not requested:
-            requested = True
-            try:
-                flush_active_signal_recorders()
-            finally:
-                reviewer.cancel()
-
-    loop.add_signal_handler(signal.SIGTERM, interrupt)
+    result = 130
     try:
-        return await reviewer
+        with anyio.CancelScope() as shutdown:
+            def interrupt() -> None:
+                nonlocal requested
+                if not requested:
+                    requested = True
+                    # A raw Task.cancel() bypasses AnyIO's writer shields.
+                    shutdown.cancel()
+                    flush_active_signal_recorders()
+
+            loop.add_signal_handler(signal.SIGTERM, interrupt)
+            try:
+                result = await main(dict(os.environ))
+            finally:
+                loop.remove_signal_handler(signal.SIGTERM)
     except asyncio.CancelledError:
         return 130
-    finally:
-        loop.remove_signal_handler(signal.SIGTERM)
+    return 130 if requested else result
 
 
 if __name__ == '__main__':

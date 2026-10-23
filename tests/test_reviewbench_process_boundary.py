@@ -24,12 +24,14 @@ class LocalReviewerEnvironment:
     """Buffered exec with Harbor's cancellation boundary: children outlive awaits."""
 
     def __init__(self, environment: dict[str, str], repository: Path, *,
-                 publication_fault: str | None = None, close_stdout: bool = False, foreign_stderr: bytes = b'') -> None:
+                 publication_fault: str | None = None, close_stdout: bool = False, foreign_stderr: bytes = b'',
+                 entrypoint_bootstrap: str | None = None) -> None:
         self.environment = environment
         self.repository = repository
         self.publication_fault = publication_fault
         self.close_stdout = close_stdout
         self.foreign_stderr = foreign_stderr
+        self.entrypoint_bootstrap = entrypoint_bootstrap
         self.results: list[SimpleNamespace] = []
         self.children: list[asyncio.subprocess.Process] = []
         self.collectors: list[asyncio.Task[tuple[bytes, bytes]]] = []
@@ -38,7 +40,8 @@ class LocalReviewerEnvironment:
         arguments = shlex.split(command)
         assert arguments[0] == 'python'
         arguments[0] = sys.executable
-        if (self.publication_fault is not None or self.foreign_stderr) and arguments[1:4] == [
+        inject = self.publication_fault is not None or self.foreign_stderr or self.entrypoint_bootstrap
+        if inject and arguments[1:4] == [
             '-I', '-m', 'daydream.benchmark.reviewbench.harbor_process',
         ]:
             # Patch the actual filesystem install only in the supervisor. The
@@ -51,6 +54,12 @@ class LocalReviewerEnvironment:
                 '        raise OSError(errno.ENOSPC,"publication-secret-canary")\n'
                 '    return original_link(source,destination,**kwargs)\n'
                 'os.link = fail_link\n'
+                + ('import asyncio\noriginal_spawn=asyncio.create_subprocess_exec\n'
+                   'async def spawn(*args,**kwargs):\n'
+                   '    if args[1:4] == ("-I","-m","daydream.benchmark.reviewbench.harbor_entrypoint"):\n'
+                   f'        args=(args[0],"-I","-c",{self.entrypoint_bootstrap!r})\n'
+                   '    return await original_spawn(*args,**kwargs)\n'
+                   'asyncio.create_subprocess_exec=spawn\n' if self.entrypoint_bootstrap else '') +
                 'sys.argv = ["daydream.benchmark.reviewbench.harbor_process", *sys.argv[1:]]\n'
                 'runpy.run_module(sys.argv[0],run_name="__main__",alter_sys=True)\n')
             arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
@@ -312,20 +321,21 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('diagnostic_failure,foreign_stderr', [
-    pytest.param('none', b'', id='none'),
-    pytest.param('log_conflict', b'', id='log_conflict'),
-    pytest.param('receipt_conflict', b'', id='receipt_conflict'),
-    pytest.param('log_symlink', b'', id='log_symlink'),
-    pytest.param('receipt_symlink', b'', id='receipt_symlink'),
-    pytest.param('supervisor_enospc', b'', id='supervisor_enospc'),
-    pytest.param('host_fallback_enospc', b'', id='host_fallback_enospc'),
-    pytest.param('closed_collector_pipe', b'', id='closed_collector_pipe'),
-    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', id='foreign_stderr'),
+@pytest.mark.parametrize('diagnostic_failure,foreign_stderr,entrypoint_payload', [
+    pytest.param('none', b'', b'', id='none'),
+    pytest.param('log_conflict', b'', b'', id='log_conflict'),
+    pytest.param('receipt_conflict', b'', b'', id='receipt_conflict'),
+    pytest.param('log_symlink', b'', b'', id='log_symlink'),
+    pytest.param('receipt_symlink', b'', b'', id='receipt_symlink'),
+    pytest.param('supervisor_enospc', b'', b'', id='supervisor_enospc'),
+    pytest.param('host_fallback_enospc', b'', b'', id='host_fallback_enospc'),
+    pytest.param('closed_collector_pipe', b'', b'', id='closed_collector_pipe'),
+    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', b'', id='foreign_stderr'),
+    pytest.param('none', b'', b'{"message":"\\ud800"}\n', id='surrogate_json'),
 ])
 async def test_completed_process_review_keeps_native_result_and_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
-    foreign_stderr: bytes,
+    foreign_stderr: bytes, entrypoint_payload: bytes,
 ) -> None:
     """Process supervision must preserve the ordinary scorable successful path.
 
@@ -336,6 +346,8 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
     A real executable bootstrap emits harmless foreign stderr in one row: an
     aggregate output-size assertion otherwise mistakes runtime warnings for
     oversized Daydream diagnostics, which quiet process fixtures cannot expose.
+    A child JSON surrogate must also survive supervisor redaction/UTF-8 log
+    publication; ordinary ASCII streams cannot expose that encoding boundary.
     """
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
@@ -347,7 +359,12 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']),
         publication_fault='reviewer-process.json' if diagnostic_failure == 'supervisor_enospc' else None,
-        close_stdout=diagnostic_failure == 'closed_collector_pipe', foreign_stderr=foreign_stderr)
+        close_stdout=diagnostic_failure == 'closed_collector_pipe', foreign_stderr=foreign_stderr,
+        entrypoint_bootstrap=('import asyncio,os\n'
+            f'os.write(1,{entrypoint_payload!r})\n'
+            'os.dup2(2,1)\n'  # Keep stdout purely JSON; retain ordinary runner output on captured stderr.
+            'from daydream.benchmark.reviewbench.harbor_entrypoint import _executable_main\n'
+            'raise SystemExit(asyncio.run(_executable_main()))\n') if entrypoint_payload else None)
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
     protected: Path | None = None
     destination: Path | None = None
@@ -406,6 +423,9 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
             assert diagnostics == []
         if foreign_stderr:
             assert foreign_stderr.decode() in all_output
+        if entrypoint_payload:
+            line = (logs / 'reviewer-entrypoint.log').read_text(encoding='utf-8').splitlines()[0]
+            assert json.loads(line) == {'message': '\ud800'}
         for canary in ('publication-secret-canary', 'private-refresh-canary', 'private-id-canary',
                        'forbidden-api-canary', 'forbidden-github-canary'):
             assert canary not in all_output
@@ -619,6 +639,130 @@ async def test_checkpoint_initialization_is_optional_only_for_operational_io_fai
         if child.returncode is None:
             child.kill()
             await child.wait()
+
+
+@pytest.mark.parametrize('shutdown', ['graceful', 'repeated_signal', 'force'])
+async def test_sigterm_joins_real_finalization_writer_before_export_or_uses_checkpoint(
+    tmp_path: Path, shutdown: str,
+) -> None:
+    """SIGTERM must respect the runner's shield around an actual filesystem writer.
+
+    The existing interrupted-review test cancels native inference before the
+    finalization thread exists. Block an actual atomic install in that thread,
+    then drive the production host/supervisor/signal path; no runner or finalizer
+    result is replaced. A stuck writer must still meet the supervisor force bound.
+    """
+    environment = public_input(tmp_path)
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
+    ready, signalled, exported, joined = [tmp_path / name for name in
+        ('writer-ready.json', 'signal-received', 'export-observation.json', 'writer-joined')]
+    release = tmp_path / 'release-writer'
+    os.mkfifo(release, mode=0o600)
+    bootstrap = f'''import asyncio,json,os,threading
+from pathlib import Path
+from daydream import runner
+from daydream.benchmark.reviewbench import harbor_entrypoint as entry
+ready,signalled,exported,joined,release=map(Path,{[str(p) for p in (ready, signalled, exported, joined, release)]!r})
+replace=os.replace
+blocked=False
+def install(source,destination,*args,**kwargs):
+ global blocked
+ if (not blocked and threading.current_thread().name.startswith('AnyIO')
+     and Path(destination).name=='publish-manifest.json'):
+  blocked=True
+  ready.write_text(json.dumps({{'pid':os.getpid()}}))
+  with release.open('rb') as stream: assert stream.read(1)==b'R'
+ return replace(source,destination,*args,**kwargs)
+os.replace=install
+finalize=runner._finalize_run_artifacts
+def observe_finalize(*args,**kwargs):
+ try: return finalize(*args,**kwargs)
+ finally: joined.write_text('writer returned')
+runner._finalize_run_artifacts=observe_finalize
+publish=entry._publish_native_evidence
+def observe_export(*args,**kwargs):
+ exported.write_text(json.dumps({{'writer_joined':joined.exists()}}))
+ return publish(*args,**kwargs)
+entry._publish_native_evidence=observe_export
+async def drive():
+ loop=asyncio.get_running_loop()
+ register=loop.add_signal_handler
+ def observe_signal(number,callback,*args):
+  def received():
+   signalled.write_text('signal observed')
+   callback(*args)
+  register(number,received)
+ loop.add_signal_handler=observe_signal
+ return await entry._executable_main()
+raise SystemExit(asyncio.run(drive()))
+'''
+    local = LocalReviewerEnvironment({**os.environ, **environment,
+        'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
+        Path(environment['DAYDREAM_RB_REPOSITORY']), entrypoint_bootstrap=bootstrap)
+    logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
+    running = asyncio.create_task(DaydreamPublicReviewAgent(logs_dir=logs).run('frozen task', local, SimpleNamespace()))
+    try:
+        deadline = asyncio.get_running_loop().time() + 15
+        while not ready.exists():
+            if running.done():
+                await running
+            assert asyncio.get_running_loop().time() < deadline, 'actual finalization install never reached readiness'
+            await asyncio.sleep(0.01)
+        running.cancel()
+        while not signalled.exists():
+            assert asyncio.get_running_loop().time() < deadline, 'reviewer executable never received SIGTERM'
+            await asyncio.sleep(0.01)
+        if shutdown == 'repeated_signal':
+            os.kill(json.loads(ready.read_text())['pid'], signal.SIGTERM)
+        if shutdown != 'force':
+            # Give an incorrectly abandoned writer a chance to reach export;
+            # the final assertion also observes the complete writer returning.
+            observe_until = asyncio.get_running_loop().time() + 0.2
+            while not exported.exists() and asyncio.get_running_loop().time() < observe_until:
+                await asyncio.sleep(0.01)
+            assert not exported.exists(), 'native export began before its finalization writer joined'
+            with release.open('wb') as stream:
+                stream.write(b'R')
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=35)
+        process = json.loads((logs / 'reviewer-process.json').read_text())
+        evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+        if shutdown == 'force':
+            assert process['cleanup_outcome'] == 'forced_termination'
+            assert process['terminal_evidence_available'] is False
+            assert not exported.exists() and not joined.exists()
+            from daydream.benchmark.reviewbench.diagnostics import interrupted_readout
+
+            retained = interrupted_readout(evidence)
+            assert isinstance(retained['checkpoint'], dict)
+            assert retained['checkpoint']['kind'] == 'checkpoint'
+            assert len(retained['checkpoint']['documents']) >= 3
+            assert retained['terminal_evidence'] == 'unavailable'
+            assert retained['unavailable_checkpoints'] == []
+            return
+        assert process['cleanup_outcome'] == 'graceful_exit' and process['child_returncode'] == 130
+        assert json.loads(exported.read_text()) == {'writer_joined': True}
+        root = json.loads((evidence / 'trajectory.json').read_text())
+        assert root['extra']['subtrajectories']
+        for document in root['extra']['subtrajectories']:
+            if reference := document.get('sibling_trajectory_ref'):
+                assert (evidence / reference).is_file()
+        execution = json.loads((evidence / 'execution.json').read_text())
+        assert execution['interruption'] == 'reviewer_task_cancelled' and execution['status'] == 'cancelled'
+        assert execution['candidate'] is None
+    finally:
+        try:
+            descriptor = os.open(release, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            pass
+        else:
+            os.write(descriptor, b'R')
+            os.close(descriptor)
+        if not running.done():
+            running.cancel()
+        await local.close()
+        await asyncio.gather(running, return_exceptions=True)
 
 
 @pytest.mark.parametrize('surface', ['receipt', 'private_stop', 'shared_stop'])

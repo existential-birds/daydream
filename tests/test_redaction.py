@@ -691,6 +691,40 @@ def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragm
         assert parsed['model'] == 'fixture-model' and parsed['count'] == 0
 
 
+@pytest.mark.parametrize('payload', [
+    {'message': chr(0xD800), 'public': 'café 😀', 'usage': {'input_tokens': 0, 'output_tokens': None}},
+    {'nested': [{'message': chr(0xDFFF)}], 'public': 'café 😀'},
+    {chr(0xD800) + 'clé': 'café 😀'},
+    [chr(0xD800), chr(0xDFFF), 'café 😀', 0, None],
+    chr(0xD800) + 'café 😀',
+    {'message': 'literal ' + chr(92) + 'ud800', 'public': 'café 😀'},
+    {'public': 'café 😀'},
+    {'nested_json': json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=False)},
+    {'nested_json': json.dumps(chr(0xDFFF) + 'café 😀', ensure_ascii=False)},
+])
+def test_structured_json_surrogates_preserve_utf8_and_json_semantics(payload: object) -> None:
+    """Escaped code points cannot become unencodable text after JSON redaction.
+
+    Ordinary Unicode tests cannot expose ensure_ascii=False emitting decoded lone
+    surrogates. Nested values, keys and scalar JSON also protect against escaping
+    recursive leaves too early and changing code points into literal backslashes.
+    """
+    source = json.dumps(payload)
+    redacted = redact_structured_text(source)
+    encoded = redacted.encode('utf-8')
+    assert 'café 😀'.encode('utf-8') in encoded
+    assert json.loads(redacted) == json.loads(source)
+    assert redact_structured_text(redacted) == redacted
+
+
+def test_plain_surrogate_text_is_safe_at_public_redaction_boundary() -> None:
+    """The public text API also makes raw invalid code points writable as escapes."""
+    redacted = redact_structured_text('public café 😀 ' + chr(0xD800) + ' tail ' + chr(0xDFFF))
+    assert redacted == 'public café 😀 ' + chr(92) + 'ud800 tail ' + chr(92) + 'udfff'
+    assert redacted.encode('utf-8')
+    assert redact_structured_text(redacted) == redacted
+
+
 @pytest.mark.parametrize('container', [
     '["opaque-container-canary", "public"]',
     '{"entry": "opaque-container-canary", "public": true}',
