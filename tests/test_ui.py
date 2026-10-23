@@ -271,9 +271,9 @@ async def test_text_displays_redact_complete_native_auth_before_selecting_or_for
 
 
 @pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
-@pytest.mark.parametrize('route', ['direct', 'callback', 'panel'])
+@pytest.mark.parametrize('route', ['direct', 'callback', 'panel', 'log'])
 async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
-    credential_type: str, route: str,
+    credential_type: str, route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Public callback formatting must not expose a bare value after losing its tag.
 
@@ -291,12 +291,13 @@ async def test_callback_tool_input_redacts_native_auth_before_primary_argument_s
     if route == 'direct':
         lines = [format_callback_progress('Inspect', values, None), format_callback_progress('Inspect', public, None)]
     else:
-        display = AgentDisplay(console, InteractionPolicy(),
+        display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
             lines.append if route == 'callback' else None, structured=False)
         await display.observe(ToolStartEvent('credential', 'Inspect', values))
         await display.observe(ToolStartEvent('public', 'Inspect', public))
         display.tools.finish_all()
-    rendered = ''.join((console.export_text() + '\n'.join(line.plain for line in lines)).replace('│', '').split())
+    rendered = ''.join((console.export_text() + capsys.readouterr().out +
+                        '\n'.join(line.plain for line in lines)).replace('│', '').split())
     assert secret not in rendered and '[REDACTED' in rendered
     assert 'ordinary-public-key' in rendered
     assert values == before
