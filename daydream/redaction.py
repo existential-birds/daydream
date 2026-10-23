@@ -620,23 +620,55 @@ def _block_value_end(text: str, start: int) -> int:
 
 
 def _redact_header_value(match: re.Match[str]) -> str:
-    """Preserve the auth header and optional Basic/Bearer/Token scheme; redact its token."""
+    """Preserve the header, scheme and complete markers; remove credential content."""
+    token = match.group(3)
+    end = match.end(3)
+    if match.string[end:end + 1] == ']':
+        # The structural ']' lookahead can backtrack into a complete marker.
+        # Preserve that safe token only at its real boundary, never when an
+        # opaque residual follows the marker outside this regex match.
+        completed = token + ']'
+        tail = match.string[end + 1:end + 2]
+        if (not tail or re.match(r"[\s,;\"']", tail)) and _redact_sensitive_text(completed) == completed:
+            return match.group(0)
+    safe = _redact_sensitive_text(token)
+    if safe == token:
+        return match.group(0)
     name = match.group(1)
     if match.group(2) is not None:
-        return f"{name}: {match.group(2)} {_REDACTED_CREDENTIAL}"
-    return f"{name}: {_REDACTED_CREDENTIAL}"
+        return f"{name}: {match.group(2)} {safe}"
+    return f"{name}: {safe}"
 
 
 def _redact_json_container(value: Any) -> Any:
     """Sanitize decoded leaves so an unfinished secret cannot consume JSON wrappers."""
     if isinstance(value, dict):
         result = {}
+        occupied = set(value)
+        next_suffix: dict[str, int] = {}
         for key, item in value.items():
-            if _is_sensitive_key(key):
-                result[redact_text(key)] = (item if item == '' else
+            # Keys are text too. Avoid JSON decoding here: a JSON-looking key
+            # remains a label, and ordinary formatting must remain unchanged.
+            sensitive_key = _is_sensitive_key(key)
+            safe_key = _redact_unstructured_text(key)
+            if safe_key != key:
+                if not sensitive_key and _is_sensitive_key(safe_key):
+                    # Sanitation can expose a compound-key suffix or insert a
+                    # marker containing sensitive words. A nonsensitive host
+                    # label keeps the original public-value classification.
+                    safe_key = "[REDACTED_LABEL]"
+                base = safe_key
+                suffix = next_suffix.get(base, 2)
+                while safe_key in occupied:
+                    safe_key = f"{base} ({suffix})"
+                    suffix += 1
+                next_suffix[base] = suffix
+                occupied.add(safe_key)
+            if sensitive_key:
+                result[safe_key] = (item if item == '' else
                     _redact_sensitive_text(item) if isinstance(item, str) else _REDACTED_CREDENTIAL)
             else:
-                result[redact_text(key)] = _redact_json_container(item)
+                result[safe_key] = _redact_json_container(item)
         return result
     if isinstance(value, list):
         return [_redact_json_container(item) for item in value]

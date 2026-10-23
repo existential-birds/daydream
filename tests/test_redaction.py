@@ -387,6 +387,119 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
 
 
 
+@pytest.mark.parametrize('key', [
+    'Authorization: Bearer opaque-key-canary',
+    'auth=Bearer opaque-key-canary',
+    'refresh_token="opaque-key-canary',
+    'api_key=[REDACTED]opaque-key-canary',
+    '{"Authorization: Bearer opaque-key-canary":"public"}',
+])
+def test_json_observation_keys_use_structured_redaction_without_retyping_values(key: str) -> None:
+    """Decoded JSON keys need the same credential policy as observation text.
+
+    Header tests pass plain text and argument tests exercise a native mapping;
+    neither reaches the JSON leaf walk that formerly flat-redacted only keys.
+    Keep JSON-looking public keys, marker identity, zero, null and valid wrappers.
+    """
+    payload = {key: '[REDACTED_RETAINED]', '{"scope":"python"}': True,
+               'usage': {'input_tokens': 0, 'output_tokens': None}, 'public': 'diagnostics'}
+    original = json.dumps(payload)
+    step = _agent_step(observation=Observation(results=[ObservationResult(content=original)]))
+    out = Redactor().redact_step(step)
+    assert out.observation is not None
+    content = out.observation.results[0].content
+    assert isinstance(content, str)
+    assert 'opaque-key-canary' not in content
+    decoded = json.loads(content)
+    assert decoded['{"scope":"python"}'] is True
+    assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
+    assert decoded['public'] == 'diagnostics'
+    assert '[REDACTED_RETAINED]' in decoded.values()
+    assert step.observation is not None and step.observation.results[0].content == original
+    repeated = Redactor().redact_step(out)
+    assert repeated.observation is not None and repeated.observation.results[0].content == content
+
+
+@pytest.mark.parametrize('key', ['defauthorization: opaque-key-canary', 'deftoken=opaque-key-canary',
+                                  'api_key=opaque-key-canary', 'X-Api-Key: opaque-key-canary',
+                                  'private_key=opaque-key-canary'])
+@pytest.mark.parametrize('value', [0, None, {'public': 'diagnostics'}])
+def test_generated_json_key_marker_cannot_change_public_value_sensitivity(key: str, value: object) -> None:
+    """A generated marker in a key cannot turn its public value into a credential.
+
+    Structured suffix recognition can sanitize a key that whole-key sensitivity
+    does not classify as secret. Marker words must not change that classification
+    during the recorder's repeated sanitation, erasing zero/null/container values.
+    """
+    redacted = redact_structured_text(json.dumps({key: value}))
+    assert 'opaque-key-canary' not in redacted
+    assert list(json.loads(redacted).values()) == [value]
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('key', ['api_key', 'private_key', '[REDACTED_CREDENTIAL]',
+                                  'prefix_[REDACTED_TOKEN]', '[REDACTED]token',
+                                  'Authorization: Bearer [REDACTED_CREDENTIAL]'])
+def test_marker_words_do_not_hide_actual_json_key_sensitivity(key: str) -> None:
+    """New key sanitation must preserve every previously sensitive key's masking."""
+    redacted = redact_structured_text(json.dumps({key: 'opaque-value-canary'}))
+    assert 'opaque-value-canary' not in redacted
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize(('header', 'marker', 'suffix'), [
+    ('X-Api-Key', '[REDACTED_API_KEY]', ''),
+    ('Cookie', '[REDACTED_CREDENTIAL]', ' (2)'),
+    ('Authorization', '<redacted>', ' (2)'),
+])
+def test_complete_markers_in_json_header_keys_keep_their_identity(header: str, marker: str, suffix: str) -> None:
+    """An already safe header-shaped key must survive the newly applied text policy.
+
+    Complete markers before a collision suffix exposed regex token backtracking,
+    which consumed only the marker prefix and added a spurious closing bracket.
+    Plain secret header tests never establish safe-key identity on repeated writes.
+    """
+    key = f'{header}: {marker}{suffix}'
+    redacted = redact_structured_text(json.dumps({key: '[REDACTED_RETAINED]'}))
+    assert list(json.loads(redacted)) == [key]
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize(('template', 'safe'), [
+    ('Authorization: Bearer {}', 'Authorization: Bearer [REDACTED_CREDENTIAL]'),
+    ('api_key={}', '[REDACTED_LABEL]'),
+    ('Cookie: {}', 'Cookie: [REDACTED_CREDENTIAL]'),
+])
+def test_json_observation_key_collisions_preserve_entries_and_existing_public_keys(template: str, safe: str) -> None:
+    """Two newly sanitized keys cannot overwrite each other or a literal safe key.
+
+    Flat key replacement already collides for shaped secrets, but adding structured
+    key coverage creates collisions for opaque headers too. Keep each retained
+    value and existing marker key without encoding any raw secret in its alias.
+    """
+    payload = {template.format('first-key-canary'): '[REDACTED_FIRST]',
+               template.format('second-key-canary'): '[REDACTED_SECOND]',
+               safe: '[REDACTED_EXISTING]', safe + ' (2)': '[REDACTED_RESERVED]',
+               'usage': {'input_tokens': 0, 'output_tokens': None}}
+    out = Redactor().redact_step(_agent_step(
+        observation=Observation(results=[ObservationResult(content=json.dumps(payload))]),
+    ))
+    assert out.observation is not None
+    content = out.observation.results[0].content
+    assert isinstance(content, str)
+    decoded = json.loads(content)
+    assert 'first-key-canary' not in content and 'second-key-canary' not in content
+    assert len(decoded) == len(payload)
+    assert decoded[safe] == '[REDACTED_EXISTING]'
+    assert decoded[safe + ' (2)'] == '[REDACTED_RESERVED]'
+    assert set(item for item in decoded.values() if isinstance(item, str)) == {
+        '[REDACTED_FIRST]', '[REDACTED_SECOND]', '[REDACTED_EXISTING]', '[REDACTED_RESERVED]',
+    }
+    assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
+    repeated = Redactor().redact_step(out)
+    assert repeated.observation is not None and repeated.observation.results[0].content == content
+
+
 
 def test_redactor_preserves_structural_separator_after_bare_value() -> None:
     """Redacting a bare value must not swallow the following ',' — the JSON

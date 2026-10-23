@@ -608,6 +608,52 @@ async def test_split_secret_stream_never_enters_immutable_partial_snapshot(
     assert b'checkpoint-first-canary' not in final and b'checkpoint-later-canary' not in final
 
 
+@pytest.mark.parametrize('surface', ['observation', 'message'])
+async def test_json_event_keys_are_redacted_before_immutable_checkpoint(tmp_path: Path, surface: str) -> None:
+    """Observation-key privacy must hold in partial callback bytes and final files.
+
+    Tool-result amendments and active text buffers freeze through distinct
+    paths. Container tests do not establish either publishes sanitized bytes.
+    Keep real public events, callback bytes and files while another step arrives.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    payload = {'Authorization: Bearer immutable-key-canary': '[REDACTED_RETAINED]',
+               '[REDACTED_CREDENTIAL]': 'retained-marker-value-canary',
+               'prefix_[REDACTED_TOKEN]': 'retained-prefixed-marker-canary',
+               'usage': {'input_tokens': 0, 'output_tokens': None}, '{"scope":"python"}': 'public'}
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            if surface == 'observation':
+                invocation.observe(ToolStartEvent(id='inspect', name='Inspect', input={}))
+                invocation.observe(ToolResultEvent(id='inspect', output=json.dumps(payload), is_error=False))
+            else:
+                invocation.observe(TextEvent(json.dumps(payload)))
+            recorder.write_partial()
+            first = snapshots[-1]
+            first_bytes = first.documents[0].json_bytes
+            assert b'immutable-key-canary' not in first_bytes
+            assert b'retained-marker-value-canary' not in first_bytes
+            assert b'retained-prefixed-marker-canary' not in first_bytes
+            assert _partial_path(recorder).read_bytes() == first_bytes
+            trajectory = json.loads(first_bytes)
+            assert atif_validate(trajectory)
+            step = next(step for step in trajectory['steps'] if step['source'] == 'agent')
+            content = json.loads(step['observation']['results'][0]['content']
+                                 if surface == 'observation' else step['message'])
+            assert content['usage'] == {'input_tokens': 0, 'output_tokens': None}
+            assert content['{"scope":"python"}'] == 'public'
+            invocation.observe(TurnEndEvent(message_id='json-evidence-step'))
+            invocation.observe(TextEvent('public activity after checkpoint'))
+            recorder.write_partial()
+            assert first.documents[0].json_bytes == first_bytes
+    final_bytes = recorder.path.read_bytes()
+    assert b'immutable-key-canary' not in final_bytes
+    assert b'retained-marker-value-canary' not in final_bytes
+    assert b'retained-prefixed-marker-canary' not in final_bytes
+    assert atif_validate(json.loads(final_bytes))
+
+
 async def test_request_metadata_is_redacted_in_active_partial_and_completed_evidence(
     recorder: TrajectoryRecorder,
 ) -> None:
