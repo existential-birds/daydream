@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Replace unreleased public ReviewBench interfaces with `harbor-export` and
-  `harbor-run`; fresh exports are required. PR-only compatibility change; no version bump.
+  `harbor-run`. Identify candidates by their supplied wheel, removing installed-package
+  scans and the requirement to export or launch from a matching installation.
+  Fresh schema-4 exports and candidate wheels are required. PR-only compatibility change; no version bump.
 
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.

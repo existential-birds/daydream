@@ -37,8 +37,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
         return __version__
 
     async def setup(self, environment: Any) -> None:
-        probe = ('import importlib.metadata,os,shutil;from pathlib import Path;'
-                 f'assert importlib.metadata.version("daydream")=={self.version()!r};'
+        probe = ('import os,shutil;from pathlib import Path;'
                  'from daydream.benchmark.reviewbench.harbor_entrypoint import load_public_task;'
                  'p=Path(os.environ.get("DAYDREAM_RB_INPUTS","/work/pr"));'
                  '_,profile=load_public_task(p/"daydream-profile.json",p/"pr.json",p/"diff.patch");'

@@ -19,7 +19,7 @@ from typing import Any
 
 import anyio
 
-from daydream.benchmark.reviewbench.contract import Case
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
 from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case, reviewer_config
 from daydream.json_utils import atomic_create_bytes
 from daydream.redaction import redact_structured_text
@@ -33,7 +33,7 @@ class PublicReviewerError(ValueError):
 def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tuple[PublicHarborTask, dict[str, Any]]:
     """Bind exported profile bytes, supplied PR metadata and frozen public patch."""
     profile = json.loads(profile_path.read_text())
-    if not isinstance(profile, dict) or profile.get('schema') != 3:
+    if not isinstance(profile, dict) or profile.get('schema') != PUBLIC_PROFILE_SCHEMA:
         raise PublicReviewerError('unsupported public reviewer profile; regenerate the export')
     digest = profile.get('profile_sha256')
     policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
@@ -208,8 +208,7 @@ async def main(environment: Mapping[str, str]) -> int:
                     checkpoint_task = asyncio.create_task(_checkpoint_loop())
                     try:
                         execution = await review_case(task, repository, config,
-                            execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
-                            evidence_directory=staged)
+                            execution_input=capability, evidence_directory=staged)
                         await anyio.lowlevel.checkpoint_if_cancelled()
                     finally:
                         checkpoint_task.cancel()

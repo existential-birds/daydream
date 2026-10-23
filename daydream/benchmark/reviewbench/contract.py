@@ -14,6 +14,7 @@ from daydream import git_ops
 
 REVIEWBENCH_REVISION = '4f04392d6bf4941ab6f8a3ea0c15b449f4458864'
 REVIEWBENCH_REPOSITORY = 'https://github.com/review-bench/ReviewBench.git'
+PUBLIC_PROFILE_SCHEMA = 4
 
 
 @dataclass(frozen=True)

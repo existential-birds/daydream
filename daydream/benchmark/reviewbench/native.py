@@ -13,7 +13,6 @@ from typing import Any
 from daydream import git_ops, runner
 from daydream.backends import BackendExecutionInput, create_backend
 from daydream.backends.pi import _configured_pi_model, native_pi_provider, native_pi_settings
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
@@ -240,7 +239,7 @@ def convert_findings(
 
 
 async def review_case(task: PublicHarborTask, repository: Path, config: RunConfig, *,
-                      execution_input: runner.RunnerExecutionInput, candidate_sha256: str,
+                      execution_input: runner.RunnerExecutionInput,
                       evidence_directory: Path) -> CaseExecution:
     """Review an admitted Harbor snapshot, retaining joined native evidence."""
     case = task.case
@@ -248,10 +247,6 @@ async def review_case(task: PublicHarborTask, repository: Path, config: RunConfi
     execution = CaseExecution("failed")
     finalized: list[FinalizedReview] = []
     try:
-        extension = selected_extension_identity()
-        admitted_candidate = candidate_package_digest()
-        if candidate_sha256 != admitted_candidate:
-            raise ValueError('candidate bytes changed before native review; create a fresh Harbor export')
         git_ops.assert_is_worktree(repository)
         if git_ops.status_porcelain(repository).strip():
             raise ValueError("source repository is not clean")
@@ -292,10 +287,6 @@ async def review_case(task: PublicHarborTask, repository: Path, config: RunConfi
                 execution.configuration = result.configuration
                 execution.usage = result.usage
                 execution.retained_findings = result.items
-            if selected_extension_identity() != extension:
-                raise ValueError('native extension changed during review; create a fresh Harbor export')
-            if candidate_package_digest() != admitted_candidate:
-                raise ValueError('candidate bytes changed during native review; create a fresh Harbor export')
             if not finalized:
                 execution.diagnostics.append("native reviewer did not produce a finalized terminal result")
                 return execution

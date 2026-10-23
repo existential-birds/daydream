@@ -28,9 +28,9 @@ from tests.harness.reviewbench import public_input
 
 @pytest.mark.parametrize('stage', ['setup', 'run'])
 async def test_public_agent_python_startup_cannot_import_reviewed_repository_packages(
-    tmp_path: Path, stage: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
-    """Isolated setup/run startup keeps hostile reviewed daydream/daydream_ext imports unexecuted."""
+    """Isolate reviewed imports while allowing the launcher and reviewer to have different versions."""
     environment = public_input(tmp_path)
     repository = Path(environment['DAYDREAM_RB_REPOSITORY'])
     marker = tmp_path / 'reviewed-python-executed'
@@ -62,6 +62,7 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
 
     logs = tmp_path / 'agent'
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
+    monkeypatch.setattr(agent, 'version', lambda: '0.0.0-host')
     if stage == 'setup':
         await agent.setup(Environment())
     else:
