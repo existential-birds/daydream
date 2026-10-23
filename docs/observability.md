@@ -32,6 +32,9 @@ pins sanitized replay inputs; replay is distinct from real-provider acceptance.
 Caller labels with supported credential shapes receive deterministic opaque
 descriptors before dispatch/fork identity and artifact path allocation; ordinary
 labels remain unchanged.
+JSON text evidence applies structured redaction to object keys as well as values.
+Opaque key aliases and collision suffixes record host redaction while preserving
+distinct entries and public value types.
 
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
