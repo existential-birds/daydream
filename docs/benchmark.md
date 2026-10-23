@@ -177,6 +177,11 @@ children, and permits bounded writer joining, export and output collection.
 The original host cancellation propagates to Harbor: only Harbor can distinguish
 its `AgentTimeoutError` from an independent `CancelledError`. Cleanup time is
 separate from inference allowance and does not authorize more model work.
+An exec collector timeout or transport exception also stops the owned invocation,
+then propagates that original exception. Its host/process receipts identify
+`host_execution_failed` separately from task cancellation; failed collection does
+not imply that the reviewer exited. The host waits for the matching supervisor's
+final receipt within its cleanup bound when collected output is unavailable.
 See [process supervision](../daydream/benchmark/reviewbench/harbor_process.py)
 for the fixed cleanup/output bounds and their receipts.
 
@@ -195,6 +200,11 @@ validated generation is usable. At most two successfully published generations
 are retained normally; competing bytes and failed installs remain visible.
 Publication faults preserve the previous valid checkpoint. `SIGKILL` cannot run
 Python finalizers: use the last checkpoint and keep terminal evidence unavailable.
+Capacity or device/resource exhaustion while initializing the optional checkpoint
+sink disables that observer, with a bounded class/errno warning and an explicit
+`execution.json` `checkpoint_error`. Canonical native evidence and findings still
+require successful publication. Unsafe, symlinked or reused checkpoint paths
+remain admission failures before model work.
 A checkpoint's `kind` remains `checkpoint` even when supplied by the recorder's
 final write; it never establishes a scored trial.
 

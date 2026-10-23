@@ -6,6 +6,7 @@ remain in Harbor's separate verifier environment; no private scorer is imported.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -151,9 +152,10 @@ async def main(environment: Mapping[str, str]) -> int:
         reviewer = profile['reviewer']
         backend = reviewer['backend']
         from daydream.benchmark.reviewbench.diagnostics import InterruptedReviewDiagnostics
+        from daydream.benchmark.reviewbench.harbor_process import warn_diagnostics_unavailable
 
         declared_outer = environment.get('DAYDREAM_RB_DECLARED_OUTER_TIMEOUT')
-        diagnostics = InterruptedReviewDiagnostics(evidence, {
+        metadata = {
             'candidate': profile['candidate'], 'profile_sha256': task.profile_sha256,
             'task_id': task.task_id, 'evaluation_id': task.evaluation_id,
             'upstream_revision': task.upstream_revision, 'case': asdict(task.case),
@@ -165,7 +167,18 @@ async def main(environment: Mapping[str, str]) -> int:
                 'docker_exec_timeout_seconds': 3600,
                 'native_allowance_availability': 'observed per dispatch in backend_lifecycle'},
             'invocation_id': environment.get('DAYDREAM_RB_INVOCATION'),
-        })
+        }
+        diagnostics = None
+        checkpoint_error = None
+        try:
+            diagnostics = InterruptedReviewDiagnostics(evidence, metadata)
+        except OSError as exc:
+            if exc.errno not in {errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EMFILE, errno.ENFILE}:
+                raise
+            # Checkpoint capacity is optional. Path admission, competing bytes,
+            # and the canonical native/finding publication remain authoritative.
+            checkpoint_error = f'checkpoint initialization unavailable: {type(exc).__name__} errno={exc.errno}'
+            warn_diagnostics_unavailable('checkpoint initialization', exc)
         canonical = Path(environment.get('DAYDREAM_RB_CODEX_HOME' if backend == 'codex'
             else 'DAYDREAM_RB_REVIEWER_HOME', '/run/reviewbench-codex' if backend == 'codex'
             else '/run/reviewbench-reviewer'))
@@ -196,7 +209,8 @@ async def main(environment: Mapping[str, str]) -> int:
                     if backend == 'pi':
                         native = replace(native, pi_settings=reviewer['pi_settings'])
                     capability = RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
-                        backends={backend: native}, on_trajectory_snapshot=diagnostics.retain)
+                        backends={backend: native},
+                        on_trajectory_snapshot=diagnostics.retain if diagnostics is not None else None)
                     invocation = environment.get('DAYDREAM_RB_INVOCATION')
                     if invocation is not None:
                         from daydream.benchmark.reviewbench.harbor_process import invocation_directory
@@ -239,7 +253,7 @@ async def main(environment: Mapping[str, str]) -> int:
                         reviewer_authentication='chatgpt-oauth' if backend == 'codex' else 'native-pi',
                         cost_interpretation='API-equivalent estimate when available',
                         invocation_id=environment.get('DAYDREAM_RB_INVOCATION'),
-                        checkpoint_error=diagnostics.last_error,
+                        checkpoint_error=diagnostics.last_error if diagnostics is not None else checkpoint_error,
                         interruption='reviewer_task_cancelled' if cancelled else None)
                     _write_new_json(evidence / 'execution.json', record)
         if execution is None:

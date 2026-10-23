@@ -107,7 +107,7 @@ def publish_diagnostic_bytes(path: Path, body: bytes) -> None:
         _create_bytes(directory, Path(path.name), body)
 
 
-def _read_bytes(directory: int, relative: Path) -> bytes:
+def _read_bytes(directory: int, relative: Path, limit: int | None = None) -> bytes:
     """Read only a regular file through no-follow descriptor-relative parents."""
     with _directory(directory, relative.parts[:-1]) as parent:
         try:
@@ -122,9 +122,21 @@ def _read_bytes(directory: int, relative: Path) -> bytes:
                 raise ValueError('checkpoint symlink rejected') from exc
             raise
         with os.fdopen(descriptor, 'rb') as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
                 raise ValueError('checkpoint file must be regular')
-            return stream.read()
+            if limit is not None and info.st_size > limit:
+                raise ValueError('diagnostic file exceeds read limit')
+            body = stream.read() if limit is None else stream.read(limit + 1)
+            if limit is not None and len(body) > limit:
+                raise ValueError('diagnostic file exceeds read limit')
+            return body
+
+
+def read_diagnostic_bytes(path: Path, limit: int = 65536) -> bytes:
+    """Read bounded regular diagnostic bytes through no-follow anchored parents."""
+    with _absolute_directory(path.parent) as directory:
+        return _read_bytes(directory, Path(path.name), limit)
 
 
 def _optional_json(path: Path, availability: dict[str, str]) -> Any:
