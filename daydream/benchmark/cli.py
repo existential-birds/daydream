@@ -593,13 +593,12 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         import subprocess
 
         from daydream.benchmark.reviewbench import harbor_cli
-        from daydream.benchmark.reviewbench.candidate import candidate_identity
         from daydream.review_profile import ProfileError
 
         if args.reviewbench_command == 'harbor-export':
             args.native_args = native_args
         try:
-            return harbor_cli.handle(args, candidate_identity())
+            return harbor_cli.handle(args)
         except (OSError, ValueError, KeyError, TypeError, ProfileError, git_ops.GitError,
                 subprocess.CalledProcessError) as exc:
             return _fail(f'ReviewBench: {exc}')

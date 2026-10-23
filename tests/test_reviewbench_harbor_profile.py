@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import runpy
 import shlex
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -19,7 +17,7 @@ import yaml
 
 from daydream import credential_patterns, json_utils, redaction
 from daydream.benchmark.reviewbench import harbor_profile
-from daydream.benchmark.reviewbench.contract import verify_source
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
 from daydream.benchmark.reviewbench.native import freeze_reviewer
@@ -54,7 +52,8 @@ def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.Fixtur
                                         reasoning_effort='high'))
     monkeypatch.setattr(harbor_profile, 'reviewer_build', lambda _wheel, *, platform, backend: (
         '\nCOPY runtime.lock /opt/runtime.lock\n', {'runtime.lock': b'offline test build input\n'},
-        {'platform': platform}))
+        {'version': '0.30.0', 'wheel_name': 'daydream-0.30.0-py3-none-any.whl',
+         'wheel_sha256': 'a' * 64, 'platform': platform}))
     export_harbor_profile(supplied_source, output, wheel=tmp_path / 'unused.whl', reviewer=reviewer,
                           base_image=NODE_IMAGE, platform=platform)
     return output
@@ -73,7 +72,7 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     manifest = json.loads((supplied_source / 'corpus/manifest.json').read_text())
     assert len(dataset['tasks']) == len(manifest) == 219
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
-    assert policy['schema'] == 3
+    assert policy['schema'] == PUBLIC_PROFILE_SCHEMA
     assert policy['source_prs'] == 219
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
@@ -88,6 +87,10 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     assert policy['judge']['max_output_tokens_enforced'] is False
     assert policy['reviewer']['fanout_concurrency'] == 1
     assert policy['runtime']['platform'] == policy['candidate']['platform']
+    assert policy['candidate'] == {
+        'version': '0.30.0', 'wheel_name': 'daydream-0.30.0-py3-none-any.whl',
+        'wheel_sha256': 'a' * 64, 'platform': policy['runtime']['platform'],
+    }
     assert policy['runtime']['reviewer_seccomp_sha256'] == _hash(public_profile / 'reviewer-seccomp.json')
     assert policy['runtime']['reviewer_seccomp_provenance']['policy_sha256'] == (
         policy['runtime']['reviewer_seccomp_sha256'])
@@ -99,7 +102,8 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         task = json.loads((directory / 'tests/task.json').read_text())
         assert expected[str(task['task_id'])] == task['evaluation_id']
         exported = json.loads((directory / 'environment/daydream-profile.json').read_text())
-        assert exported['schema'] == 3
+        assert exported['schema'] == PUBLIC_PROFILE_SCHEMA
+        assert exported['candidate'] == policy['candidate']
         digest = exported.pop('profile_sha256')
         encoded = json.dumps(exported, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
         assert hashlib.sha256(encoded).hexdigest() == digest
@@ -238,66 +242,6 @@ def test_competing_export_destination_preserves_the_winning_profile(
             for path in output.rglob('*') if path.is_file()} == winning_files
     assert not (output / 'dataset').exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
-
-
-@pytest.mark.parametrize('mutation', ['before-admission', 'during-bootstrap', 'before-publication'])
-def test_export_refuses_changed_candidate_before_publication(
-    supplied_source: Path, tmp_path: Path, mutation: str,
-) -> None:
-    """Real package mutations across build, export and publication cannot retain a stale identity."""
-    copied = tmp_path / 'candidate'
-    copied.mkdir()
-    package = Path(harbor_profile.__file__).resolve().parents[2]
-    shutil.copytree(package, copied / 'daydream', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    shutil.copyfile(package.parent / 'pyproject.toml', copied / 'pyproject.toml')
-    subprocess.run(['uv', 'build', '--wheel', '--out-dir', str(copied / 'wheels')],
-                   cwd=copied, check=True, capture_output=True)
-    script = '''import json,sys
-from pathlib import Path
-from daydream.benchmark.reviewbench import harbor_profile
-from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
-from daydream.benchmark.reviewbench.native import freeze_reviewer
-from daydream.run_config import RunConfig
-root,source,mutation=Path.cwd(),Path(sys.argv[1]),sys.argv[2]
-reviewer=freeze_reviewer(RunConfig(target=str(root),backend='codex',model='gpt-6.1-sol'))
-helper=root/'daydream/benchmark/reviewbench/harbor_auth.py'
-marker=b'\\n# competing candidate helper bytes\\n'
-verify=harbor_profile.verify_source
-build=harbor_profile.reviewer_build
-checks=0
-def captured_build(*args,**kwargs):
- _,_,identity=build(*args,**kwargs)
- if mutation=='before-admission':helper.write_bytes(helper.read_bytes()+marker)
- return '',{},identity
-harbor_profile.reviewer_build=captured_build
-def mutate(path):
- global checks
- identity=verify(path);checks+=1
- if (checks==1 and mutation=='during-bootstrap') or (checks==2 and mutation=='before-publication'):
-  helper.write_bytes(helper.read_bytes()+marker)
- return identity
-harbor_profile.verify_source=mutate
-# This HTTP-only dependency does not own candidate or supplied-source identity.
-harbor_profile.seccomp_profile=lambda:(b'{}\\n',b'{"policy_sha256":"synthetic-control"}\\n')
-output=root/'exported'
-error=None
-try:
- harbor_profile.export_harbor_profile(source,output,wheel=next((root/'wheels').glob('*.whl')),
-  base_image=NODE_IMAGE,reviewer=reviewer)
-except ValueError as exc:error=str(exc)
-print(json.dumps({'error':error,'published':output.exists(),'source_checks':checks,
- 'competing_bytes_preserved':helper.read_bytes().endswith(marker),
- 'staging_preserved':bool(list(root.glob('.reviewbench-export-*')))}))
-'''
-    result = subprocess.run([sys.executable, '-c', script, str(supplied_source), mutation], cwd=copied,
-        env={**os.environ, 'PYTHONPATH': str(copied)}, check=True, capture_output=True, text=True)
-    evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence['error'] == ('Executing candidate differs from the frozen export identity'
-                                 if mutation == 'before-admission' else 'Executing candidate changed during export')
-    assert evidence['source_checks'] == (0 if mutation == 'before-admission' else 2)
-    assert evidence['competing_bytes_preserved'] is True
-    assert evidence['published'] is False
-    assert evidence['staging_preserved'] is False
 
 
 @pytest.mark.parametrize('change', ['missing-model', 'http', 'model-host', 'headers'])

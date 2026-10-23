@@ -18,8 +18,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest
-from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case, verify_source
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, REVIEWBENCH_REVISION, Case, verify_source
 from daydream.benchmark.reviewbench.native import freeze_reviewer
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
@@ -70,11 +69,11 @@ def public_input(tmp_path: Path, *, additional_sources: int = 0, divergent_base:
     pr = {**asdict(case), 'title': 'Frozen supplied title', 'body': 'Frozen supplied author explanation'}
     (inputs / 'pr.json').write_text(json.dumps(pr))
     (inputs / 'diff.patch').write_text(git_ops.diff_paths(repo, case.base, case.head, ['.'], merge_base_diff=True))
-    profile = {'schema': 3, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
+    profile = {'schema': PUBLIC_PROFILE_SCHEMA, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': pr,
                'task_id': 7, 'evaluation_id': 99,
                'reviewer': freeze_reviewer(empty_review_config(repo, tmp_path / 'ignored', backend='codex',
                    model='gpt-6.1-sol', reasoning_effort='high')),
-               'candidate': {'artifact_sha256': candidate_package_digest()}}
+               'candidate': {'wheel_name': 'daydream-0.30.0-py3-none-any.whl', 'wheel_sha256': 'b' * 64}}
     profile['profile_sha256'] = hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(',', ':'))
                                                .encode()).hexdigest()
     (inputs / 'daydream-profile.json').write_text(json.dumps(profile))

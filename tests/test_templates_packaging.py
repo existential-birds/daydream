@@ -105,16 +105,12 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         replacement.write_bytes(replacement_bytes)
         runtime_lock = Path(harbor_build.__file__).with_name('reviewer-runtime.lock')
         read_bytes = Path.read_bytes
-        lock_reads = 0
 
         def replace_after_validation(path: Path) -> bytes:
-            nonlocal lock_reads
             content = read_bytes(path)
             if path == runtime_lock:
-                lock_reads += 1
                 # Replace after validation, when the runtime lock is captured.
-                if lock_reads == 2:
-                    os.replace(replacement, wheel)
+                os.replace(replacement, wheel)
             return content
 
         with monkeypatch.context() as patch:
@@ -126,12 +122,10 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
 
 
 def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
-    """Inspect the actual final image for verifier answers, source caches and candidate identity."""
+    """Inspect the actual final image for verifier answers and source caches."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')
-    from daydream.benchmark.reviewbench.candidate import candidate_identity
-
     script = '''import importlib.util, json
 from pathlib import Path
 
@@ -144,12 +138,10 @@ for root in (Path("/root"), Path("/opt"), Path("/tmp")):
                     "scripts/classifier/classify.ts", "golden/*.json"):
         assert not list(root.rglob(pattern)), f"verifier material visible under {root}: {pattern}"
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
-from daydream.benchmark.reviewbench.candidate import candidate_identity
-print(json.dumps({"candidate": candidate_identity(), "verifier_material_absent": True}))
+print(json.dumps({"verifier_material_absent": True}))
 '''
     result = subprocess.run([
         'docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/opt/daydream/bin/python', image, '-c', script,
     ], check=True, capture_output=True, text=True, timeout=180)
     evidence = json.loads(result.stdout)
     assert evidence['verifier_material_absent'] is True
-    assert evidence['candidate']['artifact_sha256'] == candidate_identity()['artifact_sha256']

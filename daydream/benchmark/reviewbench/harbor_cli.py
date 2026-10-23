@@ -12,8 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from daydream.benchmark.reviewbench.candidate import candidate_identity
-from daydream.benchmark.reviewbench.contract import Case
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
 from daydream.benchmark.reviewbench.harbor_build import (
     HARBOR_REVISION,
     NODE_IMAGE,
@@ -148,12 +147,7 @@ def _selected_tasks(dataset: Path, profile: dict[str, Any], args: argparse.Names
     return selected
 
 
-def _current_candidate(candidate: dict[str, Any]) -> None:
-    if candidate_identity() != candidate:
-        raise ValueError('Executing candidate changed during Harbor launch; retain evidence and use a fresh export')
-
-
-def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
+def handle(args: argparse.Namespace) -> int:
     if args.reviewbench_command == 'harbor-export':
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
         from daydream.benchmark.reviewbench.native import freeze_reviewer, parse_native_config
@@ -172,17 +166,13 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
-    if profile.get('schema') != 3:
+    if profile.get('schema') != PUBLIC_PROFILE_SCHEMA:
         raise ValueError('Incompatible public profile schema; create a fresh Harbor export')
     policy_sha = profile['policy_sha256']
     if canonical_digest({key: value for key, value in profile.items() if key != 'policy_sha256'}) != policy_sha:
         raise ValueError('Full public profile identity differs')
     if profile.get('source_prs') != 219:
         raise ValueError('Full public profile identity differs')
-    frozen_candidate = profile.get('candidate', {})
-    if any(not candidate.get(key) or frozen_candidate.get(key) != candidate[key]
-           for key in ('artifact_sha256', 'version')):
-        raise ValueError('Executing candidate differs from the frozen public profile')
     if args.rounds > profile['final_comparison_rounds']:
         raise ValueError('Requested rounds exceed the frozen profile')
     backend = profile['reviewer']['backend']
@@ -201,7 +191,7 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     validate_credential_stores(reviewer_home, judge_home, backend=backend, provider=profile['reviewer'].get('provider'))
     if not DockerEnvironment._egress_control_kernel_support():
         raise ValueError('Docker kernel lacks Harbor exact-host isolation support')
-    # Schema and package validation precede credential delivery and model work.
+    # Schema and exported dataset validation precede credential delivery and model work.
     subprocess.run([sys.executable, '-m', 'reviewbench_harbor.check-format', str(args.directory.resolve())], check=True)
     local_config = _local_metric_config(args.directory, args.jobs_dir)
     command = [str(Path(sys.executable).with_name('harbor')), 'run', '--yes', '-c', str(local_config),
@@ -222,10 +212,7 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     environment['RB_HARBOR_PI_AUTH_DIR'] = str(judge_home)
     environment['RB_HARBOR_PI_AUTH_PATH'] = '/run/reviewbench-pi/auth.json'
     environment['RB_HARBOR_SECCOMP_PROFILE'] = str(args.directory.resolve() / 'reviewer-seccomp.json')
-    _current_candidate(candidate)
     returncode = subprocess.call(command, env=environment)
     if returncode:
         return returncode
-    checked = _check_completed_job(args.jobs_dir.resolve() / args.job_name)
-    _current_candidate(candidate)
-    return checked
+    return _check_completed_job(args.jobs_dir.resolve() / args.job_name)

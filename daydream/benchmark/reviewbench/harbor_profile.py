@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from daydream.benchmark.reviewbench.candidate import candidate_identity, candidate_package_digest
 from daydream.benchmark.reviewbench.contract import (
+    PUBLIC_PROFILE_SCHEMA,
     REVIEWBENCH_REVISION,
     load_cases,
     verify_source,
@@ -140,7 +140,7 @@ def export_harbor_profile(
     rounds: int = 3,
     platform: str = 'linux/amd64',
 ) -> dict[str, Any]:
-    """Freeze the executing wheel and all 219 supplied tasks into a new local profile."""
+    """Freeze the supplied wheel and all 219 supplied tasks into a new local profile."""
     source = source.resolve()
     output = output.absolute()
     if output.exists():
@@ -153,14 +153,9 @@ def export_harbor_profile(
         raise ValueError('Independent comparison rounds must be positive')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[a-f0-9]{64}', base_image):
         raise ValueError('Runtime images must be pinned by sha256 digest')
-    candidate = candidate_identity()
-    reviewer_dockerfile_suffix, reviewer_assets, identity = reviewer_build(
+    reviewer_dockerfile_suffix, reviewer_assets, candidate = reviewer_build(
         wheel.resolve(), platform=platform, backend=reviewer['backend'],
     )
-    candidate.update(identity)
-    candidate_sha = candidate['artifact_sha256']
-    if candidate_package_digest() != candidate_sha:
-        raise ValueError('Executing candidate differs from the frozen export identity')
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
     models = codex_models()
@@ -194,7 +189,7 @@ def export_harbor_profile(
         'tests/test.sh': bootstrap.encode(),
     }
     policy: dict[str, Any] = {
-        'schema': 3, 'name': 'daydream-reviewbench-native',
+        'schema': PUBLIC_PROFILE_SCHEMA, 'name': 'daydream-reviewbench-native',
         'source': source_identity, 'source_prs': len(cases),
         'cases': {case.key: asdict(case) for case in cases},
         'test_tasks': [case.key for case in load_cases(source, 'test')],
@@ -249,7 +244,7 @@ def export_harbor_profile(
             expected[str(task['task_id'])] = task['evaluation_id']
             _write_json(task_path, task)
             profile = {
-                'schema': 3, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
+                'schema': PUBLIC_PROFILE_SCHEMA, 'upstream_revision': REVIEWBENCH_REVISION, 'pr': task['pr'],
                 'task_id': task['task_id'], 'evaluation_id': task['evaluation_id'],
                 'reviewer': policy['reviewer'], 'candidate': dict(candidate), 'policy_sha256': policy_sha,
             }
@@ -294,8 +289,6 @@ def export_harbor_profile(
         # changes cannot silently claim the originally admitted revision.
         if verify_source(source) != source_identity:
             raise ValueError('Supplied source changed during export')
-        if candidate_package_digest() != candidate_sha:
-            raise ValueError('Executing candidate changed during export')
         shutil.copytree(exported, output)
     return {'tasks': len(cases), 'policy_sha256': policy_sha, 'metric_sha256': metric_sha,
             'output': str(output), 'profile': policy}

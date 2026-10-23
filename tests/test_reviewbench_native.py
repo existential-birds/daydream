@@ -5,9 +5,7 @@ import asyncio
 import errno
 import json
 import os
-import shutil
 import subprocess
-import sys
 from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -20,7 +18,6 @@ import pytest
 from daydream import git_ops, runner
 from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, EffectiveRequestConfig, RequestEvent
 from daydream.backends.pi import native_pi_settings
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.benchmark.reviewbench.native import (
     CaseExecution,
@@ -37,6 +34,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.review_result import FinalizedReview, deliver_finalized_review
 from daydream.run_config import RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
+from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
@@ -60,13 +58,11 @@ def _execution_input(config: RunConfig) -> runner.RunnerExecutionInput:
 
 
 async def _review(repo: Path, case: Case, config: RunConfig, *,
-                  execution_input: runner.RunnerExecutionInput | None = None,
-                  candidate_sha256: str | None = None) -> CaseExecution:
+                  execution_input: runner.RunnerExecutionInput | None = None) -> CaseExecution:
     task = PublicHarborTask(case, REVIEWBENCH_REVISION,
         git_ops.diff_paths(repo, git_ops.merge_base(repo, case.base, case.head) or case.base, case.head, ['.']),
         7, 99, 'a' * 64)
     return await review_case(task, repo, config, execution_input=execution_input or _execution_input(config),
-        candidate_sha256=candidate_sha256 or candidate_package_digest(),
         evidence_directory=repo.parent / 'native-evidence')
 
 
@@ -316,75 +312,16 @@ def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(t
         9: "missing_finding_message"}
 
 
-async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, mutation: str, report: Path) -> None:
-    """Run inside the isolated candidate import root, replacing only generation."""
-    created: list[tuple[str, EmptyReviewBackend]] = []
-    config = empty_review_config(repo, report.parent / 'trajectory', file_config=DaydreamFileConfig(
-        backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
-    expected_extension = selected_extension_identity()
-    selected_mutation = extension if not mutation.startswith('core-') else (
-        extension.parent.parent / 'daydream/backends/pi_structured_output.ts')
-    mutation = mutation.removeprefix('core-')
-    measured_calls = 0
-
-    class MeasuredBackend(EmptyReviewBackend):
-        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            nonlocal measured_calls
-            measured_calls += 1
-            yield CostEvent(cost_usd=0.25, input_tokens=11, output_tokens=3, cached_tokens=2)
-            async for event in super().execute(*args, **kwargs):
-                yield event
-
-    frozen = _execution_input(config)
-    frozen = replace(frozen, backends={**frozen.backends,
-        'claude': BackendExecutionInput.from_environment(os.environ, backend='claude')})
-    frozen_candidate = candidate_package_digest()
-    if mutation == 'before':
-        selected_mutation.write_text(selected_mutation.read_text() + (
-            '\n# changed before generation\n' if selected_mutation.suffix == '.py'
-            else '\n// changed before generation\n'))
-
-    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
-        assert kwargs['execution_input'].retry_policy.base_delay_s == (10.0 if name == 'pi' else 2.0)
-        if mutation == 'during' and not created:
-            selected_mutation.write_text(selected_mutation.read_text() + ('\n# changed during the admitted run\n'
-                if selected_mutation.suffix == '.py' else '\n// changed during the admitted run\n'))
-        backend = (MeasuredBackend if mutation == 'during' else EmptyReviewBackend)(
-            kwargs.get('cwd', repo), forbid_merge=False, forbid_supervise=False,
-            review_by_stack={'structure': [finding()]} if mutation == 'during' else {})
-        backend.model = kwargs['model']
-        backend.merge_echo_records = True
-        created.append((name, backend))
-        return backend
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(runner, 'create_backend', create)
-        result = await _review(repo, case, config, execution_input=frozen,
-                                   candidate_sha256=frozen_candidate)
-    report.write_text(json.dumps({'execution': asdict(result), 'frozen_extension': expected_extension,
-        'created': len(created), 'measured_calls': measured_calls,
-        'custom_phase_called': any(name == 'claude' and backend.calls
-            for name, backend in created), 'prompt_override_called': any('PACKAGED_PROMPT_OVERRIDE' in call['prompt']
-            for _, backend in created for call in backend.calls)}))
-
-
-@pytest.mark.parametrize('mutation', ['none', 'before', 'during', 'core-before', 'core-during'])
-async def test_native_packaged_extension_is_bound_before_and_after_real_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, mutation: str,
+async def test_native_review_preserves_ordinary_extension_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, ext_dir: ExtDir,
 ) -> None:
-    """Run real packaged hooks; reject extension or core bytes changed before or during generation."""
-    import daydream
+    """Benchmark reviews retain ordinary extension loading, prompts and custom phase models.
 
+    The ordinary extension integration tests do not enter review_case's isolated
+    checkout or deliver its frozen per-backend execution capabilities.
+    """
     repo, case = frozen_case(tmp_path)
-    monkeypatch.delenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', raising=False)
-    monkeypatch.delenv('DAYDREAM_EXT_DIR', raising=False)
-    candidate = tmp_path / 'candidate'
-    shutil.copytree(Path(daydream.__file__).parent, candidate / 'daydream',
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
-    extension = candidate / 'daydream_ext' / '__init__.py'
-    extension.parent.mkdir()
-    extension.write_text(
-        'DAYDREAM_EXT_API = 8\n'
+    ext_dir.write_module(
         'from daydream.agent import run_agent\n'
         'from daydream.extensions import FlowStep\n'
         'from daydream.trajectory import DaydreamPhase\n'
@@ -394,82 +331,31 @@ async def test_native_packaged_extension_is_bound_before_and_after_real_review(
         'def register(registry):\n'
         '    intent = registry.prompt("intent")\n'
         '    registry.override_prompt("intent", lambda *args, **kwargs: '
-        'intent(*args, **kwargs) + "\\nPACKAGED_PROMPT_OVERRIDE")\n'
+        'intent(*args, **kwargs) + "\\nNATIVE_PROMPT_OVERRIDE")\n'
         '    registry.register_phase(FlowStep(name="native-probe", run=probe))\n'
         '    registry.insert_before("deep", anchor="intent", step="native-probe")\n')
-    home = tmp_path / 'private-home'
-    home.mkdir()
-    report = tmp_path / 'extension-result.json'
-    script = (
-        'import asyncio,json,sys; from pathlib import Path; '
-        'from tests.test_reviewbench_native import _packaged_extension_journey; '
-        'from daydream.benchmark.reviewbench.contract import Case; '
-        'asyncio.run(_packaged_extension_journey(Path(sys.argv[1]), Case.from_dict(json.loads(sys.argv[2])), '
-        'Path(sys.argv[3]), sys.argv[4], Path(sys.argv[5])))'
-    )
-    subprocess.run([sys.executable, '-c', script, str(repo), json.dumps(asdict(case)), str(extension), mutation,
-                    str(report)], cwd=tmp_path, env={**os.environ, 'HOME': str(home),
-        'PYTHONPATH': os.pathsep.join((str(candidate), str(Path(__file__).resolve().parent.parent)))},
-        check=True, capture_output=True, text=True, timeout=60)
-    observed = json.loads(report.read_text())
-    result = observed['execution']
-    assert observed['frozen_extension']['source_kind'] == 'packaged'
-    if mutation == 'none':
-        assert result['status'] == 'completed_empty', result['diagnostics']
-        assert result['candidate'] is not None
-    else:
-        assert result['status'] == 'failed' and result['candidate'] is None
-    if mutation in {'before', 'core-before'}:
-        assert observed['created'] == 0 and result['terminal_result'] is None
-        assert 'candidate bytes changed before native review' in result['diagnostics'][0]
-    else:
-        assert observed['custom_phase_called'] and observed['prompt_override_called']
-        assert result['configuration']['phases']['extension-review']['model'] == 'claude-sonnet-5'
-    if mutation in {'during', 'core-during'}:
-        assert result['terminal_result']['analysis_state'] == 'complete'
-        assert result['retained_findings']
-        assert ('native extension changed during review' if mutation == 'during' else
-                'candidate bytes changed during native review') in result['diagnostics'][0]
-        assert observed['measured_calls'] > 0
-        assert result['usage'] == {'prompt_tokens': 11 * observed['measured_calls'],
-            'completion_tokens': 3 * observed['measured_calls'], 'cached_tokens': 2 * observed['measured_calls'],
-            'total_tokens': 14 * observed['measured_calls'], 'cost_usd': 0.25 * observed['measured_calls']}
-    assert not fake_gh.calls('POST')
-
-
-async def test_native_explicit_runtime_cannot_admit_external_extension_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Explicit native capabilities cannot load or read a mutable external extension."""
-    repo, case = frozen_case(tmp_path)
-    config = empty_review_config(repo, tmp_path / 'trajectory', backend='codex')
+    config = empty_review_config(repo, tmp_path / 'trajectory', file_config=DaydreamFileConfig(
+        backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
     frozen = _execution_input(config)
-    frozen_candidate = candidate_package_digest()
-    extension = tmp_path / 'operator-directory'
-    extension.mkdir()
-    marker = tmp_path / 'extension-executed'
-    (extension / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
-                                          + ').write_text("must not execute")\n')
-    (extension / 'auth.json').write_text('{"refresh_token":"do-not-read-or-fingerprint"}')
-    monkeypatch.setenv('DAYDREAM_EXT_DIR', str(extension))
-    read_bytes = Path.read_bytes
+    frozen = replace(frozen, backends={**frozen.backends,
+        'claude': BackendExecutionInput.from_environment(os.environ, backend='claude')})
+    created: list[tuple[str, EmptyReviewBackend]] = []
 
-    def bounded_read(path: Path) -> bytes:
-        if path.is_relative_to(extension):
-            pytest.fail('benchmark admission read external extension or credential bytes')
-        return read_bytes(path)
+    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
+        backend = EmptyReviewBackend(kwargs.get('cwd', repo), forbid_merge=False, forbid_supervise=False)
+        backend.model = kwargs['model']
+        created.append((name, backend))
+        return backend
 
-    monkeypatch.setattr(Path, 'read_bytes', bounded_read)
-
-    def forbidden(*args: Any, **kwargs: Any) -> None:
-        pytest.fail('external extension selection reached generation')
-
-    monkeypatch.setattr(runner, 'create_backend', forbidden)
-    result = await _review(repo, case, config, execution_input=frozen, candidate_sha256=frozen_candidate)
-    assert result.status == 'failed' and result.candidate is None and result.terminal_result is None
-    assert not marker.exists()
-    assert 'DAYDREAM_EXT_DIR' in result.diagnostics[0]
-    assert 'do-not-read-or-fingerprint' not in json.dumps(asdict(result))
+    monkeypatch.setattr(runner, 'create_backend', create)
+    result = await _review(repo, case, config, execution_input=frozen)
+    assert result.status == 'completed_empty', result.diagnostics
+    assert result.candidate is not None
+    assert any(name == 'claude' and any(call['prompt'] == 'NATIVE_EXTENSION' for call in backend.calls)
+               for name, backend in created)
+    assert any('NATIVE_PROMPT_OVERRIDE' in call['prompt'] for _, backend in created for call in backend.calls)
+    assert result.configuration['phases']['extension-review']['model'] == 'claude-sonnet-5'
+    assert not fake_gh.calls('POST')
 
 
 async def test_frozen_pi_defaults_refuse_case_thinking_override(
