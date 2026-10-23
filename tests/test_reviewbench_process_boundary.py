@@ -232,17 +232,21 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
                 await running
             assert asyncio.get_running_loop().time() < deadline, 'native tool process did not reach readiness'
             await asyncio.sleep(0.01)
-        while not (manifests := list(checkpoints.glob('*/checkpoint.json'))):
+        while True:
+            if manifests := sorted(checkpoints.glob('*/checkpoint.json')):
+                manifest, documents = read_checkpoint(manifests[-1].parent)
+                tool_payloads = [json.loads(result['content'])
+                                 for document in documents for step in document['steps']
+                                 for result in step.get('observation', {}).get('results', [])
+                                 if result['source_call_id'] == 'fixture-input']
+                if len(documents) >= 3 and tool_payloads:
+                    break
             assert asyncio.get_running_loop().time() < deadline, 'active tool checkpoint was not retained'
             await asyncio.sleep(0.01)
-        manifest, documents = read_checkpoint(sorted(manifests)[-1].parent)
         assert manifest['kind'] == 'checkpoint' and len(documents) >= 3
         checkpoint_text = json.dumps(documents)
         assert 'ordinary-public-key' in checkpoint_text
         assert secret not in checkpoint_text, 'active checkpoint retained an admitted Pi credential'
-        tool_payloads = [json.loads(result['content']) for document in documents for step in document['steps']
-                         for result in step.get('observation', {}).get('results', [])
-                         if result['source_call_id'] == 'fixture-input']
         assert tool_payloads
         for payload in tool_payloads:
             assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
