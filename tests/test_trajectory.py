@@ -654,6 +654,48 @@ async def test_json_event_keys_are_redacted_before_immutable_checkpoint(tmp_path
     assert atif_validate(json.loads(final_bytes))
 
 
+@pytest.mark.parametrize('surface', ['observation', 'message'])
+async def test_escaped_surrogates_remain_utf8_writable_in_frozen_evidence(tmp_path: Path, surface: str) -> None:
+    """Retained JSON text must remain writable by a UTF-8 diagnostic consumer.
+
+    The outer ATIF encoder escapes invalid code points itself, hiding an unsafe
+    decoded message/observation string. Read actual immutable checkpoint and final
+    bytes, then exercise the diagnostic consumer's real UTF-8 filesystem write.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    payload = {'message': chr(0xD800), chr(0xDFFF) + 'clé': 'café 😀',
+               'usage': {'input_tokens': 0, 'output_tokens': None}}
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            if surface == 'observation':
+                invocation.observe(ToolStartEvent(id='inspect', name='Inspect', input={}))
+                invocation.observe(ToolResultEvent(id='inspect', output=json.dumps(payload), is_error=False))
+            else:
+                invocation.observe(TextEvent(json.dumps(payload)))
+            recorder.write_partial()
+            first = snapshots[-1]
+            first_bytes = first.documents[0].json_bytes
+            assert _partial_path(recorder).read_bytes() == first_bytes
+            trajectory = json.loads(first_bytes)
+            assert atif_validate(trajectory)
+            step = next(step for step in trajectory['steps'] if step['source'] == 'agent')
+            content = step['observation']['results'][0]['content'] if surface == 'observation' else step['message']
+            (tmp_path / 'checkpoint-readout.txt').write_text(content, encoding='utf-8')
+            assert json.loads(content) == payload
+            invocation.observe(TurnEndEvent(message_id='json-evidence-step'))
+            invocation.observe(TextEvent('public activity after checkpoint'))
+            recorder.write_partial()
+            assert first.documents[0].json_bytes == first_bytes
+    final_bytes = recorder.path.read_bytes()
+    trajectory = json.loads(final_bytes)
+    assert atif_validate(trajectory)
+    step = next(step for step in trajectory['steps'] if step['source'] == 'agent')
+    content = step['observation']['results'][0]['content'] if surface == 'observation' else step['message']
+    (tmp_path / 'final-readout.txt').write_text(content, encoding='utf-8')
+    assert json.loads(content) == payload
+
+
 async def test_request_metadata_is_redacted_in_active_partial_and_completed_evidence(
     recorder: TrajectoryRecorder,
 ) -> None:

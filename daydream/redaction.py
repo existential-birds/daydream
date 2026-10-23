@@ -673,7 +673,7 @@ def _redact_json_container(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_json_container(item) for item in value]
     if isinstance(value, str):
-        return redact_structured_text(value)
+        return _redact_structured_text(value)
     return value
 
 
@@ -686,7 +686,7 @@ def _redact_unstructured_text(s: str) -> str:
         return "[REDACTION_FAILED]"
 
 
-def redact_structured_text(s: str) -> str:
+def _redact_structured_text(s: str) -> str:
     """Apply auth-header/scheme rules, flat patterns, then structured-pair/block rules.
 
     Earlier markers are preserved, preventing partial or double redaction. Any
@@ -704,3 +704,13 @@ def redact_structured_text(s: str) -> str:
         return _redact_unstructured_text(s)
     except Exception:  # noqa: BLE001 - fail closed at every host boundary
         return "[REDACTION_FAILED]"
+
+
+def redact_structured_text(s: str) -> str:
+    """Return redacted diagnostic text that can be encoded as UTF-8.
+
+    Compose recursive JSON leaves before escaping lone surrogates: escaping a
+    leaf first would change its decoded code points into literal backslashes.
+    Valid Unicode stays literal; invalid plain text gains an escape spelling.
+    """
+    return _redact_structured_text(s).encode('utf-8', errors='backslashreplace').decode('utf-8')
