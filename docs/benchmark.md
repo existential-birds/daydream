@@ -24,8 +24,10 @@ Docker needs the selected architecture, nested sandboxing and exact-host isolati
 The wheel/hash identifies the candidate; package extensions there. No matching installation is needed.
 `--set test`: supplied 25; `--set full`: all 219; repeated `--task EXACT_NAME`: a subset.
 Harbor owns rounds/timeouts; supplied scoring/checkers own results. Use fresh schema-4 wheels/exports; preserve old evidence.
-Raw `daydream-checkpoints/checkpoint-*.json` hold exact root/sibling JSON/hashes; trial logs retain native/process receipts.
-Checkpoints confer no completion/scoring authority; offline tests establish no quality or performance improvement.
+Ordinary timeout cancellation joins writers and exports partial root/child trajectories, phase cancellation events,
+native output, `execution.json`, and process receipts. Cleanup retains a 20-second graceful shutdown allowance;
+forced termination can leave detailed review evidence unavailable. New runs create no periodic checkpoint artifacts;
+preserve historical artifacts.
 
 ## Private Harbor benchmark
 

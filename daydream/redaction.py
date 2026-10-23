@@ -46,7 +46,7 @@ _PEM_KEY_PATTERN = re.compile(
 
 
 # Keep the complete-block publication rule precise. A separate live-redaction
-# rule consumes only genuinely unmatched tails, including a checkpoint taken
+# rule consumes only genuinely unmatched tails, including a snapshot taken
 # before a streamed footer arrives; it never matches a complete key by itself.
 _PEM_KEY_TAIL_PATTERN = re.compile(
     rf"-----BEGIN {_PEM_HEADER}-----(?!.*-----END {_PEM_HEADER}-----).*\Z",

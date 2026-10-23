@@ -28,14 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
-  Simplify cancellation and publish raw evidence without separate session archives or readout machinery.
+- Redact native credentials; preserve native budgets/scoring, cancellation, and final evidence export
+  without separate session archives or readout machinery.
 
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain
   oversized-input regression coverage with a bounded case ID and unchanged
   payload and assertions.
+
+### Removed
+
+- Remove public ReviewBench's periodic interruption checkpoints and `daydream/benchmark/reviewbench/diagnostics.py`.
+  Ordinary timeout export remains; forced termination can leave detailed review evidence unavailable.
+  Remove `RunnerExecutionInput.on_trajectory_snapshot`; embedded callers must stop passing this argument.
 
 ## [0.30.0] - 2026-10-19
 
