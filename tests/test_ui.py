@@ -198,7 +198,6 @@ def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
 async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
     layout: str,
 ) -> None:
-    """Redact the complete tool result before Rich wrapping or line cuts lose its credential tag."""
     secret = 'opaque-ui-native-auth-canary'
     credentials = {'key': secret}
     payload: dict[str, object] = {**credentials, 'public': {'key': 'ordinary-public-key'}}
@@ -222,7 +221,6 @@ async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
 async def test_text_displays_redact_complete_native_auth_before_selecting_or_formatting(
     route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Narration, callbacks, thinking caps, and logs redact complete buffered context before formatting."""
     secret = 'opaque-ui-text-native-auth-canary'
     fields = {'key': secret}
     public = {'public': {'key': 'ordinary-public-key'}}
@@ -256,7 +254,6 @@ async def test_text_displays_redact_complete_native_auth_before_selecting_or_for
 async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
     route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Each public tool-input presentation route protects opaque native fields before selecting a value."""
     secret = 'opaque-ui-callback-native-auth-canary'
     values: dict[str, object] = {'key': secret}
     values['type'] = 'api_key'
@@ -293,7 +290,6 @@ async def test_callback_tool_input_redacts_native_auth_before_primary_argument_s
 def test_task_tool_presentation_preserves_labels_results_and_caps(
     name: str, arguments: dict[str, object], result: str | None, present: tuple[str, ...], absent: tuple[str, ...],
 ) -> None:
-    """One real registry journey owns ID harvesting and each task tool's public rendering."""
     console = Console(file=StringIO(), record=True)
     registry = LiveToolPanelRegistry(console, quiet_mode=result is None)
     fixtures = Path(__file__).parent / 'fixtures/task_tools'

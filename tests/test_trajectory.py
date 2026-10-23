@@ -144,7 +144,6 @@ async def _record_events(tmp_path: Path, *events: AgentEvent) -> tuple[Invocatio
 async def test_tool_completion_and_abort_preserve_the_host_step(
     tmp_path: Path, closed: bool, result: bool | None, aborted: bool,
 ) -> None:
-    """Late results amend their original step; only unfinished calls receive interruption markers."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.FIX) as invocation:
@@ -210,7 +209,6 @@ async def test_dispatch_failure_is_caught_and_run_continues(
 async def test_filesystem_writer_failure_is_optional(
     recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
-    """Actual partial/final filesystem failures warn without replacing a healthy invocation."""
     warnings: list[str] = []
     monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
 
@@ -261,7 +259,6 @@ async def test_dispatch_repeated_descriptor_scopes_keep_distinct_children(record
 
 @pytest.mark.parametrize('ending', ['optimistic-cancel', 'empty-cancel', 'empty-error'])
 async def test_dispatch_body_failure_owns_terminal_status(recorder: TrajectoryRecorder, ending: str) -> None:
-    """Cancellation/body failure outrank optimistic success and an empty child's secondary write failure."""
     async def dispatch_body() -> None:
         async with trajectory_module.dispatch_scope(recorder, phase=DaydreamPhase.FIX,
                                                      descriptors=('child',)) as dispatch:
@@ -311,7 +308,6 @@ _GRAPH_LABELS = [
 async def test_partial_graph_preserves_empty_ancestry_and_original_private_identities(
     tmp_path: Path, label: str, planned: str | None, identified: bool,
 ) -> None:
-    """Live empty ancestry and private labels retain one immutable rooted graph before any finalizer."""
     private = 'opaque-first-canary' in label
     second_label = label.replace('opaque-first-canary', 'opaque-second-canary') if private else 'second-public'
     queued = '{"type":"oauth","access":"opaque-queued-canary"}'
@@ -431,7 +427,6 @@ async def test_dispatch_step_noop_when_no_siblings(recorder: TrajectoryRecorder)
 
 @pytest.mark.parametrize('label', ['Fix_Issue (3)', 'UPPER--CASE', '../etc/passwd', '', '...', '   '])
 async def test_fork_paths_confine_public_descriptors(tmp_path: Path, label: str) -> None:
-    """The public fork interface confines labels to owned paths and refuses unusable filenames."""
     root = make_recorder(tmp_path)
     async with root:
         if label in {'', '...', '   '}:
@@ -484,7 +479,6 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize('state', ['empty', 'tool', 'diagnostic', 'completed', 'child'])
 async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Path, state: str) -> None:
-    """Partial files are stable projections; flushing cannot consume live events or duplicate joined steps."""
     root = make_recorder(tmp_path)
     async with root:
         if state == 'empty':
@@ -554,7 +548,6 @@ async def _hold_fork(
 
 
 async def test_partial_dispatch_retains_planned_queued_scopes_before_fanout_joins(tmp_path: Path) -> None:
-    """A first-scope checkpoint retains queued plans without declaring them attempted or complete."""
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     limiter = anyio.CapacityLimiter(1)
@@ -610,7 +603,6 @@ async def test_partial_dispatch_retains_planned_queued_scopes_before_fanout_join
 async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_recorder: str,
 ) -> None:
-    """A preparation failure preserves a previously valid graph; retry publishes coherent later bytes."""
     snapshots: list[RunWriteSnapshot] = []
     warnings: list[str] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
@@ -745,7 +737,6 @@ def _finish_shutdown_panel() -> None:
 async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum: signal.Signals, denied: bool,
 ) -> None:
-    """The real handler captures once, writes healthy siblings and isolates an actual filesystem failure."""
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     entered = {name: anyio.Event() for name in ('signal-a', 'signal-b')}
@@ -800,7 +791,6 @@ async def test_recorder_marks_partial_on_exception_exit(recorder: TrajectoryReco
 
 
 async def test_nested_fork_billing_reaches_root_once(tmp_path: Path) -> None:
-    """Root totals include each nested owner once; empty forks and diagnostic projections add no billing."""
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     async with root:
@@ -832,7 +822,6 @@ async def test_nested_fork_billing_reaches_root_once(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize('backend', ['', 'codex'])
 async def test_trajectory_backend_metadata_omits_unavailable_phases(tmp_path: Path, backend: str) -> None:
-    """Only resolved nonempty phase identities enter persisted metadata, including Improve."""
     recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.IMPROVE, backend_name=backend,
                              review_backend_name=backend, fix_backend_name='', test_backend_name='')
     async with recorder:
@@ -881,7 +870,6 @@ async def test_remote_ci_host_phases_record_exact_terminal_reasons(
 
 @pytest.mark.parametrize('state', ['unbound', 'empty', 'runtime', 'cancel', 'child', 'root-and-child'])
 async def test_host_document_publication(tmp_path: Path, state: str) -> None:
-    """The host writer owns ordered bytes and one rooted capture, including empty/aborted runs."""
     snapshots: list[RunWriteSnapshot] = []
     writes: list[TrajectoryDocumentSnapshot] = []
     order: list[str] = []
@@ -965,7 +953,6 @@ async def test_host_document_publication(tmp_path: Path, state: str) -> None:
 
 @pytest.mark.parametrize('failure', ['partial', 'final'])
 async def test_document_writer_failure_preserves_capture_and_primary(tmp_path: Path, failure: str) -> None:
-    """A partial writer error retains frozen capture; final failure cannot replace an active body error."""
     snapshots: list[RunWriteSnapshot] = []
 
     def writer(document: TrajectoryDocumentSnapshot, status: str) -> None:

@@ -758,9 +758,6 @@ def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
         git_ops.head_sha(repo)
 
 
-
-
-
 def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path, name="list_branches")
     _git(repo, "checkout", "-b", "feat/slash-name")
@@ -807,11 +804,6 @@ def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None
 
 def test_branch_exists_missing(repo: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
-
-
-
-
-
 
 
 def test_ref_exists_missing(repo: Path) -> None:
@@ -915,7 +907,6 @@ def test_remote_urls_is_strict_and_allows_no_remotes(repo: Path) -> None:
         git_ops.remote_urls(repo)
 
 
-
 def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(repo: Path) -> None:
     oldest = git_ops.head_sha(repo)
     write_and_stage(repo, "base-update.txt", "new base\n")
@@ -970,7 +961,6 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path, repo: Path) 
     assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
 
 
-
 def test_diff_name_only_returns_empty_list_on_bad_ref(repo: Path) -> None:
     result = git_ops.diff_name_only(repo, "nonexistent-ref", "HEAD")
     assert result == []
@@ -980,7 +970,6 @@ def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> No
     """Safety guards must not mistake a failed enumeration for a clean tree."""
     with pytest.raises(GitError):
         git_ops.changed_files_against(tmp_path, "HEAD")
-
 
 
 def test_show_raises_on_missing_path(repo: Path) -> None:
@@ -1066,8 +1055,6 @@ def test_upstream_ahead_count_no_upstream(repo: Path) -> None:
     assert git_ops.upstream_ahead_count(repo, "main") == 0
 
 
-
-
 def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path, repo: Path) -> None:
     source = tmp_path / "legacy worktree"
     destination = tmp_path / "private workspaces" / "moved worktree"
@@ -1094,7 +1081,6 @@ def test_create_branch_raises_when_branch_exists(repo_with_origin: Path) -> None
     _git(repo_with_origin, "checkout", "main")
     with pytest.raises(GitError):
         git_ops.create_branch(repo_with_origin, "daydream/dup")
-
 
 
 def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
@@ -1454,7 +1440,6 @@ def test_diff_paths_unified_context_lines(repo: Path) -> None:
 def test_diff_paths_raises_on_invalid_ref(repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
-
 
 
 @pytest.mark.parametrize(
@@ -1965,8 +1950,6 @@ def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Pat
         git_ops.gh_secret_set(git_repo, "X", "v")
     with pytest.raises(GitError):
         git_ops.gh_secret_set(git_repo, "X", "v", org="acme", repo_slug="o/r")
-
-
 
 
 def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) -> None:

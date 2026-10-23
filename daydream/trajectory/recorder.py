@@ -692,11 +692,7 @@ class TrajectoryRecorder:
         self._extend_steps([self.redactor.redact_step(step)])
 
     def review_usage(self) -> dict[str, Any]:
-        """Project single-owner whole-run usage.
-
-        Fork scopes already fold successful child metrics into the root once.
-        These are usage totals, not review wall time or cleanup duration.
-        """
+        """Project root usage after each fork folds its metrics once; exclude elapsed review and cleanup time."""
         metrics = self._build_final_metrics(len(self.steps))
         usage = {key: value for key, value in (
             ("prompt_tokens", metrics.total_prompt_tokens), ("completion_tokens", metrics.total_completion_tokens),

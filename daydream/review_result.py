@@ -23,11 +23,7 @@ from daydream.run_context import current_run_context
 
 @dataclass(frozen=True)
 class FinalizedReview:
-    """Validated native result independent of PR publication and presentation.
-
-    Each delivery owns copies of frozen terminal evidence and canonical items.
-    Missing delivery means unavailable analysis, never an empty review.
-    """
+    """Callback-owned copies of terminal evidence, findings and usage; missing delivery is unavailable analysis."""
 
     terminal_result: dict[str, Any]
     items: list[dict[str, Any]]

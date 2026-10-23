@@ -299,12 +299,8 @@ async def run(
     execution: RunnerExecutionInput | None = None,
     review_result_handler: Callable[[FinalizedReview], None] | None = None,
 ) -> int:
-    """Execute a native flow and optionally deliver its actual finalized review.
-
-    The integer remains the workflow exit code. Review authority is independent
-    of later artifacts/publication; missing delivery means unavailable analysis.
-    Handler errors fail the invocation.
-    """
+    """Execute a flow, delivering callback-owned review evidence before publication.
+    Missing delivery is unavailable analysis; callback errors fail the flow. Return the workflow exit code."""
     if config is None:
         config = RunConfig()
     if config.dataset_capture_disabled:

@@ -24,7 +24,6 @@ _EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-
 _SINGLE_TEMPLATE_PATH = "daydream/templates/workflows/single/daydream.yml"
 
 
-
 def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
     single = (_REPO_ROOT / _SINGLE_TEMPLATE_PATH).read_text(encoding="utf-8")
     for secret in config.SETUP_SECRET_NAMES:
@@ -105,7 +104,6 @@ for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')
 
 
 def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
-    """Inspect the actual final image for verifier answers and source caches."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')

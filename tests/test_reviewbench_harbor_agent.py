@@ -1,4 +1,3 @@
-"""Public reviewer boundary: real frozen Git, runner and role-private auth files."""
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +26,6 @@ from tests.harness.reviewbench import public_input
 async def test_public_agent_python_startup_cannot_import_reviewed_repository_packages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
-    """Isolate reviewed imports while allowing the launcher and reviewer to have different versions."""
     environment = public_input(tmp_path)
     repository = Path(environment['DAYDREAM_RB_REPOSITORY'])
     marker = tmp_path / 'reviewed-python-executed'
@@ -105,7 +103,6 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
 async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_inference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
-    """Public provenance must not weaken ordinary origin checks or replay artifacts."""
     environment = public_input(tmp_path)
     prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
     inputs = Path(environment['DAYDREAM_RB_INPUTS'])
@@ -158,7 +155,6 @@ async def test_native_storage_failure_retains_diagnostics_without_manufacturing_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
     artifact_runtime_root: Path,
 ) -> None:
-    """A failed private artifact mkdir retains diagnostics without fabricating ATIF or model work."""
     environment = public_input(tmp_path)
     mkdir = Path.mkdir
     rejected: list[Path] = []

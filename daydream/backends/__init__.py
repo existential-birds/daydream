@@ -497,7 +497,6 @@ class EffectiveRequestConfig(_AdmissionBase):
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
 
 
-
 @dataclass(frozen=True)
 class ClaudeRequestConfig(EffectiveRequestConfig):
     """Claude effective controls; paths, environment, prompts, and credentials stay absent."""
@@ -514,7 +513,6 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     hooks_enabled: bool | None = None
 
 
-
 @dataclass(frozen=True)
 class CodexRequestConfig(EffectiveRequestConfig):
     """Codex-only effective controls (bounded values; paths/stdin/env absent)."""
@@ -523,7 +521,6 @@ class CodexRequestConfig(EffectiveRequestConfig):
     experimental_json: bool | None = None
     native_output_schema: bool | None = None
     read_only_isolation: bool | None = None
-
 
 
 @dataclass(frozen=True)
@@ -536,7 +533,6 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_skills: bool | None = None
     schema_emulated: bool | None = None
     no_extensions: bool | None = field(default=None, kw_only=True)
-
 
 
 @dataclass(frozen=True)
@@ -574,7 +570,6 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     observation_inline_bytes: int | None = None
     observation_admission_bytes: int | None = None
     vars_count: int | None = None
-
 
 
 _ConfigCheck = Callable[[Any, str], None]

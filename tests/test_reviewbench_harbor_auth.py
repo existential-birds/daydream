@@ -1,4 +1,3 @@
-"""Native credential isolation, rotation and locking at real filesystem/process seams."""
 from __future__ import annotations
 
 import json
@@ -52,7 +51,6 @@ def _run_contenders(command: list[str], environment: dict[str, str], root: Path)
 def test_subscription_only_rejects_unusable_auth_without_exposing_it(
     tmp_path: Path, damage: str, role: str,
 ) -> None:
-    """Reject unusable native credentials without leaking their contents."""
     canonical = tmp_path / "canonical"
     value = native_auth(canonical, "codex" if role == "reviewer" else "judge")
     path = canonical / "auth.json"
@@ -86,7 +84,6 @@ def test_subscription_only_rejects_unusable_auth_without_exposing_it(
 def test_native_pi_reviewer_store_refuses_unrelated_credentials(
     tmp_path: Path, extra_provider: str,
 ) -> None:
-    """A mounted native auth file must contain only the selected reviewer capability."""
     reviewer, judge = tmp_path / 'reviewer', tmp_path / 'judge'
     reviewer.mkdir()
     judge_auth = native_auth(judge, 'judge')
@@ -107,7 +104,6 @@ def test_native_pi_reviewer_store_refuses_unrelated_credentials(
 def test_admission_tolerates_native_in_place_rotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str,
 ) -> None:
-    """Retry a real truncate/write window observed by read-only credential admission."""
     home = tmp_path / 'credentials'
     auth = native_auth(home, 'codex' if role == 'reviewer' else 'judge')
     path = home / 'auth.json'
@@ -142,7 +138,6 @@ path.write_text(sys.argv[3])
 
 
 def test_native_reviewer_processes_serialize_and_retain_rotation_after_death(tmp_path: Path) -> None:
-    """A second native invocation waits for the lock and retains writes after abrupt death."""
     canonical = tmp_path / "canonical"
     native_auth(canonical)
     child = tmp_path / "waiter.py"
@@ -186,7 +181,6 @@ with reviewer_credentials(root/'canonical', root/'second') as home:
 
 @pytest.mark.parametrize('exit_code', [0, 29, 'cancel'])
 def test_judge_rotation_survives_fresh_invocations_and_cleanup(tmp_path: Path, exit_code: int | str) -> None:
-    """Join the judge and tools before disposing of private state; persist native rotation."""
     canonical = tmp_path / 'canonical'
     native_auth(canonical, 'judge')
     models = tmp_path / 'models.json'
@@ -252,7 +246,6 @@ sys.exit(int(mode) if mode.isdigit() else 0)
 def test_native_sdk_factory_shares_canonical_lock_and_retains_rotation(
     tmp_path: Path, request: pytest.FixtureRequest, role: str,
 ) -> None:
-    """Actual SDK factories share native locks while configuration and other credentials stay private."""
     if role == 'judge':
         source: Path = request.getfixturevalue('supplied_source')
         package = source / 'node_modules/@earendil-works/pi-coding-agent'

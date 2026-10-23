@@ -1,5 +1,3 @@
-"""Public custom export contracts against the pinned supplied exporter, without inference."""
-
 from __future__ import annotations
 
 import hashlib
@@ -65,7 +63,6 @@ def _hash(path: Path) -> str:
 def test_complete_custom_profile_passes_supplied_harbor_packager(
     supplied_source: Path, public_profile: Path,
 ) -> None:
-    """Validate real task, evaluation, metric and dataset identities with the supplied packager."""
     subprocess.run(['python', str(supplied_source / 'scripts/harbor/check-format.py'), str(public_profile)], check=True)
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     manifest = json.loads((supplied_source / 'corpus/manifest.json').read_text())
@@ -111,7 +108,6 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
 def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model(
     supplied_source: Path, public_profile: Path,
 ) -> None:
-    """Resolve the actual judge SDK model and preserve supplied sources and isolated bootstrap wiring."""
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
     judge = task_dir / 'tests/judge'
@@ -171,7 +167,6 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
 def test_invalid_public_profile_preserves_source_and_publishes_nothing(
     tmp_path: Path, option: dict[str, Any], error: str,
 ) -> None:
-    """Invalid reviewer, rounds, image or architecture must publish nothing."""
     output = tmp_path / 'refused'
     options = {'wheel': tmp_path / 'unused.whl', 'base_image': NODE_IMAGE,
                'reviewer': freeze_reviewer(RunConfig(backend='codex', model='gpt-6.1-sol')), **option}
@@ -184,7 +179,6 @@ def test_invalid_public_profile_preserves_source_and_publishes_nothing(
 def test_competing_export_destination_preserves_the_winning_profile(
     supplied_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A competing publication keeps its exact bytes and cannot receive a nested losing export."""
     output = tmp_path / 'competing-profile'
     winning_files = {
         'daydream-profile.json': b'{"winner": "other-export"}\n',
@@ -218,7 +212,6 @@ def test_competing_export_destination_preserves_the_winning_profile(
 def test_native_pi_export_rejects_unavailable_or_unisolated_operator_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    """Admit native model availability and exact HTTPS routing without mutating operator files."""
     provider: dict[str, Any] = {'baseUrl': 'https://inference-api.nousresearch.com/v1',
         'apiKey': 'synthetic-native-secret', 'models': [{'id': 'deepseek/deepseek-v4.1-flash',
                                                        'api': 'openai-completions'}]}

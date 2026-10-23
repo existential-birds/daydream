@@ -217,12 +217,8 @@ def _redact_native_auth_value(value: Any, *, presentation: bool = False) -> Any:
 
 
 def redact_native_auth_value(value: Any) -> Any:
-    """Return a fresh native-context-only presentation copy with UTF-8-safe text.
-
-    Ordinary keys/search patterns/paths and value types keep their policy. Compose
-    nested JSON privately before encoding final leaves so code points are not
-    double-escaped. The full recorder/Bash text policy remains separate.
-    """
+    """Copy native auth for presentation, preserving ordinary keys/search/path policy and value types.
+    Compose nested JSON before UTF-8 encoding; full recorder/Bash redaction stays separate."""
     return _redact_native_auth_value(value, presentation=True)
 
 
@@ -870,10 +866,5 @@ def _redact_structured_text(s: str) -> str:
 
 
 def redact_structured_text(s: str) -> str:
-    """Return redacted diagnostic text that can be encoded as UTF-8.
-
-    Compose recursive JSON leaves before escaping lone surrogates: escaping a
-    leaf first would change its decoded code points into literal backslashes.
-    Valid Unicode stays literal; invalid plain text gains an escape spelling.
-    """
+    """Redact text; compose decoded JSON leaves before escaping lone surrogates for valid UTF-8."""
     return _redact_structured_text(s).encode('utf-8', errors='backslashreplace').decode('utf-8')

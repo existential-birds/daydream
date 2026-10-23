@@ -141,12 +141,7 @@ def remote_url(repo: Path, remote: str = "origin") -> str | None:
 
 
 def remote_urls(repo: Path) -> dict[str, str]:
-    """Return every configured remote's nonempty fetch URL.
-
-    An empty repository remote set is valid. Any enumeration or per-remote URL
-    failure is hard because PR base selection must not silently ignore a
-    partially readable remote configuration.
-    """
+    """Read every nonempty fetch URL; raise on any enumeration or URL-resolution failure."""
     proc = process._run_git(
         repo,
         ["config", "--null", "--name-only", "--get-regexp", r"^remote\..*\."],

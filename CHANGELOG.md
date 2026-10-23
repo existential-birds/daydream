@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
-  Simplify cancellation and use supplied judge reports instead of a separate session archive.
+  Simplify cancellation and publish raw evidence without separate session archives or readout machinery.
 
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.

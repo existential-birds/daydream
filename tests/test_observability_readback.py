@@ -577,7 +577,6 @@ class _LoopbackPeer:
 
 @pytest.mark.parametrize("trickle", [False, True])
 async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
-    """Bound real HTTP readback/close separately from CLI receipt validation and atomic publication."""
     receipt = _receipt(destinations=["honeyhive"])
     matrix = _verifier.load_matrix(FIXTURES / "readback-matrix.json")
     peer = _LoopbackPeer(trickle=trickle)

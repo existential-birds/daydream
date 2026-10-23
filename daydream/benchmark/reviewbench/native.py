@@ -187,11 +187,7 @@ def _path(value: Any) -> str | None:
 def convert_findings(
     items: list[dict[str, Any]], *, repository: Path, case: Case, producer: str, comparison: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Project native HEAD line hints onto the captured new-side diff.
-
-    Whole-file, relocated, distrusted and unlocatable findings remain visible
-    omissions rather than invented locations.
-    """
+    """Convert proven new-side HEAD locations; retain whole-file or unreliable hints as explicit omissions."""
     hunks = parse_hunks(comparison)
     findings: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []

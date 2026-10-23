@@ -1,4 +1,3 @@
-"""Harbor launch, exact selection and wheel artifact contracts without inference."""
 from __future__ import annotations
 
 import argparse
@@ -107,7 +106,6 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
     launch: argparse.Namespace, monkeypatch: pytest.MonkeyPatch,
     rounds: int, exit_code: int,
 ) -> None:
-    """Deliver exact native launch settings, scrub billing routes and propagate Harbor failure."""
     args = launch
     args.rounds = rounds
     native_variable = 'RB_HARBOR_CODEX_AUTH_DIR' if args.codex_home else 'RB_HARBOR_REVIEWER_PI_AUTH_DIR'
@@ -143,7 +141,6 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
 def test_launch_passes_exact_supplied_membership_to_harbor(
     launch: argparse.Namespace, selection: str,
 ) -> None:
-    """Select exact supplied task names and independent rounds, never globs or count limits."""
     args = launch
     args.task, args.set, args.rounds = None, selection, 3
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
@@ -165,7 +162,6 @@ def test_launch_passes_exact_supplied_membership_to_harbor(
 def test_launch_rejects_unbound_inputs_before_process_or_credentials(
     launch: argparse.Namespace, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    """Every admission boundary rejects before format checking, jobs, or credential delivery."""
     from harbor.environments.docker.docker import DockerEnvironment
 
     args = launch
@@ -230,7 +226,6 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     launch: argparse.Namespace, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch, supplied_source: Path, moby_policy: bytes, selection: str,
 ) -> None:
-    """Resolve the actual pinned CLI, Job, plugin, task identities and metric binding."""
     selected = os.environ.get('DAYDREAM_REVIEWBENCH_RUNTIME')
     if not selected:
         pytest.skip('set DAYDREAM_REVIEWBENCH_RUNTIME to the pinned public runtime Python')
@@ -313,7 +308,6 @@ asyncio.run(main())
 def test_launch_propagates_completed_job_checker_without_reusing_prior_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checker_exit: int,
 ) -> None:
-    """Deliver exact checker arguments and reserve a fresh report without replacing prior bytes."""
     job = tmp_path / 'retained-job'
     job.mkdir()
     prior = job / 'daydream-reviewbench-check-prior.json'
@@ -338,7 +332,6 @@ def test_launch_propagates_completed_job_checker_without_reusing_prior_reports(
 def test_reviewer_build_captures_fork_wheel_without_host_extension_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Capture a different candidate artifact and execute its packaged extension/resources."""
     repository = Path(__file__).resolve().parents[1]
     fork = tmp_path / 'fork'
     fork.mkdir()

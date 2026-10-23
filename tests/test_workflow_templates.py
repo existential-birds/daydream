@@ -392,7 +392,6 @@ def test_match_step_recognizes_exactly_the_three_bot_commands(
 def test_packaged_matchers_preserve_canonical_bytes_and_execute_wiring(
     wf_path: Path, job: str, tmp_path: Path,
 ) -> None:
-    """Byte parity carries every canonical grammar case into each shipped copy."""
     assert _match_script(wf_path, job) == _match_script(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch")
     assert _run_match_step(wf_path, job, "@bot add sequence diagram", "bot", tmp_path / "gh-output") == {
         "command": "sequence", "matched": "true",

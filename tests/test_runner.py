@@ -1558,8 +1558,6 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     assert identity.deep is not shallow
 
 
-
-
 @pytest.mark.parametrize(('source', 'expected_model'), [
     ('frozen', 'operator-frozen-model'), ('empty', DEFAULT_PI_MODEL),
     ('cwd', 'case-model'), ('ambient', 'case-model'), ('explicit', 'phase-explicit-model'),
@@ -1568,7 +1566,6 @@ async def test_runner_archive_manifest_uses_per_stack_native_capability(
     feature_branch_repo: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any, source: str, expected_model: str,
 ) -> None:
-    """Actual archive identity must use the Pi capability and native model precedence."""
     from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 
     (feature_branch_repo / ".pi").mkdir()

@@ -30,7 +30,6 @@ def supplied_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.parametrize('fault', ['revision', 'modified', 'untracked', 'hidden-untracked', 'hidden-whitespace'])
 def test_source_pin_refuses_changed_inputs(supplied_source: Path, fault: str) -> None:
-    """Pin evaluator bytes even when Git configuration hides untracked inputs."""
     assert verify_source(supplied_source)['hashes']['scripts/eval/scorer.ts']
     if fault == 'revision':
         write_and_stage(supplied_source, 'new', 'other revision')
@@ -51,7 +50,6 @@ def test_source_pin_refuses_changed_inputs(supplied_source: Path, fault: str) ->
 
 @pytest.mark.parametrize('fault', ['duplicate', 'subset', 'identity'])
 def test_supplied_membership_is_exact(supplied_source: Path, fault: str) -> None:
-    """Select exact supplied membership; evaluator tests start with selected cases."""
     assert len(load_cases(supplied_source, 'full')) == 219
     starter = load_cases(supplied_source, 'test')
     assert len(starter) == 25 and starter[-1].pr_number == 25

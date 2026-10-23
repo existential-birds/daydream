@@ -1,4 +1,3 @@
-"""Generated reviewer seccomp policy preserves Docker defaults and bounded bootstrap rules."""
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +24,6 @@ def moby_policy(monkeypatch: pytest.MonkeyPatch) -> bytes:
 
 
 def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_additions(moby_policy: bytes) -> None:
-    """Preserve default-deny upstream rules and bind every bounded bootstrap addition to provenance."""
     policy_bytes, provenance_bytes = harbor_seccomp.seccomp_profile()
     policy = json.loads(policy_bytes)
     provenance = json.loads(provenance_bytes)
@@ -49,7 +47,6 @@ def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_
 
 @pytest.mark.parametrize('status', [200, 404])
 def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    """Reject changed or unavailable upstream isolation rules."""
     monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
         status, content=b'{}', request=httpx.Request('GET', url)))
     with pytest.raises(ValueError if status == 200 else httpx.HTTPStatusError):
@@ -57,7 +54,6 @@ def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: p
 
 
 def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
-    """Use actual Docker/runc diagnostic errno to distinguish admitted and forbidden mount flags."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to a built public reviewer image')
