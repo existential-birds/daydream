@@ -350,6 +350,9 @@ def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> No
     """
     for text in (f"api_key = {marker}", f"api_key = '{marker}'", f"auth=Bearer {marker}",
                  f"api_key = {marker}[REDACTED_CREDENTIAL]", f"auth=Bearer {marker}[REDACTED_CREDENTIAL]",
+                 f"api_key = {marker}; public diagnostics", f"auth=Bearer {marker}; public diagnostics",
+                 f"refresh_token={marker};api_key: {marker}", f"refresh_token:{marker};api_key={marker}",
+                 f"refresh_token: {marker};api_key:\t{marker}",
                  f"Public note already {marker}"):
         assert redact_value({"note": text}) == {"note": text}
     combined = marker + '[REDACTED_CREDENTIAL]'
@@ -568,3 +571,73 @@ def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(c
     a complete sensitive block after the bare-token grammar changes.
     """
     assert redact_structured_text('token = ' + container) == 'token = "[REDACTED_CREDENTIAL]"'
+
+
+@pytest.mark.parametrize(('source', 'expected'), [
+    ('TOKEN=opaque-idempotence-canary; public diagnostics',
+     'TOKEN=[REDACTED_ENV_VAR]; public diagnostics'),
+    ('TOKEN=opaque-idempotence-canary;API_KEY=opaque-second-canary',
+     'TOKEN=[REDACTED_ENV_VAR];API_KEY=[REDACTED_ENV_VAR]'),
+    ('TOKEN=opaque-idempotence-canary;NEXT=public',
+     'TOKEN=[REDACTED_ENV_VAR];NEXT=public'),
+    ('TOKEN=opaque-idempotence-canary;api_key=opaque-second-canary',
+     'TOKEN=[REDACTED_ENV_VAR];api_key="[REDACTED_CREDENTIAL]"'),
+    ('refresh_token=[REDACTED]opaque-first-canary;api_key=opaque-second-canary',
+     'refresh_token=[REDACTED];api_key="[REDACTED_CREDENTIAL]"'),
+    ('refresh_token=[REDACTED]opaque-first-canary;;api_key=opaque-second-canary',
+     'refresh_token=[REDACTED];;api_key="[REDACTED_CREDENTIAL]"'),
+    ('refresh_token=[REDACTED]opaque-first-canary;api_key:opaque-second-canary',
+     'refresh_token=[REDACTED];api_key:"[REDACTED_CREDENTIAL]"'),
+    ('refresh_token=[REDACTED]opaque-first-canary;api_key: opaque-second-canary',
+     'refresh_token=[REDACTED];api_key: "[REDACTED_CREDENTIAL]"'),
+    ('refresh_token:[REDACTED]opaque-first-canary;api_key:opaque-second-canary',
+     'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]"'),
+    ('refresh_token:[REDACTED]opaque-first-canary;api_key:opaque-second-canary;password=opaque-third-canary',
+     'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]";password="[REDACTED_CREDENTIAL]"'),
+])
+def test_secret_assignment_redaction_preserves_semicolon_and_is_idempotent(source: str, expected: str) -> None:
+    """A separator is not residual credential content after an existing marker.
+
+    Marker-only fields without delimiters miss this composition: ENV redaction
+    adds a marker, the structured pass must preserve its semicolon and following
+    assignment identity (including a lowercase secret), and recorder
+    re-redaction must not change the sanitized bytes again. The Pi persistence
+    test separately protects the transport's bound and truncation metadata.
+    """
+    redacted = redact_structured_text(source)
+    assert redacted == expected
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('first_separator', ['=', ':'])
+@pytest.mark.parametrize('second_separator', ['=', ':', ': ', ':\t'])
+@pytest.mark.parametrize('boundary', [';', '; ', ' ;', ' ;\t'])
+def test_sensitive_semicolon_pairs_preserve_both_separator_frontiers(
+    first_separator: str, second_separator: str, boundary: str,
+) -> None:
+    """A later colon pair must receive the same sanitation as an assignment.
+
+    The original adjacent-key row only exercised '=', allowing a preceding bare
+    match to consume a later colon key and expose its credential. Preserve the
+    supported key/value separator crossproduct without admitting ordinary prose.
+    """
+    source = (f'refresh_token{first_separator}[REDACTED]opaque-first-canary{boundary}'
+              f'api_key{second_separator}opaque-second-canary')
+    redacted = redact_structured_text(source)
+    assert 'opaque-first-canary' not in redacted and 'opaque-second-canary' not in redacted
+    assert f'refresh_token{first_separator}' in redacted and f'api_key{second_separator}' in redacted
+    assert redact_structured_text(redacted) == redacted
+    prose = 'The token: is now available;metadata: public diagnostics'
+    assert redact_structured_text(prose) == prose
+
+
+@pytest.mark.parametrize('name', ['api_key', 'TOKEN'])
+def test_internal_semicolon_cannot_expose_sensitive_assignment_residual(name: str) -> None:
+    """Keep both private fragments hidden when a semicolon is inside one bare value.
+
+    Treating every semicolon as a delimiter fixes marker-only punctuation but
+    weakens existing residual masking; this guards that distinct privacy contract.
+    """
+    redacted = redact_structured_text(name + '=opaque-prefix-canary;opaque-tail-canary')
+    assert 'opaque-prefix-canary' not in redacted and 'opaque-tail-canary' not in redacted
+    assert redact_structured_text(redacted) == redacted

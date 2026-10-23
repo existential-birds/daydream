@@ -205,7 +205,11 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 # Skip opening braces to reach nested keys; handle blocks in the later block
 # pass. Sensitive values preserve complete redaction markers after matching.
 _BARE_STRUCTURED_VALUE = (
-    rf"(?:(?i:{_COMPLETE_REDACTION_MARKER.pattern})|" + r"[^\s\"'\[\]{}():,=])++"
+    # A semicolon followed by another assignment ends this value. Leave the
+    # next key in the scan so it receives its own policy. Other semicolon tails
+    # stay inside the sensitive token; consume their runs without backtracking.
+    rf"(?:(?i:{_COMPLETE_REDACTION_MARKER.pattern})|"
+    r"[^;\s\"'\[\]{}():,=]|;++(?![^\S\n\r]*[A-Za-z_][A-Za-z0-9_.\-]*[^\S\n\r]*[:=]))++"
 )
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
@@ -247,22 +251,41 @@ def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
     value = match.group(4) or match.group(5) or match.group(8)
     if value is None or value == "":
         return match.group(0)
-    if match.group(8) is not None and not _bare_value_redactable(sep, text, match.end()):
-        return match.group(0)
+    if match.group(8) is not None:
+        if not _bare_value_redactable(sep, text, match.end()):
+            return match.group(0)
+        # Flat credential rules leave statement delimiters outside the secret.
+        # Preserve only complete marker values followed by those delimiters;
+        # an opaque semicolon tail must remain subject to the existing masking.
+        marker_value = value.rstrip(';')
+        if marker_value != value and marker_value and _redact_sensitive_text(marker_value) == marker_value:
+            return match.group(0)
     safe = _redact_sensitive_text(value)
     if safe == value:
         return match.group(0)
+    if match.group(8) is not None and _COMPLETE_REDACTION_MARKER.search(value):
+        # A marked bare value stays bare after residual removal. Adding quotes
+        # here would let the next flat ENV pass remove them again.
+        return f"{wrapped_key}{sep}{safe}"
     quote = '"' if (match.group(4) is not None or match.group(8) is not None) else "'"
     return f"{wrapped_key}{sep}{quote}{safe}{quote}"
 
 
 def _bare_value_redactable(sep: str, text: str, end: int) -> bool:
-    """Redact bare assignments; colon values require end-of-text/line or , } ].
+    """Redact bare assignments; colon text needs a boundary or next sensitive pair.
 
     This preserves prose such as "the token: is now available"."""
     if "=" in sep:
         return True
-    return not text[end:] or re.match(r"[^\S\n\r]*[,}\]\r\n]", text[end:]) is not None
+    if not text[end:] or re.match(r"[^\S\n\r]*[,}\]\r\n]", text[end:]) is not None:
+        return True
+    # A later explicit sensitive pair establishes a statement boundary; an
+    # arbitrary prose clause after a semicolon does not make colon text a secret.
+    next_pair = re.match(
+        r"[^\S\n\r]*;+[^\S\n\r]*(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1[^\S\n\r]*[:=]",
+        text[end:],
+    )
+    return next_pair is not None and _is_sensitive_key(next_pair.group(2))
 
 
 def _redact_structured_key_values(text: str) -> str:
