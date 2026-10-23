@@ -248,9 +248,15 @@ _PEM_KEY_CASES: list[tuple[str, str]] = [
 ]
 _PEM_KEY_IDS = ["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"]
 
-@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS,)
-def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
-    """PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA) replaced with [REDACTED_PEM_KEY]."""
+@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS)
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_redactor_scrubs_private_key_block(pem: str, body: str, interrupted: bool) -> None:
+    """All supported key grammars fail closed before a streamed footer arrives.
+
+    Complete PEM cases cannot detect key bodies exposed by an interrupted tail.
+    """
+    if interrupted:
+        pem = pem.rsplit("-----END", 1)[0]
     out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
     assert isinstance(out.message, str)
     assert body not in out.message
@@ -528,3 +534,30 @@ def test_redactor_sensitive_suffix_block_empty_value_not_redacted() -> None:
     out = redact_structured_text(text)
     assert out == text
     assert "[REDACTED_CREDENTIAL]" not in out
+
+
+@pytest.mark.parametrize('fragment', [
+    '-----BEGIN PRIVATE KEY-----\nleaf-secret-canary',
+    '{"refresh_token": "leaf-secret-canary',
+    'refresh_token="leaf-secret-canary',
+    'refresh_token="leaf-secret-canary' + chr(92),
+    "refresh_token='leaf-secret-canary" + chr(92),
+    '{"refresh_token": "leaf-secret-canary' + chr(92),
+])
+@pytest.mark.parametrize('envelope', ['object', 'scalar'])
+def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragment: str, envelope: str) -> None:
+    """A fail-closed leaf tail cannot consume its serialized JSON quote or siblings.
+
+    Plain-field redaction cannot establish that log/receipt JSON remains parseable
+    when its text leaf contains an unfinished PEM or quoted credential value.
+    """
+    serialized = json.dumps({'message': fragment, 'model': 'fixture-model', 'count': 0}
+                            if envelope == 'object' else fragment)
+    redacted = redact_structured_text(serialized)
+    parsed = json.loads(redacted)
+    assert 'leaf-secret-canary' not in redacted
+    if envelope == 'scalar':
+        assert '[REDACTED' in parsed
+    else:
+        assert '[REDACTED' in parsed['message']
+        assert parsed['model'] == 'fixture-model' and parsed['count'] == 0

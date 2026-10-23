@@ -19,7 +19,6 @@ from daydream.backends import (
     RetryPolicy,
     TextEvent,
     ToolStartEvent,
-    TurnEndEvent,
 )
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
@@ -27,7 +26,7 @@ from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.retry_policy import derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
@@ -126,33 +125,45 @@ async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path)
     assert reason == "tool_call_budget_exceeded"
     assert backend.cancel_calls == 0
 
-async def test_run_agent_abort_records_reason_and_turn_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class _InvocationSpy:
-        def __init__(self) -> None:
-            self.abort_reasons: list[str] = []
-            self.events: list[AgentEvent] = []
-        async def __aenter__(self) -> _InvocationSpy:
-            return self
-        async def __aexit__(self, *args: Any) -> None:
-            pass
-        def observe_user_step(self, *, prompt: str) -> None:
-            pass
-        def record_host_dispatch(self, **kwargs: Any) -> None:
-            pass
-        def mark_aborted(self, reason: str) -> None:
-            self.abort_reasons.append(reason)
-        def observe(self, event: AgentEvent) -> None:
-            self.events.append(event)
-    invocation = _InvocationSpy()
-    class _RecorderSpy:
-        def invocation(self, *, phase: DaydreamPhase) -> _InvocationSpy:
-            return invocation
-    monkeypatch.setattr("daydream.agent.get_current_recorder", lambda: _RecorderSpy())
-    await run_agent(
-        _burst_backend(), tmp_path, "go", phase=DaydreamPhase.FIX, tool_call_budget=0, progress_callback=lambda _: None,
-    )
-    assert invocation.abort_reasons == ["tool_call_budget_exceeded"]
-    assert isinstance(invocation.events[-1], TurnEndEvent)
+async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> None:
+    """Abort evidence must already close the turn when backend cleanup starts.
+
+    The former invocation spy asserted host callbacks and drifted from the real
+    recorder interface. Final-only ceiling coverage cannot detect a turn that
+    stays open while stream cleanup stalls. Snapshot the actual recorder from
+    the external backend's close boundary, then inspect persisted host evidence.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _recorder, snapshot: snapshots.append(snapshot))
+    closed = False
+
+    async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
+        nonlocal closed
+        try:
+            yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
+        finally:
+            recorder.write_partial()
+            closed = True
+
+    backend = ScriptedBackend(responder=stream, model="mock-model")
+    async with recorder:
+        _, _, reason = await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX, tool_call_budget=0, progress_callback=lambda _: None,
+        )
+    assert reason == "tool_call_budget_exceeded" and closed
+    partial = next(snapshot for snapshot in snapshots if snapshot.status == "partial")
+    cleanup_document = json.loads(partial.documents[0].json_bytes)
+    final_document = json.loads(recorder.path.read_bytes())
+    for document in (cleanup_document, final_document):
+        step = _agent_step_with_stop_reason(document)
+        assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
+        assert "partial_step" not in step["extra"]
+        assert [tool["tool_call_id"] for tool in step["tool_calls"]] == ["tool-0"]
+        interruptions = step["observation"]["results"]
+        assert len(interruptions) == 1 and interruptions[0].get("source_call_id") is None
+        assert interruptions[0]["content"] == "[interrupted: call did not complete before invocation ended]"
+        assert interruptions[0]["extra"] == {"is_error": True, "status": "interrupted"}
+        assert document["extra"]["partial"] is True
 
 async def test_caller_deadline_bounds_attempts_and_is_not_restarted_by_a_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

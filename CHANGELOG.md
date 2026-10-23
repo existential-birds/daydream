@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retain coherent native review checkpoints and bounded process diagnostics when
+  a public ReviewBench reviewer is interrupted. Propagate outer cancellation to
+  its owned reviewer/native processes, permit bounded joined export, and preserve
+  Harbor's timeout/cancellation outcome for offline investigation. Reviewer
+  settings, budgets and scoring are unchanged; this is a compatible bug fix.
+
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

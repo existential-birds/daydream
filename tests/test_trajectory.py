@@ -602,6 +602,48 @@ async def test_write_partial_preserves_in_flight_diagnostic_once(recorder: Traje
         ]
         assert diagnostics == [{"code": "parser_gap", "message": "bounded", "metadata": {"count": 1}}]
 
+@pytest.mark.parametrize(('prefix', 'suffix'), [
+    ('-----BEGIN PRIVATE KEY-----\ncheckpoint-first-canary',
+     '\ncheckpoint-later-canary\n-----END PRIVATE KEY-----'),
+    ('{"refresh_token": "checkpoint-first-canary', 'checkpoint-later-canary"}'),
+    ('refresh_token="checkpoint-first-canary', 'checkpoint-later-canary"'),
+    ('refresh_token="checkpoint-first-canary' + chr(92), 'ncheckpoint-later-canary"'),
+    ("refresh_token='checkpoint-first-canary" + chr(92), "ncheckpoint-later-canary'"),
+    ('{"refresh_token": "checkpoint-first-canary' + chr(92), 'ncheckpoint-later-canary"}'),
+])
+async def test_split_secret_stream_never_enters_immutable_partial_snapshot(
+    tmp_path: Path, prefix: str, suffix: str,
+) -> None:
+    """A checkpoint between chunks cannot persist a supported unfinished secret.
+
+    Complete-block redaction tests never freeze a stream before the PEM footer or
+    quoted credential closes. Keep the real recorder, in-flight text aggregation,
+    callback bytes and filesystem writes; no sink re-redaction can mask a leak.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe(TextEvent(prefix))
+            recorder.write_partial()
+            first = snapshots[-1]
+            first_bytes = first.documents[0].json_bytes
+            assert b'checkpoint-first-canary' not in first_bytes
+            assert b'[REDACTED' in first_bytes
+            assert _partial_path(recorder).read_bytes() == first_bytes
+            assert atif_validate(json.loads(first_bytes))
+            invocation.observe(TextEvent(suffix))
+            recorder.write_partial()
+            second_bytes = snapshots[-1].documents[0].json_bytes
+            assert b'checkpoint-first-canary' not in second_bytes
+            assert b'checkpoint-later-canary' not in second_bytes
+            assert b'[REDACTED' in second_bytes
+            assert first.documents[0].json_bytes == first_bytes
+            assert atif_validate(json.loads(second_bytes))
+    final = recorder.path.read_bytes()
+    assert b'checkpoint-first-canary' not in final and b'checkpoint-later-canary' not in final
+
+
 async def test_request_metadata_is_redacted_in_active_partial_and_completed_evidence(
     recorder: TrajectoryRecorder,
 ) -> None:
@@ -701,6 +743,100 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
             assert trajectory_module.compute_timing_summary(snapshot) is not None
             release.set()
 
+async def test_partial_graph_retains_empty_active_parent_of_completed_nested_fork(tmp_path: Path) -> None:
+    """Completed descendants cannot disconnect an otherwise empty active parent.
+
+    Direct active-fork and finalized-root tests omit this nesting boundary. A
+    checkpoint that skips the intermediate document makes its retained leaf
+    unreachable from the original parent references.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    async with root:
+        async with root.fork("intermediate") as parent:
+            async with parent.fork("leaf") as child:
+                async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                    observe_text_and_result(inv, "completed nested evidence")
+            child_bytes = child.path.read_bytes()
+            flush_active_signal_recorders()
+            snapshot = snapshots[-1]
+            documents = {document.trajectory_id: json.loads(document.json_bytes) for document in snapshot.documents}
+            assert set(documents) == {root.trajectory_id, parent.trajectory_id, child.trajectory_id}
+            assert all(atif_validate(document) for document in documents.values())
+            assert root.steps == parent.steps == []
+            for active in (root, parent):
+                document = documents[active.trajectory_id]
+                assert document["extra"]["snapshot_at"] == snapshot.cutoff_at
+                assert document["steps"][0]["source"] == "system"
+                assert document["steps"][0]["extra"]["host_event"] == "partial_snapshot"
+            for owner, descendant in ((root, parent), (parent, child)):
+                references = documents[owner.trajectory_id]["extra"]["subtrajectories"]
+                reference = next(row for row in references if row.get("trajectory_id") == descendant.trajectory_id)
+                expected = descendant.path.relative_to(tmp_path / ".daydream").as_posix()
+                assert reference["sibling_trajectory_ref"] == expected
+            retained = next(document for document in snapshot.documents
+                            if document.trajectory_id == child.trajectory_id)
+            assert retained.json_bytes == child_bytes
+
+
+async def test_partial_dispatch_retains_planned_queued_scopes_before_fanout_joins(tmp_path: Path) -> None:
+    """Concurrency-one checkpoints distinguish queued work from started scopes.
+
+    Completed dispatch tests see all descriptors after joining, while active
+    fork tests expose only started work. A timeout during the first scope must
+    retain the host's remaining plan without declaring it attempted or complete.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    limiter = anyio.CapacityLimiter(1)
+    entered, queued, release = anyio.Event(), anyio.Event(), anyio.Event()
+    async with root:
+        async with trajectory_module.dispatch_scope(
+            root, phase=DaydreamPhase.DEEP, descriptors=['first', 'queued'],
+        ) as dispatch:
+            assert dispatch is not None
+
+            async def review(descriptor: str) -> None:
+                if descriptor == 'queued':
+                    queued.set()
+                async with limiter:
+                    async with root.fork(descriptor, dispatch=dispatch) as child:
+                        async with child.invocation(phase=DaydreamPhase.DEEP) as invocation:
+                            invocation.observe(TextEvent('scope activity: ' + descriptor))
+                            if descriptor == 'first':
+                                entered.set()
+                            await release.wait()
+
+            async with anyio.create_task_group() as group:
+                group.start_soon(review, 'first')
+                await entered.wait()
+                group.start_soon(review, 'queued')
+                await queued.wait()
+                try:
+                    root.write_partial()
+                    snapshot = snapshots[-1]
+                    parent = json.loads(snapshot.documents[0].json_bytes)
+                    active = parent['extra']['active_dispatches']
+                    assert len(active) == 1
+                    plan = active[0]
+                    assert plan['dispatch_id'] == dispatch.dispatch_id and plan['phase'] == 'deep'
+                    assert plan['planned_descriptors'] == ['first', 'queued']
+                    assert plan['queued_descriptors'] == ['queued']
+                    assert plan['planned_count'] == 2 and plan['attempted_count'] == 1
+                    assert plan['completed_count'] == 0 and plan['completed_fork_ids'] == []
+                    assert plan['ended_at'] is None and 'dispatch_status' not in plan
+                    assert plan['forks'] == [{'fork_id': snapshot.documents[1].trajectory_id,
+                                              'descriptor': 'first', 'ordinal': 1}]
+                    assert len(snapshot.documents) == 2
+                    assert root.steps == []
+                finally:
+                    release.set()
+    final = read_trajectory(root.path)
+    assert 'active_dispatches' not in final['extra']
+    dispatch_step = only_dispatch(final)
+    assert dispatch_step['extra']['planned_count'] == dispatch_step['extra']['completed_count'] == 2
+
+
 async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,29 +871,39 @@ async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
                 } == {third.cutoff_at}
                 assert tuple(document.json_bytes for document in first.documents) == first_bytes
 
-async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failed_recorder", ["root", "child"])
+async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_recorder: str,
 ) -> None:
-    """A root freeze failure writes no child-only snapshot and a retry recovers."""
+    """A failed document freeze retains the prior graph and a retry recovers.
+
+    Root-only preparation-failure coverage misses an active child's failure when
+    a real root event can still publish. Such a root would contain a sibling
+    reference with no matching document in the immutable run snapshot.
+    """
 
     snapshots: list[RunWriteSnapshot] = []
     warnings: list[str] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
-    original_prepare = root._prepare_document
-    failed_once = False
-
-    def fail_first_root_prepare(**kwargs: Any) -> Any:
-        nonlocal failed_once
-        if kwargs["status"] == "partial" and not failed_once:
-            failed_once = True
-            raise RuntimeError("root preparation failed")
-        return original_prepare(**kwargs)
-
-    monkeypatch.setattr(root, "_prepare_document", fail_first_root_prepare)
-    monkeypatch.setattr("daydream.ui.print_warning", lambda _console, message: warnings.append(message),)
+    monkeypatch.setattr("daydream.ui.print_warning", lambda _console, message: warnings.append(message))
 
     async with root:
+        if failed_recorder == "child":
+            async with root.invocation(phase=DaydreamPhase.INTENT) as inv:
+                observe_text_and_result(inv, "root evidence")
         async with root.fork("active-child") as child:
+            target = root if failed_recorder == "root" else child
+            original_prepare = target._prepare_document
+            failed_once = False
+
+            def fail_first_prepare(**kwargs: Any) -> Any:
+                nonlocal failed_once
+                if kwargs["status"] == "partial" and not failed_once:
+                    failed_once = True
+                    raise RuntimeError("document preparation failed")
+                return original_prepare(**kwargs)
+
+            monkeypatch.setattr(target, "_prepare_document", fail_first_prepare)
             async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe(TextEvent(text="child evidence"))
 

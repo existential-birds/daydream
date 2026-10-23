@@ -60,3 +60,10 @@ first expiry stage and secondary cleanup expiry. Supported native shutdown can
 contain sequential fallback waits; the host drain allowance is policy, not proof
 that all native awaits terminate. The historical stall's upstream cause remains
 unresolved; public milestones support diagnosis without inventing private events.
+
+Partial invocation summaries sample the active host-owned lifecycle collector
+without finalizing it or completing generations. A run snapshot samples each
+active invocation once for its common cutoff; later activity cannot mutate prior
+snapshot bytes. Completed attempt snapshots retain their ordinary terminal
+semantics. Active fork summaries preserve dispatch/scope identities and original
+sibling references; missing/corrupt observations never establish provider work.

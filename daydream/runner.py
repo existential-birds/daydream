@@ -93,6 +93,7 @@ from daydream.run_config import (
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.trajectory import (
     DaydreamRunFlow,
+    RunWriteSnapshot,
 )
 from daydream.ui import (
     NEON_THEME,
@@ -129,6 +130,9 @@ class RunnerExecutionInput:
     backend: BackendExecutionInput = field(repr=False, compare=False)
     github: github_app.GitHubExecutionInput = field(repr=False, compare=False)
     backends: Mapping[str, BackendExecutionInput | None] = field(default_factory=dict, repr=False, compare=False)
+    on_trajectory_snapshot: Callable[[RunWriteSnapshot], None] | None = field(
+        default=None, kw_only=True, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "backends", MappingProxyType(dict(self.backends)))
@@ -352,6 +356,7 @@ async def run(
                 backend_execution=(None if execution is None else execution.backends.get(
                     _resolved_backend_name(config, "per_stack_review"), execution.backend)),
                 github_execution=None if execution is None else execution.github,
+                on_trajectory_snapshot=None if execution is None else execution.on_trajectory_snapshot,
             )
         except anyio.get_cancelled_exc_class():
             # Only the run owner may cancel every invocation of a shared backend.
@@ -374,6 +379,7 @@ async def _run_with_context(
     backend_factory: BackendFactory | None = None,
     backend_execution: BackendExecutionInput | None = None,
     github_execution: github_app.GitHubExecutionInput | None = None,
+    on_trajectory_snapshot: Callable[[RunWriteSnapshot], None] | None = None,
 ) -> int:
     """Execute with the runner's immutable policy bound before any output."""
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
@@ -497,6 +503,7 @@ async def _run_with_context(
                 run_context=run_context, github_execution=session.execution,
                 backend_factory=backend_factory,
                 backend_execution=backend_execution,
+                on_trajectory_snapshot=on_trajectory_snapshot,
             )
             observed.finish(result)
             return result
@@ -519,6 +526,7 @@ async def _run_workspace(
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
     backend_execution: BackendExecutionInput | None = None,
+    on_trajectory_snapshot: Callable[[RunWriteSnapshot], None] | None = None,
 ) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
@@ -546,7 +554,10 @@ async def _run_workspace(
                 trajectory = artifacts.register_trajectory_output(_absolute_output_path(config.trajectory_path))
                 findings = _route(config.findings_out, OutputLabel.FINDINGS_OUTPUT)
                 dump = _route(config.dump_artifacts, OutputLabel.DUMP_DIRECTORY)
-                capture = _RunWriteCapture(session_id=session_id)
+                capture = _RunWriteCapture(
+                    session_id=session_id,
+                    observer=on_trajectory_snapshot,
+                )
                 run_artifacts = _RunArtifacts(
                     artifacts, private_owner, trajectory, capture, dump,
                     execution_input=backend_execution,

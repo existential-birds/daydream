@@ -317,19 +317,26 @@ class BackendLifecycleCollector:
         if bounded_count != self._snapshot.active_tool_count:
             self._update(active_tool_count=bounded_count, last_progress_s=self._elapsed())
 
-    def finalize(self) -> BackendLifecycleSnapshot | None:
-        """Freeze without awaiting or yielding, including cancellation/GeneratorExit."""
+    def snapshot(self) -> BackendLifecycleSnapshot | None:
+        """Observe immutable current facts without stopping sampling or freezing the attempt."""
         if not self._active:
             return None
-        if not self._finalized:
-            elapsed = self._elapsed()
-            self._update(elapsed_s=elapsed,
-                         remaining_wall_s=max(0.0, self._deadline - clock.monotonic())
-                         if self._deadline is not None else None,
-                         last_progress_age_s=max(0.0, elapsed - self._snapshot.last_progress_s)
-                         if self._snapshot.last_progress_s is not None else None)
+        if self._finalized:
+            return self._snapshot
+        elapsed = self._elapsed()
+        return replace(self._snapshot, elapsed_s=elapsed,
+                       remaining_wall_s=max(0.0, self._deadline - clock.monotonic())
+                       if self._deadline is not None else None,
+                       last_progress_age_s=max(0.0, elapsed - self._snapshot.last_progress_s)
+                       if self._snapshot.last_progress_s is not None else None)
+
+    def finalize(self) -> BackendLifecycleSnapshot | None:
+        """Freeze without awaiting or yielding, including cancellation/GeneratorExit."""
+        snapshot = self.snapshot()
+        if snapshot is not None:
+            self._snapshot = snapshot
             self._finalized = True
-        return self._snapshot
+        return snapshot
 
 
 _CURRENT: ContextVar[BackendLifecycleCollector | None] = ContextVar("backend_lifecycle", default=None)

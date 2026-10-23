@@ -5,6 +5,7 @@ implementation. This module does not depend on the trajectory recorder.
 """
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
 from typing import Any, Callable
@@ -32,12 +33,22 @@ _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+
 
 
 # Private PEM blocks collapse before flat API-key matching; public certificates
-# stay untouched. Benchmark buffering imports this shared header pattern.
+# stay untouched. Unmatched tails are sensitive during an interrupted stream.
+# Benchmark buffering imports this shared header pattern.
 _PEM_HEADER = r"(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY"
 
 
 _PEM_KEY_PATTERN = re.compile(
     rf"-----BEGIN {_PEM_HEADER}-----" rf".*?-----END {_PEM_HEADER}-----",
+    re.DOTALL,
+)
+
+
+# Keep the complete-block publication rule precise. A separate live-redaction
+# rule consumes only genuinely unmatched tails, including a checkpoint taken
+# before a streamed footer arrives; it never matches a complete key by itself.
+_PEM_KEY_TAIL_PATTERN = re.compile(
+    rf"-----BEGIN {_PEM_HEADER}-----(?!.*-----END {_PEM_HEADER}-----).*\Z",
     re.DOTALL,
 )
 
@@ -78,6 +89,7 @@ _REDACTION_RULES: tuple[tuple[Any, str | Callable[[re.Match[str]], str]], ...] =
     (_SCP_USERINFO_PATTERN, r"[REDACTED_USER]:[REDACTED_API_KEY]@\2"),
     (_QUERY_CREDENTIAL_PATTERN, r"\1\2=[REDACTED_CREDENTIAL]"),
     (_PEM_KEY_PATTERN, _PEM_KEY_REDACTED_MARKER),
+    (_PEM_KEY_TAIL_PATTERN, _PEM_KEY_REDACTED_MARKER),
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
     (_JWT_PATTERN, "[REDACTED_JWT]"),
@@ -195,7 +207,7 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 # pass. The lookahead protects redaction markers emitted by earlier stages.
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
-    r"(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)|([^\s\"'\[\]{}():,=]++))"
+    r"(?:\"((?:\\.|[^\"\\])*)(?:\"|\\?$)|'((?:\\.|[^'\\])*)(?:'|\\?$)|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)|([^\s\"'\[\]{}():,=]++))"  # noqa: E501 - quoted tails fail closed
     r"(?![^\S\n\r]*(?:\[REDACTED|<redacted>))",
 )
 
@@ -573,12 +585,39 @@ def _redact_header_value(match: re.Match[str]) -> str:
     return f"{name}: {_REDACTED_CREDENTIAL}"
 
 
+def _redact_json_container(value: Any) -> Any:
+    """Sanitize decoded leaves so an unfinished secret cannot consume JSON wrappers."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if _is_sensitive_key(key):
+                result[redact_text(key)] = (item if isinstance(item, str)
+                    and (not item or _REDACTION_MARKER.search(item)) else _REDACTED_CREDENTIAL)
+            else:
+                result[redact_text(key)] = _redact_json_container(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_json_container(item) for item in value]
+    if isinstance(value, str):
+        return redact_structured_text(value)
+    return value
+
+
 def redact_structured_text(s: str) -> str:
     """Apply auth-header/scheme rules, flat patterns, then structured-pair/block rules.
 
     Earlier markers are preserved, preventing partial or double redaction. Any
     stage failure replaces the whole field; raw text never passes through."""
     try:
+        # JSON envelopes require leaf redaction: a fail-closed unmatched PEM or
+        # quoted credential tail must not consume the enclosing quote/braces.
+        if s.lstrip().startswith(('{', '[', '"')):
+            try:
+                container = json.loads(s)
+            except (ValueError, TypeError):
+                container = None
+            if isinstance(container, (dict, list, str)):
+                return json.dumps(_redact_json_container(container), ensure_ascii=False, allow_nan=False)
         s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
         s = redact_text(s)
         return _redact_structured_key_values(s)

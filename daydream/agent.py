@@ -667,6 +667,7 @@ async def _run_agent(
                         event_stream_scope,
                     ):
                         if inv is not None:
+                            inv.observe_backend_lifecycle(lifecycle)
                             inv.record_host_dispatch(
                                 prompt=attempt_prompt,
                                 system_instructions=execute_kwargs.get("review_instructions"),

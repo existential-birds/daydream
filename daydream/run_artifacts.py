@@ -58,6 +58,7 @@ class _RunWriteCapture:
     validation_error: _RunSnapshotCaptureError | None = None
     manifest_identity: ManifestRunIdentity | None = None
     original_task: dict[str, object] | None = None
+    observer: Callable[[RunWriteSnapshot], None] | None = field(default=None, repr=False)
 
     def retain(self, recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
         try:
@@ -77,6 +78,14 @@ class _RunWriteCapture:
                 exc if isinstance(exc, _RunSnapshotCaptureError)
                 else _RunSnapshotCaptureError(f"snapshot validation failed ({type(exc).__name__})")
             )
+            return
+        if self.observer is not None:
+            try:
+                self.observer(snapshot)
+            except Exception as exc:
+                # Optional diagnostics cannot veto native finalization or expose
+                # exception payloads. The observer owns its availability receipt.
+                print_error(console, "Diagnostics", f"Run checkpoint unavailable ({type(exc).__name__}).")
 
 
 @dataclass(frozen=True)
