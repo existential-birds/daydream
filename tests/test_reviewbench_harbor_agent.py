@@ -99,6 +99,8 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
 
 @pytest.mark.parametrize('fault', [
     'schema', 'profile', 'patch', 'refs', 'origin', 'dirty', 'stale', 'stale_trajectory', 'auth',
+    'execution_missing', 'execution_unknown', 'execution_bool', 'execution_negative',
+    'execution_nan', 'execution_retry', 'execution_zero',
 ])
 async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_inference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
@@ -106,7 +108,7 @@ async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_in
     environment = public_input(tmp_path)
     prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
     inputs = Path(environment['DAYDREAM_RB_INPUTS'])
-    if fault in {'schema', 'profile'}:
+    if fault in {'schema', 'profile'} or fault.startswith('execution_'):
         profile_path = inputs / 'daydream-profile.json'
         profile = json.loads(profile_path.read_text())
         if fault == 'schema':
@@ -114,8 +116,27 @@ async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_in
             policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
             profile['profile_sha256'] = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'))
                                                       .encode()).hexdigest()
-        else:
+        elif fault == 'profile':
             profile['reviewer']['model'] = 'unfrozen-model'
+        else:
+            execution = profile['reviewer']['execution']
+            if fault == 'execution_missing':
+                del profile['reviewer']['execution']
+            elif fault == 'execution_unknown':
+                execution['unknown'] = 'unadmitted control'
+            elif fault == 'execution_bool':
+                execution['stream_idle_timeout_s'] = True
+            elif fault == 'execution_negative':
+                execution['pi_response_idle_timeout_s'] = -1
+            elif fault == 'execution_nan':
+                execution['codex_terminal_drain_timeout_s'] = float('nan')
+            elif fault == 'execution_retry':
+                execution['retry_policy']['attempts'] = 0.5
+            else:
+                execution['codex_cleanup_timeout_s'] = 0
+            policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
+            profile['profile_sha256'] = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'))
+                                                      .encode()).hexdigest()
         profile_path.write_text(json.dumps(profile))
     elif fault == 'patch':
         (inputs / 'diff.patch').write_text('unrelated supplied patch')

@@ -61,10 +61,12 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
         invocation = str(uuid.uuid4())
         started = time.monotonic()
         declared_timeout = _declared_outer_timeout(Path(self.logs_dir))
+        collection_allowance = SHUTDOWN_GRACE_SECONDS + FORCE_REAP_SECONDS + 10
+        execution_allowance = None if declared_timeout is None else math.ceil(declared_timeout + collection_allowance)
         command = ('python -I -m daydream.benchmark.reviewbench.harbor_process --invocation ' + invocation)
         if declared_timeout is not None:
             command += ' --outer-timeout ' + str(declared_timeout)
-        execution = asyncio.create_task(environment.exec(command, cwd='/work/repo', timeout_sec=3600))
+        execution = asyncio.create_task(environment.exec(command, cwd='/work/repo', timeout_sec=execution_allowance))
         try:
             result = await asyncio.shield(execution)
         except (asyncio.CancelledError, Exception) as failure:
@@ -85,7 +87,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             # Harbor's collector is cancelled or fails. Join a cooperative
             # collector before returning; a final receipt covers failed collectors.
             # One absolute bound also applies across repeated cancellation.
-            deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS + FORCE_REAP_SECONDS + 10
+            deadline = time.monotonic() + collection_allowance
 
             async def stop_and_collect() -> None:
                 while time.monotonic() < deadline:

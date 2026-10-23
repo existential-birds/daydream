@@ -21,7 +21,13 @@ import anyio
 from daydream import git_ops, runner
 from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
 from daydream.benchmark.reviewbench.harbor_process import publish_diagnostic_bytes
-from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, convert_findings, reviewer_config
+from daydream.benchmark.reviewbench.native import (
+    CaseExecution,
+    PublicHarborTask,
+    convert_findings,
+    reviewer_config,
+    reviewer_execution,
+)
 from daydream.deep.artifacts import diff_key
 from daydream.redaction import redact_structured_text
 from daydream.review_result import FinalizedReview, validate_terminal_result
@@ -173,12 +179,11 @@ async def main(environment: Mapping[str, str]) -> int:
                         approved_head_sha=task.case.head, dump_artifacts=str(staged),
                         frozen_author_description=None if task.author_description is None else
                             FrozenAuthorDescription(task.case.head, task.author_description))
-                    from daydream.backends import BackendExecutionInput
                     from daydream.git_ops import StaticGitHubAuth
                     from daydream.github_app import GitHubExecutionInput
                     from daydream.runner import RunnerExecutionInput
 
-                    native = BackendExecutionInput.from_environment(controls, backend=backend)
+                    native = reviewer_execution(reviewer, controls)
                     if backend == 'pi':
                         native = replace(native, pi_settings=reviewer['pi_settings'])
                     capability = RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),

@@ -277,6 +277,114 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         await local.close()
 
 
+@pytest.mark.skipif(sys.platform != 'linux', reason='late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
+@pytest.mark.parametrize('process_table_failure', [False, True])
+async def test_forced_reviewer_exit_reaps_late_descendant_holding_output(
+    tmp_path: Path, process_table_failure: bool,
+) -> None:
+    """A fork after the final ownership snapshot must not block reap on inherited pipes."""
+    entrypoint = '''import os,signal,time
+from pathlib import Path
+root=Path(os.environ['CONTROL_ROOT'])
+def fork_late(signum,frame):
+ pid=os.fork()
+ if pid==0:
+  os.setsid()
+  signal.signal(signal.SIGUSR1,signal.SIG_IGN)
+  (root/'orphan').write_text(str(os.getpid()))
+  while True: time.sleep(1)
+ while not (root/'orphan').exists(): time.sleep(0.001)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+signal.signal(signal.SIGUSR1,fork_late)
+(root/'ready').write_text(str(os.getpid()))
+while True: time.sleep(1)
+'''
+    bootstrap = f'''import asyncio,errno,json,os,signal,sys,time,uuid
+from pathlib import Path
+from daydream.benchmark.reviewbench import harbor_process as owner
+root=Path({str(tmp_path)!r})
+async def drive():
+ invocation=str(uuid.uuid4())
+ environment={{**os.environ,'DAYDREAM_RB_EVIDENCE':str(root/'logs/daydream'),'CONTROL_ROOT':str(root)}}
+ original_spawn=asyncio.create_subprocess_exec
+ original_iterdir=Path.iterdir
+ fail_listing=False
+ def iterdir(path):
+  nonlocal fail_listing
+  if path==Path('/proc') and fail_listing:
+   fail_listing=False
+   raise OSError(errno.EIO,'scripted process table read failure')
+  return original_iterdir(path)
+ Path.iterdir=iterdir
+ async def spawn(*args,**kwargs):
+  child=await original_spawn(sys.executable,'-I','-c',{entrypoint!r},**kwargs)
+  original_kill=child.kill
+  injected=False
+  def kill():
+   nonlocal injected,fail_listing
+   if not injected:
+    injected=True
+    os.kill(child.pid,signal.SIGUSR1)
+    deadline=time.monotonic()+5
+    while not (root/'orphan').exists():
+     if time.monotonic()>=deadline: raise RuntimeError('late fork never became ready')
+     time.sleep(0.001)
+    original_kill()
+    fail_listing={process_table_failure!r}
+   else: original_kill()
+  child.kill=kill
+  return child
+ asyncio.create_subprocess_exec=spawn
+ owner.SHUTDOWN_GRACE_SECONDS=0.1
+ async def cancel_when_ready():
+  while not (root/'ready').exists(): await asyncio.sleep(0.001)
+  owner.publish_diagnostic_bytes(owner.cancellation_marker(root/'logs',invocation),json.dumps({{
+   'invocation_id':invocation,'interruption':'host_task_cancelled'}}).encode())
+ stopping=asyncio.create_task(cancel_when_ready())
+ try:
+  await owner.supervise(invocation,environment)
+  await stopping
+  orphan=int((root/'orphan').read_text())
+  try:
+   os.kill(orphan,0)
+   orphan_alive=True
+  except ProcessLookupError: orphan_alive=False
+  print(json.dumps({{'orphan_alive':orphan_alive}}))
+ finally:
+  if (root/'orphan').exists():
+   orphan=int((root/'orphan').read_text())
+   try:
+    os.kill(orphan,signal.SIGKILL)
+    os.waitpid(orphan,0)
+   except ProcessLookupError: pass
+  stopping.cancel()
+  await asyncio.gather(stopping,return_exceptions=True)
+asyncio.run(drive())
+'''
+    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', bootstrap,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=15)
+        assert child.returncode == 0, stderr.decode()
+        assert json.loads(stdout)['orphan_alive'] is False
+        receipt = json.loads((tmp_path / 'logs/reviewer-process.json').read_text())
+        assert receipt['cleanup_outcome'] == ('supervisor_failed' if process_table_failure else 'forced_termination')
+        assert receipt['owned_descendants_cleanup'] == 'joined'
+        assert receipt['child_returncode'] == -signal.SIGKILL
+        assert receipt['terminal_evidence_available'] is False
+    finally:
+        for name in ('orphan', 'ready'):
+            marker = tmp_path / name
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if child.returncode is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            await child.wait()
+
+
 @pytest.mark.parametrize('receipt_conflict', [False, True])
 async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(
     tmp_path: Path, receipt_conflict: bool,
@@ -325,34 +433,45 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('diagnostic_failure,foreign_stderr,entrypoint_payload', [
-    pytest.param('none', b'', b'', id='none'),
-    pytest.param('log_conflict', b'', b'', id='log_conflict'),
-    pytest.param('receipt_conflict', b'', b'', id='receipt_conflict'),
-    pytest.param('log_symlink', b'', b'', id='log_symlink'),
-    pytest.param('receipt_symlink', b'', b'', id='receipt_symlink'),
-    pytest.param('supervisor_enospc', b'', b'', id='supervisor_enospc'),
-    pytest.param('log_enospc', b'', b'', id='log_enospc'),
-    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', b'', id='foreign_stderr'),
-    pytest.param('none', b'', b'{"message":"\\ud800"}\n', id='surrogate_json'),
+@pytest.mark.parametrize('diagnostic_failure,foreign_stderr,entrypoint_payload,declared_timeout,transport_timeout', [
+    pytest.param('none', b'', b'', 900, 932, id='none'),
+    pytest.param('none', b'', b'', 3601.25, 3634, id='long_outer_timeout'),
+    pytest.param('none', b'', b'', None, None, id='unknown_outer_timeout'),
+    pytest.param('log_conflict', b'', b'', 900, 932, id='log_conflict'),
+    pytest.param('receipt_conflict', b'', b'', 900, 932, id='receipt_conflict'),
+    pytest.param('log_symlink', b'', b'', 900, 932, id='log_symlink'),
+    pytest.param('receipt_symlink', b'', b'', 900, 932, id='receipt_symlink'),
+    pytest.param('supervisor_enospc', b'', b'', 900, 932, id='supervisor_enospc'),
+    pytest.param('log_enospc', b'', b'', 900, 932, id='log_enospc'),
+    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', b'', 900, 932,
+                 id='foreign_stderr'),
+    pytest.param('none', b'', b'{"message":"\\ud800"}\n', 900, 932, id='surrogate_json'),
     pytest.param('none', b'', b'-----BEGIN PRIVATE KEY-----\nCOMPLETE_KEY_CANARY\n-----END PRIVATE KEY-----\n'
-                 b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n', id='complete_then_incomplete_pem'),
-    pytest.param('none', b'', b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n', id='structured_secret'),
-    pytest.param('none', b'', b'{"refresh_token": "INCOMPLETE_LINE_CANARY', id='incomplete_line'),
-    pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n',
+                 b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n', 900, 932, id='complete_then_incomplete_pem'),
+    pytest.param('none', b'', b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n', 900, 932, id='structured_secret'),
+    pytest.param('none', b'', b'{"refresh_token": "INCOMPLETE_LINE_CANARY', 900, 932, id='incomplete_line'),
+    pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n', 900, 932,
                  id='oversized_credential'),
 ])
 async def test_completed_process_review_keeps_native_result_despite_diagnostic_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
-    foreign_stderr: bytes, entrypoint_payload: bytes,
+    foreign_stderr: bytes, entrypoint_payload: bytes, declared_timeout: float | None, transport_timeout: int | None,
 ) -> None:
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
-    declared_task = tmp_path / 'declared-task'
-    declared_task.mkdir()
-    (declared_task / 'task.toml').write_text('[agent]\ntimeout_sec = 900\n')
-    (tmp_path / 'config.json').write_text(json.dumps({'task': {'path': str(declared_task)}, 'agent': {}}))
-    local = LocalReviewerEnvironment({**os.environ, **environment,
+    if declared_timeout is not None:
+        declared_task = tmp_path / 'declared-task'
+        declared_task.mkdir()
+        (declared_task / 'task.toml').write_text(f'[agent]\ntimeout_sec = {declared_timeout}\n')
+        (tmp_path / 'config.json').write_text(json.dumps({'task': {'path': str(declared_task)}, 'agent': {}}))
+    received_timeouts: list[int | None] = []
+
+    class DeadlineEnvironment(LocalReviewerEnvironment):
+        async def exec(self, command: str, **kwargs: Any) -> Any:
+            received_timeouts.append(kwargs.get('timeout_sec'))
+            return await super().exec(command, **kwargs)
+
+    local = DeadlineEnvironment({**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']),
         publication_fault={'supervisor_enospc': 'reviewer-process.json',
@@ -381,14 +500,16 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
             'frozen public task', local, SimpleNamespace()), timeout=30)
         record = json.loads((Path(environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json').read_text())
         assert record['status'] == 'completed_empty'
+        assert received_timeouts == [transport_timeout]
         assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
         assert all(child.returncode == 0 for child in local.children)
         assert not list(logs.rglob('*checkpoint*')), 'fresh completed run created interruption checkpoints'
         if diagnostic_failure == 'none':
             receipt = json.loads((logs / 'reviewer-process.json').read_text())
             assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
-            assert receipt['outer_deadline_seconds'] == 900
-            assert receipt['outer_deadline_availability'] == 'declared trial config'
+            assert receipt['outer_deadline_seconds'] == declared_timeout
+            assert receipt['outer_deadline_availability'] == (
+                'declared trial config' if declared_timeout is not None else 'unavailable')
             assert receipt['terminal_evidence_available'] is True
         if protected is not None and destination is not None:
             assert protected.read_text() == 'prior competing diagnostic bytes'
@@ -421,6 +542,7 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
                 assert receipt['stdout_capture']['discarded'] and receipt['output_truncated']
             else:
                 assert b'REDACTED' in retained
+            assert b'CANARY' not in retained
             assert 'CANARY' not in all_output
         for canary in ('publication-secret-canary', 'private-refresh-canary', 'private-id-canary',
                        'forbidden-api-canary', 'forbidden-github-canary'):

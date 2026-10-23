@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -10,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from daydream import git_ops
-from daydream.backends import BackendExecutionInput, create_backend
+from daydream.backends import BackendExecutionInput, RetryPolicy, create_backend
 from daydream.backends.pi import _configured_pi_model, native_pi_provider, native_pi_settings
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.git_ops.process import _run_git
@@ -45,13 +46,49 @@ def parse_native_config(arguments: list[str]) -> RunConfig:
 
 
 # These are ordinary review-policy overrides, not a second native configuration
-# resolver. Source, authentication, outputs, publication and transport stay host-owned.
+# resolver. Source, authentication, outputs and publication stay host-owned.
 _REVIEW_OVERRIDES = ('stack', 'cleanup', 'quiet', 'diagram', 'backend', 'model', 'reasoning_effort',
     'review_backend', 'review_model', 'parse_model', 'exploration_model', 'log_mode', 'latency_profile', 'shallow',
     'shallow_fanout_threshold', 'precision_mode', 'ignore_paths',
     'deep_shard_enabled', 'deep_shard_max_files', 'deep_shard_max_bytes', 'deep_shard_fanout_cap',
     'deep_shard_frontier_max', 'review_cache_enabled', 'review_cache_max_entries', 'review_cache_max_bytes',
     'review_cache_max_age_days')
+
+_EXECUTION_OVERRIDES = ('stream_idle_timeout_s', 'pi_response_idle_timeout_s',
+    'codex_terminal_drain_timeout_s', 'codex_process_reap_timeout_s', 'codex_cleanup_timeout_s')
+
+
+def _execution_values(reviewer: Mapping[str, Any]) -> dict[str, Any]:
+    error = 'incompatible frozen native execution policy; regenerate the export'
+    policy = reviewer.get('execution')
+    if not isinstance(policy, dict) or set(policy) != {'retry_policy', *_EXECUTION_OVERRIDES}:
+        raise ValueError(error)
+    retry = policy['retry_policy']
+    if (not isinstance(retry, dict)
+            or set(retry) != {'attempts', 'base_delay_s', 'max_delay_s', 'retry_recovery_allowance_s'}
+            or type(retry['attempts']) is not int or retry['attempts'] < 0):
+        raise ValueError(error)
+    values = {name: value for name, value in retry.items() if name != 'attempts'}
+    values.update((name, policy[name]) for name in _EXECUTION_OVERRIDES)
+    for name, value in values.items():
+        if value is None and name in {'retry_recovery_allowance_s', 'stream_idle_timeout_s',
+                                      'pi_response_idle_timeout_s'}:
+            continue
+        if type(value) not in {int, float}:
+            raise ValueError(error)
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            finite = False
+        if not finite or value < 0 or (value == 0 and name in _EXECUTION_OVERRIDES):
+            raise ValueError(error)
+    return {**policy, 'retry_policy': RetryPolicy(**retry)}
+
+
+def reviewer_execution(reviewer: Mapping[str, Any], environment: Mapping[str, str]) -> BackendExecutionInput:
+    """Restore parsed nonsecret limits onto the isolated native capability."""
+    return replace(BackendExecutionInput.from_environment(environment, backend=reviewer['backend']),
+                   **_execution_values(reviewer))
 
 
 def freeze_reviewer(config: RunConfig) -> dict[str, Any]:
@@ -93,6 +130,8 @@ def freeze_reviewer(config: RunConfig) -> dict[str, Any]:
         'reasoning_effort': _resolved_reasoning_effort(config, 'per_stack_review'),
         'provider': provider, 'thinking': capability.pi_thinking if backend == 'pi' else None,
         'pi_settings': settings if backend == 'pi' else None,
+        'execution': {'retry_policy': asdict(capability.retry_policy),
+                      **{name: getattr(capability, name) for name in _EXECUTION_OVERRIDES}},
         'run_config': {name: copy.deepcopy(getattr(config, name)) for name in _REVIEW_OVERRIDES},
         'file_config': file_config,
         'profile': {'data': asdict(config.review_profile.profile), 'source_kind': config.review_profile.source_kind},
@@ -104,6 +143,7 @@ def reviewer_config(reviewer: Mapping[str, Any], repository: Path) -> RunConfig:
     from daydream.config_file import DaydreamFileConfig
     from daydream.review_profile import Arbitration, Pipeline, ResolvedProfile, ReviewProfile, Strategy, Suppression
 
+    _execution_values(reviewer)
     overrides = reviewer['run_config']
     if not isinstance(overrides, dict) or set(overrides) != set(_REVIEW_OVERRIDES):
         raise ValueError('incompatible frozen native reviewer configuration; regenerate the export')
