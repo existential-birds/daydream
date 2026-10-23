@@ -60,11 +60,6 @@ def finding(**overrides: Any) -> dict[str, Any]:
             "severity": "medium", "confidence": "MEDIUM", **overrides}
 
 
-def checkpoint_documents(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    manifest = json.loads(path.read_bytes())
-    return manifest, [json.loads(entry['json']) for entry in manifest['documents'].values()]
-
-
 def native_auth(home: Path, role: str = 'codex') -> dict[str, Any]:
     """Create one role-scoped synthetic native store with no live credentials."""
     home.mkdir(parents=True, exist_ok=True)

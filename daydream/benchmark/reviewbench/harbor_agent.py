@@ -72,7 +72,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             reason = 'host_task_cancelled' if interrupted else 'host_execution_failed'
             channels: dict[str, str] = {}
             try:
-                from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
+                from daydream.benchmark.reviewbench.harbor_process import publish_diagnostic_bytes
 
                 marker = {'invocation_id': invocation, 'interruption': reason}
                 publish_diagnostic_bytes(cancellation_marker(Path(self.logs_dir), invocation),
@@ -107,7 +107,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             execution.add_done_callback(_consume_task_result)
             cleanup.add_done_callback(_consume_task_result)
             try:
-                from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
+                from daydream.benchmark.reviewbench.harbor_process import publish_diagnostic_bytes
 
                 publish_diagnostic_bytes(Path(self.logs_dir) / 'reviewer-host.json', (json.dumps({
                     'schema': 1, 'invocation_id': invocation, 'interruption': reason,
@@ -149,7 +149,7 @@ def _consume_task_result(task: asyncio.Task[Any]) -> None:
 
 def _process_completion_observed(logs: Path, invocation: str) -> bool:
     """Observe this invocation's bounded final receipt without following a leaf."""
-    from daydream.benchmark.reviewbench.diagnostics import read_diagnostic_bytes
+    from daydream.benchmark.reviewbench.harbor_process import read_diagnostic_bytes
 
     try:
         receipt = json.loads(read_diagnostic_bytes(logs / 'reviewer-process.json'))

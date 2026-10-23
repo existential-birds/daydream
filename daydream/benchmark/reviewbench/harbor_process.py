@@ -8,19 +8,120 @@ import json
 import os
 import select
 import signal
+import stat
 import sys
 import time
 import uuid
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
-from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes, read_diagnostic_bytes
 from daydream.redaction import redact_structured_text
 
 SHUTDOWN_GRACE_SECONDS = 20.0
 FORCE_REAP_SECONDS = 2.0
 OUTPUT_LIMIT_BYTES = 65536
 STOP_REASONS = ('host_task_cancelled', 'host_execution_failed')
+
+
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+@contextmanager
+def _directory(parent: int, parts: Sequence[str], *, create: bool = False) -> Iterator[int]:
+    """Walk each diagnostic directory component relative to an anchored descriptor."""
+    descriptor = os.dup(parent)
+    try:
+        for part in parts:
+            if part in {'', '.', '..'} or '/' in part or '\\' in part:
+                raise ValueError('unsafe diagnostic directory component')
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            except OSError as exc:
+                try:
+                    symbolic = stat.S_ISLNK(os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode)
+                except OSError:
+                    symbolic = False
+                if symbolic:
+                    raise ValueError('diagnostic symlink rejected') from exc
+                raise
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def _absolute_directory(path: Path, *, create: bool = False) -> Iterator[int]:
+    """Reject symlinked ancestry, including operator-supplied readout parents."""
+    absolute = path.absolute()
+    descriptor = os.open(absolute.anchor, _DIRECTORY_FLAGS)
+    try:
+        with _directory(descriptor, absolute.parts[1:], create=create) as opened:
+            yield opened
+    finally:
+        os.close(descriptor)
+
+
+def _create_bytes(directory: int, relative: Path, body: bytes) -> None:
+    """Flush and exclusively link one flat file below an anchored directory."""
+    temporary = '.diagnostic-' + uuid.uuid4().hex + '.tmp'
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, relative.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        os.fsync(directory)
+    finally:
+        with suppress(OSError):
+            os.unlink(temporary, dir_fd=directory)
+
+
+def publish_diagnostic_bytes(path: Path, body: bytes) -> None:
+    """Publish one host diagnostic without following ancestry or replacing bytes."""
+    with _absolute_directory(path.parent, create=True) as directory:
+        _create_bytes(directory, Path(path.name), body)
+
+
+def _read_bytes(directory: int, relative: Path, limit: int) -> bytes:
+    """Read only a regular file through no-follow descriptor-relative parents."""
+    try:
+        descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+    except OSError as exc:
+        try:
+            symbolic = stat.S_ISLNK(os.stat(relative.name, dir_fd=directory, follow_symlinks=False).st_mode)
+        except OSError:
+            symbolic = False
+        if symbolic:
+            raise ValueError('diagnostic symlink rejected') from exc
+        raise
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('diagnostic file must be regular')
+        if info.st_size > limit:
+            raise ValueError('diagnostic file exceeds read limit')
+        body = stream.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError('diagnostic file exceeds read limit')
+        return body
+
+
+def read_diagnostic_bytes(path: Path, limit: int = 65536) -> bytes:
+    """Read bounded regular diagnostic bytes through no-follow anchored parents."""
+    with _absolute_directory(path.parent) as directory:
+        return _read_bytes(directory, Path(path.name), limit)
 
 
 def _enable_subreaper() -> bool:
@@ -233,8 +334,6 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
         _try_publish_process_evidence(environment, b'reviewer cancelled before startup\n', receipt)
         return 130
     worker_environment = {**environment, 'DAYDREAM_RB_INVOCATION': invocation}
-    if outer_timeout is not None:
-        worker_environment['DAYDREAM_RB_DECLARED_OUTER_TIMEOUT'] = str(outer_timeout)
     child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-m',
         'daydream.benchmark.reviewbench.harbor_entrypoint', env=worker_environment,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)

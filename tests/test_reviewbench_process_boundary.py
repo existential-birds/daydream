@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import hashlib
 import json
 import os
 import signal
@@ -17,7 +16,7 @@ import pytest
 
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
-from tests.harness.reviewbench import LocalReviewerEnvironment, checkpoint_documents, public_input
+from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 
 
 @pytest.mark.parametrize('interruption', [
@@ -87,11 +86,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             await asyncio.sleep(0.01)
         evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
         if interruption == 'force':
-            checkpoints = evidence.with_name(evidence.name + '-checkpoints')
-            checkpoint_deadline = asyncio.get_running_loop().time() + 10
-            while not list(checkpoints.glob('checkpoint-*.json')):
-                assert asyncio.get_running_loop().time() < checkpoint_deadline, 'no active checkpoint retained'
-                await asyncio.sleep(0.01)
             blocked = next(row for row in cli.observations() if row['mode'] == 'preterminal_silence')
             os.kill(blocked['ppid'], signal.SIGSTOP)
         if interruption.startswith('collector_'):
@@ -138,7 +132,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         assert host_receipt['cancellation_channels'] == {'shared_marker': 'published'}
         if interruption == 'force':
             assert not (evidence / 'execution.json').exists()
-            assert list(checkpoints.glob('checkpoint-*.json'))
             assert receipt['terminal_evidence_available'] is False
             assert all(child.returncode is not None for child in local.children)
             assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
@@ -223,7 +216,6 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']))
     evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
-    checkpoints = evidence.with_name(evidence.name + '-checkpoints')
     running = asyncio.create_task(DaydreamPublicReviewAgent(logs_dir=evidence.parent).run(
         'frozen synthetic task', local, SimpleNamespace()))
     try:
@@ -233,65 +225,6 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
                 await running
             assert asyncio.get_running_loop().time() < deadline, 'native tool process did not reach readiness'
             await asyncio.sleep(0.01)
-        while True:
-            if manifests := sorted(checkpoints.glob('checkpoint-*.json')):
-                manifest, documents = checkpoint_documents(manifests[-1])
-                tool_payloads = [json.loads(result['content'])
-                                 for document in documents for step in document['steps']
-                                 for result in step.get('observation', {}).get('results', [])
-                                 if result['source_call_id'] == 'fixture-input']
-                active = [document for document in documents
-                    if any(row.get('backend_lifecycle') and row.get('ended_at') is None
-                           for row in document.get('extra', {}).get('subtrajectories', []))
-                    and any(result['source_call_id'] == 'fixture-input' for step in document['steps']
-                            for result in step.get('observation', {}).get('results', []))]
-                if len(documents) >= 3 and active:
-                    child = active[0]
-                    break
-            assert asyncio.get_running_loop().time() < deadline, 'active tool checkpoint was not retained'
-            await asyncio.sleep(0.01)
-        assert manifest['kind'] == 'checkpoint' and len(documents) >= 3
-        first, first_bytes = manifests[-1], manifests[-1].read_bytes()
-        root = next(document for document in documents if document['trajectory_id'] == manifest['session_id'])
-        fork = next(row for row in root['extra']['subtrajectories'] if row['trajectory_id'] == child['trajectory_id'])
-        invocation = child['extra']['subtrajectories'][-1]
-        assert fork['ended_at'] is invocation['ended_at'] is None
-        assert fork['invocations'] == [] and 'generation_lifecycle' not in invocation
-        frozen = manifest['documents']
-        stored = frozen[fork['sibling_trajectory_ref']]
-        assert stored['sha256'] == hashlib.sha256(stored['json'].encode()).hexdigest()
-        assert json.loads(stored['json']) == child
-        assert {document['extra']['snapshot_at'] for document in documents if document['extra'].get('partial')} == {
-            manifest['cutoff_at']}
-        if invocation.get('host_dispatch'):
-            assert invocation['host_dispatch']['stage_scope_id']
-        lifecycle = invocation['backend_lifecycle']
-        assert lifecycle['spawn_completed_s'] is not None and lifecycle['last_native_event_s'] is not None
-        assert lifecycle['last_native_event_kind'] == 'item_completed'
-        assert all(lifecycle[field] is None for field in
-                   ('terminal_received_s', 'stdout_eof_s', 'process_returncode', 'teardown_started_s'))
-        async with asyncio.timeout(5):
-            while (newest := sorted(checkpoints.glob('checkpoint-*.json'))[-1]) == first:
-                await asyncio.sleep(0.01)
-        following_manifest, following = checkpoint_documents(newest)
-        assert all(following_manifest['documents'][path] == row for path, row in frozen.items()
-                   if not json.loads(row['json'])['extra'].get('partial'))
-        sampled = next(document for document in following if document['trajectory_id'] == child['trajectory_id'])
-        current = sampled['extra']['subtrajectories'][-1]['backend_lifecycle']
-        assert current['elapsed_s'] > lifecycle['elapsed_s']
-        assert current['last_native_event_s'] == lifecycle['last_native_event_s']
-        assert first.read_bytes() == first_bytes and not running.done()
-        checkpoint_text = json.dumps(documents)
-        assert 'ordinary-public-key' in checkpoint_text
-        assert secret not in checkpoint_text, 'active checkpoint retained an admitted Pi credential'
-        assert tool_payloads
-        for payload in tool_payloads:
-            assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
-            assert payload['usage'] == {'input': 0, 'output': None}
-            admitted = payload['data']['nous' if credential_type == 'api_key' else 'openai-codex']
-            assert admitted['type'] == credential_type
-            if credential_type == 'oauth':
-                assert admitted['accountId'] == 'synthetic-public-account' and admitted['expires'] == 9000000000000
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(running, timeout=35)
@@ -302,13 +235,31 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         siblings = [row['sibling_trajectory_ref'] for row in root['extra']['subtrajectories']
                     if 'sibling_trajectory_ref' in row]
         assert siblings and all((evidence / reference).is_file() for reference in siblings)
-        completed = next(document for reference in siblings
-            if (document := json.loads((evidence / reference).read_bytes()))['trajectory_id'] == child['trajectory_id'])
+        documents = [json.loads((evidence / reference).read_bytes()) for reference in siblings]
+        tool_payloads = [json.loads(result['content'])
+                         for document in documents for step in document['steps']
+                         for result in step.get('observation', {}).get('results', [])
+                         if result['source_call_id'] == 'fixture-input']
+        assert tool_payloads
+        for payload in tool_payloads:
+            assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
+            assert payload['usage'] == {'input': 0, 'output': None}
+            admitted = payload['data']['nous' if credential_type == 'api_key' else 'openai-codex']
+            assert admitted['type'] == credential_type
+            if credential_type == 'oauth':
+                assert admitted['accountId'] == 'synthetic-public-account' and admitted['expires'] == 9000000000000
+        completed = next(document for document in documents
+            if any(result['source_call_id'] == 'fixture-input' for step in document['steps']
+                   for result in step.get('observation', {}).get('results', []))
+            and any(step.get('extra', {}).get('stop_reason') == 'cancelled' for step in document['steps']))
         final_invocation = completed['extra']['subtrajectories'][-1]
         final_lifecycle = final_invocation['backend_lifecycle']
         assert final_invocation['ended_at'] is not None and final_lifecycle['teardown_completed_s'] is not None
         assert final_lifecycle['process_returncode'] is not None
-        assert final_lifecycle['elapsed_s'] >= current['elapsed_s']
+        assert final_lifecycle['spawn_completed_s'] is not None and final_lifecycle['last_native_event_s'] is not None
+        assert final_lifecycle['last_native_event_kind'] == 'item_completed'
+        if final_invocation.get('host_dispatch'):
+            assert final_invocation['host_dispatch']['stage_scope_id']
         retained = {path: path.read_bytes() for path in evidence.parent.rglob('*') if path.is_file()}
         assert any(b'ordinary-public-key' in body for body in retained.values())
         assert not [str(path.relative_to(evidence.parent))
@@ -432,6 +383,7 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
         assert record['status'] == 'completed_empty'
         assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
         assert all(child.returncode == 0 for child in local.children)
+        assert not list(logs.rglob('*checkpoint*')), 'fresh completed run created interruption checkpoints'
         if diagnostic_failure == 'none':
             receipt = json.loads((logs / 'reviewer-process.json').read_text())
             assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
@@ -510,65 +462,8 @@ async def test_optional_process_log_failure_preserves_actual_native_failure(tmp_
         await local.close()
 
 
-@pytest.mark.parametrize('failure', ['mkdir_enospc', 'metadata_enospc', 'reused', 'symlink'])
-async def test_checkpoint_initialization_is_optional_only_for_operational_io_failure(
-    tmp_path: Path, failure: str,
-) -> None:
-    environment = public_input(tmp_path)
-    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
-    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
-    checkpoints = evidence.with_name(evidence.name + '-checkpoints')
-    protected = tmp_path / 'other-owner'
-    if failure in {'reused', 'symlink'}:
-        checkpoints.parent.mkdir(parents=True)
-        protected.mkdir()
-        (protected / 'preserve').write_text('other owner bytes')
-        if failure == 'reused':
-            checkpoints.mkdir()
-            (checkpoints / 'preserve').write_text('prior checkpoint bytes')
-        else:
-            checkpoints.symlink_to(protected, target_is_directory=True)
-    bootstrap = ('import errno,os,runpy\nfrom pathlib import Path\n'
-        'original_mkdir,original_link=os.mkdir,os.link\n'
-        'def mkdir(path,*args,**kwargs):\n'
-        f'    if {failure == "mkdir_enospc"!r} and Path(path).name=="daydream-checkpoints":\n'
-        '        raise OSError(errno.ENOSPC,"checkpoint failure secret")\n'
-        '    return original_mkdir(path,*args,**kwargs)\n'
-        'def link(source,destination,**kwargs):\n'
-        f'    if {failure == "metadata_enospc"!r} and Path(destination).name=="metadata.json":\n'
-        '        raise OSError(errno.ENOSPC,"checkpoint failure secret")\n'
-        '    return original_link(source,destination,**kwargs)\n'
-        'os.mkdir,os.link=mkdir,link\n'
-        'runpy.run_module("daydream.benchmark.reviewbench.harbor_entrypoint",run_name="__main__")\n')
-    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', bootstrap,
-        cwd=environment['DAYDREAM_RB_REPOSITORY'],
-        env={**os.environ, **environment, 'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
-        if failure in {'reused', 'symlink'}:
-            assert child.returncode == 1
-            assert not cli.observations(), 'unsafe checkpoint path reached native inference'
-            assert not evidence.exists() and not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-            assert (protected / 'preserve').read_text() == 'other owner bytes'
-            if failure == 'reused':
-                assert (checkpoints / 'preserve').read_text() == 'prior checkpoint bytes'
-            return
-        assert child.returncode == 0, stderr.decode()
-        record = json.loads((evidence / 'execution.json').read_text())
-        assert record['status'] == 'completed_empty' and cli.observations()
-        assert record['checkpoint_error'] == 'checkpoint initialization unavailable: OSError errno=28'
-        assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
-        assert 'diagnostics unavailable' in stderr.decode() and 'errno=28' in stderr.decode()
-        assert 'checkpoint failure secret' not in (stdout + stderr).decode()
-    finally:
-        if child.returncode is None:
-            child.kill()
-            await child.wait()
-
-
 @pytest.mark.parametrize('shutdown', ['graceful', 'repeated_signal', 'force'])
-async def test_sigterm_joins_real_finalization_writer_before_export_or_uses_checkpoint(
+async def test_sigterm_joins_real_finalization_writer_before_export_or_reports_unavailable_evidence(
     tmp_path: Path, shutdown: str,
 ) -> None:
     environment = public_input(tmp_path)
@@ -651,13 +546,6 @@ raise SystemExit(asyncio.run(drive()))
             assert process['cleanup_outcome'] == 'forced_termination'
             assert process['terminal_evidence_available'] is False
             assert not exported.exists() and not joined.exists()
-            checkpoints = evidence.with_name(evidence.name + '-checkpoints')
-            manifest, documents = checkpoint_documents(sorted(checkpoints.glob('checkpoint-*.json'))[-1])
-            assert manifest['schema'] == 2 and len(documents) >= 3
-            assert all(hashlib.sha256(row['json'].encode()).hexdigest() == row['sha256']
-                       for row in manifest['documents'].values())
-            assert all(row['sibling_trajectory_ref'] in manifest['documents'] for document in documents
-                       for row in document['extra']['subtrajectories'] if 'sibling_trajectory_ref' in row)
             assert not (evidence / 'execution.json').exists()
             return
         assert process['cleanup_outcome'] == 'graceful_exit' and process['child_returncode'] == 130

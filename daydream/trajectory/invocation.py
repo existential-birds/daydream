@@ -287,7 +287,7 @@ class Invocation:
             ui.print_warning(_console, f"Trajectory dispatch measurement failed: {type(exc).__name__}")
 
     def observe_backend_lifecycle(self, collector: BackendLifecycleCollector) -> None:
-        """Bind only this host-owned attempt for immutable in-flight checkpoint observations."""
+        """Bind only this host-owned attempt for immutable in-flight lifecycle observations."""
         self._active_backend_lifecycle = collector
 
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:

@@ -73,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
-- Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
-  Simplify cancellation and publish raw evidence without separate session archives or readout machinery.
+- Redact native credentials; preserve native budgets/scoring, cancellation, and final evidence export
+  without separate session archives or readout machinery.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
@@ -127,6 +127,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Isolate mutable test registries and consolidate equivalent cases; retain
   oversized-input regression coverage with a bounded case ID and unchanged
   payload and assertions.
+
+### Removed
+
+- Remove public ReviewBench's periodic interruption checkpoints and `daydream/benchmark/reviewbench/diagnostics.py`.
+  Ordinary timeout export remains; forced termination can leave detailed review evidence unavailable.
+  Remove `RunnerExecutionInput.on_trajectory_snapshot`; embedded callers must stop passing this argument.
 
 ## [0.30.0] - 2026-10-19
 
