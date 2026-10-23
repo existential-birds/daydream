@@ -22,8 +22,10 @@ Pi requires configured `nous`; for Codex use `--backend codex` / `--codex-home`.
 Keep independent native credentials outside exports/jobs. The judge uses `openai-codex` / `gpt-6.1-sol`.
 Docker needs the selected architecture, nested sandboxing and exact-host isolation.
 The wheel/hash identifies the candidate; package extensions there. No matching installation is needed.
+Exports freeze reviewer retry, idle, and Codex lifecycle controls for native execution.
 `--set test`: supplied 25; `--set full`: all 219; repeated `--task EXACT_NAME`: a subset.
-Harbor owns rounds/timeouts; supplied scoring/checkers own results. Use fresh schema-4 wheels/exports; preserve old evidence.
+Harbor owns rounds/timeouts; supplied scoring/checkers own results. Use fresh schema-4 wheels/exports;
+regenerate earlier exports without frozen execution controls and preserve old evidence.
 Ordinary timeout cancellation joins writers and exports partial root/child trajectories, phase cancellation events,
 native output, `execution.json`, and process receipts. Cleanup retains a 20-second graceful shutdown allowance;
 forced termination can leave detailed review evidence unavailable. New runs create no periodic checkpoint artifacts;

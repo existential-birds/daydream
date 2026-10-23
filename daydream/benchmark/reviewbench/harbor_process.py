@@ -258,6 +258,31 @@ def _signal_owned(owned: dict[int, str], signum: int) -> None:
             pass
 
 
+async def _join_owned_processes(
+    child: asyncio.subprocess.Process, owned: dict[int, str], *, subreaper: bool,
+) -> None:
+    """Discover pipe-holding descendants before joining the reviewer's exit."""
+    parent = os.getpid() if subreaper else child.pid
+    while True:
+        table = _process_table()
+        owned.update(_descendants(parent, table))
+        owned.pop(child.pid, None)
+        _signal_owned(owned, signal.SIGKILL)
+        if subreaper:
+            _reap_adopted(owned, child.pid)
+        after_reap = _process_table()
+        owned.update(_descendants(parent, after_reap))
+        owned.pop(child.pid, None)
+        remaining = {pid: identity for pid, identity in owned.items()
+                     if after_reap.get(pid, (None, None))[1] == identity}
+        if child.returncode is not None and not remaining:
+            # A wait registered before exit can depend on inherited pipe EOF.
+            # Observe exit and clean late adoptions before registering that wait.
+            await child.wait()
+            return
+        await asyncio.sleep(0.02)
+
+
 async def _capture(stream: asyncio.StreamReader, retained: bytearray, flags: dict[str, bool]) -> None:
     while chunk := await stream.read(4096):
         if flags.get('discarded'):
@@ -371,23 +396,7 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
                 break
             await asyncio.sleep(0.05)
         async with asyncio.timeout(FORCE_REAP_SECONDS):
-            await child.wait()
-            # A native TERM handler can fork then exit between table reads.
-            # Linux adoption keeps that late child attached to this invocation
-            # even after the reviewer and its original native parent exit.
-            while True:
-                table = _process_table()
-                owned.update(_descendants(os.getpid() if subreaper else child.pid, table))
-                owned.pop(child.pid, None)
-                _signal_owned(owned, signal.SIGKILL)
-                if subreaper:
-                    _reap_adopted(owned, child.pid)
-                after_reap = _process_table()
-                remaining = {pid: identity for pid, identity in owned.items()
-                             if after_reap.get(pid, (None, None))[1] == identity}
-                if not remaining:
-                    break
-                await asyncio.sleep(0.02)
+            await _join_owned_processes(child, owned, subreaper=subreaper)
             receipt['owned_descendants_cleanup'] = 'joined' if subreaper else 'observed_exits'
             await asyncio.gather(*readers)
         if cancellation_at is not None and force_at is None:
@@ -395,17 +404,17 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
     except Exception as exc:
         receipt['cleanup_outcome'] = 'reap_or_output_expired' if isinstance(exc, TimeoutError) else 'supervisor_failed'
         receipt['cleanup_error'] = type(exc).__name__
-        try:
-            _signal_owned(owned, signal.SIGKILL)
-        except Exception:
-            receipt['owned_descendants_cleanup'] = 'unavailable_process_table'
         if child.returncode is None:
             child.kill()
         try:
             async with asyncio.timeout(FORCE_REAP_SECONDS):
-                await child.wait()
-                if subreaper:
-                    _reap_adopted(owned, child.pid)
+                try:
+                    await _join_owned_processes(child, owned, subreaper=subreaper)
+                except Exception:
+                    receipt['owned_descendants_cleanup'] = 'unavailable_process_table'
+                    await child.wait()
+                else:
+                    receipt['owned_descendants_cleanup'] = 'joined' if subreaper else 'observed_exits'
         except TimeoutError:
             receipt['child_reap'] = 'unavailable_after_force_bound'
     finally:

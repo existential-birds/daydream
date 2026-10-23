@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent
+from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, RetryPolicy, create_backend
 from daydream.backends.pi import native_pi_settings
 from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import (
@@ -49,7 +49,17 @@ async def test_admitted_review_preserves_terminal_authority_and_isolation(
     from daydream.backends.codex import CodexBackend
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
 
+    controls = {
+        'DAYDREAM_PI_RETRY_ATTEMPTS': '0', 'DAYDREAM_PI_RETRY_BASE_DELAY_S': '0.25',
+        'DAYDREAM_PI_RETRY_MAX_DELAY_S': '4', 'DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S': '0',
+        'DAYDREAM_STREAM_IDLE_TIMEOUT_S': '17', 'DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S': '19',
+        'DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S': '3', 'DAYDREAM_CODEX_CLEANUP_TIMEOUT_S': '7',
+    }
+    for key, value in controls.items():
+        monkeypatch.setenv(key, value)
     environment = public_input(tmp_path, divergent_base=outcome == 'divergent')
+    for key in controls:
+        monkeypatch.setenv(key, '1')
     if outcome == 'extension':
         request.getfixturevalue('ext_dir').write_module(
             'def register(registry):\n'
@@ -83,8 +93,14 @@ async def test_admitted_review_preserves_terminal_authority_and_isolation(
 
     def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
         assert name == 'codex' and kwargs['execution_input'].fanout_concurrency == 1
-        child = kwargs['execution_input'].child_environment()
+        capability = kwargs['execution_input']
+        assert capability.retry_policy == RetryPolicy(0, 0.25, 4, 0)
+        assert capability.stream_idle_timeout_s == capability.pi_response_idle_timeout_s == 17
+        assert (capability.codex_terminal_drain_timeout_s, capability.codex_process_reap_timeout_s,
+                capability.codex_cleanup_timeout_s) == (19, 3, 7)
+        child = capability.child_environment()
         assert not {'OPENAI_API_KEY', 'GH_TOKEN', 'OPENAI_BASE_URL', 'DAYDREAM_ARCHIVE_DIR'} & child.keys()
+        assert not controls.keys() & child.keys()
         home = Path(child['CODEX_HOME'])
         archives.add(Path(os.environ['DAYDREAM_ARCHIVE_DIR']))
         auth = json.loads((home / 'auth.json').read_text())
@@ -98,8 +114,10 @@ async def test_admitted_review_preserves_terminal_authority_and_isolation(
                 outcome == 'failed' and ('you are reviewing the ' in prompt.lower()
                     or 'you are the structural reviewer' in prompt.lower())
                 or outcome == 'pipeline_failure' and 'supervisor adjudication' in prompt.lower()) else None)
-        backend.fanout_concurrency = CodexBackend(model=kwargs['model'], reasoning_effort=kwargs['reasoning_effort'],
-            execution_input=kwargs['execution_input']).fanout_concurrency
+        native_backend = CodexBackend(model=kwargs['model'], reasoning_effort=kwargs['reasoning_effort'],
+            execution_input=capability)
+        assert native_backend.retry_policy == RetryPolicy(0, 0.25, 4, 0)
+        backend.fanout_concurrency = native_backend.fanout_concurrency
         backend.merge_echo_records = True
         return backend
 
@@ -228,13 +246,29 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
             pytest.fail('case-local effort reached the Pi transport')
 
 
-@pytest.mark.parametrize('phase_model', [None, 'native-intent-model'])
+@pytest.mark.parametrize('phase_model,idle_override', [(None, None), ('native-intent-model', None), (None, '0')])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, phase_model: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+    phase_model: str | None, idle_override: str | None,
 ) -> None:
+    from daydream.backends.pi import PiBackend
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
+    if idle_override is None:
+        monkeypatch.delenv('DAYDREAM_STREAM_IDLE_TIMEOUT_S', raising=False)
+    else:
+        monkeypatch.setenv('DAYDREAM_STREAM_IDLE_TIMEOUT_S', idle_override)
+    retry_controls = {
+        'DAYDREAM_PI_RETRY_ATTEMPTS': '0', 'DAYDREAM_PI_RETRY_BASE_DELAY_S': '0.25',
+        'DAYDREAM_PI_RETRY_MAX_DELAY_S': '4', 'DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S': '0',
+    }
+    for key, value in retry_controls.items():
+        if idle_override is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    expected_retry = RetryPolicy(20, 10, 120, None) if idle_override is None else RetryPolicy(0, 0.25, 4, 0)
     environment = public_input(tmp_path, additional_sources=3 if phase_model else 0)
     repo = Path(environment['DAYDREAM_RB_REPOSITORY'])
     agent_dir = tmp_path / 'operator-pi'
@@ -297,6 +331,18 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     profile['profile_sha256'] = canonical_digest({key: value for key, value in profile.items()
                                                   if key != 'profile_sha256'})
     profile_path.write_text(json.dumps(profile))
+    monkeypatch.setenv('DAYDREAM_STREAM_IDLE_TIMEOUT_S', '6000')
+    for key in retry_controls:
+        monkeypatch.setenv(key, '1')
+    real_create = create_backend
+
+    def create(name: str, **kwargs: Any) -> PiBackend:
+        backend = real_create(name, **kwargs)
+        assert isinstance(backend, PiBackend)
+        assert backend.retry_policy == expected_retry
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
     environment['DAYDREAM_RB_REVIEWER_HOME'] = str(agent_dir)
     assert await main(environment) == 0
     result = json.loads((Path(environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json').read_text())
@@ -315,6 +361,12 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
                         for row in root['extra']['subtrajectories'] if 'sibling_trajectory_ref' in row]]
     requests = [request for document in documents for invocation in document['extra']['subtrajectories']
                 for request in invocation.get('requests', [])]
+    lifecycles = [invocation['backend_lifecycle'] for document in documents
+                  for invocation in document['extra']['subtrajectories'] if invocation.get('backend_lifecycle')]
+    assert lifecycles
+    assert {(row['tool_idle_timeout_s'], row['response_idle_timeout_s']) for row in lifecycles} == {
+        (2700, 600) if idle_override is None else (0, 0)}
+    assert {row['idle_detection_enabled'] for row in lifecycles} == {idle_override is None}
     assert {row['model'] for row in requests} == expected_models
     assert {row['provider'] for row in requests} == {'nous'}
     assert 'offline-file-auth-canary' not in json.dumps(result)
