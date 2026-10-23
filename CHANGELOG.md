@@ -72,7 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
-  Simplify cancellation and use supplied judge reports instead of a separate session archive.
+  Simplify cancellation and publish raw evidence without separate session archives or readout machinery.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into

@@ -4,9 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import stat
-import sys
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -132,23 +130,6 @@ def read_diagnostic_bytes(path: Path, limit: int = 65536) -> bytes:
         return _read_bytes(directory, Path(path.name), limit)
 
 
-def _optional_json(path: Path, availability: dict[str, str]) -> Any:
-    try:
-        with _absolute_directory(path.parent) as directory:
-            try:
-                value = json.loads(_read_bytes(directory, Path(path.name)))
-                if not isinstance(value, dict):
-                    raise ValueError('diagnostic receipt must be an object')
-            except (OSError, ValueError) as exc:
-                availability[path.name] = 'unavailable:' + type(exc).__name__
-                return None
-    except OSError as exc:
-        availability[path.name] = 'unavailable:' + type(exc).__name__
-        return None
-    availability[path.name] = 'available'
-    return value
-
-
 class InterruptedReviewDiagnostics:
     """Retain two immutable checkpoints; optional failures never change review authority."""
 
@@ -191,22 +172,41 @@ class InterruptedReviewDiagnostics:
         snapshot.validate(session)
         root = next(document for document in snapshot.documents if document.trajectory_id == session)
         documents = {}
+        identities = {}
+        references: list[dict[str, Any]] = []
         for document in snapshot.documents:
             relative = document.path.relative_to(root.path.parent)
             relative = relative.with_name(relative.name.removesuffix(PARTIAL_SUFFIX))
             name = (run_directory(Path(), session) / _relative(relative.as_posix())).as_posix()
             if name in documents:
                 raise ValueError('duplicate checkpoint path')
+            payload = document.validated_payload(session)
+            extra = payload.get('extra', {})
+            if not isinstance(extra, dict) or any(
+                not isinstance(extra.get(key, []), list) or any(not isinstance(value, dict) for value in extra[key])
+                for key in ('subtrajectories', 'phase_events', 'active_dispatches') if key in extra
+            ):
+                raise ValueError('checkpoint activity is malformed')
+            references.extend(extra.get('subtrajectories', []))
+            identities[name] = document.trajectory_id
             documents[name] = {'sha256': hashlib.sha256(document.json_bytes).hexdigest(),
                                'json': document.json_bytes.decode('utf-8')}
+        root_name = (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix()
+        if identities.get(root_name) != session:
+            raise ValueError('checkpoint root unavailable')
+        for reference in references:
+            if 'sibling_trajectory_ref' in reference:
+                target = reference['sibling_trajectory_ref']
+                if (not isinstance(target, str) or target not in identities
+                        or identities[target] != reference.get('trajectory_id')):
+                    raise ValueError('checkpoint sibling reference unavailable or mismatched')
         bundle = {
             'schema': 2, 'kind': 'checkpoint', 'recorder_status': snapshot.status,
             'cutoff_at': snapshot.cutoff_at, 'session_id': session,
-            'root': (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix(),
+            'root': root_name,
             'terminal_evidence': 'unavailable until joined final export', 'documents': documents,
         }
         body = (json.dumps(bundle, allow_nan=False) + '\n').encode()
-        _decode_checkpoint(body)
         self._sequence += 1
         generation = f'{self._sequence:08d}'
         with self._root() as directory:
@@ -220,123 +220,3 @@ class InterruptedReviewDiagnostics:
                         os.unlink(checkpoint.name, dir_fd=directory)
                 except (OSError, ValueError):
                     pass  # Preserve competing bytes and symlinks.
-
-
-def read_checkpoint(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Read a committed generation, rejecting symlinks, corruption and bad refs."""
-    with _absolute_directory(path.parent) as descriptor:
-        return _decode_checkpoint(_read_bytes(descriptor, Path(path.name)))
-
-
-def _decode_checkpoint(body: bytes) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    manifest = json.loads(body)
-    if (not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 2
-            or manifest.get('kind') != 'checkpoint' or manifest.get('recorder_status') not in ('partial', 'complete')
-            or any(not isinstance(manifest.get(key), str) or not manifest[key]
-                   for key in ('cutoff_at', 'session_id', 'root'))):
-        raise ValueError('unsupported or malformed checkpoint')
-    inventory = manifest.get('documents')
-    if not isinstance(inventory, dict) or not inventory:
-        raise ValueError('checkpoint document inventory is malformed')
-    session = manifest['session_id']
-    expected_root = (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix()
-    if manifest['root'] != expected_root or expected_root not in inventory:
-        raise ValueError('checkpoint root unavailable')
-    by_path: dict[str, dict[str, Any]] = {}
-    identities: set[str] = set()
-    for relative, entry in inventory.items():
-        _relative(relative)
-        if not isinstance(entry, dict) or not isinstance(entry.get('json'), str):
-            raise ValueError('checkpoint document is malformed')
-        if hashlib.sha256(entry['json'].encode()).hexdigest() != entry.get('sha256'):
-            raise ValueError('checkpoint bytes differ')
-        document = json.loads(entry['json'])
-        if (not isinstance(document, dict) or document.get('session_id') != session
-                or not isinstance(document.get('trajectory_id'), str) or not document['trajectory_id']
-                or document['trajectory_id'] in identities):
-            raise ValueError('checkpoint identity differs')
-        extra = document.get('extra', {})
-        if not isinstance(extra, dict) or any(
-            not isinstance(extra.get(key, []), list) or any(not isinstance(value, dict) for value in extra[key])
-            for key in ('subtrajectories', 'phase_events', 'active_dispatches') if key in extra
-        ):
-            raise ValueError('checkpoint activity is malformed')
-        identities.add(document['trajectory_id'])
-        by_path[relative] = document
-    for document in by_path.values():
-        for entry in document.get('extra', {}).get('subtrajectories', []):
-            if 'sibling_trajectory_ref' in entry:
-                reference = entry['sibling_trajectory_ref']
-                if (not isinstance(reference, str) or reference not in by_path
-                        or entry.get('trajectory_id') != by_path[reference]['trajectory_id']):
-                    raise ValueError('checkpoint reference unavailable or mismatched')
-    if by_path[expected_root]['trajectory_id'] != session:
-        raise ValueError('checkpoint root unavailable')
-    manifest['documents'] = {path: entry['sha256'] for path, entry in inventory.items()}
-    return manifest, list(by_path.values())
-
-
-def interrupted_readout(evidence: Path) -> dict[str, Any]:
-    """Summarize retained observations without inference or scoring interrupted work."""
-    checkpoints = evidence.with_name(evidence.name + '-checkpoints')
-    availability: dict[str, str] = {}
-    result: dict[str, Any] = {'terminal_evidence': 'unavailable', 'checkpoint': 'unavailable',
-                              'input_availability': availability}
-    for label, path in {'identity_and_policy': checkpoints / 'metadata.json',
-                        'execution': evidence / 'execution.json',
-                        'process': evidence.parent / 'reviewer-process.json',
-                        'host': evidence.parent / 'reviewer-host.json'}.items():
-        if (value := _optional_json(path, availability)) is not None:
-            result[label] = value
-    if 'execution' in result:
-        result['terminal_evidence'] = 'joined export available; inspect execution status'
-    # Harbor alone labels an outer timeout. SIGTERM/task cancellation in the
-    # reviewer cannot establish whether its caller timed out or was cancelled.
-    trial = evidence.parent.parent / 'result.json'
-    if (trial_result := _optional_json(trial, availability)) is not None:
-        exception = trial_result.get('exception_info')
-        if exception is not None and not isinstance(exception, dict):
-            availability[trial.name] = 'unavailable:ValueError'
-        else:
-            exception = exception or {}
-            result['harbor_outcome'] = {
-                'exception_type': exception.get('exception_type'),
-                'occurred_at': exception.get('occurred_at'),
-                'agent_execution': trial_result.get('agent_execution'),
-            }
-    failures = []
-    try:
-        with _absolute_directory(checkpoints) as directory:
-            names = os.listdir(directory)
-    except FileNotFoundError:
-        names = []
-    for name in sorted((name for name in names if re.fullmatch(r'checkpoint-[0-9]{8}\.json', name)), reverse=True):
-        generation = checkpoints / name
-        try:
-            manifest, documents = read_checkpoint(generation)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            failures.append({'generation': generation.stem.removeprefix('checkpoint-'), 'reason': type(exc).__name__})
-            continue
-        result['checkpoint'] = {'generation': generation.stem.removeprefix('checkpoint-'), **manifest}
-        result['activity'] = [{
-            'trajectory_id': document['trajectory_id'],
-            'phase_events': document.get('extra', {}).get('phase_events', []),
-            'invocations': document.get('extra', {}).get('subtrajectories', []),
-            'active_dispatches': document.get('extra', {}).get('active_dispatches', []),
-        } for document in documents]
-        break
-    result['unavailable_checkpoints'] = failures
-    result['publication_failures'] = [_optional_json(checkpoints / name, availability) for name in sorted(names)
-                                      if re.fullmatch(r'failure-[0-9]{8}\.json', name)]
-    result['interpretation'] = (
-        'Host public observations only. Silence is not reasoning time. Missing usage and terminal evidence '
-        'remain unavailable. Checkpoints do not establish completed analysis, findings, scores, '
-        'who cancelled a run, or a provider root cause.'
-    )
-    return result
-
-
-if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        raise SystemExit('usage: python -m daydream.benchmark.reviewbench.diagnostics PATH_TO_DAYDREAM_EVIDENCE')
-    print(redact_structured_text(json.dumps(interrupted_readout(Path(sys.argv[1])), indent=2)))

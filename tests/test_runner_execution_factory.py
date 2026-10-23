@@ -29,7 +29,6 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
     flow: str, injected: bool, backend_name: str, improve_monorepo_target: Path, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
 ) -> None:
-    """Real custom/Improve flows preserve capabilities, effort/cache identity and ordinary fallback."""
     repo = improve_monorepo_target
     login = "execution-owner" if injected else "ambient-owner"
     ext_dir.write_module(

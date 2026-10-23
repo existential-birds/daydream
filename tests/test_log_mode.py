@@ -94,7 +94,6 @@ async def test_log_mode_rendering(
     events: list[AgentEvent], config_overrides: dict[str, object], required: tuple[str, ...],
     forbidden: tuple[str, ...],
 ) -> None:
-    """Public AgentDisplay owns event routing; the CLI smoke owns runner integration."""
     display = AgentDisplay(Console(file=io.StringIO()),
         InteractionPolicy(log_mode=bool(config_overrides['log_mode'])), None, structured=False)
     for event in events:
@@ -143,7 +142,6 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
 async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellation(
     tmp_path: Path, credential_type: str, closed_pipe: bool, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Cancellation drains delivered log context and survives a real closed-pipe error."""
     secret = 'opaque-ui-cancel-native-auth-canary'
     fields = {'key': secret}
     content = ('ordinary public narration' if credential_type == 'public' else
@@ -205,7 +203,6 @@ async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellat
 async def test_log_mode_failure_handoff_redacts_credential_body(
     git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str], log_mode: bool,
 ) -> None:
-    """The actual failure handoff owns the mode-dependent console boundary."""
     backend = ScriptedBackend(events=[TextEvent(''), ResultEvent(
         structured_output={'handoff_prompt': f'token {REDACTION_SENTINEL}'}, continuation=None)])
     with bind_run_context(RunContext(InteractionPolicy(log_mode=log_mode))):

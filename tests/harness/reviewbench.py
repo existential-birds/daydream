@@ -1,5 +1,3 @@
-"""Frozen ReviewBench inputs and actual reviewer-process test support."""
-
 from __future__ import annotations
 
 import asyncio
@@ -60,6 +58,11 @@ def finding(**overrides: Any) -> dict[str, Any]:
     return {"id": 1, "file": "api.py", "line": 2, "description": "Empty input raises IndexError",
             "rationale": "The API accepts an empty sequence.", "evidence": "api.py:2 indexes value[0].",
             "severity": "medium", "confidence": "MEDIUM", **overrides}
+
+
+def checkpoint_documents(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    manifest = json.loads(path.read_bytes())
+    return manifest, [json.loads(entry['json']) for entry in manifest['documents'].values()]
 
 
 def native_auth(home: Path, role: str = 'codex') -> dict[str, Any]:

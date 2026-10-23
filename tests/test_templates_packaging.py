@@ -99,7 +99,6 @@ for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')
 
 
 def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
-    """Inspect the actual final image for verifier answers and source caches."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')

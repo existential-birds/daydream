@@ -14,11 +14,8 @@ MOBY_SHA256 = '6416b47770785a41ac59073cdc77d9fe98517df2799dc83ef207e622de3053f6'
 
 
 def seccomp_profile() -> tuple[bytes, bytes]:
-    """Fetch pinned upstream bytes, append bounded bootstrap rules, retain evidence.
-
-    Only export needs network access. Exported datasets contain the complete
-    policy and provenance, so execution never downloads or regenerates them.
-    """
+    """Fetch pinned upstream policy and append bounded bootstrap rules with provenance.
+    Only export downloads; execution uses the frozen assets."""
     response = httpx.get(MOBY_URL, timeout=30)
     response.raise_for_status()
     if hashlib.sha256(response.content).hexdigest() != MOBY_SHA256:

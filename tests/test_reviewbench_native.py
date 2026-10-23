@@ -1,4 +1,3 @@
-"""Native ReviewBench contracts using real Git and the ordinary runner."""
 from __future__ import annotations
 
 import asyncio
@@ -47,7 +46,6 @@ async def test_admitted_review_preserves_terminal_authority_and_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str, status: str,
     dataset_store: Path, dataset_hub: FakeDatasetHub, request: pytest.FixtureRequest,
 ) -> None:
-    """One real admitted runner journey owns terminal, public-output and C5 policy."""
     from daydream.backends.codex import CodexBackend
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
 
@@ -177,14 +175,12 @@ def test_frozen_native_profile_survives_removed_operator_files(tmp_path: Path) -
 def test_export_refuses_native_controls_without_an_admitted_runtime_capability(
     tmp_path: Path, arguments: list[str],
 ) -> None:
-    """Reject copying, tests, publication and trace controls whose capabilities cannot be delivered."""
     config = parse_native_config([str(tmp_path), '--backend', 'codex', *arguments])
     with pytest.raises(ValueError, match='unsupported benchmark native policy'):
         freeze_reviewer(config)
 
 
 def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(tmp_path: Path) -> None:
-    """Convert proven HEAD locations and retain explicit omissions for unsafe hints."""
     repo, initial = frozen_case(tmp_path)
     # A later frozen PR includes a same-number replacement, unchanged context,
     # a pure-deleted file, and new-only lines beyond the old hunk's bounds.
@@ -212,7 +208,6 @@ def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(t
 async def test_frozen_pi_defaults_refuse_case_thinking_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unavailable frozen operator effort cannot inherit higher case-local Pi settings."""
     from daydream.backends.pi import PiBackend, PiError
 
     repo, _ = frozen_case(tmp_path)
@@ -237,7 +232,6 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
 async def test_native_pi_retains_nous_provider_model_and_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, phase_model: str | None,
 ) -> None:
-    """The frozen Harbor policy delivers native auth and each phase's model to real Pi transport."""
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
@@ -333,7 +327,6 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
 async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
 ) -> None:
-    """Artifact faults and changed comparisons cannot produce scorable empty success."""
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
@@ -402,7 +395,6 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
 async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, consumer_fails: bool,
 ) -> None:
-    """Observer mutations and exceptions leave native authority and later run scope intact."""
     repo, case = frozen_case(tmp_path)
     received: list[str] = []
     backend = EmptyReviewBackend(repo, forbid_merge=False, forbid_supervise=False,

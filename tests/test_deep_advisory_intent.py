@@ -122,7 +122,6 @@ async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
 async def test_frozen_author_context_is_revision_bound_without_network_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, matching_head: bool,
 ) -> None:
-    """Origin-free author context must match the analyzed HEAD and bypass live PR discovery."""
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
     assert ctx.work.head_sha is not None
     ctx.config.frozen_author_description = FrozenAuthorDescription(

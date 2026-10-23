@@ -132,7 +132,6 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytes
 def test_redactor_preserves_argument_structure_and_per_key_failure(
     monkeypatch: pytest.MonkeyPatch, fail_nested: bool,
 ) -> None:
-    """Recursive failure must isolate one argument without retyping unrelated values."""
     arguments = {'edits': [{'path': '/Users/alice/repo/file.py', 'edit_type': 'replace'},
                            {'path': '/Users/alice/repo/other.py', 'edit_type': 'delete'}],
                  'count': 42, 'flags': ['a', 'b'], 'config': {'x': 1, 'y': [1, 2, 3]}}
@@ -258,7 +257,6 @@ def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
 
 @pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "[redacted_api_key]", "<redacted>"])
 def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> None:
-    """Exact markers remain idempotent while adjacent credential content remains sensitive."""
     for text in (f"api_key = {marker}", f"api_key = '{marker}'", f"auth=Bearer {marker}",
                  f"api_key = {marker}[REDACTED_CREDENTIAL]", f"auth=Bearer {marker}[REDACTED_CREDENTIAL]",
                  f"api_key = {marker}; public diagnostics", f"auth=Bearer {marker}; public diagnostics",
@@ -359,7 +357,6 @@ def test_json_key_privacy_preserves_original_sensitivity_and_value_types(
 def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
     template: str, safe: str, values: tuple[object, object], existing: str,
 ) -> None:
-    """Secret labels cannot collapse each other or clobber literal safe aliases."""
     payload = {template.format('first-key-canary'): values[0], template.format('second-key-canary'): values[1],
                safe: existing, safe + ' (2)': '[REDACTED_RESERVED]',
                'usage': {'input_tokens': 0, 'output_tokens': None}}
@@ -382,7 +379,6 @@ def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
      'opaque-scan-canary', 'foo' + '_' * 100_000 + 'x'),
 ])
 def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> None:
-    """Keep large separator/prefix shapes; tiny semantic cases cannot catch quadratic scans."""
     start = time.process_time()
     result = redact_structured_text(source)
     assert time.process_time() - start < 5
@@ -403,7 +399,6 @@ def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> No
 ])
 @pytest.mark.parametrize('envelope', ['object', 'scalar'])
 def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragment: str, envelope: str) -> None:
-    """Fail-closed unfinished leaves retain valid JSON envelopes and public siblings."""
     serialized = json.dumps({'message': fragment, 'model': 'fixture-model', 'count': 0}
                             if envelope == 'object' else fragment)
     redacted = redact_structured_text(serialized)
@@ -428,7 +423,6 @@ def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragm
     {'nested_json': json.dumps(chr(0xDFFF) + 'café 😀', ensure_ascii=False)},
 ])
 def test_structured_json_surrogates_preserve_utf8_and_json_semantics(payload: object) -> None:
-    """UTF-8 publication preserves decoded lone-surrogate semantics in keys, values, and nested JSON."""
     source = json.dumps(payload)
     redacted = redact_structured_text(source)
     encoded = redacted.encode('utf-8')
@@ -438,7 +432,6 @@ def test_structured_json_surrogates_preserve_utf8_and_json_semantics(payload: ob
 
 
 def test_plain_surrogate_text_is_safe_at_public_redaction_boundary() -> None:
-    """The public text API also makes raw invalid code points writable as escapes."""
     redacted = redact_structured_text('public café 😀 ' + chr(0xD800) + ' tail ' + chr(0xDFFF))
     assert redacted == 'public café 😀 ' + chr(92) + 'ud800 tail ' + chr(92) + 'udfff'
     assert redacted.encode('utf-8')
@@ -450,7 +443,6 @@ def test_plain_surrogate_text_is_safe_at_public_redaction_boundary() -> None:
     '{"entry": "opaque-container-canary", "public": true}',
 ])
 def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(container: str) -> None:
-    """Marker token handling must retain whole sensitive array/object redaction."""
     assert redact_structured_text('token = ' + container) == 'token = "[REDACTED_CREDENTIAL]"'
 
 
@@ -481,7 +473,6 @@ def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(c
      'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]";password="[REDACTED_CREDENTIAL]"'),
 ])
 def test_secret_assignment_redaction_preserves_semicolon_and_is_idempotent(source: str, expected: str) -> None:
-    """ENV and structured redaction must preserve separators and following fields across repeated passes."""
     redacted = redact_structured_text(source)
     assert redacted == expected
     assert redact_structured_text(redacted) == redacted
@@ -495,7 +486,6 @@ def test_secret_assignment_redaction_preserves_semicolon_and_is_idempotent(sourc
 def test_sensitive_semicolon_pairs_preserve_both_separator_frontiers(
     first_separator: str, second_separator: str, boundary: str,
 ) -> None:
-    """Earlier bare values cannot swallow a later credential after a colon or assignment separator."""
     source = (f'refresh_token{first_separator}[REDACTED]opaque-first-canary{boundary}'
               f'api_key{second_separator}opaque-second-canary')
     redacted = redact_structured_text(source)
@@ -508,7 +498,6 @@ def test_sensitive_semicolon_pairs_preserve_both_separator_frontiers(
 
 @pytest.mark.parametrize('name', ['api_key', 'TOKEN'])
 def test_internal_semicolon_cannot_expose_sensitive_assignment_residual(name: str) -> None:
-    """A semicolon inside one opaque value cannot expose either private fragment."""
     redacted = redact_structured_text(name + '=opaque-prefix-canary;opaque-tail-canary')
     assert 'opaque-prefix-canary' not in redacted and 'opaque-tail-canary' not in redacted
     assert redact_structured_text(redacted) == redacted
@@ -523,7 +512,6 @@ def test_internal_semicolon_cannot_expose_sensitive_assignment_residual(name: st
 def test_native_tagged_credentials_use_context_without_masking_public_keys(
     kind: str, order: str, form: str, marked: bool,
 ) -> None:
-    """Opaque generic credential fields require a same-object tag; adapters preserve public data and markers."""
     credential: dict[str, object] = ({'type': kind, 'key': 'opaque-native-key-canary'} if kind == 'api_key' else
         {'type': kind, 'access': 'opaque-native-access-canary', 'refresh': 'opaque-native-refresh-canary',
          'accountId': 'offline-account', 'expires': 9000000000})
@@ -619,7 +607,6 @@ _NATIVE_AUTH_FRAGMENTS = [
 def test_native_auth_fragments_respect_observed_scope(
     kind: str, source: str, private: str, public: tuple[str, ...],
 ) -> None:
-    """Observed same-object tags survive cutoffs/escapes; unrelated generic fields stay public."""
     field = 'key' if kind == 'api_key' else 'access'
     text = source.replace('ESC_KIND', chr(92) + 'u%04x' % ord(kind[0]) + kind[1:]) \
         .replace('ESC_FIELD', chr(92) + 'u%04x' % ord(field[0]) + field[1:]) \
@@ -635,14 +622,12 @@ def test_native_auth_fragments_respect_observed_scope(
 
 @pytest.mark.parametrize('value', [0, None, ''])
 def test_invalid_nonstring_native_credential_fields_remain_typed(value: object) -> None:
-    """The admitted native credential fields are nonempty strings, not public scalars."""
     payload = {'data': {'type': 'api_key', 'key': value}, 'other': {'type': 'oauth', 'access': value, 'refresh': value}}
     assert redact_value(payload) == payload
     assert json.loads(redact_structured_text(json.dumps(payload))) == payload
 
 
 def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy() -> None:
-    """Existing auth/credential block masking remains authoritative over the tag."""
     credential = {'type': 'api_key', 'key': 'opaque-parent-auth-canary', 'metadata': 'private-parent-value'}
     redacted = redact_value({'auth': credential})
     assert redacted['auth']['type'] == '[REDACTED_CREDENTIAL]'
@@ -655,7 +640,6 @@ def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy(
     ('api_key', 'scalar'), ('api_key', 'text-list'),
 ])
 def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, form: str) -> None:
-    """UI copies preserve native privacy, public types, Unicode semantics, and ordinary search/path policy."""
     field = 'key' if kind == 'api_key' else 'access'
     metadata = 'config: token=ordinary-search-pattern /home/operator/file.py'
     credential = {'type': kind, field: '[REDACTED_API_KEY]opaque-ui-context-canary', 'metadata': metadata}
@@ -694,7 +678,6 @@ def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, 
 
 @pytest.mark.parametrize('nonfinite', ['NaN', 'Infinity', '-Infinity'])
 def test_native_only_text_recovery_withholds_unrepresentable_credential_span(nonfinite: str) -> None:
-    """Nonfinite auth data is withheld without aborting presentation or suppressing public siblings."""
     text = ('{"data":{"type":"api_key","key":"opaque-nonfinite-auth-canary","public":' + nonfinite
             + '},"other":{"key":"ordinary-sibling","count":0}} trailing')
     redacted = redaction_mod.redact_native_auth_value(text)

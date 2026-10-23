@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import os
 import signal
@@ -16,7 +17,7 @@ import pytest
 
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
-from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
+from tests.harness.reviewbench import LocalReviewerEnvironment, checkpoint_documents, public_input
 
 
 @pytest.mark.parametrize('interruption', [
@@ -26,7 +27,6 @@ from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str,
 ) -> None:
-    """A cancelled or failed real host collector stops owned inference and retains joined native evidence."""
     if interruption == 'late_child' and sys.platform != 'linux':
         pytest.skip('late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
     if interruption == 'slow_process_listing' and sys.platform != 'darwin':
@@ -200,8 +200,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
 async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_bundle(
     tmp_path: Path, credential_type: str,
 ) -> None:
-    """Real native tool events preserve admitted credential privacy in live checkpoints and joined exports."""
-    from daydream.benchmark.reviewbench.diagnostics import read_checkpoint
     from daydream.benchmark.reviewbench.harbor_auth import validate_judge_home, validate_pi_reviewer_home
     from daydream.redaction import redact_structured_text
 
@@ -237,7 +235,7 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
             await asyncio.sleep(0.01)
         while True:
             if manifests := sorted(checkpoints.glob('checkpoint-*.json')):
-                manifest, documents = read_checkpoint(manifests[-1])
+                manifest, documents = checkpoint_documents(manifests[-1])
                 tool_payloads = [json.loads(result['content'])
                                  for document in documents for step in document['steps']
                                  for result in step.get('observation', {}).get('results', [])
@@ -259,9 +257,9 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         invocation = child['extra']['subtrajectories'][-1]
         assert fork['ended_at'] is invocation['ended_at'] is None
         assert fork['invocations'] == [] and 'generation_lifecycle' not in invocation
-        frozen = json.loads(first_bytes)['documents']
+        frozen = manifest['documents']
         stored = frozen[fork['sibling_trajectory_ref']]
-        assert stored['sha256'] == manifest['documents'][fork['sibling_trajectory_ref']]
+        assert stored['sha256'] == hashlib.sha256(stored['json'].encode()).hexdigest()
         assert json.loads(stored['json']) == child
         assert {document['extra']['snapshot_at'] for document in documents if document['extra'].get('partial')} == {
             manifest['cutoff_at']}
@@ -275,8 +273,8 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         async with asyncio.timeout(5):
             while (newest := sorted(checkpoints.glob('checkpoint-*.json'))[-1]) == first:
                 await asyncio.sleep(0.01)
-        _, following = read_checkpoint(newest)
-        assert all(json.loads(newest.read_bytes())['documents'][path] == row for path, row in frozen.items()
+        following_manifest, following = checkpoint_documents(newest)
+        assert all(following_manifest['documents'][path] == row for path, row in frozen.items()
                    if not json.loads(row['json'])['extra'].get('partial'))
         sampled = next(document for document in following if document['trajectory_id'] == child['trajectory_id'])
         current = sampled['extra']['subtrajectories'][-1]['backend_lifecycle']
@@ -332,7 +330,6 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
 async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(
     tmp_path: Path, receipt_conflict: bool,
 ) -> None:
-    """Cancellation before delayed startup must prevent native inference."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='preterminal_silence')
     child_environment = {**os.environ, **environment,
@@ -398,7 +395,6 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
     foreign_stderr: bytes, entrypoint_payload: bytes,
 ) -> None:
-    """Real supervision keeps native success despite lost or unsafe diagnostic output."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     declared_task = tmp_path / 'declared-task'
@@ -482,7 +478,6 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
 
 
 def test_supervisor_publication_refuses_redirected_log_parent(tmp_path: Path) -> None:
-    """The process-log publisher must reject redirected parents before either write."""
     from daydream.benchmark.reviewbench.harbor_process import _publish_process_evidence
 
     protected = tmp_path / 'other-owner'
@@ -497,7 +492,6 @@ def test_supervisor_publication_refuses_redirected_log_parent(tmp_path: Path) ->
 
 
 async def test_optional_process_log_failure_preserves_actual_native_failure(tmp_path: Path) -> None:
-    """A diagnostic install failure cannot replace the actual child credential admission failure."""
     environment = public_input(tmp_path)
     (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
     local = LocalReviewerEnvironment({**os.environ, **environment},
@@ -520,7 +514,6 @@ async def test_optional_process_log_failure_preserves_actual_native_failure(tmp_
 async def test_checkpoint_initialization_is_optional_only_for_operational_io_failure(
     tmp_path: Path, failure: str,
 ) -> None:
-    """Observer mkdir/link failures are optional; reused or redirected checkpoint paths forbid inference."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
@@ -578,7 +571,6 @@ async def test_checkpoint_initialization_is_optional_only_for_operational_io_fai
 async def test_sigterm_joins_real_finalization_writer_before_export_or_uses_checkpoint(
     tmp_path: Path, shutdown: str,
 ) -> None:
-    """SIGTERM joins the actual shielded filesystem writer or retains a checkpoint within the force bound."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     ready, signalled, exported, joined = [tmp_path / name for name in
@@ -659,14 +651,14 @@ raise SystemExit(asyncio.run(drive()))
             assert process['cleanup_outcome'] == 'forced_termination'
             assert process['terminal_evidence_available'] is False
             assert not exported.exists() and not joined.exists()
-            from daydream.benchmark.reviewbench.diagnostics import interrupted_readout
-
-            retained = interrupted_readout(evidence)
-            assert isinstance(retained['checkpoint'], dict)
-            assert retained['checkpoint']['kind'] == 'checkpoint'
-            assert len(retained['checkpoint']['documents']) >= 3
-            assert retained['terminal_evidence'] == 'unavailable'
-            assert retained['unavailable_checkpoints'] == []
+            checkpoints = evidence.with_name(evidence.name + '-checkpoints')
+            manifest, documents = checkpoint_documents(sorted(checkpoints.glob('checkpoint-*.json'))[-1])
+            assert manifest['schema'] == 2 and len(documents) >= 3
+            assert all(hashlib.sha256(row['json'].encode()).hexdigest() == row['sha256']
+                       for row in manifest['documents'].values())
+            assert all(row['sibling_trajectory_ref'] in manifest['documents'] for document in documents
+                       for row in document['extra']['subtrajectories'] if 'sibling_trajectory_ref' in row)
+            assert not (evidence / 'execution.json').exists()
             return
         assert process['cleanup_outcome'] == 'graceful_exit' and process['child_returncode'] == 130
         assert json.loads(exported.read_text()) == {'writer_joined': True}
@@ -699,7 +691,6 @@ raise SystemExit(asyncio.run(drive()))
 async def test_process_control_observation_requires_bounded_owned_regular_files(
     tmp_path: Path, surface: str, storage: str,
 ) -> None:
-    """Actual control readers reject redirected, huge and nonregular files without blocking shutdown."""
     invocation = str(uuid.uuid4())
     real = tmp_path / 'real'
     directory = real / 'owner'

@@ -122,7 +122,6 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     assert trajectory["extra"]["partial"] is True
 
 async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> None:
-    """The actual backend close boundary sees an already-closed, interrupted host turn."""
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _recorder, snapshot: snapshots.append(snapshot))
 
