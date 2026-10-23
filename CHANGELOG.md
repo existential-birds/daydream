@@ -71,8 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
-- Retain private diagnostics when public ReviewBench reviewers are interrupted.
-  Compatible bug fix; reviewer settings, budgets and scoring are unchanged.
+- Redact native credentials in evidence and UI; retain diagnostics for interrupted
+  ReviewBench runs. Compatible fix; reviewer settings, budgets and scoring stay unchanged.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into

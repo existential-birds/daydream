@@ -6,7 +6,6 @@ import hashlib
 import io
 import re
 import zipfile
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,7 @@ PI_VERSION = '1.3.0'
 
 
 def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64',
-                   reviewer: Mapping[str, Any] | None = None) -> tuple[str, dict[str, bytes], dict[str, Any]]:
+                   backend: str = 'codex') -> tuple[str, dict[str, bytes], dict[str, Any]]:
     """Freeze wheel and resolved dependency bytes; no source-checkout install."""
     if platform not in REVIEWBENCH_PLATFORMS:
         raise ValueError('Public ReviewBench requires an explicit supported Linux platform')
@@ -48,7 +47,6 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64',
     requirements = Path(__file__).with_name('reviewer-runtime.lock').read_bytes()
     host_requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
     assets = {wheel.name: wheel_bytes, 'reviewer-runtime.lock': requirements}
-    backend = 'codex' if reviewer is None else reviewer.get('backend')
     if backend not in {'codex', 'pi'}:
         raise ValueError('Public ReviewBench supports native Codex or Pi reviewers')
     if backend == 'pi':

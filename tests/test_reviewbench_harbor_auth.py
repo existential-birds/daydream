@@ -1,9 +1,4 @@
-"""Private role delivery and refresh ownership at real process/filesystem boundaries.
-
-Existing native/backend replay tests own model lifecycle, not role-native
-credential stores or the standalone verifier executable. Synthetic secrets never contact
-an OAuth or inference endpoint.
-"""
+"""Native credential isolation, rotation, locking and evidence at real filesystem/process seams."""
 from __future__ import annotations
 
 import base64
@@ -57,12 +52,35 @@ def _wait_for(path: Path, process: subprocess.Popen[str]) -> None:
         time.sleep(0.01)
 
 
+def _run_contenders(command: list[str], environment: dict[str, str], root: Path) -> None:
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for number, mode, marker in ((1, 'first', 'locked'), (2, 'second', 'blocked')):
+            process = subprocess.Popen([*command, mode],
+                env={**environment, 'PI_CODING_AGENT_DIR': str(root / f'pi{number}')},
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            processes.append(process)
+            _wait_for(root / marker, process)
+        # Exceed the supplied SDK's ~180ms synchronous lock retry window.
+        time.sleep(0.5)
+        assert processes[1].poll() is None
+        (root / 'release').touch()
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=20)
+            assert process.returncode == 0, stdout + stderr
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=15)
+
+
 @pytest.mark.parametrize("damage", ["missing", "api", "partial", "malformed", "symlink"])
 @pytest.mark.parametrize("role", ["reviewer", "judge"])
 def test_subscription_only_rejects_unusable_auth_without_exposing_it(
     tmp_path: Path, damage: str, role: str,
 ) -> None:
-    """Native Pi admission must also reject API keys; Codex-only checks missed that route."""
+    """Reject unusable native credentials without leaking their contents."""
     canonical = tmp_path / "canonical"
     value = _login(canonical) if role == "reviewer" else _pi_login(canonical)
     path = canonical / "auth.json"
@@ -96,11 +114,7 @@ def test_subscription_only_rejects_unusable_auth_without_exposing_it(
 def test_native_pi_reviewer_store_refuses_unrelated_credentials(
     tmp_path: Path, extra_provider: str,
 ) -> None:
-    """A separate directory cannot isolate judge credentials copied inside its file.
-
-    Native Pi mounts the entire auth file. Existing disjoint-path and selected
-    provider checks admit an additional judge login unless membership is closed.
-    """
+    """A mounted native auth file must contain only the selected reviewer capability."""
     reviewer, judge = tmp_path / 'reviewer', tmp_path / 'judge'
     reviewer.mkdir()
     judge_auth = _pi_login(judge)
@@ -121,13 +135,7 @@ def test_native_pi_reviewer_store_refuses_unrelated_credentials(
 def test_admission_tolerates_native_in_place_rotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str,
 ) -> None:
-    """Read-only snapshots must tolerate another runtime owner's truncate/write window.
-
-    The SDK contention test owns locking, but host admission/evidence snapshots
-    read independently. Release a real filesystem writer only after the first
-    actual read observes its truncated file, so the regression cannot pass by
-    scheduling the writer entirely before admission.
-    """
+    """Retry a real truncate/write window observed by read-only credential admission."""
     home = tmp_path / 'credentials'
     auth = _login(home) if role == 'reviewer' else _pi_login(home)
     path = home / 'auth.json'
@@ -162,11 +170,7 @@ path.write_text(sys.argv[3])
 
 
 def test_native_reviewer_processes_serialize_and_retain_rotation_after_death(tmp_path: Path) -> None:
-    """Direct auth survives death without copyback; a second native invocation must still wait.
-
-    The removed cross-runtime handoff tested conversion and recovery markers,
-    which no longer exist. This retains the real independent flock contention.
-    """
+    """A second native invocation waits for the lock and retains writes after abrupt death."""
     canonical = tmp_path / "canonical"
     _login(canonical)
     child = tmp_path / "waiter.py"
@@ -210,11 +214,7 @@ with reviewer_credentials(root/'canonical', root/'second') as home:
 
 @pytest.mark.parametrize('exit_code', [0, 29, 'cancel'])
 def test_judge_rotation_survives_fresh_invocations_and_cleanup(tmp_path: Path, exit_code: int | str) -> None:
-    """A failed/cancelled child must be joined before its fresh configuration is deleted.
-
-    Lease tests missed direct Pi persistence and canonical auth identity across
-    separate wrapper processes. No real OAuth requests or inference occur.
-    """
+    """Join the judge and tools before disposing of private state; persist native rotation."""
     canonical = tmp_path / 'canonical'
     _pi_login(canonical)
     models = tmp_path / 'models.json'
@@ -278,7 +278,7 @@ sys.exit(int(mode) if mode.isdigit() else 0)
 
 @pytest.fixture
 def classifier_retention(tmp_path: Path) -> tuple[list[str], Path, Path, Path]:
-    """A harmless child writes genuine-shaped Pi files through the public wrapper."""
+    """A real harmless child writes classifier sessions through the public wrapper."""
     canonical = tmp_path / 'canonical'
     _pi_login(canonical)
     models = tmp_path / 'models.json'
@@ -342,7 +342,7 @@ sys.exit(int(sys.argv[2]))
 def test_judge_retains_exact_classifier_sessions_and_available_usage(
     classifier_retention: tuple[list[str], Path, Path, Path], exit_code: int,
 ) -> None:
-    """Container cleanup must not erase classifier model/effort/token evidence, even on failure."""
+    """Retain exact classifier bytes and truthful usage even on judge failure."""
     arguments, canonical, sessions, evidence = classifier_retention
     assert harbor_auth.main([*arguments, str(exit_code), 'valid']) == exit_code
     session = next(sessions.glob('*.jsonl'))
@@ -367,7 +367,7 @@ def test_judge_retains_exact_classifier_sessions_and_available_usage(
 def test_judge_evidence_roots_refuse_stale_or_unsafe_paths_before_execution(
     classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
 ) -> None:
-    """An old session or symlink root must never be attributed to this judge attempt."""
+    """Reject stale or unsafe evidence roots before invoking the judge."""
     arguments, canonical, source, output = classifier_retention
     if fault.startswith('source') or fault == 'stale-source':
         source.parent.mkdir(parents=True)
@@ -395,7 +395,7 @@ def test_judge_evidence_roots_refuse_stale_or_unsafe_paths_before_execution(
 def test_judge_refuses_unsafe_transcripts_without_publishing_credentials(
     classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
 ) -> None:
-    """Read tools/provider errors can expose auth; unsafe logs must fail closed before hashing/publication."""
+    """Reject unsafe classifier files before evidence publication."""
     arguments, canonical, _source, output = classifier_retention
     assert harbor_auth.main([*arguments, '0', fault]) == 1
     assert (canonical.parent / 'invoked').exists()
@@ -406,7 +406,7 @@ def test_judge_refuses_unsafe_transcripts_without_publishing_credentials(
 def test_judge_session_publication_failure_preserves_partial_evidence_and_blocks_reuse(
     classifier_retention: tuple[list[str], Path, Path, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Failure installing the final index must remain incomplete without overwriting a later attempt."""
+    """An actual index-install fault preserves partial evidence and blocks reuse."""
     arguments, canonical, source, output = classifier_retention
     link = os.link
 
@@ -429,7 +429,7 @@ def test_judge_session_publication_failure_preserves_partial_evidence_and_blocks
 def test_judge_sanitizes_auth_tool_results_before_retention_and_digest(
     classifier_retention: tuple[list[str], Path, Path, Path], fault: str,
 ) -> None:
-    """Absolute-path reads may expose initial, rotated or intermediate OAuth stores."""
+    """Sanitize initial, rotated and intermediate credentials before hashing retained sessions."""
     arguments, _canonical, source, output = classifier_retention
     assert harbor_auth.main([*arguments, '0', fault]) == 0
     original = next(source.glob('*.jsonl'))
@@ -451,12 +451,7 @@ def test_judge_sanitizes_auth_tool_results_before_retention_and_digest(
 def test_pinned_pi_factory_uses_shared_canonical_lock_and_persistent_rotation(
     tmp_path: Path, supplied_source: Path,
 ) -> None:
-    """Real pinned Pi locks must contend across fresh agent dirs, not just point at one inode.
-
-    Python filesystem replays cannot establish the SDK factory binding or Pi's
-    sidecar identity. Replace only OAuth network refresh; retain its actual
-    getApiKey, model discovery, storage and refresh locks.
-    """
+    """The real supplied SDK factory shares canonical locks and persists one refresh."""
     import shutil
 
     canonical = tmp_path / 'canonical'
@@ -516,28 +511,7 @@ if(existsSync(process.env.PI_CODING_AGENT_DIR+'/auth.json')) throw Error('copied
     command = [sys.executable, str(Path(harbor_auth.__file__)), 'judge', '--canonical-home', str(canonical),
                '--models', str(models), '--pi-bootstrap', str(binding), '--', 'node', str(launcher),
                str(script), str(tmp_path)]
-    first = subprocess.Popen([*command, 'first'], env={**environment, 'PI_CODING_AGENT_DIR': str(tmp_path / 'pi1')},
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    second = None
-    try:
-        _wait_for(tmp_path / 'locked', first)
-        second = subprocess.Popen([*command, 'second'], env={**environment,
-                                  'PI_CODING_AGENT_DIR': str(tmp_path / 'pi2')},
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        _wait_for(tmp_path / 'blocked', second)
-        # Exceed pinned Pi's ~180ms synchronous lock retry window. The
-        # factory must still return authenticated storage after contention.
-        time.sleep(0.5)
-        assert second.poll() is None
-        (tmp_path / 'release').touch()
-        for process in (first, second):
-            stdout, stderr = process.communicate(timeout=20)
-            assert process.returncode == 0, stdout + stderr
-    finally:
-        for pending in (first, second):
-            if pending is not None and pending.poll() is None:
-                pending.terminate()
-                pending.communicate(timeout=15)
+    _run_contenders(command, environment, tmp_path)
     assert not (canonical / 'auth.json.lock').exists()
     assert json.loads((canonical / 'auth.json').read_text())['openai-codex']['refresh'] == 'synthetic-pi-rotated'
 
@@ -545,12 +519,7 @@ if(existsSync(process.env.PI_CODING_AGENT_DIR+'/auth.json')) throw Error('copied
 def test_native_pi_reviewer_uses_its_own_canonical_auth_and_native_locks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The native reviewer SDK differs from the supplied judge's pinned SDK.
-
-    Reusing its bootstrap against the bundled CLI leaves a different AuthStorage
-    class unbound. Use the actual published unbundled native module and its real
-    file locks, with synthetic credentials and no provider requests.
-    """
+    """The actual native SDK preserves canonical auth, phase models and independent judge state."""
     configured = os.environ.get('DAYDREAM_REVIEWBENCH_NATIVE_PI')
     if not configured:
         pytest.skip('set DAYDREAM_REVIEWBENCH_NATIVE_PI to the locked native Pi 1.3.0 package directory')
@@ -625,24 +594,7 @@ if(existsSync(process.env.PI_CODING_AGENT_DIR+'/auth.json'))throw Error('copied 
     command = ['node', '--import', str(binding), str(script), str(tmp_path)]
     environment = {'PATH': os.environ['PATH'], 'HOME': str(tmp_path), 'PI_OFFLINE': '1',
                    'DAYDREAM_RB_PI_AUTH_PATH': str(canonical / 'auth.json')}
-    first = subprocess.Popen([*command, 'first'], env={**environment, 'PI_CODING_AGENT_DIR': str(tmp_path / 'pi1')},
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    second = None
-    try:
-        _wait_for(tmp_path / 'locked', first)
-        second = subprocess.Popen([*command, 'second'],
-            env={**environment, 'PI_CODING_AGENT_DIR': str(tmp_path / 'pi2')},
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        _wait_for(tmp_path / 'blocked', second)
-        (tmp_path / 'release').touch()
-        for process in (first, second):
-            stdout, stderr = process.communicate(timeout=20)
-            assert process.returncode == 0, stdout + stderr
-    finally:
-        for pending in (first, second):
-            if pending is not None and pending.poll() is None:
-                pending.terminate()
-                pending.communicate(timeout=15)
+    _run_contenders(command, environment, tmp_path)
     assert (judge / 'auth.json').read_bytes() == judge_bytes
     assert not (canonical / 'auth.json.lock').exists()
     assert json.loads((canonical / 'auth.json').read_text())['nous']['key'] == 'synthetic-native-rotated'

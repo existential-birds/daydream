@@ -45,11 +45,6 @@ class Case:
             raise ValueError('missing or malformed ReviewBench PR identity') from exc
 
 
-def file_digest(path: Path) -> str:
-    """Hash actual immutable input bytes, not paths or labels."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def verify_source(source: Path) -> dict[str, Any]:
     """Refuse another revision or modified executable/reference source."""
     if git_ops.head_sha(source) != REVIEWBENCH_REVISION:
@@ -60,7 +55,7 @@ def verify_source(source: Path) -> dict[str, Any]:
              'scripts/eval/scorer.ts', 'scripts/eval/print-summary.ts', 'scripts/eval/eval.ts',
              'scripts/eval/matcher.ts', 'scripts/classifier/prompts.ts')
     return {'repository': REVIEWBENCH_REPOSITORY, 'revision': REVIEWBENCH_REVISION,
-            'hashes': {path: file_digest(source / path) for path in paths}}
+            'hashes': {path: hashlib.sha256((source / path).read_bytes()).hexdigest() for path in paths}}
 
 
 def load_cases(source: Path, selection: str) -> list[Case]:

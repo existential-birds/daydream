@@ -62,15 +62,14 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             f"Expected paths: {sorted(expected_paths)!r}. "
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )
-        # Regression: source-tree resource reads pass while installed execution
-        # outside a checkout cannot find its runtime lock or public entrypoint.
+        # Execute installed resources outside the source checkout.
         script = (
             'import json,sys; from pathlib import Path; '
             'from daydream.benchmark.reviewbench.harbor_build import reviewer_build; '
             'suffix,assets,identity=reviewer_build(Path(sys.argv[1])); '
             '_,_,arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64"); '
-            'pi_suffix,pi_assets,pi_identity=reviewer_build(Path(sys.argv[1]),reviewer={"backend":"pi"}); '
-            '_,_,pi_arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64",reviewer={"backend":"pi"}); '
+            'pi_suffix,pi_assets,pi_identity=reviewer_build(Path(sys.argv[1]),backend="pi"); '
+            '_,_,pi_arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64",backend="pi"); '
             'print(json.dumps({"identity":identity,"arm_identity":arm_identity,"assets":list(assets),"suffix":suffix,'
             '"pi_identity":pi_identity,"pi_arm_identity":pi_arm_identity,"pi_assets":list(pi_assets),'
             '"pi_suffix":pi_suffix}))'
@@ -98,8 +97,7 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         assert '--wheel' in help_result.stdout
         assert '--source' in help_result.stdout
         assert '--platform' in help_result.stdout
-        # A concurrent path replacement after package validation must not change
-        # the admitted wheel delivered to the reviewer or its frozen identity.
+        # Concurrent filename replacement must preserve the admitted wheel bytes.
         wheel = wheels[0]
         admitted = wheel.read_bytes()
         replacement = Path(tmp) / 'replacement.whl'
@@ -114,8 +112,7 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             content = read_bytes(path)
             if path == runtime_lock:
                 lock_reads += 1
-                # The first read validates this packaged resource against the
-                # wheel; the next captures the runtime after archive validation.
+                # Replace after validation, when the runtime lock is captured.
                 if lock_reads == 2:
                     os.replace(replacement, wheel)
             return content
@@ -129,13 +126,7 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
 
 
 def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
-    """An actual final image must not retain answers through installed Git packages.
-
-    Packaging bytes and a safe-looking Dockerfile cannot establish filesystem
-    isolation: installing the host graph previously retained the complete
-    ReviewBench checkout under uv's cache. This opt-in check runs without auth or
-    networking against the final built reviewer image, before any model work.
-    """
+    """Inspect the actual final image for verifier answers, source caches and candidate identity."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')

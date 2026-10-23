@@ -257,7 +257,7 @@ class Invocation:
         if self._host_dispatch is not None:
             summary["host_dispatch"] = dict(self._host_dispatch)
         if self._requests:
-            summary["requests"] = redact_value([dict(request) for request in self._requests])
+            summary["requests"] = redact_value(self._requests)
         return summary
 
     def record_host_dispatch(

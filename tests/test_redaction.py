@@ -353,25 +353,25 @@ def test_json_key_privacy_preserves_original_sensitivity_and_value_types(
         assert key in decoded
 
 
-@pytest.mark.parametrize(('template', 'safe', 'values'), [
+@pytest.mark.parametrize(('template', 'safe', 'values', 'existing'), [
     ('Authorization: Bearer {}', 'Authorization: Bearer [REDACTED_CREDENTIAL]',
-     ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
-    ('api_key={}', '[REDACTED_LABEL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
-    ('Cookie: {}', 'Cookie: [REDACTED_CREDENTIAL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
-    ('{{"type":"api_key","key":"{}"}}', '[REDACTED_LABEL]', (0, None)),
+     ('[REDACTED_FIRST]', '[REDACTED_SECOND]'), '[REDACTED_EXISTING]'),
+    ('api_key={}', '[REDACTED_LABEL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]'), '[REDACTED_EXISTING]'),
+    ('Cookie: {}', 'Cookie: [REDACTED_CREDENTIAL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]'), '[REDACTED_EXISTING]'),
+    ('{{"type":"api_key","key":"{}"}}', '[REDACTED_LABEL]', (0, None), 'reserved-public-value'),
 ])
 def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
-    template: str, safe: str, values: tuple[object, object],
+    template: str, safe: str, values: tuple[object, object], existing: str,
 ) -> None:
     """Secret labels cannot collapse each other or clobber literal safe aliases."""
     payload = {template.format('first-key-canary'): values[0], template.format('second-key-canary'): values[1],
-               safe: '[REDACTED_EXISTING]', safe + ' (2)': '[REDACTED_RESERVED]',
+               safe: existing, safe + ' (2)': '[REDACTED_RESERVED]',
                'usage': {'input_tokens': 0, 'output_tokens': None}}
     result = redact_structured_text(json.dumps(payload))
     assert '-canary' not in result and redact_structured_text(result) == result
     decoded = json.loads(result)
     assert len(decoded) == len(payload)
-    assert decoded[safe] == '[REDACTED_EXISTING]' and decoded[safe + ' (2)'] == '[REDACTED_RESERVED]'
+    assert decoded[safe] == existing and decoded[safe + ' (2)'] == '[REDACTED_RESERVED]'
     assert [value for key, value in decoded.items() if key not in (safe, safe + ' (2)', 'usage')] == list(values)
     assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
 
@@ -641,10 +641,12 @@ _NATIVE_FRAGMENT = '{"type":"KIND","FIELD":"opaque-context-canary'
 
 @pytest.mark.parametrize('kind', ['api_key', 'oauth'])
 @pytest.mark.parametrize(('source', 'private', 'public'), [
-    (_NATIVE_FRAGMENT, 'opaque-context-canary', ()),
-    ('{"FIELD":"opaque-context-canary","type":"KIND"', 'opaque-context-canary', ()),
-    ('{"ty\u0070e":"ESC_KIND","ESC_FIELD":"opaque-context-canary', 'opaque-context-canary', ()),
-    ('{"ESC_FIELD":"opaque-context-canary","ty\u0070e":"ESC_KIND"', 'opaque-context-canary', ()),
+    *[(prefix + text, 'opaque-context-canary', ()) for prefix in ('', '{"data":') for text in (
+        _NATIVE_FRAGMENT,
+        '{"FIELD":"opaque-context-canary","type":"KIND"',
+        r'{"ty\u0070e":"ESC_KIND","ESC_FIELD":"opaque-context-canary',
+        r'{"ESC_FIELD":"opaque-context-canary","ty\u0070e":"ESC_KIND"',
+    )],
     ('{"type":"KIND","FIELD":"opaque-context-canary","type":"record"}', 'opaque-context-canary', ()),
     ('{"type":"api_key","key":"opaque-context-canary","type":"oauth","access":"opaque-context-canary"}',
      'opaque-context-canary', ()),
