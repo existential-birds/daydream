@@ -291,7 +291,7 @@ async def test_dispatch_body_failure_owns_terminal_status(recorder: TrajectoryRe
         assert status['attempted_count'] == 1 and status['completed_count'] == 0
 
 
-@pytest.mark.parametrize('label,planned', [
+_GRAPH_LABELS = [
     ('ordinary-python', 'ordinary-python'),
     ('{"scope":"python"}', '{"scope": "python"}'),
     ('{"scope":"python","scope":"rust"}', '{"scope": "rust"}'),
@@ -300,16 +300,18 @@ async def test_dispatch_body_failure_owns_terminal_status(recorder: TrajectoryRe
     ('TOKEN=[REDACTED_ENV_VAR]; public diagnostics', 'TOKEN=[REDACTED_ENV_VAR]; public diagnostics'),
     ('{"type":"api_key","key":"[REDACTED]"}', '{"type": "api_key", "key": "[REDACTED]"}'),
     ('{"type":"api_key","key":"opaque-first-canary"}', None),
+]
+
+
+@pytest.mark.parametrize(('label', 'planned', 'identified'), [
+    *[(*case, True) for case in _GRAPH_LABELS],
+    ('ordinary-python', 'ordinary-python', False),
+    ('{"type":"api_key","key":"opaque-first-canary"}', None, False),
 ])
-@pytest.mark.parametrize('identified', [False, True])
 async def test_partial_graph_preserves_empty_ancestry_and_original_private_identities(
     tmp_path: Path, label: str, planned: str | None, identified: bool,
 ) -> None:
-    """Empty active ancestors, completed leaves and private labels retain one rooted immutable graph.
-
-    No first event or finalizer may be required for an admitted invocation. Grammar variants live at the
-    redaction interface; this checks identity allocation before paths, including queued dispatch labels.
-    """
+    """Live empty ancestry and private labels retain one immutable rooted graph before any finalizer."""
     private = 'opaque-first-canary' in label
     second_label = label.replace('opaque-first-canary', 'opaque-second-canary') if private else 'second-public'
     queued = '{"type":"oauth","access":"opaque-queued-canary"}'
@@ -319,6 +321,8 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
         async with trajectory_module.dispatch_scope(root if identified else None, phase=DaydreamPhase.DEEP,
             descriptors=[label, second_label, queued]) as dispatch:
             async with root.fork(label, dispatch=dispatch) as parent:
+                root.write_partial()
+                assert len(snapshots[-1].documents) == 2  # Entered forks exist before their first invocation.
                 async with parent.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                     root.write_partial()
                     first = snapshots[-1]
@@ -331,6 +335,21 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                         assert payload['final_metrics'].get('total_prompt_tokens') is None
                     active = json.loads(first.documents[1].json_bytes)['extra']['subtrajectories'][0]
                     assert active['ended_at'] is None and active['step_ids'] == []
+                    secret = '{"type":"oauth","access":"opaque-event-canary"}'
+                    split = secret.index('opaque-event-canary') + len('opaque-event-canary')
+                    invocation.observe(TextEvent(secret[:split]))
+                    root.write_partial()
+                    interrupted = snapshots[-1]
+                    interrupted_bytes = tuple(document.json_bytes for document in interrupted.documents)
+                    assert b'opaque-event-canary' not in b''.join(interrupted_bytes)
+                    invocation.observe(TextEvent(secret[split:]))
+                    events: list[AgentEvent] = [ToolStartEvent('private', 'Inspect',
+                        {'type': 'api_key', 'key': 'opaque-input-canary'}), ToolResultEvent('private', secret, False),
+                        RequestEvent(prompt='Private prompt', config=PiRequestConfig(read_only=True),
+                            model_name='sk-request-canary', provider_name='public-provider', reasoning_effort='medium'),
+                        CostEvent(input_tokens=0, output_tokens=None, cached_tokens=0, cost_usd=None), TurnEndEvent()]
+                    for event in events:
+                        invocation.observe(event)
                     async with parent.fork('completed-leaf') as leaf:
                         async with leaf.invocation(phase=DaydreamPhase.REVIEW) as inner:
                             observe_text_and_result(inner, 'completed nested evidence')
@@ -366,6 +385,9 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                         logical = target.path.relative_to(tmp_path / '.daydream').as_posix()
                                         assert logical.removesuffix('.partial') == reference
                             assert documents[leaf.trajectory_id].json_bytes == completed_bytes
+                            partial = json.loads(documents[parent.trajectory_id].json_bytes)
+                            assert partial['final_metrics']['total_prompt_tokens'] == 0
+                            assert partial['final_metrics'].get('total_completion_tokens') is None
                             assert tuple(document.json_bytes for document in first.documents) == frozen
                             assert '-canary' not in str(parent.path) + str(second.path)
                             assert snapshot_trajectories(snapshot)['main']['_source_file'] == RUN_DOCUMENT_NAME
@@ -379,6 +401,18 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                     parent.descriptor if planned is None else planned, second.descriptor]
                                 assert len(plan['queued_descriptors']) == 1 and '-canary' not in json.dumps(plan)
                                 assert plan['attempted_count'] == 2 and plan['completed_count'] == 0
+    assert tuple(document.json_bytes for document in interrupted.documents) == interrupted_bytes
+    final_parent = json.loads(parent.path.read_bytes())
+    message = next(step['message'] for step in final_parent['steps'] if step['source'] == 'agent')
+    assert json.loads(message)['type'] == 'oauth'  # Snapshot redaction must not mutate the live text buffer.
+    usage = root.review_usage()
+    requests = [request for invocation in json.loads(parent.path.read_bytes())['extra']['subtrajectories']
+                for request in invocation.get('requests', [])]
+    assert usage['prompt_tokens'] == usage['cached_tokens'] == 0 and 'completion_tokens' not in usage
+    assert len(requests) == 1 and requests[0]['backend'] == 'pi' and requests[0]['controls']['read_only']
+    assert requests[0]['provider'] == 'public-provider' and requests[0]['reasoning_effort'] == 'medium'
+    final_bytes = parent.path.read_text() + (root.path.read_text() if identified else '')
+    assert '-canary' not in json.dumps(requests) + final_bytes
 
 
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
@@ -501,95 +535,6 @@ async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Pat
             assert sum('retained response' in step.get('message', '') for step in _agent_steps(document)) == 1
 
 
-@pytest.mark.parametrize('route', ['message', 'arguments', 'observation'])
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-async def test_private_event_evidence_survives_checkpoint_and_finalization(
-    tmp_path: Path, route: str, kind: str,
-) -> None:
-    """Each event route sanitizes before immutable bytes, preserving public types and native authority.
-
-    Grammar variants live at the redaction interface. These routes independently own text buffering,
-    top-level argument context, observation amendments and embedded request measurements.
-    """
-    credential = ({'type': kind, 'key': '[REDACTED_API_KEY]opaque-native-canary'} if kind == 'api_key' else
-                  {'type': kind, 'access': 'opaque-native-canary', 'refresh': 'opaque-refresh-canary',
-                   'accountId': 'public-account', 'expires': 9000000000})
-    public: dict[str, Any] = {'key': 'ordinary-public-key',
-                              'nested_json': json.dumps({'public': 'café 😀'}, ensure_ascii=False)}
-    if route != 'arguments':
-        public.update({'message': chr(0xD800), chr(0xDFFF) + 'clé': 'café 😀'})
-        public['nested_json'] = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=False)
-    payload = {'data': credential, 'public': public, 'usage': {'input': 0, 'output': None},
-               '[REDACTED_CREDENTIAL]': 'opaque-marker-value-canary', '{"scope":"python"}': True,
-               'token': '[REDACTED_CREDENTIAL]opaque-generic-canary'}
-    if route != 'arguments':
-        payload.update({'Authorization: Bearer opaque-key-canary': '[REDACTED_RETAINED]',
-                        'Authorization: Bearer opaque-other-key-canary': '[REDACTED_SECOND]',
-                        'Authorization: Bearer [REDACTED_CREDENTIAL]': '[REDACTED_EXISTING]'})
-    raw = json.dumps(payload)
-    snapshots: list[RunWriteSnapshot] = []
-    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
-            for model, provider, effort in [('sk-request-canary', 'sk-request-canary', 'sk-request-canary'),
-                                            ('public-model', 'public-provider', 'medium')]:
-                invocation.observe(RequestEvent(prompt='Private prompt', config=PiRequestConfig(read_only=True),
-                    model_name=model, provider_name=provider, reasoning_effort=effort))
-            invocation.observe(CostEvent(input_tokens=0, output_tokens=None, cached_tokens=0, cost_usd=None))
-            if route == 'arguments':
-                event: AgentEvent = ToolStartEvent(id='inspect', name='Inspect', input=payload)
-            elif route == 'observation':
-                invocation.observe(ToolStartEvent(id='inspect', name='Inspect', input={}))
-                event = ToolResultEvent(id='inspect', output=raw, is_error=False)
-            else:
-                split = raw.index('opaque-native-canary') + len('opaque-native-canary')
-                invocation.observe(TextEvent(raw[:split]))
-                recorder.write_partial()
-                assert b'opaque-native-canary' not in snapshots[-1].documents[0].json_bytes
-                event = TextEvent(raw[split:])
-            invocation.observe(event)
-            recorder.write_partial()
-            first = snapshots[-1]
-            frozen = first.documents[0].json_bytes
-            assert partial_document_path(recorder.path).read_bytes() == frozen
-            invocation.observe(TurnEndEvent(message_id='private-evidence'))
-            invocation.observe(TextEvent('public activity after cutoff'))
-            recorder.write_partial()
-            assert first.documents[0].json_bytes == frozen
-        _, embedded = recorder.review_measurements()
-    for body in (frozen, recorder.path.read_bytes()):
-        assert b'-canary' not in body
-        document = json.loads(body)
-        assert atif_validate(document)
-        step = next(step for step in document['steps'] if step['source'] == 'agent')
-        content = (step['tool_calls'][0]['arguments'] if route == 'arguments' else
-                   json.loads(step['message'] if route == 'message' else step['observation']['results'][0]['content']))
-        assert content['public'] == public and content['usage'] == {'input': 0, 'output': None}
-        assert len(content) == len(payload) and content['{"scope":"python"}'] is True
-        if route != 'arguments':
-            assert {'[REDACTED_RETAINED]', '[REDACTED_SECOND]'} <= set(
-                value for value in content.values() if isinstance(value, str))
-            assert content['Authorization: Bearer [REDACTED_CREDENTIAL]'] == '[REDACTED_EXISTING]'
-        assert content['data']['type'] == kind
-        if kind == 'api_key':
-            assert content['data']['key'] == '[REDACTED_API_KEY]'
-        else:
-            assert content['data']['accountId'] == 'public-account' and content['data']['expires'] == 9000000000
-        (tmp_path / 'inner-evidence.txt').write_text(json.dumps(content), encoding='utf-8')
-        if route != 'arguments':
-            text = step['message'] if route == 'message' else step['observation']['results'][0]['content']
-            (tmp_path / 'inner-evidence.txt').write_text(text, encoding='utf-8')
-        assert document['final_metrics']['total_prompt_tokens'] == document['final_metrics']['total_cached_tokens'] == 0
-        assert document['final_metrics'].get('total_completion_tokens') is None
-    for requests in (json.loads(frozen)['extra']['subtrajectories'][0]['requests'],
-                     read_trajectory(recorder.path)['extra']['subtrajectories'][0]['requests'], embedded):
-        assert len(requests) == 2 and '-canary' not in json.dumps(requests)
-        assert requests[1]['model'] == 'public-model' and requests[1]['provider'] == 'public-provider'
-        assert requests[1]['reasoning_effort'] == 'medium'
-        assert all(request['backend'] == 'pi' and request['controls']['read_only'] for request in requests)
-    assert json.dumps(payload) == raw
-
-
 def _partial_path(recorder: TrajectoryRecorder) -> Path:
     return recorder.path.with_suffix(recorder.path.suffix + ".partial")
 
@@ -609,12 +554,7 @@ async def _hold_fork(
 
 
 async def test_partial_dispatch_retains_planned_queued_scopes_before_fanout_joins(tmp_path: Path) -> None:
-    """Concurrency-one checkpoints distinguish queued work from started scopes.
-
-    Completed dispatch tests see all descriptors after joining, while active
-    fork tests expose only started work. A timeout during the first scope must
-    retain the host's remaining plan without declaring it attempted or complete.
-    """
+    """A first-scope checkpoint retains queued plans without declaring them attempted or complete."""
     snapshots: list[RunWriteSnapshot] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     limiter = anyio.CapacityLimiter(1)

@@ -10,7 +10,6 @@ import pytest
 
 from daydream import json_utils
 from daydream.json_utils import (
-    atomic_create_bytes,
     atomic_write_bytes,
     atomic_write_json,
     extract_json,
@@ -172,48 +171,6 @@ def test_staged_decoder_consumes_outer_spans_and_bounds_packaging(
 
 
 class TestAtomicWritePrimitives:
-    def test_create_publishes_private_bytes_and_preserves_competing_output(self, tmp_path: Path) -> None:
-        """Replacement writes cannot cover the shared create-only publication contract."""
-        target = tmp_path / 'nested' / 'evidence.bin'
-        atomic_create_bytes(target, b'first')
-        assert target.read_bytes() == b'first'
-        assert stat.S_IMODE(target.stat().st_mode) == 0o600
-        with pytest.raises(FileExistsError):
-            atomic_create_bytes(target, b'second', mode=0o640)
-        assert target.read_bytes() == b'first'
-        assert stat.S_IMODE(target.stat().st_mode) == 0o600
-        assert list(target.parent.iterdir()) == [target]
-
-    @pytest.mark.parametrize('fault', ['flush', 'install', 'competitor'])
-    def test_create_failure_cleans_local_stage_without_clobbering(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
-    ) -> None:
-        """Fail real flush/install operations; the competitor appears after staging."""
-        target = tmp_path / 'publication' / 'evidence.bin'
-        link = os.link
-
-        def install(source: Any, destination: Any, **kwargs: Any) -> None:
-            staged = Path(source)
-            assert staged.parent == target.parent
-            assert staged.read_bytes() == b'candidate'
-            assert stat.S_IMODE(staged.stat().st_mode) == 0o640
-            if fault == 'install':
-                raise OSError('install failed')
-            target.write_bytes(b'competing evidence')
-            link(source, destination, **kwargs)
-
-        def flush(_descriptor: int) -> None:
-            raise OSError('flush failed')
-
-        monkeypatch.setattr(os, 'fsync' if fault == 'flush' else 'link', flush if fault == 'flush' else install)
-        with pytest.raises(OSError):
-            atomic_create_bytes(target, b'candidate', mode=0o640)
-        if fault == 'competitor':
-            assert target.read_bytes() == b'competing evidence'
-        else:
-            assert not target.exists()
-        assert list(target.parent.iterdir()) == ([target] if fault == 'competitor' else [])
-
     def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "data.bin"
         atomic_write_bytes(target, b"first")

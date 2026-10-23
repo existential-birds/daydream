@@ -13,10 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Replace unreleased public ReviewBench interfaces with `harbor-export` and
-  `harbor-run`. Identify candidates by their supplied wheel, removing installed-package
-  scans and the requirement to export or launch from a matching installation.
-  Fresh schema-4 exports and candidate wheels are required. PR-only compatibility change; no version bump.
+- Replace unreleased benchmark commands with `harbor-export`/`harbor-run` and
+  wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
 
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
@@ -28,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Redact native credentials in evidence and UI; retain diagnostics for interrupted
-  ReviewBench runs. Compatible fix; reviewer settings, budgets and scoring stay unchanged.
+- Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
+  Simplify cancellation and use supplied judge reports instead of a separate session archive.
 
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.

@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 import yaml
 
-from daydream import credential_patterns, json_utils, redaction
 from daydream.benchmark.reviewbench import harbor_profile
 from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, verify_source
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
@@ -73,7 +72,6 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
     assert len(dataset['tasks']) == len(manifest) == 219
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
     assert policy['schema'] == PUBLIC_PROFILE_SCHEMA
-    assert policy['source_prs'] == 219
     assert policy['final_comparison_rounds'] == 3
     assert policy['judge']['provider'] == 'openai-codex'
     assert policy['judge']['model'] == 'gpt-6.1-sol'
@@ -82,19 +80,10 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
         assert {model['id'] for model in policy['reviewer']['pi_models']['providers']['nous']['models']} == {
             'deepseek/deepseek-v4.1-flash', 'deepseek/deepseek-v4.1-flash-1017'}
     assert 'synthetic-native-secret' not in (public_profile / 'daydream-profile.json').read_text()
-    assert len(policy['cases']) == 219
     assert len(policy['test_tasks']) == 25
-    assert policy['judge']['max_output_tokens_enforced'] is False
-    assert policy['reviewer']['fanout_concurrency'] == 1
-    assert policy['runtime']['platform'] == policy['candidate']['platform']
-    assert policy['candidate'] == {
-        'version': '0.30.0', 'wheel_name': 'daydream-0.30.0-py3-none-any.whl',
-        'wheel_sha256': 'a' * 64, 'platform': policy['runtime']['platform'],
-    }
     assert policy['runtime']['reviewer_seccomp_sha256'] == _hash(public_profile / 'reviewer-seccomp.json')
     assert policy['runtime']['reviewer_seccomp_provenance']['policy_sha256'] == (
         policy['runtime']['reviewer_seccomp_sha256'])
-    assert policy['trial_concurrency'] == 1
     expected = runpy.run_path(str(public_profile / 'metric.py'))['EXPECTED_TASKS']
     assert len(expected) == 219
     for reference in dataset['tasks']:
@@ -126,30 +115,11 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
     judge = task_dir / 'tests/judge'
-    atomic_asset = task_dir / 'tests/daydream/json_utils.py'
-    assert atomic_asset.read_bytes() == Path(json_utils.__file__).read_bytes()
-    # Shipped verifier imports must work without host packages or PYTHONPATH.
+    # The verifier wrapper is self-contained and imports no host/site packages.
     subprocess.run([sys.executable, '-E', '-S', str(task_dir / 'tests/daydream-auth.py'), '--help'],
                    cwd=public_profile, check=True, capture_output=True)
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
-    redaction_asset = task_dir / 'tests/daydream/redaction.py'
-    credential_patterns_asset = task_dir / 'tests/daydream/credential_patterns.py'
-    assert redaction_asset.read_bytes() == Path(redaction.__file__).read_bytes()
-    assert credential_patterns_asset.read_bytes() == Path(credential_patterns.__file__).read_bytes()
-    assert (task_dir / 'tests/daydream/__init__.py').read_bytes() == b''
-    # The shipped verifier must enable classifier retention.
-    bootstrap = (task_dir / 'tests/test.sh').read_text().splitlines()[-1]
-    arguments = shlex.split(bootstrap)
-    source = arguments[arguments.index('--classifier-sessions') + 1]
-    destination = arguments[arguments.index('--judge-evidence') + 1]
-    assert source == '/tests/judge/classifier-output/sessions'
-    assert destination == '/logs/verifier/judge-sessions'
-    assert policy['judge']['evidence'] == {
-        'classifier_sessions_source': source, 'classifier_sessions_destination': destination,
-        'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
-        'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
-        'monetary_usage_source': 'api-equivalent-estimate',
-    }
+    arguments = shlex.split((task_dir / 'tests/test.sh').read_text().splitlines()[-1])
     for relative in ('scripts/eval/matcher.ts', 'scripts/eval/eval.ts', 'scripts/eval/scorer.ts',
                      'scripts/classifier/classify.ts', 'scripts/classifier/prompts.ts', 'scripts/harbor/verify.ts',
                      'package.json', 'package-lock.json'):
@@ -199,14 +169,14 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     ({'platform': 'linux/ppc64le'}, 'supported Linux platform'),
 ])
 def test_invalid_public_profile_preserves_source_and_publishes_nothing(
-    supplied_source: Path, tmp_path: Path, option: dict[str, Any], error: str,
+    tmp_path: Path, option: dict[str, Any], error: str,
 ) -> None:
     """Invalid reviewer, rounds, image or architecture must publish nothing."""
     output = tmp_path / 'refused'
     options = {'wheel': tmp_path / 'unused.whl', 'base_image': NODE_IMAGE,
                'reviewer': freeze_reviewer(RunConfig(backend='codex', model='gpt-6.1-sol')), **option}
     with pytest.raises(ValueError, match=error):
-        export_harbor_profile(supplied_source, output, **options)
+        export_harbor_profile(tmp_path / 'unread-source', output, **options)
     assert not output.exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
 

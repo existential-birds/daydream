@@ -306,8 +306,7 @@ def test_single_workflow_head_bound_gate() -> None:
 # Execute the workflow match step under GitHub's actual shell, testing outputs rather than copied
 # regexes. Locate it by stable id, not display name. Live, packaged and single-file copies must agree.
 
-_MATCH_STEP_SOURCES = [pytest.param(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch", id="live-command"),
-    pytest.param(TEMPLATES_DIR / "daydream-command.yml", "dispatch", id="template-command"),
+_MATCH_STEP_COPIES = [pytest.param(TEMPLATES_DIR / "daydream-command.yml", "dispatch", id="template-command"),
     pytest.param(TEMPLATES_DIR / "single" / "daydream.yml", "gate", id="single"),
 ]
 
@@ -347,17 +346,24 @@ _MATCH_CASES = [pytest.param("@bot review", "bot", "review", id="review"),
 ]
 
 
-def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> dict[str, str]:
-    """Execute *path*'s own `id: match` step and return the outputs it wrote."""
+def _match_script(path: Path, job: str) -> str:
+    """Load the shipped matcher and enforce its actual GitHub shell contract."""
     wf = load_workflow(path)
     step = next(s for s in job_steps(wf, job) if s.get("id") == "match")
     workflow_shell = wf.get("defaults", {}).get("run", {}).get("shell")
     job_shell = wf["jobs"][job].get("defaults", {}).get("run", {}).get("shell", workflow_shell)
     assert step.get("shell", job_shell) is None, "match-step harness requires the workflow's unspecified shell"
+    run = step["run"]
+    assert isinstance(run, str)
+    return run
+
+
+def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> dict[str, str]:
+    """Execute the shipped matcher under its declared shell and read its outputs."""
     # GitHub's unspecified shell is `bash -e {0}`. Explicit `shell: bash` adds
     # pipefail, which can turn grep's successful early exit into a false match.
     script = out.with_suffix(".sh")
-    script.write_text(step["run"], encoding="utf-8")
+    script.write_text(_match_script(path, job), encoding="utf-8")
     out.write_text("", encoding="utf-8")
     subprocess.run(["bash", "-e", str(script)],
         env={"PATH": os.environ["PATH"], "BODY": body, "BOT_HANDLE": handle, "GITHUB_OUTPUT": str(out)}, check=True,
@@ -371,16 +377,27 @@ def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> 
         parsed[key] = value
     return parsed
 
-@pytest.mark.parametrize(("wf_path", "job"), _MATCH_STEP_SOURCES)
 @pytest.mark.parametrize(("body", "handle", "expected"), _MATCH_CASES)
 def test_match_step_recognizes_exactly_the_three_bot_commands(
-    wf_path: Path, job: str, body: str, handle: str, expected: str, tmp_path: Path
+    body: str, handle: str, expected: str, tmp_path: Path
 ) -> None:
-    outputs = _run_match_step(wf_path, job, body, handle, tmp_path / "gh-output")
+    outputs = _run_match_step(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch",
+                              body, handle, tmp_path / "gh-output")
 
     # Command is always written for the single-file job output; matched remains the downstream gate.
     assert outputs["command"] == expected
     assert outputs["matched"] == ("true" if expected else "false")
+
+@pytest.mark.parametrize(("wf_path", "job"), _MATCH_STEP_COPIES)
+def test_packaged_matchers_preserve_canonical_bytes_and_execute_wiring(
+    wf_path: Path, job: str, tmp_path: Path,
+) -> None:
+    """Byte parity carries every canonical grammar case into each shipped copy."""
+    assert _match_script(wf_path, job) == _match_script(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch")
+    assert _run_match_step(wf_path, job, "@bot add sequence diagram", "bot", tmp_path / "gh-output") == {
+        "command": "sequence", "matched": "true",
+    }
+
 
 @pytest.mark.parametrize("wf_path", _COMMAND_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:

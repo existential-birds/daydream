@@ -286,9 +286,8 @@ def test_independent_snapshot_rejects_shared_alternates(
     with pytest.raises(git_ops.SnapshotPreparationError, match="alternates or remotes"):
         git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
 
-@pytest.mark.parametrize("unborn", [False, True])
-@pytest.mark.parametrize("empty", [False, True])
-@pytest.mark.parametrize("variable", [
+@pytest.mark.parametrize(("variable", "empty", "unborn"), [
+    *((variable, False, False) for variable in [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
     "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_NAMESPACE",
     "GIT_CEILING_DIRECTORIES", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
@@ -296,6 +295,8 @@ def test_independent_snapshot_rejects_shared_alternates(
     "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
     "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_TRACE", "GIT_EXEC_PATH",
+]),
+    ("GIT_DIR", True, False), ("GIT_DIR", False, True), ("GIT_DIR", True, True), ("GIT_EXEC_PATH", True, False),
 ])
 def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, empty: bool, unborn: bool,

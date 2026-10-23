@@ -4,15 +4,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
-import sys
+import subprocess
+import uuid
 from pathlib import Path
 
 import httpx
 import pytest
 
 from daydream.benchmark.reviewbench import harbor_seccomp
-from tests.harness.reviewbench_docker import run_seccomp_probe
 
 
 @pytest.fixture
@@ -57,7 +56,7 @@ def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: p
         harbor_seccomp.seccomp_profile()
 
 
-async def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
+def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
     """Use actual Docker/runc diagnostic errno to distinguish admitted and forbidden mount flags."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
@@ -70,8 +69,6 @@ async def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbi
 libc=ctypes.CDLL(None,use_errno=True)
 libc.mount.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_void_p]
 libc.mount.restype=ctypes.c_int
-print('DAYDREAM_SECCOMP_READY',flush=True)
-assert input()=='GO'
 rows={}
 for name,flags in [('required',36898),('required_readonly',36899),('no_flags',0),
                    ('missing_remount',36866),('forbidden_synchronous',36914)]:
@@ -82,66 +79,15 @@ status=dict(line.split(':',1) for line in pathlib.Path('/proc/self/status').read
 assert int(status['CapEff'],16)==0 and status['Seccomp'].strip()=='2'
 print(json.dumps(rows))
 '''
-    observed = json.loads(await run_seccomp_probe(image, diagnostic, script))
+    name = 'daydream-seccomp-' + uuid.uuid4().hex
+    try:
+        result = subprocess.run(['docker', 'run', '--name', name, '--network', 'none', '--cap-drop', 'ALL',
+            '--security-opt', f'seccomp={diagnostic}', '--entrypoint', '/opt/daydream/bin/python',
+            image, '-I', '-c', script], check=True, capture_output=True, timeout=225)
+        observed = json.loads(result.stdout)
+    finally:
+        cleanup = subprocess.run(['docker', 'rm', '--force', name], capture_output=True, timeout=10)
+        assert cleanup.returncode == 0 or b'No such container' in cleanup.stderr, cleanup.stderr
     assert set(observed) == {'required', 'required_readonly', 'no_flags', 'missing_remount', 'forbidden_synchronous'}
     assert observed['required'] != 99 and observed['required_readonly'] != 99, observed
     assert all(observed[name] == 99 for name in ('no_flags', 'missing_remount', 'forbidden_synchronous')), observed
-
-
-@pytest.mark.parametrize('behavior', ['delayed_start', 'startup_hang', 'filter_hang'])
-async def test_seccomp_probe_separates_startup_and_execution_and_cleans_only_owned_container(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str,
-) -> None:
-    """Script real Docker pipes to prove distinct deadlines, process reap and exclusive container cleanup."""
-    binary = tmp_path / 'bin/docker'
-    binary.parent.mkdir()
-    state = tmp_path / 'state'
-    state.mkdir()
-    protected = state / 'other-agent'
-    protected.write_text('preserve other container')
-    binary.write_text(f'#!{sys.executable}\n' +
-        'import json,os,sys,time\nfrom pathlib import Path\n' + f'root=Path({str(state)!r})\n' +
-        'args=sys.argv[1:]\n'
-        'if args[0]=="run":\n'
-        ' name=args[args.index("--name")+1]\n'
-        ' (root/"run.json").write_text(json.dumps({"args":args,"name":name,"pid":os.getpid()}))\n'
-        ' (root/name).write_text("created")\n' +
-        f' time.sleep({1.5 if behavior == "delayed_start" else 60 if behavior == "startup_hang" else 0})\n' +
-        ' print("DAYDREAM_SECCOMP_READY",flush=True)\n'
-        ' assert input()=="GO"\n'
-        ' (root/"go").write_text("probe started")\n' +
-        f' time.sleep({60 if behavior == "filter_hang" else 0})\n' +
-        ' print("probe result",flush=True)\n'
-        'elif args[0]=="rm":\n'
-        ' assert args[:2]==["rm","--force"] and len(args)==3\n'
-        ' name=args[2]\n'
-        ' assert name.startswith("daydream-seccomp-")\n'
-        ' (root/"removed.json").write_text(json.dumps(args))\n'
-        ' (root/name).unlink(missing_ok=True)\n'
-        'else: raise AssertionError(args)\n')
-    binary.chmod(0o700)
-    monkeypatch.setenv('PATH', str(binary.parent) + os.pathsep + os.environ['PATH'])
-    profile = tmp_path / 'profile.json'
-    profile.write_text('{}')
-    try:
-        if behavior == 'delayed_start':
-            assert await run_seccomp_probe('synthetic-image', profile, '',
-                startup_timeout=10, execution_timeout=1) == 'probe result\n'
-        else:
-            phase = 'startup' if behavior == 'startup_hang' else 'filter execution'
-            with pytest.raises(AssertionError, match=phase):
-                await run_seccomp_probe('synthetic-image', profile, '',
-                    startup_timeout=1 if behavior == 'startup_hang' else 10, execution_timeout=1)
-        started = json.loads((state / 'run.json').read_text())
-        assert json.loads((state / 'removed.json').read_text()) == ['rm', '--force', started['name']]
-        assert not (state / started['name']).exists()
-        assert protected.read_text() == 'preserve other container'
-        assert (state / 'go').exists() is (behavior != 'startup_hang')
-        with pytest.raises(ProcessLookupError):
-            os.kill(started['pid'], 0)
-    finally:
-        if (state / 'run.json').exists():
-            try:
-                os.kill(json.loads((state / 'run.json').read_text())['pid'], signal.SIGKILL)
-            except ProcessLookupError:
-                pass

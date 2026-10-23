@@ -64,13 +64,7 @@ def verify_runtime() -> None:
 
 
 def _local_metric_config(dataset: Path, jobs_dir: Path) -> Path:
-    """Retain an explicit local-dataset metric binding without changing its bytes.
-
-    Harbor discovers package-Hub metrics automatically, but local ``-p`` datasets
-    require a JobConfig metric. Unique private-created filenames cannot reuse or
-    overwrite another launch's configuration; Harbor also retains this binding
-    in its resolved job config.
-    """
+    """Bind the unchanged local metric in a fresh retained Harbor launch configuration."""
     metric = dataset.resolve() / 'metric.py'
     if not metric.is_file():
         raise ValueError('Public local dataset lacks its frozen metric.py')
@@ -83,12 +77,7 @@ def _local_metric_config(dataset: Path, jobs_dir: Path) -> Path:
 
 
 def _check_completed_job(job_directory: Path) -> int:
-    """Harbor process success alone does not establish scored trial success.
-
-    Use the supplied strict checker and this job's retained metric/round plan.
-    Every invocation owns a fresh report name so an earlier verification result
-    remains intact when a later check fails or another command checks the job.
-    """
+    """Run the supplied strict checker with a fresh report; Harbor exit zero alone is insufficient."""
     if not job_directory.is_dir():
         print('ReviewBench: Harbor returned without a retained job directory', file=sys.stderr)
         return 1
@@ -106,12 +95,7 @@ def _check_completed_job(job_directory: Path) -> int:
 
 
 def _selected_tasks(dataset: Path, profile: dict[str, Any], args: argparse.Namespace) -> list[str]:
-    """Admit full frozen case identities before Harbor resolves the chosen trials.
-
-    Harbor and the supplied plugin own task resolution and round/evaluation
-    membership. This boundary checks that the exact names sent to Harbor still
-    refer to the full supplied PR identities frozen by the exporter.
-    """
+    """Validate exported full identities and select exact supplied membership before Harbor resolves trials."""
     raw_cases = profile.get('cases')
     test_tasks = profile.get('test_tasks')
     if not isinstance(raw_cases, dict) or len(raw_cases) != 219:

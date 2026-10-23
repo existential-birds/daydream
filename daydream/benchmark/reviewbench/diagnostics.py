@@ -1,9 +1,4 @@
-"""Immutable ReviewBench checkpoints and an offline public-evidence readout.
-
-Only recorder-supplied bytes cross this boundary. Native exchange directories
-are never scanned or copied. A checkpoint manifest commits its entire document
-set; an interrupted install cannot supersede the previous valid checkpoint.
-"""
+"""Atomic checkpoints from exact recorder bytes; native exchange directories stay private."""
 from __future__ import annotations
 
 import hashlib
@@ -84,21 +79,20 @@ def _identity(descriptor: int) -> tuple[int, int]:
 
 
 def _create_bytes(directory: int, relative: Path, body: bytes) -> None:
-    """Install flushed bytes without following any parent or replacing a leaf."""
-    with _directory(directory, relative.parts[:-1], create=True) as parent:
-        temporary = '.checkpoint-' + uuid.uuid4().hex + '.tmp'
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                             0o600, dir_fd=parent)
-        try:
-            with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(body)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.link(temporary, relative.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-            os.fsync(parent)
-        finally:
-            with suppress(OSError):
-                os.unlink(temporary, dir_fd=parent)
+    """Flush and exclusively link one flat file below an anchored directory."""
+    temporary = '.checkpoint-' + uuid.uuid4().hex + '.tmp'
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, relative.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        os.fsync(directory)
+    finally:
+        with suppress(OSError):
+            os.unlink(temporary, dir_fd=directory)
 
 
 def publish_diagnostic_bytes(path: Path, body: bytes) -> None:
@@ -109,28 +103,27 @@ def publish_diagnostic_bytes(path: Path, body: bytes) -> None:
 
 def _read_bytes(directory: int, relative: Path, limit: int | None = None) -> bytes:
     """Read only a regular file through no-follow descriptor-relative parents."""
-    with _directory(directory, relative.parts[:-1]) as parent:
+    try:
+        descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+    except OSError as exc:
         try:
-            descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                                 dir_fd=parent)
-        except OSError as exc:
-            try:
-                symbolic = stat.S_ISLNK(os.stat(relative.name, dir_fd=parent, follow_symlinks=False).st_mode)
-            except OSError:
-                symbolic = False
-            if symbolic:
-                raise ValueError('checkpoint symlink rejected') from exc
-            raise
-        with os.fdopen(descriptor, 'rb') as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError('checkpoint file must be regular')
-            if limit is not None and info.st_size > limit:
-                raise ValueError('diagnostic file exceeds read limit')
-            body = stream.read() if limit is None else stream.read(limit + 1)
-            if limit is not None and len(body) > limit:
-                raise ValueError('diagnostic file exceeds read limit')
-            return body
+            symbolic = stat.S_ISLNK(os.stat(relative.name, dir_fd=directory, follow_symlinks=False).st_mode)
+        except OSError:
+            symbolic = False
+        if symbolic:
+            raise ValueError('checkpoint symlink rejected') from exc
+        raise
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('checkpoint file must be regular')
+        if limit is not None and info.st_size > limit:
+            raise ValueError('diagnostic file exceeds read limit')
+        body = stream.read() if limit is None else stream.read(limit + 1)
+        if limit is not None and len(body) > limit:
+            raise ValueError('diagnostic file exceeds read limit')
+        return body
 
 
 def read_diagnostic_bytes(path: Path, limit: int = 65536) -> bytes:
@@ -157,12 +150,7 @@ def _optional_json(path: Path, availability: dict[str, str]) -> Any:
 
 
 class InterruptedReviewDiagnostics:
-    """Publish at most two committed generations with no-clobber owned paths.
-
-    The diagnostic sink is optional: failure records an explicit availability
-    reason and never changes review authority. Every generation is a new tree;
-    there is no mutable latest pointer and no copied live artifact tree.
-    """
+    """Retain two immutable checkpoints; optional failures never change review authority."""
 
     def __init__(self, evidence: Path, metadata: dict[str, Any]) -> None:
         self.checkpoint_directory = evidence.with_name(evidence.name + '-checkpoints')
@@ -173,7 +161,7 @@ class InterruptedReviewDiagnostics:
                 _create_bytes(directory, Path('metadata.json'), _json_bytes(metadata))
         self.last_error: str | None = None
         self._sequence = 0
-        self._retained: list[tuple[str, tuple[int, int], dict[Path, bytes]]] = []
+        self._retained: list[tuple[Path, bytes]] = []
 
     @contextmanager
     def _root(self) -> Iterator[int]:
@@ -202,94 +190,51 @@ class InterruptedReviewDiagnostics:
         session = snapshot.root_trajectory_id
         snapshot.validate(session)
         root = next(document for document in snapshot.documents if document.trajectory_id == session)
-        files: dict[Path, bytes] = {}
+        documents = {}
         for document in snapshot.documents:
-            # Paths are used only for logical layout, never read from disk.
             relative = document.path.relative_to(root.path.parent)
-            name = relative.name.removesuffix(PARTIAL_SUFFIX)
-            relative = _relative(relative.with_name(name).as_posix())
-            destination = run_directory(Path(), session) / relative
-            if destination in files:
+            relative = relative.with_name(relative.name.removesuffix(PARTIAL_SUFFIX))
+            name = (run_directory(Path(), session) / _relative(relative.as_posix())).as_posix()
+            if name in documents:
                 raise ValueError('duplicate checkpoint path')
-            files[destination] = document.json_bytes
-        for document in snapshot.documents:
-            payload = document.validated_payload(session)
-            for entry in payload.get('extra', {}).get('subtrajectories', []):
-                if 'sibling_trajectory_ref' in entry and _relative(entry['sibling_trajectory_ref']) not in files:
-                    raise ValueError('checkpoint sibling reference unavailable')
-        self._sequence += 1
-        generation = f'{self._sequence:08d}'
-        manifest = {
-            'schema': 1, 'kind': 'checkpoint', 'recorder_status': snapshot.status,
+            documents[name] = {'sha256': hashlib.sha256(document.json_bytes).hexdigest(),
+                               'json': document.json_bytes.decode('utf-8')}
+        bundle = {
+            'schema': 2, 'kind': 'checkpoint', 'recorder_status': snapshot.status,
             'cutoff_at': snapshot.cutoff_at, 'session_id': session,
             'root': (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix(),
-            'terminal_evidence': 'unavailable until joined final export',
-            'documents': {path.as_posix(): hashlib.sha256(body).hexdigest() for path, body in files.items()},
+            'terminal_evidence': 'unavailable until joined final export', 'documents': documents,
         }
-        # checkpoint.json is the commit record. Readers ignore directories
-        # without it, including a SIGKILL halfway through a document install.
+        body = (json.dumps(bundle, allow_nan=False) + '\n').encode()
+        _decode_checkpoint(body)
+        self._sequence += 1
+        generation = f'{self._sequence:08d}'
         with self._root() as directory:
-            os.mkdir(generation, mode=0o700, dir_fd=directory)
-            with _directory(directory, [generation]) as opened:
-                identity = _identity(opened)
-                for path, body in files.items():
-                    _create_bytes(opened, path, body)
-                # Refuse an ancestor substituted during document installation.
-                # No path-based traversal may publish or prune through its target.
-                for path, body in files.items():
-                    if _read_bytes(opened, path) != body:
-                        raise ValueError('checkpoint document identity changed')
-                observed = os.stat(generation, dir_fd=directory, follow_symlinks=False)
-                if (observed.st_dev, observed.st_ino) != identity or not stat.S_ISDIR(observed.st_mode):
-                    raise ValueError('checkpoint generation identity changed')
-                marker = Path('checkpoint.json')
-                files[marker] = _json_bytes(manifest)
-                _create_bytes(opened, marker, files[marker])
-            self._retained.append((generation, identity, files))
+            checkpoint = Path(f'checkpoint-{generation}.json')
+            _create_bytes(directory, checkpoint, body)
+            self._retained.append((checkpoint, body))
             while len(self._retained) > 2:
-                name, identity, owned = self._retained.pop(0)
-                self._discard(directory, name, identity, owned)
-
-    @staticmethod
-    def _discard(root: int, name: str, identity: tuple[int, int], owned: dict[Path, bytes]) -> None:
-        """Prune only matching files and directories below anchored no-follow parents."""
-        try:
-            with _directory(root, [name]) as directory:
-                if _identity(directory) != identity:
-                    return
-                if any(_read_bytes(directory, path) != body for path, body in owned.items()):
-                    return
-                for path, body in owned.items():
-                    with _directory(directory, path.parts[:-1]) as parent:
-                        if _read_bytes(parent, Path(path.name)) != body:
-                            return
-                        os.unlink(path.name, dir_fd=parent)
-                parents = {parent for path in owned for parent in path.parents if parent.parts}
-                for path in sorted(parents, key=lambda path: len(path.parts), reverse=True):
-                    with _directory(directory, path.parts[:-1]) as parent:
-                        os.rmdir(path.name, dir_fd=parent)
-            observed = os.stat(name, dir_fd=root, follow_symlinks=False)
-            if (observed.st_dev, observed.st_ino) == identity and stat.S_ISDIR(observed.st_mode):
-                os.rmdir(name, dir_fd=root)
-        except (OSError, ValueError):
-            return
+                checkpoint, body = self._retained.pop(0)
+                try:
+                    if _read_bytes(directory, checkpoint) == body:
+                        os.unlink(checkpoint.name, dir_fd=directory)
+                except (OSError, ValueError):
+                    pass  # Preserve competing bytes and symlinks.
 
 
-def read_checkpoint(directory: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def read_checkpoint(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Read a committed generation, rejecting symlinks, corruption and bad refs."""
-    with _absolute_directory(directory) as descriptor:
-        return _read_checkpoint(descriptor)
+    with _absolute_directory(path.parent) as descriptor:
+        return _decode_checkpoint(_read_bytes(descriptor, Path(path.name)))
 
 
-def _read_checkpoint(descriptor: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    manifest = json.loads(_read_bytes(descriptor, Path('checkpoint.json')))
-    if not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 1:
-        raise ValueError('unsupported checkpoint')
-    if (manifest.get('kind') != 'checkpoint' or not isinstance(manifest.get('recorder_status'), str)
-            or manifest['recorder_status'] not in {'partial', 'complete'}
+def _decode_checkpoint(body: bytes) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    manifest = json.loads(body)
+    if (not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 2
+            or manifest.get('kind') != 'checkpoint' or manifest.get('recorder_status') not in ('partial', 'complete')
             or any(not isinstance(manifest.get(key), str) or not manifest[key]
                    for key in ('cutoff_at', 'session_id', 'root'))):
-        raise ValueError('checkpoint metadata is malformed')
+        raise ValueError('unsupported or malformed checkpoint')
     inventory = manifest.get('documents')
     if not isinstance(inventory, dict) or not inventory:
         raise ValueError('checkpoint document inventory is malformed')
@@ -297,43 +242,38 @@ def _read_checkpoint(descriptor: int) -> tuple[dict[str, Any], list[dict[str, An
     expected_root = (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix()
     if manifest['root'] != expected_root or expected_root not in inventory:
         raise ValueError('checkpoint root unavailable')
-    documents: list[dict[str, Any]] = []
     by_path: dict[str, dict[str, Any]] = {}
     identities: set[str] = set()
-    for relative, digest in inventory.items():
-        if (not isinstance(relative, str) or not isinstance(digest, str)
-                or re.fullmatch(r'[0-9a-f]{64}', digest) is None):
-            raise ValueError('checkpoint document identity is malformed')
-        body = _read_bytes(descriptor, _relative(relative))
-        if hashlib.sha256(body).hexdigest() != digest:
+    for relative, entry in inventory.items():
+        _relative(relative)
+        if not isinstance(entry, dict) or not isinstance(entry.get('json'), str):
+            raise ValueError('checkpoint document is malformed')
+        if hashlib.sha256(entry['json'].encode()).hexdigest() != entry.get('sha256'):
             raise ValueError('checkpoint bytes differ')
-        document = json.loads(body)
+        document = json.loads(entry['json'])
         if (not isinstance(document, dict) or document.get('session_id') != session
                 or not isinstance(document.get('trajectory_id'), str) or not document['trajectory_id']
                 or document['trajectory_id'] in identities):
             raise ValueError('checkpoint identity differs')
         extra = document.get('extra', {})
-        if not isinstance(extra, dict):
-            raise ValueError('checkpoint document metadata is malformed')
-        for key in ('subtrajectories', 'phase_events', 'active_dispatches'):
-            values = extra.get(key, [])
-            if not isinstance(values, list) or any(not isinstance(value, dict) for value in values):
-                raise ValueError('checkpoint activity is malformed')
+        if not isinstance(extra, dict) or any(
+            not isinstance(extra.get(key, []), list) or any(not isinstance(value, dict) for value in extra[key])
+            for key in ('subtrajectories', 'phase_events', 'active_dispatches') if key in extra
+        ):
+            raise ValueError('checkpoint activity is malformed')
         identities.add(document['trajectory_id'])
-        documents.append(document)
         by_path[relative] = document
-    for document in documents:
+    for document in by_path.values():
         for entry in document.get('extra', {}).get('subtrajectories', []):
-            if 'sibling_trajectory_ref' not in entry:
-                continue
-            reference = entry['sibling_trajectory_ref']
-            if not isinstance(reference, str) or reference not in by_path:
-                raise ValueError('checkpoint reference unavailable')
-            if entry.get('trajectory_id') != by_path[reference]['trajectory_id']:
-                raise ValueError('checkpoint reference identity differs')
+            if 'sibling_trajectory_ref' in entry:
+                reference = entry['sibling_trajectory_ref']
+                if (not isinstance(reference, str) or reference not in by_path
+                        or entry.get('trajectory_id') != by_path[reference]['trajectory_id']):
+                    raise ValueError('checkpoint reference unavailable or mismatched')
     if by_path[expected_root]['trajectory_id'] != session:
         raise ValueError('checkpoint root unavailable')
-    return manifest, documents
+    manifest['documents'] = {path: entry['sha256'] for path, entry in inventory.items()}
+    return manifest, list(by_path.values())
 
 
 def interrupted_readout(evidence: Path) -> dict[str, Any]:
@@ -342,19 +282,14 @@ def interrupted_readout(evidence: Path) -> dict[str, Any]:
     availability: dict[str, str] = {}
     result: dict[str, Any] = {'terminal_evidence': 'unavailable', 'checkpoint': 'unavailable',
                               'input_availability': availability}
-    metadata = checkpoints / 'metadata.json'
-    if (value := _optional_json(metadata, availability)) is not None:
-        result['identity_and_policy'] = value
-    execution = evidence / 'execution.json'
-    if (value := _optional_json(execution, availability)) is not None:
-        result['execution'] = value
+    for label, path in {'identity_and_policy': checkpoints / 'metadata.json',
+                        'execution': evidence / 'execution.json',
+                        'process': evidence.parent / 'reviewer-process.json',
+                        'host': evidence.parent / 'reviewer-host.json'}.items():
+        if (value := _optional_json(path, availability)) is not None:
+            result[label] = value
+    if 'execution' in result:
         result['terminal_evidence'] = 'joined export available; inspect execution status'
-    process = evidence.parent / 'reviewer-process.json'
-    if (value := _optional_json(process, availability)) is not None:
-        result['process'] = value
-    host = evidence.parent / 'reviewer-host.json'
-    if (value := _optional_json(host, availability)) is not None:
-        result['host'] = value
     # Harbor alone labels an outer timeout. SIGTERM/task cancellation in the
     # reviewer cannot establish whether its caller timed out or was cancelled.
     trial = evidence.parent.parent / 'result.json'
@@ -375,34 +310,20 @@ def interrupted_readout(evidence: Path) -> dict[str, Any]:
             names = os.listdir(directory)
     except FileNotFoundError:
         names = []
-    for name in sorted((name for name in names if re.fullmatch(r'[0-9]{8}', name)), reverse=True):
+    for name in sorted((name for name in names if re.fullmatch(r'checkpoint-[0-9]{8}\.json', name)), reverse=True):
         generation = checkpoints / name
         try:
             manifest, documents = read_checkpoint(generation)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            failures.append({'generation': generation.name, 'reason': type(exc).__name__})
+            failures.append({'generation': generation.stem.removeprefix('checkpoint-'), 'reason': type(exc).__name__})
             continue
-        result['checkpoint'] = {'generation': generation.name, **manifest}
+        result['checkpoint'] = {'generation': generation.stem.removeprefix('checkpoint-'), **manifest}
         result['activity'] = [{
             'trajectory_id': document['trajectory_id'],
             'phase_events': document.get('extra', {}).get('phase_events', []),
             'invocations': document.get('extra', {}).get('subtrajectories', []),
             'active_dispatches': document.get('extra', {}).get('active_dispatches', []),
         } for document in documents]
-        result['last_observed'] = []
-        for document in documents:
-            extra = document.get('extra', {})
-            invocations = extra.get('subtrajectories', [])
-            active = [invocation for invocation in invocations
-                      if invocation.get('invocation_id') and invocation.get('ended_at') is None]
-            phases = extra.get('phase_events', [])
-            result['last_observed'].append({
-                'trajectory_id': document['trajectory_id'],
-                'last_phase_event': phases[-1] if phases else None,
-                'active_invocations': active,
-                'active_dispatches': extra.get('active_dispatches', []),
-                'completed_phase_timings': [event for event in phases if event.get('event') == 'phase_end'],
-            })
         break
     result['unavailable_checkpoints'] = failures
     result['publication_failures'] = [_optional_json(checkpoints / name, availability) for name in sorted(names)

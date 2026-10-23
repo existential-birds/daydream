@@ -81,40 +81,27 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             except Exception as exc:
                 channels['shared_marker'] = 'unavailable:' + type(exc).__name__
                 warn_diagnostics_unavailable('host cancellation marker', exc)
-            # Harbor's Docker collector does not stop the reviewer in-container
-            # when its await is cancelled or its Docker client fails.
-            # Keep its buffered collection alive while an independent control exec
-            # stops this invocation. Repeated cancellation cannot reset this bound.
+            # The in-container supervisor observes the shared marker even when
+            # Harbor's collector is cancelled or fails. Join a cooperative
+            # collector before returning; a final receipt covers failed collectors.
+            # One absolute bound also applies across repeated cancellation.
             deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS + FORCE_REAP_SECONDS + 10
 
             async def stop_and_collect() -> None:
-                control = command + ' --cancel --stop-reason ' + reason
-                try:
-                    async with asyncio.timeout(5):
-                        control_result = await environment.exec(control, timeout_sec=5)
-                        channels['control_exec'] = 'returned_zero' if control_result.return_code == 0 else 'failed'
-                except (Exception, asyncio.CancelledError) as exc:
-                    channels['control_exec'] = 'unavailable:' + type(exc).__name__
                 while time.monotonic() < deadline:
-                    if execution.done():
-                        if not execution.cancelled() and execution.exception() is None:
-                            return
-                        if _process_completion_observed(Path(self.logs_dir), invocation):
-                            return
-                    # A failed collector cannot join the supervisor. Its exact
-                    # final receipt is published after native export and reap.
+                    if execution.done() and (not execution.cancelled() and execution.exception() is None
+                            or _process_completion_observed(Path(self.logs_dir), invocation)):
+                        return
                     await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
             cleanup = asyncio.create_task(stop_and_collect())
-            while not cleanup.done() and time.monotonic() < deadline:
+            while not cleanup.done():
                 try:
-                    await asyncio.wait_for(asyncio.shield(cleanup), timeout=max(0.0, deadline - time.monotonic()))
+                    await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
                     continue
                 except Exception:
                     break
-            if not cleanup.done():
-                cleanup.cancel()
             # Detached noncooperative collectors must not hold the agent's
             # cancellation open indefinitely; the supervisor has its own bound.
             execution.add_done_callback(_consume_task_result)
@@ -124,37 +111,18 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
 
                 publish_diagnostic_bytes(Path(self.logs_dir) / 'reviewer-host.json', (json.dumps({
                     'schema': 1, 'invocation_id': invocation, 'interruption': reason,
-                    'classification': 'Harbor owns timeout versus explicit cancellation' if interrupted
-                        else 'host execution transport failed; original exception propagated',
                     'execution_error': None if interrupted else type(failure).__name__[:80],
-                    'execution_error_errno': failure.errno
-                        if isinstance(failure, OSError) and type(failure.errno) is int else None,
                     'cancellation_channels': channels,
                     'declared_outer_timeout_seconds': declared_timeout,
-                    'outer_timeout_availability': 'trial config' if declared_timeout is not None else 'unavailable',
                     'elapsed_seconds': time.monotonic() - started,
-                    'cleanup_allowance_seconds': SHUTDOWN_GRACE_SECONDS + FORCE_REAP_SECONDS + 10,
                     'output_collection': 'returned' if execution.done() and not execution.cancelled()
                         and execution.exception() is None else 'unavailable',
-                    'output_availability_reason': None if interrupted else 'collector failed: '
-                        + type(failure).__name__[:80],
                     'process_completion': 'observed' if _process_completion_observed(Path(self.logs_dir), invocation)
                         else 'unavailable',
-                    'cleanup_task': 'finished' if cleanup.done() else 'detached_at_absolute_bound',
                 }, indent=2) + '\n').encode())
             except Exception as exc:
                 warn_diagnostics_unavailable('host receipt', exc)
             raise
-        from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
-        from daydream.redaction import redact_structured_text
-
-        try:
-            log = Path(self.logs_dir) / 'reviewer-entrypoint.log'
-            if not log.exists() and not log.is_symlink():
-                safe_output = redact_structured_text((result.stdout or '') + (result.stderr or ''))
-                publish_diagnostic_bytes(log, safe_output[:131072].encode())
-        except Exception as exc:
-            warn_diagnostics_unavailable('host log', exc)
         if result.return_code != 0:
             raise RuntimeError('public ReviewBench native reviewer failed; inspect retained execution evidence')
 
@@ -188,7 +156,7 @@ def _process_completion_observed(logs: Path, invocation: str) -> bool:
         return (isinstance(receipt, dict) and receipt.get('schema') == 1
                 and receipt.get('invocation_id') == invocation
                 and (type(receipt.get('child_returncode')) is int
-                     or receipt.get('cleanup_outcome') == 'cancelled_before_start'))
+                     or receipt.get('cleanup_outcome') in ('cancelled_before_start', 'startup_failed')))
     except (OSError, ValueError):
         return False
 

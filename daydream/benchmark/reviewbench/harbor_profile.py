@@ -1,9 +1,4 @@
-"""Content-addressed public ReviewBench tasks with a subscription-only Codex judge.
-
-The supplied exporter and judging sources are executed unchanged. This module owns
-only the explicitly distinct local evaluation profile and its runtime bootstrap.
-It never reads credentials and never publishes a dataset.
-"""
+"""Freeze content-addressed tasks around the unchanged supplied exporter and judge."""
 
 from __future__ import annotations
 
@@ -89,13 +84,7 @@ def _write_json(path: Path, value: Any) -> None:
 
 def selected_reviewer_policy(reviewer: Mapping[str, Any], *,
                              environment: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Bind the selected native endpoint/model, without reading authentication.
-
-    Nous is an operator-defined native Pi provider. Copy only its selected public
-    model definition; credentials remain in Pi's native auth store. Other native
-    providers need an explicit isolation contract before this public lane admits
-    them. Ordinary Daydream backend support is unaffected.
-    """
+    """Freeze only the selected native endpoint/models; authentication remains in its native store."""
     policy = dict(reviewer)
     if policy.get('backend') == 'codex':
         policy['allowed_hosts'] = ['chatgpt.com', 'auth.openai.com']
@@ -159,8 +148,6 @@ def export_harbor_profile(
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
     models = codex_models()
-    from daydream import credential_patterns, json_utils, redaction
-
     seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
@@ -168,8 +155,6 @@ def export_harbor_profile(
         '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
         'exec python3 /tests/daydream-auth.py judge '
         f'--canonical-home {JUDGE_HOME} '
-        '--classifier-sessions /tests/judge/classifier-output/sessions '
-        '--judge-evidence /logs/verifier/judge-sessions '
         '--models /tests/judge/.daydream-codex/models.json '
         '--pi-bootstrap /tests/judge/daydream-auth.mjs -- '
         'node --import tsx scripts/harbor/verify.ts /tests/task.json\n'
@@ -181,9 +166,6 @@ def export_harbor_profile(
         'environment/docker-compose.yaml': _compose(platform, reviewer=True, backend=reviewer['backend']).encode(),
         'tests/docker-compose.yaml': _compose(platform, reviewer=False).encode(),
         'tests/daydream-auth.py': Path(__file__).with_name('harbor_auth.py').read_bytes(),
-        'tests/daydream/__init__.py': b'',
-        **{f'tests/daydream/{Path(filename).name}': Path(filename).read_bytes()
-           for filename in (json_utils.__file__, redaction.__file__, credential_patterns.__file__)},
         'tests/judge/.daydream-codex/models.json': (json.dumps(models, sort_keys=True, indent=2) + '\n').encode(),
         'tests/judge/daydream-auth.mjs': Path(__file__).with_name('judge_auth.mjs').read_bytes(),
         'tests/test.sh': bootstrap.encode(),
@@ -203,13 +185,7 @@ def export_harbor_profile(
             'verifier_timeout_sec': 7200, 'models': models,
             'max_output_tokens_enforced': False, 'cost_source': 'api-equivalent-estimate',
             'refresh_policy': 'independent-native-stores-pi-canonical-locks',
-            'evidence': {
-                'classifier_sessions_source': '/tests/judge/classifier-output/sessions',
-                'classifier_sessions_destination': '/logs/verifier/judge-sessions',
-                'format': 'sanitized-top-level-pi-jsonl', 'publication': 'exclusive-index-last',
-                'matcher_sessions': 'unavailable_upstream_in_memory', 'matcher_usage': 'not_retained_by_eval',
-                'monetary_usage_source': 'api-equivalent-estimate',
-            },
+
         },
         'runtime': {'platform': platform,
                     'reviewer_seccomp_sha256': seccomp_sha,

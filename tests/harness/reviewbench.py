@@ -62,6 +62,20 @@ def finding(**overrides: Any) -> dict[str, Any]:
             "severity": "medium", "confidence": "MEDIUM", **overrides}
 
 
+def native_auth(home: Path, role: str = 'codex') -> dict[str, Any]:
+    """Create one role-scoped synthetic native store with no live credentials."""
+    home.mkdir(parents=True, exist_ok=True)
+    payload = base64.urlsafe_b64encode(b'{"exp":9000000000}').decode().rstrip('=')
+    value = ({'auth_mode': 'chatgpt', 'tokens': {
+        'access_token': f'header.{payload}.signature', 'refresh_token': 'private-refresh-canary',
+        'id_token': 'private-id-canary', 'account_id': 'test-account'}} if role == 'codex' else
+        {'openai-codex': {'type': 'oauth', 'access': 'synthetic-pi-access', 'refresh': 'synthetic-refresh',
+                         'accountId': 'test-account', 'expires': 1}})
+    (home / 'auth.json').write_text(json.dumps(value))
+    (home / 'auth.json').chmod(0o600)
+    return value
+
+
 def public_input(tmp_path: Path, *, additional_sources: int = 0, divergent_base: bool = False) -> dict[str, str]:
     repo, case = frozen_case(tmp_path, additional_sources=additional_sources, divergent_base=divergent_base)
     inputs = tmp_path / 'pr'
@@ -78,11 +92,7 @@ def public_input(tmp_path: Path, *, additional_sources: int = 0, divergent_base:
                                                .encode()).hexdigest()
     (inputs / 'daydream-profile.json').write_text(json.dumps(profile))
     canonical = tmp_path / 'subscription'
-    canonical.mkdir()
-    payload = base64.urlsafe_b64encode(json.dumps({'exp': 9000000000}).encode()).decode().rstrip('=')
-    (canonical / 'auth.json').write_text(json.dumps({'auth_mode': 'chatgpt', 'tokens': {
-        'access_token': f'header.{payload}.signature', 'refresh_token': 'private-refresh-canary',
-        'id_token': 'private-id-canary', 'account_id': 'test-account'}}))
+    native_auth(canonical)
     return {'DAYDREAM_RB_REPOSITORY': str(repo), 'DAYDREAM_RB_INPUTS': str(inputs),
             'DAYDREAM_RB_OUTPUT': str(tmp_path / 'out/findings.json'),
             'DAYDREAM_RB_EVIDENCE': str(tmp_path / 'logs/daydream'),
@@ -95,12 +105,11 @@ class LocalReviewerEnvironment:
     """Buffered exec with Harbor's cancellation boundary: children outlive awaits."""
 
     def __init__(self, environment: dict[str, str], repository: Path, *,
-                 publication_fault: str | None = None, close_stdout: bool = False, foreign_stderr: bytes = b'',
+                 publication_fault: str | None = None, foreign_stderr: bytes = b'',
                  entrypoint_bootstrap: str | None = None) -> None:
         self.environment = environment
         self.repository = repository
         self.publication_fault = publication_fault
-        self.close_stdout = close_stdout
         self.foreign_stderr = foreign_stderr
         self.entrypoint_bootstrap = entrypoint_bootstrap
         self.results: list[SimpleNamespace] = []
@@ -134,17 +143,8 @@ class LocalReviewerEnvironment:
                 'sys.argv = ["daydream.benchmark.reviewbench.harbor_process", *sys.argv[1:]]\n'
                 'runpy.run_module(sys.argv[0],run_name="__main__",alter_sys=True)\n')
             arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
-        writer: int | None = None
-        if self.close_stdout:
-            reader, writer = os.pipe()
-            os.close(reader)  # A real collector pipe with no remaining reader.
-        try:
-            child = await asyncio.create_subprocess_exec(*arguments, cwd=self.repository, env=self.environment,
-                stdout=writer if writer is not None else asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, start_new_session=True)
-        finally:
-            if writer is not None:
-                os.close(writer)
+        child = await asyncio.create_subprocess_exec(*arguments, cwd=self.repository, env=self.environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
         self.children.append(child)
         collector = asyncio.create_task(child.communicate())
         self.collectors.append(collector)

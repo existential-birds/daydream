@@ -2,14 +2,10 @@
 
 ## Public ReviewBench
 
-Use `daydream benchmark reviewbench --help`. Export performs no inference;
-reviewing and judging require experiment authorization. Keep inputs/results out
-of capture and training, preserve failed evidence, and use fresh output paths.
-
-Install the packaged [Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock).
-Use Node 20+ and a clean ReviewBench checkout at
-`4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
-Export the candidate wheel, then launch the exported tasks:
+Install the packaged [Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock),
+Node 20+, and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
+Export performs no inference; reviewing/judging require separate authorization.
+Keep inputs/results out of capture/training and use fresh output paths:
 
 ```bash
 daydream benchmark reviewbench harbor-export /private/export \
@@ -20,27 +16,18 @@ daydream benchmark reviewbench harbor-run /private/export \
   --jobs-dir /private/jobs --job-name comparison --set test --rounds 3
 ```
 
-For Codex, select `--backend codex` and replace `--reviewer-pi-home` with
-`--codex-home`. Reviewer and judge need separate native credential stores outside
-exports/jobs; the common judge uses `openai-codex` / `gpt-6.1-sol`. Docker must
-support the selected architecture, nested sandboxing and exact-host isolation.
+For Codex, use `--backend codex` and `--codex-home`. Keep independent native
+reviewer/judge credentials outside exports/jobs. The judge uses
+`openai-codex` / `gpt-6.1-sol`; Docker needs the selected architecture, nested
+sandboxing and exact-host isolation. The wheel/hash identifies the candidate;
+package extensions in that wheel. Export/launch need no matching installation.
 
-The supplied wheel and its SHA-256 identify the candidate. Export and launch may
-run from another Daydream installation; installed source trees are not scanned.
-Package any reviewer extension in the wheel. Host extension overrides are not
-included in the reviewer image.
-
-`--set test` selects the supplied 25 cases; `--set full` selects all 219.
-Repeated `--task EXACT_NAME` selects a subset. Harbor owns independent rounds;
-the supplied checker and metric own admission, scoring and reports. Profiles use
-schema 4; rebuild the candidate wheel and create a fresh export together. Preserve
-older exports without migration. Offline integration proves no review-quality or
-performance improvement.
-
-Inspect interrupted evidence without inference with
-`python -m daydream.benchmark.reviewbench.diagnostics JOB/TRIAL/agent/daydream`.
-The last valid checkpoint preserves observed activity; Harbor owns timeout
-classification. Checkpoints establish neither completed reviews nor scores.
+`--set test` selects the supplied 25 cases; `--set full` all 219; repeated
+`--task EXACT_NAME` a subset. Harbor owns rounds; supplied scoring/checkers own
+results. Schema 4 requires fresh exports and candidate wheels; preserve old evidence.
+Offline proof establishes no review-quality or performance improvement.
+Read interruptions with `python -m daydream.benchmark.reviewbench.diagnostics JOB/TRIAL/agent/daydream`.
+Checkpoints retain exact recorder bytes; Harbor owns timeout classification and completion/scoring.
 
 ## Private Harbor benchmark
 
