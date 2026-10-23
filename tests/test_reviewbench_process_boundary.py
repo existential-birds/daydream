@@ -267,6 +267,98 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         await asyncio.gather(running, return_exceptions=True)
 
 
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_bundle(
+    tmp_path: Path, credential_type: str,
+) -> None:
+    """Native tool evidence cannot retain schema-admitted opaque Pi credentials.
+
+    Existing supervisor privacy cases emit familiar credential labels directly
+    to pipes. This reads the actual validator-admitted auth object in a scripted
+    Codex process and emits genuine public tool events through the real runner,
+    active checkpoint and joined root/sibling exports. Reviewer API-key and judge
+    OAuth stores retain their original files; this invokes no Pi provider.
+    """
+    from daydream.benchmark.reviewbench.diagnostics import read_checkpoint
+    from daydream.benchmark.reviewbench.harbor_auth import validate_judge_home, validate_pi_reviewer_home
+    from daydream.redaction import redact_structured_text
+
+    environment = public_input(tmp_path)
+    pi_home = tmp_path / 'synthetic-pi-auth'
+    pi_home.mkdir(mode=0o700)
+    secret = 'opaque-reviewbench-pi-auth-secret-canary'
+    credential = pi_home / 'auth.json'
+    auth = ({'nous': {'type': 'api_key', 'key': secret}} if credential_type == 'api_key' else
+            {'openai-codex': {'type': 'oauth', 'access': secret + '-access', 'refresh': secret + '-refresh',
+                              'accountId': 'synthetic-public-account', 'expires': 9000000000000}})
+    original_auth = json.dumps(auth).encode()
+    credential.write_bytes(original_auth)
+    if credential_type == 'api_key':
+        validate_pi_reviewer_home(pi_home, 'nous')
+    else:
+        validate_judge_home(pi_home)
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence',
+        empty_reviews=True, tool_output_path=credential)
+    local = LocalReviewerEnvironment({**os.environ, **environment,
+        'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
+        Path(environment['DAYDREAM_RB_REPOSITORY']))
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    checkpoints = evidence.with_name(evidence.name + '-checkpoints')
+    running = asyncio.create_task(DaydreamPublicReviewAgent(logs_dir=evidence.parent).run(
+        'frozen synthetic task', local, SimpleNamespace()))
+    try:
+        deadline = asyncio.get_running_loop().time() + 15
+        while not any(row['mode'] == 'preterminal_silence' for row in cli.observations()):
+            if running.done():
+                await running
+            assert asyncio.get_running_loop().time() < deadline, 'native tool process did not reach readiness'
+            await asyncio.sleep(0.01)
+        while not (manifests := list(checkpoints.glob('*/checkpoint.json'))):
+            assert asyncio.get_running_loop().time() < deadline, 'active tool checkpoint was not retained'
+            await asyncio.sleep(0.01)
+        manifest, documents = read_checkpoint(sorted(manifests)[-1].parent)
+        assert manifest['kind'] == 'checkpoint' and len(documents) >= 3
+        checkpoint_text = json.dumps(documents)
+        assert 'ordinary-public-key' in checkpoint_text
+        assert secret not in checkpoint_text, 'active checkpoint retained an admitted Pi credential'
+        tool_payloads = [json.loads(result['content']) for document in documents for step in document['steps']
+                         for result in step.get('observation', {}).get('results', [])
+                         if result['source_call_id'] == 'fixture-input']
+        assert tool_payloads
+        for payload in tool_payloads:
+            assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
+            assert payload['usage'] == {'input': 0, 'output': None}
+            admitted = payload['data']['nous' if credential_type == 'api_key' else 'openai-codex']
+            assert admitted['type'] == credential_type
+            if credential_type == 'oauth':
+                assert admitted['accountId'] == 'synthetic-public-account' and admitted['expires'] == 9000000000000
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=35)
+        execution = json.loads((evidence / 'execution.json').read_text())
+        assert execution['status'] == 'cancelled' and execution['candidate'] is None
+        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+        root = json.loads((evidence / 'trajectory.json').read_text())
+        siblings = [row['sibling_trajectory_ref'] for row in root['extra']['subtrajectories']
+                    if 'sibling_trajectory_ref' in row]
+        assert siblings and all((evidence / reference).is_file() for reference in siblings)
+        retained = {path: path.read_bytes() for path in evidence.parent.rglob('*') if path.is_file()}
+        assert any(b'ordinary-public-key' in body for body in retained.values())
+        assert not [str(path.relative_to(evidence.parent))
+                    for path, body in retained.items() if secret.encode() in body]
+        for body in retained.values():
+            once = redact_structured_text(body.decode('utf-8'))
+            assert redact_structured_text(once) == once
+        collected = ''.join((result.stdout or '') + (result.stderr or '') for result in local.results)
+        assert secret not in collected
+        assert credential.read_bytes() == original_auth
+    finally:
+        if not running.done():
+            running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+        await local.close()
+
+
 @pytest.mark.parametrize('receipt_conflict', [False, True])
 async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(
     tmp_path: Path, receipt_conflict: bool,

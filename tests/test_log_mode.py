@@ -6,15 +6,18 @@ and the default Rich path.
 from __future__ import annotations
 
 import io
+import json
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 
 import anyio
 import pytest
+from rich.console import Console
 
-from daydream.agent import _LogRedactingConsole, console as phases_console
+from daydream.agent import _LogRedactingConsole, console as phases_console, run_agent
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -32,7 +35,8 @@ from daydream.phases.handoff import (
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import run
-from daydream.ui.agent_stream import _print_log, _summarize_input, _summarize_output
+from daydream.trajectory import DaydreamPhase
+from daydream.ui.agent_stream import AgentDisplay, _print_log, _summarize_input, _summarize_output
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -191,6 +195,102 @@ def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
         "prompt": "Add rate limiting",
     }
     assert _summarize_input(args, "TaskCreate") == "Add rate limiting"
+
+
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+async def test_log_tool_summary_preserves_native_auth_context_until_redaction(
+    credential_type: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Selecting a generic first string must not discard its credential type tag.
+
+    Existing summaries use self-identifying command text and cannot expose an
+    opaque key/access value selected from a complete typed native auth mapping.
+    Emit real tool events, preserving ordinary public keys and replayable input.
+    """
+    secret = 'opaque-ui-log-native-auth-canary'
+    values = ({'key': secret} if credential_type == 'api_key' else
+              {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    values['type'] = credential_type
+    before = dict(values)
+    event = ToolStartEvent('credential', 'Inspect', values)
+    display = AgentDisplay(Console(file=io.StringIO()), InteractionPolicy(log_mode=True), None, structured=False)
+    await display.observe(event)
+    await display.observe(ToolStartEvent('public', 'Inspect', {'key': 'ordinary-public-key', 'type': 'record'}))
+    output = capsys.readouterr().out
+    assert output.count('[tool:Inspect]') == 2
+    assert secret not in output and '[REDACTED' in output
+    assert 'ordinary-public-key' in output
+    assert event.input == before
+
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth', 'public'])
+@pytest.mark.parametrize('closed_pipe', [False, True])
+async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellation(
+    tmp_path: Path, credential_type: str, closed_pipe: bool, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Graceful cancellation must drain the same complete block as normal flush.
+
+    Rendering tests call flush explicitly, while run_agent cancellation skips
+    its normal flush. Stream real backend events into the event loop, rendezvous
+    after observation, then cancel. A real closed pipe must preserve cancellation
+    rather than replacing it with a secondary presentation failure.
+    """
+    secret = 'opaque-ui-cancel-native-auth-canary'
+    fields = ({'key': secret} if credential_type == 'api_key' else
+              {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    content = ('ordinary public narration' if credential_type == 'public' else
+               json.dumps({'type': credential_type, **fields, 'public': {'key': 'ordinary-public-key'}}))
+    split = len(content) // 2
+    events = [TextEvent(content[:split]), TextEvent(content[split:])]
+    ready, closed = anyio.Event(), anyio.Event()
+    captured: list[BaseException] = []
+
+    async def respond(*_args: object) -> AsyncIterator[AgentEvent]:
+        try:
+            for event in events:
+                yield event
+            ready.set()
+            await anyio.sleep_forever()
+        finally:
+            closed.set()
+
+    backend = ScriptedBackend(responder=respond)
+
+    async def invoke() -> None:
+        try:
+            await run_agent(backend, tmp_path, 'go', phase=DaydreamPhase.REVIEW)
+        except BaseException as exc:
+            captured.append(exc)
+            raise
+
+    async def cancel_after_observation() -> None:
+        with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
+            async with anyio.create_task_group() as group:
+                group.start_soon(invoke)
+                with anyio.fail_after(5):
+                    await ready.wait()
+                group.cancel_scope.cancel()
+
+    if closed_pipe:
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        # Unbuffered actual OS writes avoid a deferred context-close failure.
+        with io.TextIOWrapper(io.FileIO(write_fd, 'w'), write_through=True) as stream:
+            with redirect_stdout(stream):
+                await cancel_after_observation()
+    else:
+        await cancel_after_observation()
+    assert len(captured) == 1 and isinstance(captured[0], anyio.get_cancelled_exc_class())
+    assert closed.is_set()
+    output = capsys.readouterr().out
+    assert secret not in output
+    if closed_pipe:
+        assert any('BrokenPipeError' in note for note in getattr(captured[0], '__notes__', []))
+    elif credential_type == 'public':
+        assert 'ordinary public narration' in output
+    else:
+        assert 'ordinary-public-key' in output and '[REDACTED' in output
+    assert ''.join(event.text for event in events) == content
+
 
 def test_log_mode_summaries_redact_structured_credentials() -> None:
     """Log-mode summaries must use the structured redactor, not the flat one.

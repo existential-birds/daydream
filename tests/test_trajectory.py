@@ -645,6 +645,7 @@ async def test_existing_redaction_marker_cannot_exempt_adjacent_credentials_in_s
     'ordinary-python', '{"scope":"python"}', '{"scope":"python","scope":"rust"}',
     'auth=Bearer [REDACTED][REDACTED_CREDENTIAL]', 'api_key=[REDACTED][REDACTED_CREDENTIAL]',
     'TOKEN=[REDACTED_ENV_VAR]; public diagnostics',
+    '{"type":"api_key","key":"[REDACTED]"}',
 ])
 async def test_benign_host_fork_labels_keep_original_identity(label: str, tmp_path: Path) -> None:
     """Privacy admission must not rename ordinary or merely JSON-looking labels.

@@ -11,12 +11,13 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.benchmark.reviewbench.diagnostics import (
     InterruptedReviewDiagnostics,
     interrupted_readout,
     read_checkpoint,
 )
+from daydream.benchmark.reviewbench.harbor_auth import validate_judge_home, validate_pi_reviewer_home
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot, dispatch_scope, run_directory
 from tests.harness.trajectory import make_recorder
 
@@ -269,7 +270,7 @@ async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
 @pytest.mark.parametrize('label_kind', [
     'api_key', 'marker_json', 'scheme_token', 'scheme_suffix', 'marker_after_bare_value',
     'marker_after_quoted_value', 'marker_prefixed_value', 'repeated_marker_prefixed_value',
-    'sensitive_container', 'duplicate_sensitive_container',
+    'sensitive_container', 'duplicate_sensitive_container', 'native_credential', 'duplicate_native_credential',
 ])
 @pytest.mark.parametrize('identified_dispatch', [False, True], ids=['legacy-fork', 'identified-dispatch'])
 async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_publication(
@@ -298,6 +299,11 @@ async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_p
     if label_kind == 'marker_json':
         canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
         labels = [json.dumps({'api_key': '[REDACTED] ' + canary}) for canary in canaries]
+    elif label_kind in ('native_credential', 'duplicate_native_credential'):
+        canaries = ['opaque-native-label-one', 'opaque-native-label-two', 'opaque-native-label-queued']
+        labels = ['{"type":"api_key","key":"' + canary + '"'
+                  + (',"key":"[REDACTED]"}' if label_kind == 'duplicate_native_credential' else '}')
+                  for canary in canaries]
     elif label_kind != 'api_key':
         canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
         if label_kind == 'sensitive_container':
@@ -469,3 +475,76 @@ async def test_checkpoint_schema_corruption_selects_previous_immutable_generatio
             assert report['unavailable_checkpoints'] == [{'generation': '00000002', 'reason': 'ValueError'}]
             assert (previous / 'checkpoint.json').read_bytes() == saved_manifest
             read_checkpoint(previous)
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('surface', ['observation', 'message', 'arguments'])
+async def test_admitted_native_auth_is_private_in_immutable_checkpoint_and_final_evidence(
+    tmp_path: Path, kind: str, surface: str,
+) -> None:
+    """A validator-admitted input store must not leak through generic auth fields.
+
+    Sensitive-name fixtures miss native type/api_key/key and type/oauth/access/
+    refresh. Read an actual admitted fake input file, then preserve real events,
+    snapshot validation, no-clobber checkpoint publication and joined final bytes.
+    """
+    home = tmp_path / ('reviewer' if kind == 'api_key' else 'judge')
+    home.mkdir()
+    credential = ({'type': kind, 'key': 'opaque-admitted-key-canary'} if kind == 'api_key' else
+                  {'type': kind, 'access': 'opaque-admitted-access-canary', 'refresh': 'opaque-admitted-refresh-canary',
+                   'accountId': 'offline-account', 'expires': 9000000000})
+    auth = {'nous' if kind == 'api_key' else 'openai-codex': credential}
+    source = home / 'auth.json'
+    source.write_text(json.dumps(auth))
+    source.chmod(0o600)
+    if kind == 'api_key':
+        validate_pi_reviewer_home(home, 'nous')
+    else:
+        validate_judge_home(home)
+    source_bytes = source.read_bytes()
+    public = {'type': 'record', 'key': 'ordinary-public-key', 'access': 'ordinary-public-access',
+              'refresh': 'ordinary-public-refresh'}
+    payload = {'data': json.loads(source_bytes), 'public': public, 'usage': {'input': 0, 'output': None}}
+    evidence = tmp_path / 'logs/daydream'
+    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
+    snapshots: list[RunWriteSnapshot] = []
+
+    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
+        snapshot.validate(_recorder.session_id)
+        snapshots.append(snapshot)
+        sink.retain(snapshot)
+
+    root = make_recorder(tmp_path, session_id=str(uuid.uuid4()), on_write=retain)
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            if surface == 'arguments':
+                invocation.observe(ToolStartEvent(id='read-auth', name='Inspect', input=payload))
+            elif surface == 'observation':
+                invocation.observe(ToolStartEvent(id='read-auth', name='Inspect', input={}))
+                invocation.observe(ToolResultEvent(id='read-auth', output=json.dumps(payload), is_error=False))
+            else:
+                invocation.observe(TextEvent(json.dumps(payload)))
+            root.write_partial()
+            first = snapshots[-1]
+            frozen = b''.join(document.json_bytes for document in first.documents)
+            assert b'opaque-admitted-' not in frozen
+            _, documents = read_checkpoint(sink.checkpoint_directory / '00000001')
+            assert b'opaque-admitted-' not in json.dumps(documents).encode()
+            step = next(step for step in documents[0]['steps'] if step['source'] == 'agent')
+            retained = (step['tool_calls'][0]['arguments'] if surface == 'arguments' else
+                        json.loads(step['observation']['results'][0]['content']
+                                   if surface == 'observation' else step['message']))
+            assert retained['public'] == public and retained['usage'] == {'input': 0, 'output': None}
+            if kind == 'oauth':
+                assert retained['data']['openai-codex']['accountId'] == 'offline-account'
+                assert retained['data']['openai-codex']['expires'] == 9000000000
+            invocation.observe(TurnEndEvent(message_id='auth-read-step'))
+            invocation.observe(TextEvent('public activity after checkpoint'))
+            root.write_partial()
+            assert b''.join(document.json_bytes for document in first.documents) == frozen
+            assert 'opaque-admitted-' not in json.dumps(interrupted_readout(evidence))
+    assert b'opaque-admitted-' not in root.path.read_bytes()
+    for path in sink.checkpoint_directory.rglob('*'):
+        if path.is_file():
+            assert b'opaque-admitted-' not in path.read_bytes()
+    assert source.read_bytes() == source_bytes

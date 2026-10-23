@@ -197,6 +197,13 @@ Periodic checkpoints project the recorder's immutable root and sibling bytes,
 with one cutoff for active documents and original logical references. They never
 copy native exchange storage to the log mount or enable dataset capture.
 
+Tool results and accumulated text are redacted before display wrapping or limits;
+argument presentation copies retain native credential context before selecting
+a summary. Raw events and host model results remain authoritative. In log mode,
+consecutive text deltas emit as one redacted block at existing event and attempt
+boundaries. Graceful cancellation drains that buffered block; `SIGKILL` may lose
+unemitted log text, so use the last valid checkpoint when it is available.
+
 Checkpoint generation directories contain a `checkpoint.json` commit manifest,
 document hashes and the ordinary `runs/<session>/` layout. Only a fully committed,
 validated generation is usable. At most two successfully published generations

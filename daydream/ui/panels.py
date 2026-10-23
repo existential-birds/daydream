@@ -17,6 +17,7 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 
+from daydream.redaction import redact_native_auth_value, redact_structured_text
 from daydream.ui.console import _interpolate_color
 from daydream.ui.theme import (
     _BACKGROUND_TASK_TOOLS,
@@ -54,6 +55,7 @@ from daydream.ui.tools import (
 
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
     """Print a truncated Markdown thinking panel."""
+    content = redact_structured_text(content)
     if len(content) > max_length:
         content = content[:max_length] + "..."
     console.print()
@@ -146,8 +148,8 @@ class LiveToolPanel:
         """Keep the resolved background-task label for the header."""
         self._console = console
         self._name = name
-        self._args = args
-        self._label = label
+        self._args = redact_native_auth_value(args)
+        self._label = redact_native_auth_value(label)
         self._result: str | None = None
         self._is_error: bool = False
         self._spinner = CrazySpinner(num_spinners=3)
@@ -335,7 +337,7 @@ class LiveToolPanel:
 
     def set_result(self, content: str, is_error: bool = False) -> None:
         """Store result and update the display."""
-        self._result = content
+        self._result = redact_structured_text(content)
         self._is_error = is_error
 
 
@@ -378,7 +380,7 @@ class LiveToolPanelRegistry:
 
     def note_call(self, tool_use_id: str, name: str, args: dict[str, object]) -> None:
         """Record every call, including callbacks without panels, for label correlation."""
-        self._call_args[tool_use_id] = (name, args)
+        self._call_args[tool_use_id] = (name, redact_native_auth_value(args))
 
     def observe_result(self, tool_use_id: str, output: str) -> None:
         """Correlate an assigned task id with its originating call and consume the call."""

@@ -806,3 +806,369 @@ def test_internal_semicolon_cannot_expose_sensitive_assignment_residual(name: st
     redacted = redact_structured_text(name + '=opaque-prefix-canary;opaque-tail-canary')
     assert 'opaque-prefix-canary' not in redacted and 'opaque-tail-canary' not in redacted
     assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('order', ['type-first', 'type-last'])
+@pytest.mark.parametrize('form', ['mapping', 'json', 'json-string', 'text-parts'])
+def test_native_tagged_credentials_use_context_without_masking_public_keys(kind: str, order: str, form: str) -> None:
+    """Native auth unions use generic fields that need their own sibling tag.
+
+    Existing sensitive-name tests intentionally preserve bare key/access/refresh;
+    they cannot protect the admitted native Pi shapes or JSON-string/native-map
+    walks. Preserve public siblings, type/identity/expiry metadata and usage types.
+    """
+    credential: dict[str, object] = ({'type': kind, 'key': 'opaque-native-key-canary'} if kind == 'api_key' else
+        {'type': kind, 'access': 'opaque-native-access-canary', 'refresh': 'opaque-native-refresh-canary',
+         'accountId': 'offline-account', 'expires': 9000000000})
+    if order == 'type-last':
+        credential = dict(reversed(list(credential.items())))
+    public = {'type': 'record', 'key': 'ordinary-public-key', 'access': 'ordinary-public-access',
+              'refresh': 'ordinary-public-refresh'}
+    payload = {'data': credential, 'public': public, 'usage': {'input': 0, 'output': None}}
+    original = copy.deepcopy(payload)
+    if form == 'mapping':
+        result = redact_value(payload)
+        assert redact_value(result) == result
+    elif form == 'text-parts':
+        out = Redactor().redact_step(_agent_step(observation=Observation(results=[ObservationResult(
+            content=[ContentPart(type='text', text=json.dumps(payload))],
+        )])))
+        assert out.observation is not None
+        parts = out.observation.results[0].content
+        assert isinstance(parts, list) and isinstance(parts[0].text, str)
+        result = json.loads(parts[0].text)
+    else:
+        text = json.dumps(payload)
+        text = json.dumps(text) if form == 'json-string' else text
+        redacted = redact_structured_text(text)
+        assert redact_structured_text(redacted) == redacted
+        result = json.loads(redacted)
+        result = json.loads(result) if form == 'json-string' else result
+    assert '-canary' not in json.dumps(result)
+    assert result['public'] == public
+    assert result['usage'] == {'input': 0, 'output': None}
+    assert result['data']['type'] == kind
+    if kind == 'oauth':
+        assert result['data']['accountId'] == 'offline-account' and result['data']['expires'] == 9000000000
+    assert payload == original
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+def test_top_level_native_tool_arguments_keep_tagged_credential_context(kind: str) -> None:
+    """The per-key arguments walk must retain the sibling discriminator context.
+
+    Nested mapping coverage passes each complete record to redact_value; direct
+    ToolCall.arguments previously split the discriminator from its generic field.
+    """
+    credential = {'type': kind, 'key' if kind == 'api_key' else 'access': 'opaque-tool-argument-canary'}
+    out = Redactor().redact_step(_agent_step(tool_calls=[
+        ToolCall(tool_call_id='auth', function_name='Inspect', arguments=credential),
+    ]))
+    assert out.tool_calls is not None
+    result = out.tool_calls[0].arguments
+    assert result.keys() == credential.keys() and result['type'] == kind
+    assert 'opaque-tool-argument-canary' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('order', ['type-first', 'type-last'])
+@pytest.mark.parametrize('escaped', [False, True])
+def test_interrupted_tagged_auth_records_with_observed_context_fail_closed(
+    kind: str, order: str, escaped: bool,
+) -> None:
+    """A cutoff after an observed discriminator cannot expose generic credentials.
+
+    Complete JSON tests never take the flat-text fallback. Keep scope and complete
+    discriminator tokens, including JSON escapes and either member order, while a
+    value string or object remains unfinished.
+    """
+    field = 'key' if kind == 'api_key' else 'access'
+    record = {'type': kind, field: 'opaque-interrupted-auth-canary'}
+    if order == 'type-last':
+        record = dict(reversed(list(record.items())))
+    text = json.dumps(record)
+    text = text[:-2] if order == 'type-first' else text[:-1]
+    if escaped:
+        text = text.replace('"type"', '"ty' + chr(92) + 'u0070e"')
+        text = text.replace('"key"', '"k' + chr(92) + 'u0065y"')
+        text = text.replace('api_key', 'api' + chr(92) + 'u005fkey')
+        text = text.replace('oauth', 'oa' + chr(92) + 'u0075th')
+    redacted = redact_structured_text('{"data":' + text)
+    assert 'opaque-interrupted-auth-canary' not in redacted
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('value', [0, None, ''])
+def test_invalid_nonstring_native_credential_fields_remain_typed(value: object) -> None:
+    """The admitted native credential fields are nonempty strings, not public scalars."""
+    payload = {'data': {'type': 'api_key', 'key': value}, 'other': {'type': 'oauth', 'access': value, 'refresh': value}}
+    assert redact_value(payload) == payload
+    assert json.loads(redact_structured_text(json.dumps(payload))) == payload
+
+
+def test_partial_auth_scope_does_not_promote_unrelated_generic_fields() -> None:
+    """Only observed tags in the same object can authorize contextual masking.
+
+    A sibling tag, a nested public key or type-like quoted text cannot change an
+    ordinary generic field. Before any discriminator arrives its future meaning
+    cannot be established without also suppressing ordinary public keys.
+    """
+    text = ('{"typed":{"type":"api_key","key":"opaque-scoped-auth-canary"},'
+            '"public":{"key":"public-sibling","access":"public-access","refresh":"public-refresh"},'
+            '"nested":{"type":"api_key","metadata":{"key":"public-nested"}}} trailing')
+    redacted = redact_structured_text(text)
+    assert 'opaque-scoped-auth-canary' not in redacted
+    for value in ('public-sibling', 'public-access', 'public-refresh', 'public-nested'):
+        assert value in redacted
+    ordinary = '{"key":"public-before-type'
+    assert redact_structured_text(ordinary) == ordinary
+    quoted = '{"key":"public-sibling","note":"' + json.dumps('{"type":"api_key"}')[1:-1] + '"} trailing'
+    assert 'public-sibling' in redact_structured_text(quoted)
+
+
+def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy() -> None:
+    """Existing auth/credential block masking remains authoritative over the tag."""
+    credential = {'type': 'api_key', 'key': 'opaque-parent-auth-canary', 'metadata': 'private-parent-value'}
+    redacted = redact_value({'auth': credential})
+    assert redacted['auth']['type'] == '[REDACTED_CREDENTIAL]'
+    assert redacted['auth']['metadata'] == '[REDACTED_CREDENTIAL]'
+    assert 'opaque-parent-auth-canary' not in json.dumps(redacted)
+
+
+@pytest.mark.parametrize('text', [
+    '{"type":"api_key","key":"opaque-duplicate-auth-canary","type":"record"}',
+    '{"type":"api_key","key":"opaque-duplicate-auth-canary","type":"oauth","access":"opaque-duplicate-auth-canary"}',
+])
+def test_duplicate_discriminator_cannot_hide_observed_native_credential_context(text: str) -> None:
+    """A later decoded member cannot erase a credential discriminator already seen.
+
+    Normal container tests receive only the final duplicate-key value, so the raw
+    member sequence must remain authoritative for fail-closed context admission.
+    """
+    redacted = redact_structured_text(text)
+    assert 'opaque-duplicate-auth-canary' not in redacted
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('prefix', ["Here's the data: ", 'Read "data: ', "it's here\n", 'prefix: ', 'Read "', '"'])
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+def test_native_auth_context_survives_neutral_prose_prefixes(prefix: str, kind: str) -> None:
+    """Prose punctuation cannot consume the following credential object's scope.
+
+    Plain 'prefix:' coverage misses unmatched apostrophes/quotes that the initial
+    regex token walk interpreted as one string hiding every later brace/member.
+    """
+    record = {'type': kind, 'key' if kind == 'api_key' else 'access': 'opaque-prefixed-auth-canary'}
+    redacted = redact_structured_text(prefix + json.dumps(record))
+    assert 'opaque-prefixed-auth-canary' not in redacted
+    assert redacted.startswith(prefix)
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('envelope', ['scalar', 'member', 'prefixed'])
+def test_interrupted_json_string_auth_context_stays_inside_its_value(envelope: str) -> None:
+    """Encoded string prefixes can expose an observed inner credential context.
+
+    Complete JSON strings decode before sanitation. A cutoff before their final
+    quote instead takes fallback text, which must withhold that observed context
+    without promoting its discriminator onto unrelated outer generic fields.
+    """
+    inner = '{"type":"api_key","key":"opaque-encoded-auth-canary'
+    text = json.dumps(inner)[:-1]
+    if envelope == 'member':
+        text = '{"key":"public-outer-key","message":' + text
+    elif envelope == 'prefixed':
+        text = "Here's the data: " + text
+    redacted = redact_structured_text(text)
+    assert 'opaque-encoded-auth-canary' not in redacted
+    if envelope == 'member':
+        assert 'public-outer-key' in redacted
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('form', ['mapping', 'json-string'])
+def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, form: str) -> None:
+    """UI input copies must protect native stores without expanding search/path policy.
+
+    The complete recorder redactor intentionally masks ordinary token patterns
+    and paths; using it for all UI arguments would change existing non-Bash display
+    policy. Preserve container types/source authority while masking only native auth.
+    """
+    credential = {'type': kind, 'key' if kind == 'api_key' else 'access':
+                  '[REDACTED_API_KEY]opaque-ui-context-canary',
+                  'metadata': 'config: token=ordinary-search-pattern /home/operator/file.py'}
+    data: object = {'data': credential, 'public': {'key': 'ordinary-key', 'access': 'ordinary-access',
+                   'refresh': 'ordinary-refresh'}, 'usage': {'input': 0, 'output': None}}
+    if form == 'json-string':
+        data = json.dumps(data)
+    original = copy.deepcopy(data)
+    result = redaction_mod.redact_native_auth_value(data)
+    assert 'opaque-ui-context-canary' not in json.dumps(result)
+    assert redaction_mod.redact_native_auth_value(result) == result
+    decoded = json.loads(result) if isinstance(result, str) else result
+    assert decoded['public'] == {'key': 'ordinary-key', 'access': 'ordinary-access', 'refresh': 'ordinary-refresh'}
+    assert decoded['usage'] == {'input': 0, 'output': None}
+    assert decoded['data']['metadata'] == 'config: token=ordinary-search-pattern /home/operator/file.py'
+    field = 'key' if kind == 'api_key' else 'access'
+    assert decoded['data'][field] == '[REDACTED_API_KEY]'
+    assert data == original
+    containers = [{'key': 'ordinary-key'}, ({'key': 'ordinary-tuple-key'},)]
+    copied = redaction_mod.redact_native_auth_value(containers)
+    assert isinstance(copied, list) and isinstance(copied[1], tuple)
+    copied[0]['key'] = 'changed presentation copy'
+    assert containers[0] == {'key': 'ordinary-key'}
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('form', ['mapping', 'json', 'arguments'])
+def test_new_native_context_masks_keep_complete_marker_spelling(kind: str, form: str) -> None:
+    """New contextual fields preserve safe markers while removing adjacent opaque data."""
+    field = 'key' if kind == 'api_key' else 'access'
+    record = {'type': kind, field: '[REDACTED_API_KEY]opaque-context-marker-canary'}
+    if form == 'json':
+        result = json.loads(redact_structured_text(json.dumps(record)))
+    elif form == 'mapping':
+        result = redact_value(record)
+    else:
+        out = Redactor().redact_step(_agent_step(tool_calls=[
+            ToolCall(tool_call_id='auth', function_name='Inspect', arguments=record),
+        ]))
+        assert out.tool_calls is not None
+        result = out.tool_calls[0].arguments
+    assert result[field] == '[REDACTED_API_KEY]' and result['type'] == kind
+    safe = json.dumps({'type': kind, field: '[REDACTED_API_KEY]'})[:-1]
+    assert redact_structured_text(safe) == safe
+    assert redact_structured_text(safe[:-1]) == safe[:-1]
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize('prefix', ['', '[REDACTED]'])
+@pytest.mark.parametrize('envelope', ['raw', 'scalar', 'member'])
+def test_discarded_escape_tail_cannot_make_native_credential_prefix_look_safe(
+    kind: str, prefix: str, envelope: str,
+) -> None:
+    """A partial Unicode escape is observed credential data, not an empty value.
+
+    Recovering a quoted prefix can discard the final incomplete escape. Marker-only
+    coverage misses treating the recovered marker/empty prefix as the whole value.
+    """
+    field = 'key' if kind == 'api_key' else 'access'
+    inner = '{"type":"' + kind + '","' + field + '":"' + prefix + chr(92) + 'u004'
+    text = inner if envelope == 'raw' else json.dumps(inner)[:-1]
+    if envelope == 'member':
+        text = '{"public":{"key":"ordinary-key"},"message":' + text
+    redacted = redact_structured_text(text)
+    assert 'u004' not in redacted and redacted != text
+    assert redact_structured_text(redacted) == redacted
+    if envelope == 'member':
+        assert 'ordinary-key' in redacted
+    unknown = '{"key":"[REDACTED]' + chr(92) + 'u004'
+    assert redact_structured_text(unknown) == unknown
+
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+def test_discarded_outer_string_escape_propagates_only_to_observed_credential_value(kind: str) -> None:
+    """Discarded codec bytes remain unsafe across an incomplete encoded JSON layer."""
+    field = 'key' if kind == 'api_key' else 'access'
+    inner = '{"type":"' + kind + '","' + field + '":"[REDACTED]é'
+    encoded = json.dumps(inner)
+    text = encoded[:encoded.index(chr(92) + 'u00e9') + 5]
+    redacted = redact_structured_text(text)
+    assert 'u00e' not in redacted and redacted != text
+    assert redact_structured_text(redacted) == redacted
+
+
+@pytest.mark.parametrize('nonfinite', ['NaN', 'Infinity', '-Infinity'])
+def test_native_only_text_recovery_withholds_unrepresentable_credential_span(nonfinite: str) -> None:
+    """Malformed known auth data must not abort presentation or suppress public siblings.
+
+    json.loads accepts these constants while allow_nan=False publication rejects
+    them; raw native-only UI copies previously let that serialization error escape.
+    """
+    text = ('{"data":{"type":"api_key","key":"opaque-nonfinite-auth-canary","public":' + nonfinite
+            + '},"other":{"key":"ordinary-sibling","count":0}} trailing')
+    redacted = redaction_mod.redact_native_auth_value(text)
+    assert 'opaque-nonfinite-auth-canary' not in redacted
+    assert 'ordinary-sibling' in redacted and '"count":0' in redacted
+    assert redaction_mod.redact_native_auth_value(redacted) == redacted
+    ordinary = '{"key":"ordinary-key","public":' + nonfinite + '}'
+    assert redaction_mod.redact_native_auth_value(ordinary) == ordinary
+
+
+@pytest.mark.parametrize('envelope', ['object', 'scalar', 'text-list'])
+def test_native_only_presentation_strings_compose_unicode_before_utf8_encoding(envelope: str) -> None:
+    """The UI-only copy must not reintroduce decoded surrogates or double-escape leaves.
+
+    The full recorder API's encoding boundary does not cover the new native-only
+    presentation copy. Exercise semantic JSON values/keys/nested JSON strings and
+    non-ASCII literal bytes while ordinary search text remains untouched.
+    """
+    nested = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=False)
+    payload = {'type': 'api_key', 'key': 'opaque-ui-surrogate-canary', 'public': chr(0xD800),
+               chr(0xDFFF) + 'clé': 'café 😀', 'nested': nested, 'usage': {'input': 0, 'output': None}}
+    text = json.dumps(payload)
+    source: object = json.dumps(text) if envelope == 'scalar' else [text, 'token=ordinary-pattern /home/operator'] \
+        if envelope == 'text-list' else text
+    result = redaction_mod.redact_native_auth_value(source)
+    if envelope == 'text-list':
+        assert isinstance(result, list) and result[1] == 'token=ordinary-pattern /home/operator'
+        text_result = result[0]
+    else:
+        text_result = result
+    assert isinstance(text_result, str)
+    text_result.encode('utf-8')
+    decoded = json.loads(text_result)
+    decoded = json.loads(decoded) if envelope == 'scalar' else decoded
+    assert 'opaque-ui-surrogate-canary' not in json.dumps(decoded)
+    assert decoded['public'] == chr(0xD800)
+    assert decoded[chr(0xDFFF) + 'clé'] == 'café 😀'
+    assert decoded['nested'] == nested
+    assert decoded['usage'] == {'input': 0, 'output': None}
+    assert redaction_mod.redact_native_auth_value(result) == result
+
+
+@pytest.mark.parametrize('value', [0, None, {'public': 0}])
+@pytest.mark.parametrize('envelope', ['object', 'scalar', 'credential-parent'])
+def test_encoded_native_auth_member_keys_reach_original_key_sensitivity_owner(value: object, envelope: str) -> None:
+    """A prepass cannot replace a member key before its original sensitivity is bound.
+
+    The encoded native record is a secret-bearing key label, not the owning
+    object's discriminator. Rewriting it early inserted a credential marker and
+    promoted public zero/null/container values on the later JSON container walk.
+    """
+    key = json.dumps({'type': 'api_key', 'key': 'opaque-encoded-key-canary'}, separators=(',', ':'))
+    payload = {key: value, 'usage': {'input': 0, 'output': None}}
+    source = json.dumps(payload)
+    if envelope == 'scalar':
+        source = json.dumps(source)
+    elif envelope == 'credential-parent':
+        source = json.dumps({'type': 'api_key', 'key': 'opaque-parent-key-canary', 'public': source})
+    redacted = redact_structured_text(source)
+    assert '-canary' not in redacted
+    result = json.loads(redacted)
+    result = json.loads(result) if envelope == 'scalar' else json.loads(result['public']) \
+        if envelope == 'credential-parent' else result
+    assert len(result) == 2
+    assert [item for name, item in result.items() if name != 'usage'] == [value]
+    assert result['usage'] == {'input': 0, 'output': None}
+    assert redact_structured_text(redacted) == redacted
+
+
+def test_encoded_native_auth_member_key_collisions_preserve_public_values() -> None:
+    """Native-context key redaction must retain original collision reservations.
+
+    Two encoded keys previously collapsed to the same sanitized key before JSON
+    decoding, losing one entry and replacing the surviving public value.
+    """
+    keys = [json.dumps({'type': 'api_key', 'key': f'opaque-encoded-{index}-canary'}, separators=(',', ':'))
+            for index in range(2)]
+    source = json.dumps({keys[0]: 0, keys[1]: None, '[REDACTED_LABEL]': 'reserved-public-value'})
+    redacted = redact_structured_text(source)
+    assert '-canary' not in redacted
+    result = json.loads(redacted)
+    assert len(result) == 3
+    assert result['[REDACTED_LABEL]'] == 'reserved-public-value'
+    assert [item for name, item in result.items() if name != '[REDACTED_LABEL]'] == [0, None]
+    assert redact_structured_text(redacted) == redacted

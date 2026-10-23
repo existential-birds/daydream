@@ -8,7 +8,9 @@ from typing import Any
 from daydream import ui
 from daydream.atif import Observation, ObservationResult, Step
 from daydream.redaction import (
+    _is_native_credential_field as _is_native_credential_field,
     _is_sensitive_key as _is_sensitive_key,
+    _redact_sensitive_text as _redact_sensitive_text,
     redact_structured_text as redact_structured_text,
     redact_value as redact_value,
 )
@@ -49,7 +51,8 @@ class Redactor:
         out: dict[str, Any] = {}
         for key, val in arguments.items():
             try:
-                out[key] = redact_value(val, _is_sensitive_key(key) if isinstance(key, str) else False)
+                out[key] = (_redact_sensitive_text(val) if _is_native_credential_field(key, arguments)
+                            else redact_value(val, _is_sensitive_key(key) if isinstance(key, str) else False))
             except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                 out[key] = "[REDACTION_FAILED]"
         return out
