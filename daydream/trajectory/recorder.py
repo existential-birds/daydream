@@ -30,6 +30,7 @@ from daydream.atif import (
 )
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import (
+    _redact_unstructured_text,
     redact_value,
 )
 from daydream.trajectory.context import _RECORDER_VAR
@@ -74,9 +75,16 @@ _INITIAL_TOTALS: dict[str, Any] = {
 }  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
 
+def _admitted_descriptor(raw: str) -> str:
+    """Retain ordinary labels verbatim; admit private labels as distinct opaque identities."""
+    if _redact_unstructured_text(raw) == raw:
+        return raw
+    return 'redacted-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
 def _safe_descriptor(raw: str) -> str:
     """Slugify a descriptor for filenames; reject an empty sanitized result."""
-    slug = re.sub(r"[^a-z0-9-]", "-", raw.lower())
+    slug = re.sub(r"[^a-z0-9-]", "-", _admitted_descriptor(raw).lower())
     slug = re.sub(r"-{2,}", "-", slug)
     slug = slug.strip("-")
     if not slug:
@@ -930,7 +938,8 @@ class TrajectoryRecorder:
         """Freeze one canonical document without performing any filesystem write."""
         steps = self.steps if status == "complete" else self._snapshot_in_flight_steps()
         if not steps:
-            if not allow_empty_root or (self.parent is not None and status != "partial"):
+            allow_host_snapshot = allow_empty_root or (status == "partial" and bool(self._active_invocations))
+            if not allow_host_snapshot or (self.parent is not None and status != "partial"):
                 return None
             # ATIF requires at least one Step. An early signal can arrive while
             # child agents are already running -- or a whole run can end host-only --
@@ -963,7 +972,10 @@ class TrajectoryRecorder:
                       else [invocation.summary(partial=True) for invocation in self._active_invocations])
             if active:
                 extra = payload.setdefault("extra", {})
-                extra["subtrajectories"] = [*extra.get("subtrajectories", []), *active]
+                safe_active = redact_value(active)
+                if not isinstance(safe_active, list):
+                    raise ValueError("active summary redaction returned a non-array")
+                extra["subtrajectories"] = [*extra.get("subtrajectories", []), *safe_active]
         if self._aborted or status == "partial":
             payload.setdefault("extra", {})["partial"] = True
         path = self.path

@@ -18,6 +18,7 @@ from daydream.atif import validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
+    CostEvent,
     DiagnosticEvent,
     PiRequestConfig,
     RequestEvent,
@@ -601,6 +602,60 @@ async def test_write_partial_preserves_in_flight_diagnostic_once(recorder: Traje
             for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
         ]
         assert diagnostics == [{"code": "parser_gap", "message": "bounded", "metadata": {"count": 1}}]
+
+@pytest.mark.parametrize('marker', ['[REDACTED_CREDENTIAL]', '[REDACTED_API_KEY]', '<redacted>'])
+@pytest.mark.parametrize(('credential', 'canary'), [
+    ('sk-markeradjacentcanary123', 'sk-markeradjacentcanary123'),
+    ('opaque-marker-adjacent-canary', 'opaque-marker-adjacent-canary'),
+    ('-----BEGIN PRIVATE KEY-----\nmarker-adjacent-pem-canary\n-----END PRIVATE KEY-----',
+     'marker-adjacent-pem-canary'),
+    ('-----BEGIN PRIVATE KEY-----\nmarker-adjacent-tail-canary', 'marker-adjacent-tail-canary'),
+])
+async def test_existing_redaction_marker_cannot_exempt_adjacent_credentials_in_snapshot(
+    tmp_path: Path, credential: str, canary: str, marker: str,
+) -> None:
+    """A sensitive JSON leaf can contain both a safe marker and a live credential.
+
+    Existing marker-only and split-tail cases never combine these in the JSON
+    branch. Keep native recorder snapshots and final bytes so marker preservation
+    cannot bypass credential redaction or change observed zero/missing usage.
+    """
+    snapshots: list[RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe(TextEvent(json.dumps({'token': marker + ' ' + credential, 'count': 0, 'missing': None})))
+            invocation.observe(CostEvent(input_tokens=0, output_tokens=None, cached_tokens=0, cost_usd=None))
+            recorder.write_partial()
+            frozen = snapshots[-1].documents[0].json_bytes
+            assert canary.encode() not in frozen
+            assert marker.encode() in frozen
+            assert _partial_path(recorder).read_bytes() == frozen
+    for body in (frozen, recorder.path.read_bytes()):
+        assert canary.encode() not in body and marker.encode() in body
+        document = json.loads(body)
+        message = json.loads(next(step['message'] for step in document['steps'] if step['source'] == 'agent'))
+        assert message['count'] == 0 and message['missing'] is None
+        assert document['final_metrics']['total_prompt_tokens'] == 0
+        assert document['final_metrics']['total_cached_tokens'] == 0
+        assert document['final_metrics'].get('total_completion_tokens') is None
+
+
+@pytest.mark.parametrize('label', ['ordinary-python', '{"scope":"python"}', '{"scope":"python","scope":"rust"}'])
+async def test_benign_host_fork_labels_keep_original_identity(label: str, tmp_path: Path) -> None:
+    """Privacy admission must not rename ordinary or merely JSON-looking labels.
+
+    Existing descriptor tests cover slug formatting, not label identity across
+    the new admission boundary; JSON normalization alone is not redaction.
+    """
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.fork(label) as child:
+            assert child.descriptor == label
+            assert child.trajectory_id == recorder.session_id + ':' + label
+            async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                invocation.observe(TextEvent('public activity'))
+
 
 @pytest.mark.parametrize(('prefix', 'suffix'), [
     ('-----BEGIN PRIVATE KEY-----\ncheckpoint-first-canary',

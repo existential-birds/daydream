@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import uuid
@@ -10,13 +11,13 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.benchmark.reviewbench.diagnostics import (
     InterruptedReviewDiagnostics,
     interrupted_readout,
     read_checkpoint,
 )
-from daydream.trajectory import DaydreamPhase, RunWriteSnapshot, run_directory
+from daydream.trajectory import DaydreamPhase, RunWriteSnapshot, dispatch_scope, run_directory
 from tests.harness.trajectory import make_recorder
 
 
@@ -223,8 +224,10 @@ def test_interrupted_readout_retains_host_receipt_when_reviewer_never_published(
     assert 'execution' not in report and 'activity' not in report and 'process' not in report
 
 
-@pytest.mark.parametrize('receipt', ['reviewer-host.json', 'result.json'])
-@pytest.mark.parametrize('damage', ['corrupt', 'symlink'])
+@pytest.mark.parametrize(('receipt', 'damage'), [
+    (receipt, damage) for receipt in ('reviewer-host.json', 'result.json')
+    for damage in ('corrupt', 'symlink', 'wrong_container')
+] + [('result.json', 'exception_container')])
 async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
     tmp_path: Path, receipt: str, damage: str,
 ) -> None:
@@ -247,6 +250,10 @@ async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
             outside.write_text('{"private": "outside-receipt-canary"}')
             if damage == 'corrupt':
                 path.write_bytes(b'{torn')
+            elif damage == 'wrong_container':
+                path.write_bytes(b'[]')
+            elif damage == 'exception_container':
+                path.write_text(json.dumps({'exception_info': ['malformed']}))
             else:
                 path.symlink_to(outside)
             report = interrupted_readout(evidence)
@@ -257,3 +264,186 @@ async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
             assert report['terminal_evidence'] == 'unavailable'
             assert 'outside-receipt-canary' not in json.dumps(report)
             assert outside.read_text() == '{"private": "outside-receipt-canary"}'
+
+
+@pytest.mark.parametrize('label_kind', ['api_key', 'marker_json'])
+@pytest.mark.parametrize('identified_dispatch', [False, True], ids=['legacy-fork', 'identified-dispatch'])
+async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_publication(
+    tmp_path: Path, identified_dispatch: bool, label_kind: str,
+) -> None:
+    """Host labels must remain private without breaking original document refs.
+
+    Message/request privacy coverage does not exercise a caller-supplied fork
+    descriptor or a queued scope. Keep the real recorder, dispatch registration,
+    immutable callback and no-clobber filesystem publication, including two
+    different private labels that must not collapse onto one legacy identity.
+    """
+    evidence = tmp_path / 'logs/daydream'
+    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
+    snapshots: list[RunWriteSnapshot] = []
+
+    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
+        snapshots.append(snapshot)
+        sink.retain(snapshot)
+
+    session = str(uuid.uuid4())
+    root = make_recorder(tmp_path, session_id=session, on_write=retain,
+                         path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
+    canaries = ['sk-activeforkcanary123', 'sk-otherforkcanary456', 'sk-queuedforkcanary789']
+    labels = canaries
+    if label_kind == 'marker_json':
+        canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
+        labels = [json.dumps({'api_key': '[REDACTED] ' + canary}) for canary in canaries]
+    async with root:
+        async with dispatch_scope(root if identified_dispatch else None, phase=DaydreamPhase.DEEP,
+                                  descriptors=labels) as dispatch:
+            async with root.fork(labels[0], dispatch=dispatch) as first:
+                async with first.invocation(phase=DaydreamPhase.DEEP) as invocation:
+                    invocation.observe(TextEvent('first public activity'))
+                    async with root.fork(labels[1], dispatch=dispatch) as second:
+                        async with second.invocation(phase=DaydreamPhase.DEEP) as other:
+                            other.observe(TextEvent('second public activity'))
+                            root.write_partial()
+                            snapshot = snapshots[-1]
+                            joined = b''.join(document.json_bytes for document in snapshot.documents)
+                            for canary in canaries:
+                                assert canary.encode() not in joined
+                                assert canary not in str(first.path) + str(second.path)
+                            assert first.descriptor != second.descriptor
+                            assert first.trajectory_id != second.trajectory_id and first.path != second.path
+                            assert sink.last_error is None
+                            generation = sink.checkpoint_directory / '00000001'
+                            manifest, documents = read_checkpoint(generation)
+                            by_id = {document['trajectory_id']: document for document in documents}
+                            references = by_id[session]['extra']['subtrajectories']
+                            for child in (first, second):
+                                reference = next(row for row in references
+                                                 if row.get('trajectory_id') == child.trajectory_id)
+                                expected = child.path.relative_to(tmp_path / '.daydream').as_posix()
+                                assert reference['sibling_trajectory_ref'] == expected
+                                retained = json.loads((generation / expected).read_bytes())
+                                assert retained['trajectory_id'] == child.trajectory_id
+                                assert retained['session_id'] == session
+                            saved = [(generation / name).read_bytes() for name in manifest['documents']]
+                            assert all(document.json_bytes in saved for document in snapshot.documents)
+                            if dispatch is not None:
+                                plan = by_id[session]['extra']['active_dispatches'][0]
+                                assert plan['planned_descriptors'][:2] == [first.descriptor, second.descriptor]
+                                assert plan['queued_descriptors'] == plan['planned_descriptors'][2:]
+                                assert plan['attempted_count'] == 2 and plan['completed_count'] == 0
+                                assert [fork['descriptor'] for fork in plan['forks']] == [
+                                    first.descriptor, second.descriptor]
+
+
+async def test_checkpoint_before_first_child_event_retains_host_only_fork_document(tmp_path: Path) -> None:
+    """An admitted invocation exists before its first user or native event.
+
+    Active-fork tests already observe text before flushing and miss this startup
+    window. A root with prior evidence must not publish a dangling child ref or
+    force the sink back to an older checkpoint while the child starts.
+    """
+    evidence = tmp_path / 'logs/daydream'
+    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
+    snapshots: list[RunWriteSnapshot] = []
+
+    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
+        snapshots.append(snapshot)
+        sink.retain(snapshot)
+
+    session = str(uuid.uuid4())
+    root = make_recorder(tmp_path, session_id=session, on_write=retain,
+                         path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
+    async with root:
+        async with root.invocation(phase=DaydreamPhase.INTENT) as prior:
+            prior.observe(TextEvent('prior public activity'))
+            prior.observe(ResultEvent(structured_output=None, continuation=None))
+        root.write_partial()
+        first_bytes = snapshots[-1].documents[0].json_bytes
+        async with root.fork('starting-child') as child:
+            async with child.invocation(phase=DaydreamPhase.REVIEW):
+                root.write_partial()
+                assert sink.last_error is None
+                snapshot = snapshots[-1]
+                manifest, documents = read_checkpoint(sink.checkpoint_directory / '00000002')
+                assert manifest['cutoff_at'] == snapshot.cutoff_at
+                assert {document['trajectory_id'] for document in documents} == {session, child.trajectory_id}
+                assert {document['extra']['snapshot_at'] for document in documents} == {snapshot.cutoff_at}
+                host = next(document for document in documents if document['trajectory_id'] == child.trajectory_id)
+                assert len(host['steps']) == 1 and host['steps'][0]['source'] == 'system'
+                assert host['steps'][0]['extra']['host_event'] == 'partial_snapshot'
+                assert host['extra']['subtrajectories'][0]['ended_at'] is None
+                assert host['extra']['subtrajectories'][0]['step_ids'] == []
+                assert host['final_metrics'].get('total_prompt_tokens') is None
+                assert snapshots[0].documents[0].json_bytes == first_bytes
+
+
+@pytest.mark.parametrize('damage', [
+    'manifest_list', 'documents_list', 'documents_null', 'missing_root', 'null_cutoff', 'session_list',
+    'status_list', 'status_object', 'kind_list',
+    'digest_list', 'document_list', 'extra_list', 'subtrajectories_list_item', 'phase_events_list_item',
+])
+async def test_checkpoint_schema_corruption_selects_previous_immutable_generation(tmp_path: Path, damage: str) -> None:
+    """Malformed committed containers must not hide the previous valid checkpoint.
+
+    Byte-corruption cases reach the digest guard, while a list manifest or
+    malformed document inventory previously escaped the reader with AttributeError.
+    Mutate actual files only after two valid generations were recorder-produced.
+    """
+    evidence = tmp_path / 'logs/daydream'
+    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
+    session = str(uuid.uuid4())
+    recorder = make_recorder(tmp_path, session_id=session, on_write=lambda _rec, snapshot: sink.retain(snapshot))
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.INTENT) as invocation:
+            invocation.observe(TextEvent('first public activity'))
+            recorder.write_partial()
+            previous = sink.checkpoint_directory / '00000001'
+            saved_manifest = (previous / 'checkpoint.json').read_bytes()
+            invocation.observe(TextEvent('second public activity'))
+            recorder.write_partial()
+            newest = sink.checkpoint_directory / '00000002'
+            marker = newest / 'checkpoint.json'
+            manifest = json.loads(marker.read_bytes())
+            corrupted: Any = dict(manifest)
+            if damage == 'manifest_list':
+                corrupted = []
+            elif damage == 'documents_list':
+                corrupted['documents'] = []
+            elif damage == 'documents_null':
+                corrupted['documents'] = None
+            elif damage == 'missing_root':
+                del corrupted['root']
+            elif damage == 'null_cutoff':
+                corrupted['cutoff_at'] = None
+            elif damage == 'session_list':
+                corrupted['session_id'] = []
+            elif damage == 'digest_list':
+                corrupted['documents'] = {manifest['root']: []}
+            elif damage == 'status_list':
+                corrupted['recorder_status'] = []
+            elif damage == 'status_object':
+                corrupted['recorder_status'] = {}
+            elif damage == 'kind_list':
+                corrupted['kind'] = []
+            else:
+                source = newest / manifest['root']
+                document = json.loads(source.read_bytes())
+                if damage == 'document_list':
+                    document = []
+                elif damage == 'extra_list':
+                    document['extra'] = []
+                elif damage == 'subtrajectories_list_item':
+                    document['extra']['subtrajectories'] = [False]
+                else:
+                    document['extra']['phase_events'] = [False]
+                body = json.dumps(document).encode()
+                source.write_bytes(body)
+                corrupted['documents'][manifest['root']] = hashlib.sha256(body).hexdigest()
+            marker.write_text(json.dumps(corrupted))
+            with pytest.raises(ValueError):
+                read_checkpoint(newest)
+            report = interrupted_readout(evidence)
+            assert report['checkpoint']['generation'] == '00000001'
+            assert report['unavailable_checkpoints'] == [{'generation': '00000002', 'reason': 'ValueError'}]
+            assert (previous / 'checkpoint.json').read_bytes() == saved_manifest
+            read_checkpoint(previous)

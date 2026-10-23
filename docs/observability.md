@@ -29,6 +29,10 @@ verify native trees using [readback tooling](../scripts/verify_observability_rea
 The [replay manifest](../tests/fixtures/observability_contract/replay-manifest.json)
 pins sanitized replay inputs; replay is distinct from real-provider acceptance.
 
+Caller labels with supported credential shapes receive deterministic opaque
+descriptors before dispatch/fork identity and artifact path allocation; ordinary
+labels remain unchanged.
+
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
 Missing values stay absent; observed zero stays zero. Pi generation intervals need

@@ -56,6 +56,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             FORCE_REAP_SECONDS,
             SHUTDOWN_GRACE_SECONDS,
             cancellation_marker,
+            warn_diagnostics_unavailable,
         )
 
         invocation = str(uuid.uuid4())
@@ -78,6 +79,7 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
                 channels['shared_marker'] = 'published'
             except Exception as exc:
                 channels['shared_marker'] = 'unavailable:' + type(exc).__name__
+                warn_diagnostics_unavailable('host cancellation marker', exc)
             # Harbor's Docker collector does not cancel the reviewer in-container.
             # Keep its buffered collection alive while an independent control exec
             # stops this invocation. Repeated cancellation cannot reset this bound.
@@ -123,16 +125,19 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
                         and execution.exception() is None else 'unavailable',
                     'cleanup_task': 'finished' if cleanup.done() else 'detached_at_absolute_bound',
                 }, indent=2) + '\n').encode())
-            except Exception:
-                pass  # persistence failure must preserve Harbor's original cancellation
+            except Exception as exc:
+                warn_diagnostics_unavailable('host receipt', exc)
             raise
         from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
         from daydream.redaction import redact_structured_text
 
-        log = Path(self.logs_dir) / 'reviewer-entrypoint.log'
-        if not log.exists() and not log.is_symlink():
-            safe_output = redact_structured_text((result.stdout or '') + (result.stderr or ''))
-            publish_diagnostic_bytes(log, safe_output[:131072].encode())
+        try:
+            log = Path(self.logs_dir) / 'reviewer-entrypoint.log'
+            if not log.exists() and not log.is_symlink():
+                safe_output = redact_structured_text((result.stdout or '') + (result.stderr or ''))
+                publish_diagnostic_bytes(log, safe_output[:131072].encode())
+        except Exception as exc:
+            warn_diagnostics_unavailable('host log', exc)
         if result.return_code != 0:
             raise RuntimeError('public ReviewBench native reviewer failed; inspect retained execution evidence')
 

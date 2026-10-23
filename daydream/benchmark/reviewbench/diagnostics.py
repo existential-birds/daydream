@@ -271,23 +271,55 @@ def read_checkpoint(directory: Path) -> tuple[dict[str, Any], list[dict[str, Any
 
 def _read_checkpoint(descriptor: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     manifest = json.loads(_read_bytes(descriptor, Path('checkpoint.json')))
-    if manifest.get('schema') != 1 or manifest.get('kind') != 'checkpoint':
+    if not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 1:
         raise ValueError('unsupported checkpoint')
-    documents = []
-    identities = set()
-    for relative, digest in manifest['documents'].items():
+    if (manifest.get('kind') != 'checkpoint' or not isinstance(manifest.get('recorder_status'), str)
+            or manifest['recorder_status'] not in {'partial', 'complete'}
+            or any(not isinstance(manifest.get(key), str) or not manifest[key]
+                   for key in ('cutoff_at', 'session_id', 'root'))):
+        raise ValueError('checkpoint metadata is malformed')
+    inventory = manifest.get('documents')
+    if not isinstance(inventory, dict) or not inventory:
+        raise ValueError('checkpoint document inventory is malformed')
+    session = manifest['session_id']
+    expected_root = (run_directory(Path(), session) / RUN_DOCUMENT_NAME).as_posix()
+    if manifest['root'] != expected_root or expected_root not in inventory:
+        raise ValueError('checkpoint root unavailable')
+    documents: list[dict[str, Any]] = []
+    by_path: dict[str, dict[str, Any]] = {}
+    identities: set[str] = set()
+    for relative, digest in inventory.items():
+        if (not isinstance(relative, str) or not isinstance(digest, str)
+                or re.fullmatch(r'[0-9a-f]{64}', digest) is None):
+            raise ValueError('checkpoint document identity is malformed')
         body = _read_bytes(descriptor, _relative(relative))
         if hashlib.sha256(body).hexdigest() != digest:
             raise ValueError('checkpoint bytes differ')
         document = json.loads(body)
-        if document['session_id'] != manifest['session_id'] or document['trajectory_id'] in identities:
+        if (not isinstance(document, dict) or document.get('session_id') != session
+                or not isinstance(document.get('trajectory_id'), str) or not document['trajectory_id']
+                or document['trajectory_id'] in identities):
             raise ValueError('checkpoint identity differs')
+        extra = document.get('extra', {})
+        if not isinstance(extra, dict):
+            raise ValueError('checkpoint document metadata is malformed')
+        for key in ('subtrajectories', 'phase_events', 'active_dispatches'):
+            values = extra.get(key, [])
+            if not isinstance(values, list) or any(not isinstance(value, dict) for value in values):
+                raise ValueError('checkpoint activity is malformed')
         identities.add(document['trajectory_id'])
         documents.append(document)
+        by_path[relative] = document
+    for document in documents:
         for entry in document.get('extra', {}).get('subtrajectories', []):
-            if 'sibling_trajectory_ref' in entry and entry['sibling_trajectory_ref'] not in manifest['documents']:
+            if 'sibling_trajectory_ref' not in entry:
+                continue
+            reference = entry['sibling_trajectory_ref']
+            if not isinstance(reference, str) or reference not in by_path:
                 raise ValueError('checkpoint reference unavailable')
-    if manifest['session_id'] not in identities or manifest['root'] not in manifest['documents']:
+            if entry.get('trajectory_id') != by_path[reference]['trajectory_id']:
+                raise ValueError('checkpoint reference identity differs')
+    if by_path[expected_root]['trajectory_id'] != session:
         raise ValueError('checkpoint root unavailable')
     return manifest, documents
 
@@ -315,12 +347,16 @@ def interrupted_readout(evidence: Path) -> dict[str, Any]:
     # reviewer cannot establish whether its caller timed out or was cancelled.
     trial = evidence.parent.parent / 'result.json'
     if (trial_result := _optional_json(trial, availability)) is not None:
-        exception = trial_result.get('exception_info') or {}
-        result['harbor_outcome'] = {
-            'exception_type': exception.get('exception_type'),
-            'occurred_at': exception.get('occurred_at'),
-            'agent_execution': trial_result.get('agent_execution'),
-        }
+        exception = trial_result.get('exception_info')
+        if exception is not None and not isinstance(exception, dict):
+            availability[trial.name] = 'unavailable:ValueError'
+        else:
+            exception = exception or {}
+            result['harbor_outcome'] = {
+                'exception_type': exception.get('exception_type'),
+                'occurred_at': exception.get('occurred_at'),
+                'agent_execution': trial_result.get('agent_execution'),
+            }
     failures = []
     try:
         with _absolute_directory(checkpoints) as directory:

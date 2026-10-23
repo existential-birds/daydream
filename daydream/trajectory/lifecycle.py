@@ -322,8 +322,11 @@ class DispatchHandle:
 
     def register_fork(self, descriptor: str) -> ForkIdentity:
         """Register one actual attempt and return its unique fork identity."""
+        from daydream.trajectory.recorder import _admitted_descriptor
+
         if self._closed:
             raise RuntimeError("dispatch scope is closed")
+        descriptor = _admitted_descriptor(descriptor)
         ordinal = len(self._forks) + 1
         identity = ForkIdentity(
             fork_id=f"{self.dispatch_id}:fork:{ordinal}",
@@ -410,10 +413,13 @@ async def dispatch_scope(
     descriptors: Sequence[str],
 ) -> AsyncIterator[DispatchHandle | None]:
     """Bracket one explicit fan-out and materialize its deterministic step."""
+    from daydream.trajectory.recorder import _admitted_descriptor
+
     planned = tuple(descriptors)
     if recorder is None or not planned:
         yield None
         return
+    planned = tuple(_admitted_descriptor(descriptor) for descriptor in planned)
     handle = DispatchHandle(
         dispatch_id=recorder._next_dispatch_id(),
         phase=phase,
