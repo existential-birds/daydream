@@ -82,6 +82,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- Retain coherent native review checkpoints and bounded process diagnostics when
+  a public ReviewBench reviewer is interrupted. Propagate outer cancellation to
+  its owned reviewer/native processes, permit bounded joined export, and preserve
+  Harbor's timeout/cancellation outcome for offline investigation. Reviewer
+  settings, budgets and scoring are unchanged; this is a compatible bug fix.
+
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities

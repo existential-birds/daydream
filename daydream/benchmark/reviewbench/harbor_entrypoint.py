@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -23,7 +24,7 @@ from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case, reviewer_config
 from daydream.json_utils import atomic_create_bytes
 from daydream.redaction import redact_structured_text
-from daydream.trajectory import RUN_DOCUMENT_NAME, run_directory
+from daydream.trajectory import RUN_DOCUMENT_NAME, flush_active_signal_recorders, run_directory
 
 
 class PublicReviewerError(ValueError):
@@ -149,6 +150,22 @@ async def main(environment: Mapping[str, str]) -> int:
         task, profile = load_public_task(inputs / 'daydream-profile.json', inputs / 'pr.json', inputs / 'diff.patch')
         reviewer = profile['reviewer']
         backend = reviewer['backend']
+        from daydream.benchmark.reviewbench.diagnostics import InterruptedReviewDiagnostics
+
+        declared_outer = environment.get('DAYDREAM_RB_DECLARED_OUTER_TIMEOUT')
+        diagnostics = InterruptedReviewDiagnostics(evidence, {
+            'candidate': profile['candidate'], 'profile_sha256': task.profile_sha256,
+            'task_id': task.task_id, 'evaluation_id': task.evaluation_id,
+            'upstream_revision': task.upstream_revision, 'case': asdict(task.case),
+            'patch_sha256': hashlib.sha256(task.patch.encode()).hexdigest(),
+            'reviewer': reviewer,
+            'budget_hierarchy': {'harbor_outer_deadline_seconds': float(declared_outer) if declared_outer else None,
+                'outer_deadline_availability': 'declared trial config'
+                    if 'DAYDREAM_RB_DECLARED_OUTER_TIMEOUT' in environment else 'unavailable',
+                'docker_exec_timeout_seconds': 3600,
+                'native_allowance_availability': 'observed per dispatch in backend_lifecycle'},
+            'invocation_id': environment.get('DAYDREAM_RB_INVOCATION'),
+        })
         canonical = Path(environment.get('DAYDREAM_RB_CODEX_HOME' if backend == 'codex'
             else 'DAYDREAM_RB_REVIEWER_HOME', '/run/reviewbench-codex' if backend == 'codex'
             else '/run/reviewbench-reviewer'))
@@ -179,10 +196,21 @@ async def main(environment: Mapping[str, str]) -> int:
                     if backend == 'pi':
                         native = replace(native, pi_settings=reviewer['pi_settings'])
                     capability = RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
-                                                      backends={backend: native})
-                    execution = await review_case(task.case, repository, config, 'daydream-native-' + backend,
-                        execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
-                        public_task=task, evidence_directory=staged)
+                        backends={backend: native}, on_trajectory_snapshot=diagnostics.retain)
+                    invocation = environment.get('DAYDREAM_RB_INVOCATION')
+                    if invocation is not None:
+                        from daydream.benchmark.reviewbench.harbor_process import invocation_directory
+
+                        if (invocation_directory(invocation) / 'cancel').exists():
+                            raise asyncio.CancelledError
+                    checkpoint_task = asyncio.create_task(_checkpoint_loop())
+                    try:
+                        execution = await review_case(task.case, repository, config, 'daydream-native-' + backend,
+                            execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
+                            public_task=task, evidence_directory=staged)
+                    finally:
+                        checkpoint_task.cancel()
+                        await asyncio.gather(checkpoint_task, return_exceptions=True)
             except asyncio.CancelledError:
                 cancelled = True
                 raise
@@ -209,7 +237,10 @@ async def main(environment: Mapping[str, str]) -> int:
                         profile_sha256=task.profile_sha256, elapsed_seconds=time.monotonic() - started,
                         reviewer_backend=backend, reviewer_provider=reviewer['provider'],
                         reviewer_authentication='chatgpt-oauth' if backend == 'codex' else 'native-pi',
-                        cost_interpretation='API-equivalent estimate when available')
+                        cost_interpretation='API-equivalent estimate when available',
+                        invocation_id=environment.get('DAYDREAM_RB_INVOCATION'),
+                        checkpoint_error=diagnostics.last_error,
+                        interruption='reviewer_task_cancelled' if cancelled else None)
                     _write_new_json(evidence / 'execution.json', record)
         if execution is None:
             raise PublicReviewerError('native review did not return an execution result')
@@ -222,5 +253,36 @@ async def main(environment: Mapping[str, str]) -> int:
         return 1
 
 
+async def _checkpoint_loop() -> None:
+    """Project coherent immutable snapshots; live native storage never leaves its owner."""
+    while True:
+        await asyncio.sleep(2)
+        flush_active_signal_recorders()
+
+
+async def _executable_main() -> int:
+    """Translate SIGTERM once into cancellation with ordinary joined finalization."""
+    loop = asyncio.get_running_loop()
+    reviewer = asyncio.create_task(main(dict(os.environ)))
+    requested = False
+
+    def interrupt() -> None:
+        nonlocal requested
+        if not requested:
+            requested = True
+            try:
+                flush_active_signal_recorders()
+            finally:
+                reviewer.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, interrupt)
+    try:
+        return await reviewer
+    except asyncio.CancelledError:
+        return 130
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
 if __name__ == '__main__':
-    raise SystemExit(asyncio.run(main(dict(os.environ))))
+    raise SystemExit(asyncio.run(_executable_main()))

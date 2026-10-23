@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -53,12 +54,14 @@ class CodexLifecycleCli:
 def install_codex_lifecycle_cli(
     root: Path, *, mode: LifecycleMode = "healthy", fix_modes: dict[str, LifecycleMode] | None = None,
     structure_mode: LifecycleMode | None = None, shutdown_delay_s: float = 0.0,
+    empty_reviews: bool = False, spawn_on_term: bool = False,
 ) -> CodexLifecycleCli:
     root = root.resolve()
     for name in ("bin", "observations", "controls", "fix_started"):
         (root / name).mkdir(parents=True)
     config = {"root": str(root), "mode": mode, "fix_modes": fix_modes or {},
-              "structure_mode": structure_mode, "shutdown_delay_s": shutdown_delay_s}
+              "structure_mode": structure_mode, "shutdown_delay_s": shutdown_delay_s, "empty_reviews": empty_reviews,
+              "spawn_on_term": spawn_on_term}
     executable = root / "bin" / "codex"
     executable.write_text(
         f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n" + Path(__file__).read_text(), encoding="utf-8",
@@ -74,7 +77,7 @@ def _emit(event: dict[str, Any]) -> None:
 def _observe(stage: str, *, mode: str, file: str | None = None, descendant: int | None = None) -> None:
     path = Path(_FIXTURE_CONFIG["root"]) / "observations" / f"{os.getpid()}.json"
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"pid": os.getpid(), "stage": stage, "mode": mode,
+    temporary.write_text(json.dumps({"pid": os.getpid(), "ppid": os.getppid(), "stage": stage, "mode": mode,
                                    "file": file, "cwd": str(Path.cwd()), "descendant": descendant}))
     os.replace(temporary, path)
 
@@ -123,7 +126,7 @@ def _response(prompt: str) -> tuple[str, str | None]:
             candidates = [dict(row, disposition="confirmed") for row in state["candidates"]
                           if row["candidate_id"] in state["assigned_candidate_ids"]]
         # The structural reviewer contributes no duplicated file finding.
-        if "you are the structural reviewer" in lower:
+        if "you are the structural reviewer" in lower or _FIXTURE_CONFIG.get("empty_reviews"):
             candidates = []
         return json.dumps({"targets": [{"target_id": target, "status": "reviewed", "reason": "",
                                         "evidence_refs": state["source_refs"][target][:1]}
@@ -180,6 +183,16 @@ def _run() -> int:
     _emit({"type": "item.completed", "item": {"type": "agent_message", "id": "initial",
                                                "text": "Synthetic initial commentary", "phase": "commentary"}})
     if mode == "preterminal_silence":
+        if _FIXTURE_CONFIG.get("spawn_on_term"):
+            def spawn_and_exit(signum: int, frame: Any) -> None:
+                del signum, frame
+                escaped = subprocess.Popen([sys.executable, "-I", "-c", "import time;time.sleep(3600)"],
+                    start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+                (Path(_FIXTURE_CONFIG["root"]) / "escaped.json").write_text(json.dumps({"pid": escaped.pid}))
+                os._exit(0)
+
+            signal.signal(signal.SIGTERM, spawn_and_exit)
         _block("initial", mode=mode, file=file)
         return 0
     _observe("initial", mode=mode, file=file)

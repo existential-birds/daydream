@@ -6,7 +6,7 @@ import json
 import re
 import time
 from collections.abc import AsyncIterator, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -421,6 +421,7 @@ async def dispatch_scope(
         _recorder=recorder,
         _started_at=timeutil.now_iso(),
     )
+    recorder._active_dispatches.append(handle)
     try:
         yield handle
     except BaseException as exc:
@@ -436,3 +437,6 @@ async def dispatch_scope(
                 _console,
                 f"Trajectory dispatch recording failed: {type(exc).__name__}",
             )
+        finally:
+            with suppress(ValueError):
+                recorder._active_dispatches.remove(handle)

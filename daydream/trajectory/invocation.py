@@ -30,7 +30,11 @@ from daydream.backends import (
     TurnEndEvent,
     request_config_controls,
 )
-from daydream.backends.lifecycle import BackendLifecycleSnapshot, current_backend_lifecycle
+from daydream.backends.lifecycle import (
+    BackendLifecycleCollector,
+    BackendLifecycleSnapshot,
+    current_backend_lifecycle,
+)
 from daydream.redaction import redact_value as redact_value
 from daydream.trajectory.generation import _GenerationLedger
 from daydream.trajectory.types import DaydreamPhase as DaydreamPhase
@@ -230,6 +234,7 @@ class Invocation:
     # paths drain every draft exactly once at its sealed historical end.
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
     _backend_lifecycle: BackendLifecycleSnapshot | None = None
+    _active_backend_lifecycle: BackendLifecycleCollector | None = field(default=None, repr=False)
     _host_dispatch: dict[str, int | str] | None = None
     _requests: list[dict[str, Any]] = field(default_factory=list)
 
@@ -245,8 +250,10 @@ class Invocation:
         }
         if not partial and self._generation_ledger.has_drafts():
             summary["generation_lifecycle"] = self._generation_ledger.to_dict()
-        if self._backend_lifecycle is not None:
-            summary["backend_lifecycle"] = self._backend_lifecycle.to_dict()
+        lifecycle = (self._active_backend_lifecycle.snapshot()
+                     if partial and self._active_backend_lifecycle is not None else self._backend_lifecycle)
+        if lifecycle is not None:
+            summary["backend_lifecycle"] = lifecycle.to_dict()
         if self._host_dispatch is not None:
             summary["host_dispatch"] = dict(self._host_dispatch)
         if self._requests:
@@ -279,9 +286,14 @@ class Invocation:
         except Exception as exc:  # noqa: BLE001 - measurement must never interrupt agent work
             ui.print_warning(_console, f"Trajectory dispatch measurement failed: {type(exc).__name__}")
 
+    def observe_backend_lifecycle(self, collector: BackendLifecycleCollector) -> None:
+        """Bind only this host-owned attempt for immutable in-flight checkpoint observations."""
+        self._active_backend_lifecycle = collector
+
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
         """Retain finalized attempt observations without completing or billing generations."""
         self._backend_lifecycle = snapshot
+        self._active_backend_lifecycle = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append an initial user Step without ATIF agent-only fields."""

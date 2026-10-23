@@ -169,6 +169,79 @@ Change owners: [launch/selection](../daydream/benchmark/reviewbench/harbor_cli.p
 [authentication](../daydream/benchmark/reviewbench/harbor_auth.py),
 [judge binding](../daydream/benchmark/reviewbench/judge_auth.mjs).
 
+### Investigating interrupted public trials offline
+
+The public host adapter supervises one invocation in the reviewer container.
+Outer cancellation requests stop that exact invocation, including its native
+children, and permits bounded writer joining, export and output collection.
+The original host cancellation propagates to Harbor: only Harbor can distinguish
+its `AgentTimeoutError` from an independent `CancelledError`. Cleanup time is
+separate from inference allowance and does not authorize more model work.
+See [process supervision](../daydream/benchmark/reviewbench/harbor_process.py)
+for the fixed cleanup/output bounds and their receipts.
+
+Each trial's `agent/` retains `reviewer-entrypoint.log` (bounded and redacted),
+`reviewer-process.json` (observed interruption, child exit and cleanup outcome),
+and, after joined finalization, `daydream/execution.json` plus native trajectories.
+`daydream-checkpoints/metadata.json` binds candidate, profile, supplied task and
+evaluation IDs, frozen endpoints/patch and native settings before review work.
+Periodic checkpoints project the recorder's immutable root and sibling bytes,
+with one cutoff for active documents and original logical references. They never
+copy native exchange storage to the log mount or enable dataset capture.
+
+Checkpoint generation directories contain a `checkpoint.json` commit manifest,
+document hashes and the ordinary `runs/<session>/` layout. Only a fully committed,
+validated generation is usable. At most two successfully published generations
+are retained normally; competing bytes and failed installs remain visible.
+Publication faults preserve the previous valid checkpoint. `SIGKILL` cannot run
+Python finalizers: use the last checkpoint and keep terminal evidence unavailable.
+A checkpoint's `kind` remains `checkpoint` even when supplied by the recorder's
+final write; it never establishes a scored trial.
+
+Read an interrupted bundle without loading a model or contacting a provider:
+
+```bash
+python -m daydream.benchmark.reviewbench.diagnostics \
+  /private/reviewbench-jobs/JOB/TRIAL/agent/daydream
+```
+
+The readout selects the latest valid committed checkpoint, reports rejected newer
+generations and publication failures, and shows policy/identity, last phase event,
+active invocation/attempt/stage scope and completed phase timings. Inspect active
+invocation `requests` for actual backend, model, reasoning effort and native
+controls, and `backend_lifecycle` for native wall allowance, elapsed time, last
+event kind/time, outstanding-tool count, terminal receipt, stdout EOF,
+independently observed child exit and cleanup. Use `reviewer-process.json` and
+Harbor's `result.json` for outer interruption and trial timing; unavailable
+effective outer deadlines are explicit rather than guessed. Never sum parent
+and sibling token totals.
+
+The deterministic offline process-boundary test's `force` case retains an example
+bundle using a scripted Codex executable and real Git/runner/processes. Its
+readout identifies `review-integration`, `gpt-6.1-sol` with `high` effort, an
+approximately 2,400-second native dispatch allowance, and last public activity
+`item_completed`. At that cutoff terminal receipt, EOF and child exit are
+unobserved. The later process receipt says `forced_termination`, with no terminal
+`execution.json`. This demonstrates the diagnostic distinction without model
+inference; the fixture's settings describe that synthetic run only.
+
+An active invocation's last public event establishes observed activity before
+interruption. A later `graceful_exit` receipt establishes that the reviewer exited
+within the shutdown grace; inspect `terminal_evidence_available` separately for
+joined export. A `forced_termination`
+receipt leaves terminal reviewer evidence unavailable unless independently
+published. Silence does not establish reasoning time, tool execution, provider
+internals or a root cause. Missing usage stays unavailable; observed zero remains
+zero. An interrupted checkpoint establishes no completed generations, findings,
+scores or successful trial.
+
+The historical 900-second timeouts and separate shorter cancellation do not prove
+that effort, arbitration or another phase caused a timeout. Compare actual
+global/per-phase settings and budget hierarchy with observed phase durations.
+This change establishes diagnostic correctness, not improved timeout rates or
+review quality. Preserve historical experiments/runtimes; build a separate
+candidate runtime/image to exercise changed code.
+
 ## Private Harbor benchmark
 
 Requires the `benchmark` extra and local Docker Desktop on macOS with live

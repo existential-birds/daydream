@@ -382,6 +382,15 @@ matches the captured worktree and common directories. Genuine evaluation or
 integrity failures continue to abort atomic archive installation. Body failures
 and cancellation remain primary when finalization also fails.
 
+Embedded hosts may supply `RunnerExecutionInput.on_trajectory_snapshot` to
+observe validated immutable `RunWriteSnapshot` bytes. This optional synchronous
+diagnostic observer owns its persistence/availability receipts; errors cannot veto
+native artifact finalization. Partial snapshots carry active root/fork references
+and a common cutoff, distinct from completed review authority. Consumers must
+publish a coherent document set atomically and preserve prior valid checkpoints
+on interruption, without reading/copying mutable private artifact trees. See the
+[ReviewBench readout](benchmark.md#investigating-interrupted-public-trials-offline).
+
 Pass generated model inputs through exact sanctioned paths or bounded inline
 contents; private storage is discovery isolation, not an OS sandbox. Never broaden
 read roots or reconstruct public paths. Explicit external `--trajectory` supports
