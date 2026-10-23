@@ -779,25 +779,32 @@ def _redact_native_credential_objects(
         previous = start - 1
         while previous >= 0 and text[previous].isspace():
             previous -= 1
-        encoded_object = character == '"' and spelling[1:].lstrip().startswith(('{', '['))
-        if not ((stack and previous >= 0 and text[previous] in '{[,:') or encoded_object
-                or (character == '"' and previous < 0)):
+        if character == "'" and start > 0 and (text[start - 1].isalnum() or text[start - 1] == '_'):
             offset = start + 1
             continue
         decoded = _quoted_credential_token(spelling)
-        if (not stack and end < len(text) and text[end:].strip()
-                and (not encoded_object or (isinstance(decoded, str) and decoded.strip() in ('{', '[')))):
-            offset = start + 1
-            continue
         recovered = _credential_string_prefix(spelling) if decoded is None else None
         content = decoded if decoded is not None else recovered[0] if recovered is not None else None
         incomplete_tail = bool(recovered and recovered[1]) or (discarded_tail and decoded is None and end == len(text))
         scope = stack[-1] if stack else None
         member_key = scope is not None and previous >= 0 and text[previous] in '{,'
+        replaced_string = False
         if content is not None and '{' in content and not (defer_keys and member_key):
             safe = _redact_native_credential_objects(content, discarded_tail=incomplete_tail, defer_keys=defer_keys)
             if safe != content:
                 objects.append(_CredentialTextObject(start, end, replacement=json.dumps(safe, ensure_ascii=False)))
+                replaced_string = True
+        encoded_object = character == '"' and spelling[1:].lstrip().startswith(('{', '['))
+        if not ((stack and previous >= 0 and text[previous] in '{[,:') or encoded_object
+                or (character == '"' and previous < 0)):
+            if not replaced_string:
+                offset = start + 1
+            continue
+        if (not stack and end < len(text) and text[end:].strip()
+                and (not encoded_object or (isinstance(decoded, str) and decoded.strip() in ('{', '[')))):
+            if not replaced_string:
+                offset = start + 1
+            continue
         if scope is None:
             continue
         if scope.pending_key is not None and text[scope.pending_end:start].strip() == ':':

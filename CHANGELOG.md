@@ -28,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Redact native credentials; preserve native budgets/scoring, cancellation, and final evidence export
-  without separate session archives or readout machinery.
+- Redact native API-key and OAuth credentials in quoted log prose with embedded payloads; preserve native
+  budgets/scoring, cancellation, and final evidence export without separate session archives or readout machinery.
 - Honor ReviewBench's declared Harbor timeout plus cleanup/output collection time, including budgets over one hour;
   leave the execution transport uncapped when the declared timeout is unavailable.
 - Discover and reap late pipe-holding reviewer descendants during forced and fallback cleanup within the existing
