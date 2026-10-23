@@ -34,23 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
   ordinary Pi defaults are unchanged. This compatible minor feature retains
   committed result schema 1 and extension API 8.
-- Run the pinned public ReviewBench corpus through Harbor with ordinary native
-  Pi/Nous or Codex reviewers and an independent common Codex-subscription judge.
-  Use the exact supplied 25-task test set or full 219-task corpus, independent
-  rounds, supplied scoring/reports, isolated credentials and retained native/judge
-  evidence ([#1688](https://github.com/existential-birds/daydream/pull/1688),
-  [#92](https://github.com/existential-birds/daydream/issues/92)).
+- Add public ReviewBench reviewers through Harbor ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 
 ### Changed
 
-- Make Harbor the sole public ReviewBench workflow. Remove this PR's standalone
-  `plan`, `run`, `status`, `judge` and `report` commands; use `harbor-export` and
-  `harbor-run`. Reviewer overrides use ordinary native arguments after export's
-  `--`; exact `--set`/repeatable `--task` selection replaces the count limit.
-  Policy/task profiles use schema 3 and require fresh exports; preserve older
-  evidence without migration. Ordinary reviewer behavior is unchanged. This
-  deliberately changes PR-only interfaces; no version bump is included
-  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+- Replace unreleased public ReviewBench interfaces with `harbor-export` and
+  `harbor-run`; fresh exports are required. PR-only compatibility change; no version bump.
 
 ### Fixed
 
@@ -82,13 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
-- Retain coherent native review checkpoints and bounded process diagnostics when
-  a public ReviewBench reviewer is interrupted. Propagate outer cancellation to
-  its owned reviewer/native processes, permit bounded joined export, and preserve
-  Harbor's timeout/cancellation outcome for offline investigation. Keep native
-  `api_key`/OAuth credentials private in retained evidence and console copies before
-  formatting. Reviewer settings, budgets and scoring are unchanged; this is a
-  compatible bug fix.
+- Retain private diagnostics when public ReviewBench reviewers are interrupted.
+  Compatible bug fix; reviewer settings, budgets and scoring are unchanged.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into

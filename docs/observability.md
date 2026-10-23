@@ -29,23 +29,6 @@ verify native trees using [readback tooling](../scripts/verify_observability_rea
 The [replay manifest](../tests/fixtures/observability_contract/replay-manifest.json)
 pins sanitized replay inputs; replay is distinct from real-provider acceptance.
 
-Caller labels with supported credential shapes receive deterministic opaque
-descriptors before dispatch/fork identity and artifact path allocation; ordinary
-labels remain unchanged.
-JSON text evidence applies structured redaction to object keys as well as values.
-Opaque key aliases and collision suffixes record host redaction while preserving
-distinct entries and public value types.
-
-Native credential context masks nonempty string `api_key.key` and
-`oauth.access`/`oauth.refresh` fields before recorder checkpoints and final bytes.
-Ordinary `key`/`access`/`refresh` fields, nonstring values and nonsecret identity,
-expiry and usage metadata retain their existing policy and types. Existing
-sensitive-parent masking still applies. Recognized interrupted or malformed credential objects
-are withheld when they cannot be represented safely; a prefix ending before its discriminator arrives
-cannot establish credential context.
-Tool presentation sanitizes complete input/output copies before summarizing,
-wrapping or truncating them; raw events and model results remain authoritative.
-
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
 Missing values stay absent; observed zero stays zero. Pi generation intervals need
@@ -120,10 +103,3 @@ first expiry stage and secondary cleanup expiry. Supported native shutdown can
 contain sequential fallback waits; the host drain allowance is policy, not proof
 that all native awaits terminate. The historical stall's upstream cause remains
 unresolved; public milestones support diagnosis without inventing private events.
-
-Partial invocation summaries sample the active host-owned lifecycle collector
-without finalizing it or completing generations. A run snapshot samples each
-active invocation once for its common cutoff; later activity cannot mutate prior
-snapshot bytes. Completed attempt snapshots retain their ordinary terminal
-semantics. Active fork summaries preserve dispatch/scope identities and original
-sibling references; missing/corrupt observations never establish provider work.

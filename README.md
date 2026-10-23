@@ -50,11 +50,3 @@ Hugging Face dataset and the `hub` extra. The training pipeline implements
 reward construction → SFT → RFT → online RL; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
 [training](docs/training-launch.md), [benchmarks](docs/benchmark.md).
-`daydream benchmark reviewbench` integrates the supplied frozen ReviewBench cases
-through Harbor with native Pi or Codex reviewers and the same independent
-Codex-subscription judge. Harbor and supplied ReviewBench own selection, rounds,
-scoring and reports; generation/judging require experiment authorization. The before/after [#1616 acceptance gate](https://github.com/existential-birds/daydream/issues/1616)
-uses the upstream [25-task test set](https://github.com/review-bench/ReviewBench/blob/4f04392d6bf4941ab6f8a3ea0c15b449f4458864/corpus/test/test.json)
-with three independent rounds per candidate; the full 219-task
-corpus is not required for that gate. The private Harbor benchmark remains a
-separate workflow.
