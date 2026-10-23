@@ -189,9 +189,11 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+@pytest.mark.parametrize('credential_type,tool_output_form', [
+    ('api_key', 'mapping'), ('oauth', 'mapping'), ('api_key', 'quoted_log'), ('oauth', 'quoted_log'),
+])
 async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_bundle(
-    tmp_path: Path, credential_type: str,
+    tmp_path: Path, credential_type: str, tool_output_form: str,
 ) -> None:
     from daydream.benchmark.reviewbench.harbor_auth import validate_judge_home, validate_pi_reviewer_home
     from daydream.redaction import redact_structured_text
@@ -210,8 +212,12 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         validate_pi_reviewer_home(pi_home, 'nous')
     else:
         validate_judge_home(pi_home)
+    tool_input = credential
+    if tool_output_form == 'quoted_log':
+        tool_input = tmp_path / 'quoted-tool-output.json'
+        tool_input.write_text(json.dumps('Read ' + json.dumps('data: ' + json.dumps(auth))))
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence',
-        empty_reviews=True, tool_output_path=credential)
+        empty_reviews=True, tool_output_path=tool_input)
     local = LocalReviewerEnvironment({**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']))
@@ -244,7 +250,13 @@ async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_
         for payload in tool_payloads:
             assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
             assert payload['usage'] == {'input': 0, 'output': None}
-            admitted = payload['data']['nous' if credential_type == 'api_key' else 'openai-codex']
+            data = payload['data']
+            if tool_output_form == 'quoted_log':
+                assert isinstance(data, str) and data.startswith('Read ')
+                data = json.loads(data.removeprefix('Read '))
+                assert isinstance(data, str) and data.startswith('data: ')
+                data = json.loads(data.removeprefix('data: '))
+            admitted = data['nous' if credential_type == 'api_key' else 'openai-codex']
             assert admitted['type'] == credential_type
             if credential_type == 'oauth':
                 assert admitted['accountId'] == 'synthetic-public-account' and admitted['expires'] == 9000000000000
@@ -449,6 +461,12 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
     pytest.param('none', b'', b'-----BEGIN PRIVATE KEY-----\nCOMPLETE_KEY_CANARY\n-----END PRIVATE KEY-----\n'
                  b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n', 900, 932, id='complete_then_incomplete_pem'),
     pytest.param('none', b'', b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n', 900, 932, id='structured_secret'),
+    *[pytest.param('none', b'', ('Read ' + json.dumps('data: ' + json.dumps(credential)) + ' trailing prose\n')
+                   .encode(), 900, 932, id='quoted_' + kind)
+      for kind, credential in [
+          ('api_key', {'type': 'api_key', 'key': 'QUOTED_KEY_CANARY'}),
+          ('oauth', {'type': 'oauth', 'access': 'QUOTED_ACCESS_CANARY', 'refresh': 'QUOTED_REFRESH_CANARY'}),
+      ]],
     pytest.param('none', b'', b'{"refresh_token": "INCOMPLETE_LINE_CANARY', 900, 932, id='incomplete_line'),
     pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n', 900, 932,
                  id='oversized_credential'),

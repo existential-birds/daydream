@@ -97,6 +97,8 @@ def test_text_redaction_preserves_public_structure(source: str, private: str, pu
     'the token: is now available', 'The authorization: feature is enabled now', 'defpasswd:\nplain: 1\n',
     'CLERK_SECRET_KEY=\nCLOUDFLARE_ACCOUNT_ID=\nCLOUDFLARE_API_TOKEN=\n'
     'CLOUDFLARE_ACCOUNT_HASH=\nINTERNAL_SERVICE_SECRET=',
+    'Read ' + json.dumps('data: { "type":"record", "key": "public-quoted-key" }') + ' trailing prose',
+    'Read \'data: { "type":"record", "key": "public-quoted-key" }\' trailing prose',
 ])
 def test_public_text_redaction_is_identity(source: str) -> None:
     assert redact_structured_text(source) == source
@@ -598,8 +600,25 @@ _NATIVE_AUTH_FRAGMENTS = [
 ]
 
 
+_QUOTED_NATIVE_AUTH_FRAGMENTS = [
+    (kind, source, 'opaque-context-canary', ('Read ', 'data: '))
+    for kind, credential in [
+        ('api_key', {'type': 'api_key', 'key': 'opaque-context-canary'}),
+        ('oauth', {'type': 'oauth', 'access': 'opaque-context-canary', 'refresh': 'opaque-context-canary'}),
+    ]
+    for source in (
+        'Read ' + json.dumps('data: ' + json.dumps(credential)),
+        'Read ' + json.dumps('data: ' + json.dumps(credential)) + ' trailing prose',
+        'Read ' + json.dumps('data: ' + json.dumps(credential)[:-2]),
+        'Read ' + json.dumps('data: ' + json.dumps(credential)[:-2])[:-1],
+        'Read ' + json.dumps('outer prose: ' + json.dumps('data: ' + json.dumps(credential))),
+    )
+]
+
+
 @pytest.mark.parametrize(('kind', 'source', 'private', 'public'), [
     *[('api_key', *case) for case in _NATIVE_AUTH_FRAGMENTS],
+    *_QUOTED_NATIVE_AUTH_FRAGMENTS,
     ('oauth', _NATIVE_FRAGMENT, 'opaque-context-canary', ()),
     ('oauth', '{"FIELD":"opaque-context-canary","type":"KIND"', 'opaque-context-canary', ()),
     ('oauth', '{"type":"KIND","refresh":"opaque-context-canary', 'opaque-context-canary', ()),
@@ -638,6 +657,7 @@ def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy(
 @pytest.mark.parametrize(('kind', 'form'), [
     ('api_key', 'mapping'), ('oauth', 'mapping'), ('api_key', 'json'), ('oauth', 'json'),
     ('api_key', 'scalar'), ('api_key', 'text-list'),
+    ('api_key', 'quoted-log'), ('oauth', 'quoted-log'),
 ])
 def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, form: str) -> None:
     field = 'key' if kind == 'api_key' else 'access'
@@ -653,6 +673,9 @@ def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, 
         source = json.dumps(source)
     elif form == 'text-list':
         source = [source, metadata]
+    elif form == 'quoted-log':
+        assert isinstance(source, str)
+        source = 'Read ' + json.dumps('data: ' + source)
     original = copy.deepcopy(source)
     result = redaction_mod.redact_native_auth_value(source)
     assert 'opaque-ui-context-canary' not in json.dumps(result)
@@ -663,6 +686,11 @@ def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, 
         decoded = decoded[0]
     if isinstance(decoded, str):
         decoded.encode('utf-8')
+    if form == 'quoted-log':
+        assert isinstance(decoded, str) and decoded.startswith('Read ')
+        decoded = json.loads(decoded.removeprefix('Read '))
+        assert isinstance(decoded, str) and decoded.startswith('data: ')
+        decoded = decoded.removeprefix('data: ')
     while isinstance(decoded, str):
         decoded = json.loads(decoded)
     assert decoded['public'] == public and decoded['nested'] == nested
