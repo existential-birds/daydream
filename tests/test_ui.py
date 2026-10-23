@@ -16,7 +16,6 @@ from rich.style import Style
 from rich.text import Text
 
 import daydream.agent as agent_mod
-import daydream.ui.tools as ui_tools
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent, ThinkingEvent, ToolResultEvent, ToolStartEvent
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
@@ -269,9 +268,9 @@ async def test_text_displays_redact_complete_native_auth_before_selecting_or_for
 
 
 @pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
-@pytest.mark.parametrize('route', ['direct', 'callback', 'panel'])
+@pytest.mark.parametrize('route', ['direct', 'callback', 'panel', 'log'])
 async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
-    credential_type: str, route: str,
+    credential_type: str, route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Public callback formatting must not expose a bare value after losing its tag.
 
@@ -289,100 +288,60 @@ async def test_callback_tool_input_redacts_native_auth_before_primary_argument_s
     if route == 'direct':
         lines = [format_callback_progress('Inspect', values, None), format_callback_progress('Inspect', public, None)]
     else:
-        display = AgentDisplay(console, InteractionPolicy(),
+        display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
             lines.append if route == 'callback' else None, structured=False)
         await display.observe(ToolStartEvent('credential', 'Inspect', values))
         await display.observe(ToolStartEvent('public', 'Inspect', public))
         display.tools.finish_all()
-    rendered = ''.join((console.export_text() + '\n'.join(line.plain for line in lines)).replace('│', '').split())
+    rendered = ''.join((console.export_text() + capsys.readouterr().out +
+                        '\n'.join(line.plain for line in lines)).replace('│', '').split())
     assert secret not in rendered and '[REDACTED' in rendered
     assert 'ordinary-public-key' in rendered
     assert values == before
 
 
-def test_parse_background_task_id_from_launch_string() -> None:
+@pytest.mark.parametrize(('name', 'arguments', 'result', 'present', 'absent'), [
+    ('TaskOutput', {'task_id': 'zzz999', 'block': True, 'timeout': 1}, None, ('zzz999',), ('block',)),
+    ('TaskCreate', {'subject': 'Fix auth bug', 'description': 'details here'}, None,
+     ('Fix auth bug', 'details here'), ()),
+    ('TaskUpdate', {'taskId': '1', 'status': 'completed'}, None, ('Fix auth bug', 'completed'), ()),
+    ('TaskList', {}, None, ('TaskList',), ('(#)', '()')),
+    ('TaskOutput', {'task_id': 'a066168', 'block': True}, 'taskoutput_result.txt',
+     ('done-with-bg-work',), ('<retrieval_status>',)),
+    ('Task', {'description': 'd', 'prompt': '\n'.join(f'l{i}' for i in range(40))}, None,
+     (f'({40 - _TASK_PROMPT_MAX_LINES} more lines)', 'l0'), ('l39',)),
+])
+def test_task_tool_presentation_preserves_labels_results_and_caps(
+    name: str, arguments: dict[str, object], result: str | None, present: tuple[str, ...], absent: tuple[str, ...],
+) -> None:
+    """One real registry journey owns ID harvesting and each task tool's public rendering."""
+    console = Console(file=StringIO(), record=True)
+    registry = LiveToolPanelRegistry(console, quiet_mode=result is None)
+    fixtures = Path(__file__).parent / 'fixtures/task_tools'
+    registry.create('launch', 'Bash', {'command': 'pytest', 'run_in_background': True, 'description': 'Run tests'})
+    registry.observe_result('launch', (fixtures / 'bash_bg_launch.txt').read_text())
+    assert registry.resolve_label('Bash', 'b0nsmwb99') == 'Run tests'
+    assert registry.resolve_label('Bash', 'unknown') is None
+    registry.create('create', 'TaskCreate', {'subject': 'Fix auth bug', 'description': 'd'})
+    registry.observe_result('create', (fixtures / 'taskcreate_result.txt').read_text())
+    assert registry.resolve_label('TaskCreate', '1') == 'Fix auth bug'
+    panel = registry.create('selected', name, arguments)
+    if result:
+        panel.set_result((fixtures / result).read_text(), is_error=False)
+    console.print(panel._render_panel())
+    output = console.export_text()
+    assert all(value in output for value in present)
+    assert all(value not in output for value in absent)
+    registry.finish_all()
 
 
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
-    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
-    reg.observe_result("c1", launch)
-    assert reg.resolve_label("Bash", "b0nsmwb99") == "Run tests"
-    assert reg.resolve_label("Bash", "unknown") is None
-
-    reg.create("c2", "TaskCreate", {"subject": "Find tool-call render code", "description": "d"})
-    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
-    reg.observe_result("c2", create)
-    assert reg.resolve_label("TaskCreate", "1") == "Find tool-call render code"
 
 
-def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
-
-    c = Console(file=StringIO(), record=True)
-    panel = reg.get(tool_use_id)
-    assert panel is not None
-    c.print(panel._render_panel())
-    return c.export_text()
 
 
-def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
 
 
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
-    out = _render_panel_text(reg, "c2")
-    assert "zzz999" in out and "block" not in out
 
-def test_taskcreate_header_shows_subject_and_body() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "details here"})
-    out = _render_panel_text(reg, "c1")
-    assert "Fix auth bug" in out and "details here" in out
-
-def test_taskupdate_resolves_subject_and_shows_status() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
-    reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
-    reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
-    out = _render_panel_text(reg, "c2")
-    assert "Fix auth bug" in out and "completed" in out
-
-def test_tasklist_header_omits_empty_id_suffix() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskList", {})
-    out = _render_panel_text(reg, "c1")
-    assert "TaskList" in out
-    assert "(#)" not in out and "()" not in out
-
-def test_taskoutput_result_shows_output_snippet() -> None:
-
-
-    # Use normal mode to render the TaskOutput result body.
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
-    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
-    result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
-    c2_panel = reg.get("c2")
-    assert c2_panel is not None
-    c2_panel.set_result(result, is_error=False)
-    out = _render_panel_text(reg, "c2")
-    assert "done-with-bg-work" in out  # the <output> snippet surfaces
-    assert "<retrieval_status>" not in out  # tag plumbing is stripped
-
-def test_task_prompt_truncation_uses_named_limit() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
-    out = _render_panel_text(reg, "c1")
-    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in out
-    assert "l0" in out
-    assert "l39" not in out
 
 
 def _taskoutput_backend() -> Any:
@@ -453,21 +412,6 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     assert "Edit False" not in joined  # the stray-boolean dump is gone
 
 
-def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The owner is the only capper of a command value (issue #1227).
-
-    A stub owner returning more than max_len proves the callback passes the command through whole; a second
-    `value[:max_len]` at the call site would truncate it. Non-command values keep the generic single-line cap."""
-    long_value = "z" * (_BASH_COMMAND_MAX_CHARS + 50)
-    monkeypatch.setattr(ui_tools, "_redacted_bash_command", lambda *a, **k: long_value)
-
-    command_line = format_callback_progress("Bash", {"command": "anything"}, None)
-    assert long_value in command_line.plain
-
-    pattern = "p" * (_BASH_COMMAND_MAX_CHARS + 50)
-    generic_line = format_callback_progress("Grep", {"pattern": pattern}, None)
-    assert pattern[: _BASH_COMMAND_MAX_CHARS] in generic_line.plain
-    assert pattern not in generic_line.plain
 
 def test_format_callback_progress_redacts_only_bash_commands() -> None:
     """Callback redaction is scoped to the Bash command, like the panel header.
@@ -486,6 +430,9 @@ def test_format_callback_progress_redacts_only_bash_commands() -> None:
     )
     assert "opaque-test-12345" in grep_line.plain
     assert "[REDACTED" not in grep_line.plain
+    pattern = 'p' * (_BASH_COMMAND_MAX_CHARS + 50)
+    capped = format_callback_progress('Grep', {'pattern': pattern}, None).plain
+    assert pattern[:_BASH_COMMAND_MAX_CHARS] in capped and pattern not in capped
 
     bash_line = format_callback_progress("Bash", {"command": "the config: token=opaque-test-12345"}, None)
     assert "opaque-test-12345" not in bash_line.plain

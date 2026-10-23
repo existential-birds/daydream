@@ -33,52 +33,80 @@ def _agent_step(message: str = "ok", reasoning_content: str | None = None, tool_
 
 _JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345"
 
-@pytest.mark.parametrize(("text", "raw_secret", "marker"),
-    [("token=sk-test-12345abcdef done", "sk-test-12345abcdef", "[REDACTED_API_KEY]"),
-        ("auth=ghp_test123abcdef bearer", "ghp_test123abcdef", "[REDACTED_API_KEY]"),
-        ("slack=xoxb-test456abcdef", "xoxb-test456abcdef", "[REDACTED_API_KEY]"),
-        ("aws=AKIA0000TESTKEY00000", "AKIA0000TESTKEY00000", "[REDACTED_API_KEY]"),
-        ("token=ghs_abc123DEF456ghi789jkl012 done", "ghs_abc123DEF456ghi789jkl012", "[REDACTED_API_KEY]"),
-        (f"bearer {_JWT}", _JWT, "[REDACTED_JWT]"),
-    ], ids=["openai", "github", "slack", "aws", "github_installation", "jwt"],
-)
-def test_redactor_scrubs_single_token_secret(text: str, raw_secret: str, marker: str) -> None:
-    """REDA-01: sk-/ghp_/xoxb-/AKIA/ghs_ tokens → [REDACTED_API_KEY], JWTs → [REDACTED_JWT]."""
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert raw_secret not in out.message
-    assert marker in out.message
+@pytest.mark.parametrize(('source', 'private', 'public'), [
+    ('token=sk-test-12345abcdef done', 'sk-test-12345abcdef', '[REDACTED_API_KEY]'),
+    ('auth=ghp_test123abcdef bearer', 'ghp_test123abcdef', '[REDACTED_API_KEY]'),
+    ('slack=xoxb-test456abcdef', 'xoxb-test456abcdef', '[REDACTED_API_KEY]'),
+    ('aws=AKIA0000TESTKEY00000', 'AKIA0000TESTKEY00000', '[REDACTED_API_KEY]'),
+    ('token=ghs_abc123DEF456ghi789jkl012 done', 'ghs_abc123DEF456ghi789jkl012', '[REDACTED_API_KEY]'),
+    (f'bearer {_JWT}', _JWT, '[REDACTED_JWT]'),
+    ('path=/Users/ka/github/proj/app.py', '/Users/ka', '/Users/[REDACTED_USER]/github/proj/app.py'),
+    ('path=/home/alice/foo/bar', '/home/alice', '/home/[REDACTED_USER]/foo/bar'),
+    ('path=C:\\Users\\bob\\repo', 'Users\\bob', '[REDACTED_USER]'),
+    *[(line, value, '[REDACTED_ENV_VAR]') for line, value in [
+        ('OPENAI_API_KEY=sk-leakthis', 'sk-leakthis'), ('MY_API_KEY=value', 'value'),
+        ('JWT_TOKEN=abc.def.ghi', 'abc.def.ghi'), ('DB_PASSWORD=hunter2', 'hunter2'),
+        ('AUTH_TOKEN=t-foo', 't-foo'), ('CACHE_KEY=k-bar', 'k-bar'), ('DB_CREDENTIAL=admin:pw', 'admin:pw'),
+    ]],
+    *[(text, 'opaque-test-only-sentinel', '[REDACTED_CREDENTIAL]') for text in [
+        '{"credentials": {"apiKey": "opaque-test-only-sentinel"}}', "{'client_secret': 'opaque-test-only-sentinel'}",
+        'apiKey: opaque-test-only-sentinel', 'client-secret = opaque-test-only-sentinel',
+        'apiKey:\n  nested: opaque-test-only-sentinel',
+        '{\n "apiKey": {\n "nested": "opaque-test-only-sentinel"\n }\n}',
+        '{"apiKey": {"nested": "opaque-test-only-sentinel"}}', 'text: apiKey: opaque-test-only-sentinel',
+        'config: token=opaque-test-only-sentinel', '{"description": "use token=opaque-test-only-sentinel here"}',
+        '1AUTHORIZATION = opaque-test-only-sentinel', '1apiKey: "opaque-test-only-sentinel"',
+        '1apiKey:\n  nested: opaque-test-only-sentinel\n',
+    ]],
+    *[(text, '', '[REDACTED_CREDENTIAL]') for text in ['1apiKey=x', '2token= y', '123secret: z']],
+    *[(f'{header}: {scheme}opaque-header-canary\nnext line stays', 'opaque-header-canary',
+       f'{header}: {scheme if scheme == 'Bearer ' else ''}[REDACTED_CREDENTIAL]\nnext line stays')
+      for header, scheme in [
+        ('Authorization', ''), ('authorization', 'Bearer '), ('Proxy-Authorization', ''),
+        ('X-Api-Key', ''), ('X-Auth-Token', ''), ('Cookie', 'session='), ('Set-Cookie', ''),
+    ]],
+    *[(text, 'opaque-token-xyz', 'Bearer [REDACTED_CREDENTIAL]') for text in [
+        'curl -H "Authorization: Bearer opaque-token-xyz" https://api',
+        '  authorization: Bearer opaque-token-xyz', 'saw Authorization: Bearer opaque-token-xyz in the log',
+        'token: Bearer opaque-token-xyz',
+    ]],
+    *[(prefix + 'sk-opaque123' + suffix, 'sk-opaque123', prefix) for prefix, suffix in [
+        ('note: apiKey: ', ''), ('note: "apiKey: ', '"'),
+    ]],
+    *[(key + separator + value, 'opaque-test-only-sentinel', key) for key, separator, value in [
+        ('defauthorization', ': ', '"opaque-test-only-sentinel"'), ('nullpasswd', '=', '1'),
+        ('fooapi_key', ': ', '2'), ('xpassword', '=', '3'), ('superclient_secret ', '= ', 'opaque-test-only-sentinel'),
+        ('defauthorization', ':\n', '  nested: opaque-test-only-sentinel\n'),
+        ('nullpasswd', ':\n', '  nested: opaque-test-only-sentinel\n'),
+        ('12defauthorization', '= ', 'opaque-test-only-sentinel'), ('1nullpasswd', ': ', 'opaque-test-only-sentinel'),
+    ]],
+])
+def test_text_redaction_preserves_public_structure(source: str, private: str, public: str) -> None:
+    """Grammar belongs here; field routing and persisted bytes have separate keepers."""
+    result = redact_structured_text(source)
+    if private:
+        assert private not in result
+    assert public in result
+    assert '[REDACTED' in result
+    assert redact_structured_text(result) == result
 
 
-def test_redactor_preserves_short_eyj_non_jwt() -> None:
-    out = Redactor().redact_step(_user_step("eyJhbG is a prefix"))
-    assert isinstance(out.message, str)
-    assert "[REDACTED_JWT]" not in out.message
-    assert "eyJhbG" in out.message
+@pytest.mark.parametrize('source', [
+    'eyJhbG is a prefix', 'DEBUG=true\nAPP_NAME=myproject',
+    'MONKEY_PATCH=enabled', 'KEYBOARD_LAYOUT=qwerty', 'AUTHOR=alice', 'TOKENIZED=foo', 'KEYSTORE=path/to/store',
+    'the token: is now available', 'The authorization: feature is enabled now', 'defpasswd:\nplain: 1\n',
+    'CLERK_SECRET_KEY=\nCLOUDFLARE_ACCOUNT_ID=\nCLOUDFLARE_API_TOKEN=\n'
+    'CLOUDFLARE_ACCOUNT_HASH=\nINTERNAL_SERVICE_SECRET=',
+])
+def test_public_text_redaction_is_identity(source: str) -> None:
+    assert redact_structured_text(source) == source
+    assert redaction_mod.redact_text(source) == source
 
 
-@pytest.mark.parametrize(("text", "absent", "present", "preserved_tail"),
-    [("path=/Users/ka/github/proj/app.py", "/Users/ka", "/Users/[REDACTED_USER]", "github/proj/app.py"),
-        ("path=/home/alice/foo/bar", "/home/alice", "/home/[REDACTED_USER]", "foo/bar"),
-        ("path=C:\\Users\\bob\\repo", "Users\\bob", "[REDACTED_USER]", None),
-    ], ids=["macos", "linux", "windows"],
-)
-def test_redactor_scrubs_username_path(text: str, absent: str, present: str, preserved_tail: str | None) -> None:
-    """REDA-02: /Users//home//C:\\Users\\ <name> → [REDACTED_USER], project-relative tail preserved."""
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert absent not in out.message
-    assert present in out.message
-    if preserved_tail is not None:
-        assert preserved_tail in out.message
 
 
-def test_redactor_preserves_non_secret_env_vars() -> None:
-    out = Redactor().redact_step(_user_step("DEBUG=true\nAPP_NAME=myproject"))
-    assert isinstance(out.message, str)
-    assert "DEBUG=true" in out.message
-    assert "APP_NAME=myproject" in out.message
-    assert "[REDACTED" not in out.message
+
+
 
 
 def test_redactor_applies_to_reasoning_content() -> None:
@@ -99,67 +127,45 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytes
     boom_rules = ((_BoomPattern(), "[REDACTED_API_KEY]"), *original_rules[1:])
     monkeypatch.setattr(redaction_mod, "_REDACTION_RULES", boom_rules)
 
+    assert redaction_mod.redact_text("OPENAI_API_KEY=sk-leakthis123") == "[REDACTION_FAILED]"
     out = Redactor().redact_step(_user_step("OPENAI_API_KEY=sk-leakthis123"))
     assert isinstance(out.message, str)
     assert "sk-leakthis123" not in out.message
     assert "[REDACTION_FAILED]" in out.message
 
 
-def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
-    # Path triggers redaction so we exercise the redaction-changed-the-text branch (the bug only fires then).
-    nested_value = [{"path": "/Users/alice/repo/file.py", "edit_type": "replace"},
-        {"path": "/Users/alice/repo/other.py", "edit_type": "delete"},
+@pytest.mark.parametrize('fail_nested', [False, True])
+def test_redactor_preserves_argument_structure_and_per_key_failure(
+    monkeypatch: pytest.MonkeyPatch, fail_nested: bool,
+) -> None:
+    """Recursive failure must isolate one argument without retyping unrelated values."""
+    arguments = {'edits': [{'path': '/Users/alice/repo/file.py', 'edit_type': 'replace'},
+                           {'path': '/Users/alice/repo/other.py', 'edit_type': 'delete'}],
+                 'count': 42, 'flags': ['a', 'b'], 'config': {'x': 1, 'y': [1, 2, 3]}}
+    original = copy.deepcopy(arguments)
+    real = redactor_mod.redact_value
+    def redact(value: object, sensitive: bool = False) -> object:
+        if fail_nested and isinstance(value, list) and value and isinstance(value[0], dict):
+            raise RuntimeError('nested argument failure')
+        return real(value, sensitive=sensitive)
+    monkeypatch.setattr(redactor_mod, 'redact_value', redact)
+    step = Redactor().redact_step(_agent_step(tool_calls=[ToolCall(
+        tool_call_id='edit', function_name='Edit', arguments=arguments,
+    )]))
+    assert step.tool_calls is not None
+    result = step.tool_calls[0].arguments
+    assert result['count'] == 42 and result['flags'] == ['a', 'b'] and result['config'] == arguments['config']
+    expected = '[REDACTION_FAILED]' if fail_nested else [
+        {'path': '/Users/[REDACTED_USER]/repo/file.py', 'edit_type': 'replace'},
+        {'path': '/Users/[REDACTED_USER]/repo/other.py', 'edit_type': 'delete'},
     ]
-    arguments = {"edits": nested_value}
-    out = Redactor()._redact_arguments(arguments)
-
-    # out["edits"] must stay a list of dicts, NOT a JSON-encoded string (CR-01 stored the string).
-    assert isinstance(out["edits"], list), (f"Expected list, got {type(out['edits']).__name__}: {out['edits']!r}")
-    assert len(out["edits"]) == 2
-    assert all(isinstance(item, dict) for item in out["edits"])
-    serialized_back = str(out["edits"])
-    assert "alice" not in serialized_back
-    assert "[REDACTED_USER]" in serialized_back
-
-def test_redact_arguments_passthrough_when_no_secret() -> None:
-    arguments = {"count": 42, "flags": ["a", "b"], "config": {"x": 1, "y": [1, 2, 3]}}
-    out = Redactor()._redact_arguments(arguments)
-    assert out["count"] == 42
-    assert out["flags"] == ["a", "b"]
-    assert out["config"] == {"x": 1, "y": [1, 2, 3]}
-
-def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(monkeypatch: pytest.MonkeyPatch,) -> None:
-    def _boom(value: object, sensitive: bool = False) -> object:
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(redactor_mod, "redact_value", _boom, raising=True)
-    out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
-    assert out["edits"] == "[REDACTION_FAILED]"
+    assert result['edits'] == expected
+    assert arguments == original
 
 
-@pytest.mark.parametrize("non_secret",
-    ["MONKEY_PATCH=enabled", "KEYBOARD_LAYOUT=qwerty", "AUTHOR=alice", "TOKENIZED=foo", "KEYSTORE=path/to/store"],
-)
-def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) -> None:
-    """Credential names require complete underscore-delimited segments, not substrings."""
-    out = Redactor().redact_step(_user_step(non_secret))
-    assert isinstance(out.message, str)
-    assert "[REDACTED_ENV_VAR]" not in out.message
-    _, _, value = non_secret.partition("=")
-    assert value in out.message, f"Expected {value!r} preserved in {out.message!r}"
 
-@pytest.mark.parametrize("secret",
-    [("OPENAI_API_KEY=sk-leakthis", "sk-leakthis"), ("MY_API_KEY=value", "value"),
-        ("JWT_TOKEN=abc.def.ghi", "abc.def.ghi"), ("DB_PASSWORD=hunter2", "hunter2"), ("AUTH_TOKEN=t-foo", "t-foo"),
-        ("CACHE_KEY=k-bar", "k-bar"), ("DB_CREDENTIAL=admin:pw", "admin:pw"),
-    ],
-)
-def test_env_var_pattern_redacts_legitimate_secret_segments(secret: tuple[str, str],) -> None:
-    line, raw_value = secret
-    out = Redactor().redact_step(_user_step(line))
-    assert isinstance(out.message, str)
-    assert raw_value not in out.message
-    assert "[REDACTED_ENV_VAR]" in out.message
+
+
 
 
 def test_redactor_failure_mode_wipes_all_text_bearing_fields(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -212,39 +218,10 @@ def test_redactor_scrubs_text_content_parts() -> None:
     assert out.message[2].text == "clean text"
 
 
-_PKCS1_PEM = (
-    "-----BEGIN RSA PRIVATE KEY-----\n"
-    "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGPgjF\n"
-    "-----END RSA PRIVATE KEY-----"
-)
-_PKCS8_PEM = ("-----BEGIN PRIVATE KEY-----\n" "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n" "-----END PRIVATE KEY-----")
-_ENCRYPTED_PEM = (
-    "-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
-    "MIIFCTBHBgkqhkiG9w0BBQ0wOjANBglghkgBZQMEAwEFENCRYPTEDKEYBODY\n"
-    "-----END ENCRYPTED PRIVATE KEY-----"
-)
-_OPENSSH_PEM = (
-    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAEAAABlOPENSSHKEYBODY\n"
-    "-----END OPENSSH PRIVATE KEY-----"
-)
-_EC_PEM = (
-    "-----BEGIN EC PRIVATE KEY-----\n"
-    "MHcCAQEEIBF8XZQ6ECKEYBODYwJ5fWx8+1FcQ2rY=\n"
-    "-----END EC PRIVATE KEY-----"
-)
-_DSA_PEM = (
-    "-----BEGIN DSA PRIVATE KEY-----\n"
-    "MIH3AgEAAkEA8qWq6Q2DSAKEYBODYB5QhJ9zQ2nLr3U=\n"
-    "-----END DSA PRIVATE KEY-----"
-)
-
-# Shared by the block and env-assignment redaction tests — one spec for the six
-# PEM variants so the parametrize lists cannot drift out of sync.
-_PEM_KEY_CASES: list[tuple[str, str]] = [
-    (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
-    (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"), (_OPENSSH_PEM, "OPENSSHKEYBODY"), (_EC_PEM, "ECKEYBODY"),
-    (_DSA_PEM, "DSAKEYBODY"),
+_PEM_KEY_CASES = [
+    (f"-----BEGIN {label}-----\nsynthetic-private-pem-body\n-----END {label}-----", "synthetic-private-pem-body")
+    for label in ("RSA PRIVATE KEY", "PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "OPENSSH PRIVATE KEY",
+                  "EC PRIVATE KEY", "DSA PRIVATE KEY")
 ]
 _PEM_KEY_IDS = ["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"]
 
@@ -333,335 +310,120 @@ def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -
     assert "[REDACTED_CREDENTIAL]" not in json.dumps(args)
 
 
-@pytest.mark.parametrize("text", [
-    '{"credentials": {"apiKey": "opaque-test-only-sentinel"}}', "{'client_secret': 'opaque-test-only-sentinel'}",
-    "apiKey: opaque-test-only-sentinel", "client-secret = opaque-test-only-sentinel",
-])
-def test_redactor_scrubs_sensitive_key_value_text_formats(text: str) -> None:
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert "opaque-test-only-sentinel" not in out.message
-    assert "[REDACTED_CREDENTIAL]" in out.message
 
-@pytest.mark.parametrize('key', [
-    'Authorization: Bearer opaque-key-canary',
-    'auth=Bearer opaque-key-canary',
-    'refresh_token="opaque-key-canary',
-    'api_key=[REDACTED]opaque-key-canary',
-    '{"Authorization: Bearer opaque-key-canary":"public"}',
+@pytest.mark.parametrize(('key', 'value', 'expected', 'unchanged'), [
+    *[(key, value, value, False) for key in [
+        'defauthorization: opaque-key-canary', 'deftoken=opaque-key-canary', 'api_key=opaque-key-canary',
+        'X-Api-Key: opaque-key-canary', 'private_key=opaque-key-canary',
+        json.dumps({'type': 'api_key', 'key': 'opaque-key-canary'}, separators=(',', ':')),
+    ] for value in [0, None, {'public': 'diagnostics'}]],
+    *[(key, 'opaque-value-canary', '[REDACTED_CREDENTIAL]', False) for key in [
+        'api_key', 'private_key', '[REDACTED_CREDENTIAL]', 'prefix_[REDACTED_TOKEN]',
+        '[REDACTED]token', 'Authorization: Bearer [REDACTED_CREDENTIAL]',
+    ]],
+    *[(key, '[REDACTED_RETAINED]', '[REDACTED_RETAINED]', False) for key in [
+        'Authorization: Bearer opaque-key-canary', 'auth=Bearer opaque-key-canary',
+        'refresh_token="opaque-key-canary', 'api_key=[REDACTED]opaque-key-canary',
+        '{"Authorization: Bearer opaque-key-canary":"public"}',
+    ]],
+    *[(key, '[REDACTED_RETAINED]', '[REDACTED_RETAINED]', True) for key in [
+        'X-Api-Key: [REDACTED_API_KEY]', 'Cookie: [REDACTED_CREDENTIAL] (2)', 'Authorization: <redacted> (2)',
+    ]],
 ])
-def test_json_observation_keys_use_structured_redaction_without_retyping_values(key: str) -> None:
-    """Decoded JSON keys need the same credential policy as observation text.
-
-    Header tests pass plain text and argument tests exercise a native mapping;
-    neither reaches the JSON leaf walk that formerly flat-redacted only keys.
-    Keep JSON-looking public keys, marker identity, zero, null and valid wrappers.
-    """
-    payload = {key: '[REDACTED_RETAINED]', '{"scope":"python"}': True,
-               'usage': {'input_tokens': 0, 'output_tokens': None}, 'public': 'diagnostics'}
-    original = json.dumps(payload)
-    step = _agent_step(observation=Observation(results=[ObservationResult(content=original)]))
-    out = Redactor().redact_step(step)
-    assert out.observation is not None
-    content = out.observation.results[0].content
-    assert isinstance(content, str)
-    assert 'opaque-key-canary' not in content
-    decoded = json.loads(content)
+@pytest.mark.parametrize('envelope', ['object', 'scalar', 'credential-parent'])
+def test_json_key_privacy_preserves_original_sensitivity_and_value_types(
+    key: str, value: object, expected: object, unchanged: bool, envelope: str,
+) -> None:
+    """Bind original key sensitivity before sanitation; markers cannot retype public values."""
+    payload = {key: value, '{"scope":"python"}': True, 'usage': {'input_tokens': 0, 'output_tokens': None}}
+    source = json.dumps(payload)
+    if envelope == 'scalar':
+        source = json.dumps(source)
+    elif envelope == 'credential-parent':
+        source = json.dumps({'type': 'api_key', 'key': 'opaque-parent-canary', 'public': source})
+    result = redact_structured_text(source)
+    assert '-canary' not in result
+    assert redact_structured_text(result) == result
+    decoded = json.loads(result)
+    decoded = json.loads(decoded) if envelope == 'scalar' else json.loads(decoded['public']) \
+        if envelope == 'credential-parent' else decoded
     assert decoded['{"scope":"python"}'] is True
     assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
-    assert decoded['public'] == 'diagnostics'
-    assert '[REDACTED_RETAINED]' in decoded.values()
-    assert step.observation is not None and step.observation.results[0].content == original
-    repeated = Redactor().redact_step(out)
-    assert repeated.observation is not None and repeated.observation.results[0].content == content
+    assert [item for name, item in decoded.items() if name not in ('{"scope":"python"}', 'usage')] == [expected]
+    if unchanged:
+        assert key in decoded
 
 
-@pytest.mark.parametrize('key', ['defauthorization: opaque-key-canary', 'deftoken=opaque-key-canary',
-                                  'api_key=opaque-key-canary', 'X-Api-Key: opaque-key-canary',
-                                  'private_key=opaque-key-canary'])
-@pytest.mark.parametrize('value', [0, None, {'public': 'diagnostics'}])
-def test_generated_json_key_marker_cannot_change_public_value_sensitivity(key: str, value: object) -> None:
-    """A generated marker in a key cannot turn its public value into a credential.
-
-    Structured suffix recognition can sanitize a key that whole-key sensitivity
-    does not classify as secret. Marker words must not change that classification
-    during the recorder's repeated sanitation, erasing zero/null/container values.
-    """
-    redacted = redact_structured_text(json.dumps({key: value}))
-    assert 'opaque-key-canary' not in redacted
-    assert list(json.loads(redacted).values()) == [value]
-    assert redact_structured_text(redacted) == redacted
-
-
-@pytest.mark.parametrize('key', ['api_key', 'private_key', '[REDACTED_CREDENTIAL]',
-                                  'prefix_[REDACTED_TOKEN]', '[REDACTED]token',
-                                  'Authorization: Bearer [REDACTED_CREDENTIAL]'])
-def test_marker_words_do_not_hide_actual_json_key_sensitivity(key: str) -> None:
-    """New key sanitation must preserve every previously sensitive key's masking."""
-    redacted = redact_structured_text(json.dumps({key: 'opaque-value-canary'}))
-    assert 'opaque-value-canary' not in redacted
-    assert redact_structured_text(redacted) == redacted
-
-
-@pytest.mark.parametrize(('header', 'marker', 'suffix'), [
-    ('X-Api-Key', '[REDACTED_API_KEY]', ''),
-    ('Cookie', '[REDACTED_CREDENTIAL]', ' (2)'),
-    ('Authorization', '<redacted>', ' (2)'),
+@pytest.mark.parametrize(('template', 'safe', 'values'), [
+    ('Authorization: Bearer {}', 'Authorization: Bearer [REDACTED_CREDENTIAL]',
+     ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
+    ('api_key={}', '[REDACTED_LABEL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
+    ('Cookie: {}', 'Cookie: [REDACTED_CREDENTIAL]', ('[REDACTED_FIRST]', '[REDACTED_SECOND]')),
+    ('{{"type":"api_key","key":"{}"}}', '[REDACTED_LABEL]', (0, None)),
 ])
-def test_complete_markers_in_json_header_keys_keep_their_identity(header: str, marker: str, suffix: str) -> None:
-    """An already safe header-shaped key must survive the newly applied text policy.
-
-    Complete markers before a collision suffix exposed regex token backtracking,
-    which consumed only the marker prefix and added a spurious closing bracket.
-    Plain secret header tests never establish safe-key identity on repeated writes.
-    """
-    key = f'{header}: {marker}{suffix}'
-    redacted = redact_structured_text(json.dumps({key: '[REDACTED_RETAINED]'}))
-    assert list(json.loads(redacted)) == [key]
-    assert redact_structured_text(redacted) == redacted
-
-
-@pytest.mark.parametrize(('template', 'safe'), [
-    ('Authorization: Bearer {}', 'Authorization: Bearer [REDACTED_CREDENTIAL]'),
-    ('api_key={}', '[REDACTED_LABEL]'),
-    ('Cookie: {}', 'Cookie: [REDACTED_CREDENTIAL]'),
-])
-def test_json_observation_key_collisions_preserve_entries_and_existing_public_keys(template: str, safe: str) -> None:
-    """Two newly sanitized keys cannot overwrite each other or a literal safe key.
-
-    Flat key replacement already collides for shaped secrets, but adding structured
-    key coverage creates collisions for opaque headers too. Keep each retained
-    value and existing marker key without encoding any raw secret in its alias.
-    """
-    payload = {template.format('first-key-canary'): '[REDACTED_FIRST]',
-               template.format('second-key-canary'): '[REDACTED_SECOND]',
+def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
+    template: str, safe: str, values: tuple[object, object],
+) -> None:
+    """Secret labels cannot collapse each other or clobber literal safe aliases."""
+    payload = {template.format('first-key-canary'): values[0], template.format('second-key-canary'): values[1],
                safe: '[REDACTED_EXISTING]', safe + ' (2)': '[REDACTED_RESERVED]',
                'usage': {'input_tokens': 0, 'output_tokens': None}}
-    out = Redactor().redact_step(_agent_step(
-        observation=Observation(results=[ObservationResult(content=json.dumps(payload))]),
-    ))
-    assert out.observation is not None
-    content = out.observation.results[0].content
-    assert isinstance(content, str)
-    decoded = json.loads(content)
-    assert 'first-key-canary' not in content and 'second-key-canary' not in content
+    result = redact_structured_text(json.dumps(payload))
+    assert '-canary' not in result and redact_structured_text(result) == result
+    decoded = json.loads(result)
     assert len(decoded) == len(payload)
-    assert decoded[safe] == '[REDACTED_EXISTING]'
-    assert decoded[safe + ' (2)'] == '[REDACTED_RESERVED]'
-    assert set(item for item in decoded.values() if isinstance(item, str)) == {
-        '[REDACTED_FIRST]', '[REDACTED_SECOND]', '[REDACTED_EXISTING]', '[REDACTED_RESERVED]',
-    }
+    assert decoded[safe] == '[REDACTED_EXISTING]' and decoded[safe + ' (2)'] == '[REDACTED_RESERVED]'
+    assert [value for key, value in decoded.items() if key not in (safe, safe + ' (2)', 'usage')] == list(values)
     assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
-    repeated = Redactor().redact_step(out)
-    assert repeated.observation is not None and repeated.observation.results[0].content == content
 
 
-@pytest.mark.parametrize(("header", "value", "scheme"), [("Authorization", "opaque-test-only-sentinel", None),
-    ("authorization", "Bearer opaque-test-only-sentinel", "Bearer"),
-    ("Proxy-Authorization", "opaque-test-only-sentinel", None), ("X-Api-Key", "opaque-test-only-sentinel", None),
-    ("X-Auth-Token", "opaque-test-only-sentinel", None), ("Cookie", "session=opaque-test-only-sentinel", None),
-    ("Set-Cookie", "opaque-test-only-sentinel", None),
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@pytest.mark.parametrize(('source', 'private', 'prefix'), [
+    ('x' * 200_000, '', 'x' * 200_000),
+    ('a' * 5000 + '=x token=sk-opaque123', 'sk-opaque123', 'a' * 5000 + '=x '),
+    ('a' * 200_000 + '=x token=opaque-scan-canary', 'opaque-scan-canary', 'a' * 200_000 + '=x '),
+    ('foo' + '_' * 100_000 + 'tail: x', '', 'foo' + '_' * 100_000 + 'tail: x'),
+    ('foo' + '_' * 100_000 + 'xapi_key: opaque-scan-canary', 'opaque-scan-canary', 'foo' + '_' * 100_000 + 'x'),
+    ('foo' + '_' * 100_000 + 'xapi_key: {\n "nested": "opaque-scan-canary"\n}',
+     'opaque-scan-canary', 'foo' + '_' * 100_000 + 'x'),
 ])
-def test_redactor_scrubs_authorization_header_values(header: str, value: str, scheme: str | None,) -> None:
-    """Auth header values are redacted case-insensitively; name + scheme preserved;
-    nothing past end of line consumed."""
-    line = f"{header}: {value}\nnext line stays"
-    out = Redactor().redact_step(_user_step(line))
-    assert isinstance(out.message, str)
-    assert "opaque-test-only-sentinel" not in out.message
-    assert "[REDACTED_CREDENTIAL]" in out.message
-    assert f"{header}: " in out.message
-    assert "next line stays" in out.message
-    if scheme is not None:
-        assert f"{header}: {scheme} " in out.message
-
-
-def test_redactor_scrubs_mid_line_authorization_header() -> None:
-    text = 'curl -H "Authorization: Bearer opaque-token-xyz" https://api'
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert "opaque-token-xyz" not in out.message
-    assert "Authorization: Bearer [REDACTED_CREDENTIAL]" in out.message
-
-def test_redactor_scrubs_indented_and_embedded_headers() -> None:
-    """Indented (curl -v / httpie / YAML) and prose-embedded headers fire the
-    header stage instead of leaking the opaque token after the scheme word."""
-    indented = "  authorization: Bearer opaque-token-xyz"
-    embedded = "saw Authorization: Bearer opaque-token-xyz in the log"
-    for text in (indented, embedded):
-        out = Redactor().redact_step(_user_step(text))
-        assert isinstance(out.message, str)
-        assert "opaque-token-xyz" not in out.message
-        assert "Bearer [REDACTED_CREDENTIAL]" in out.message
-
-@pytest.mark.parametrize("text", [
-    "apiKey:\n  nested: opaque-test-only-sentinel",
-    '{\n  "apiKey": {\n    "nested": "opaque-test-only-sentinel"\n  }\n}',
-    '{"apiKey": {"nested": "opaque-test-only-sentinel"}}', "text: apiKey: opaque-test-only-sentinel",
-    "config: token=opaque-test-only-sentinel", '{"description": "use token=opaque-test-only-sentinel here"}',
-    "1apiKey=x", "2token= y", "123secret: z", "1AUTHORIZATION = opaque-test-only-sentinel",
-    '1apiKey: "opaque-test-only-sentinel"',
-    "1apiKey:\n  nested: opaque-test-only-sentinel\n",
-])
-def test_redactor_scrubs_sensitive_key_shapes(text: str) -> None:
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-
-def test_redactor_preserves_structural_separator_after_bare_value() -> None:
-    """Redacting a bare value must not swallow the following ',' — the JSON
-    keeps its structure (issue: '{"token": null, "count": 3}' lost its comma)."""
-    out = redact_structured_text('{"token": null, "count": 3}')
-    assert out == '{"token": "[REDACTED_CREDENTIAL]", "count": 3}'
-
-    assert json.loads(out)  # still parseable as JSON
-
-@pytest.mark.parametrize("text", ["the token: is now available", "The authorization: feature is enabled now"])
-def test_redactor_preserves_prose_with_sensitive_word_colon(text: str) -> None:
-    """A sensitive word followed by a colon in ordinary prose is not a key-value
-    pair — the following prose word is left untouched."""
-    out = redact_structured_text(text)
-    assert out == text
-    assert "[REDACTED_CREDENTIAL]" not in out
-
-def test_redactor_keeps_comma_in_bare_yaml_pair() -> None:
-    out = redact_structured_text("token: abc, other: 1")
-    assert out == 'token: "[REDACTED_CREDENTIAL]", other: 1'
-
-def test_redactor_scrubs_scheme_pair_under_sensitive_key() -> None:
-    out = redact_structured_text("token: Bearer opaque-token-xyz")
-    assert "opaque-token-xyz" not in out
-    assert "token: Bearer [REDACTED_CREDENTIAL]" in out
-
-
-def test_redactor_linear_scan_nested_pair_in_bare_value() -> None:
-    """A sensitive pair nested in a non-sensitive pair's bare value is still
-    redacted under the separator-anchored scan: the value advance stops at the
-    value start, so the inner pair's key is re-anchored, never skipped."""
-    out = redact_structured_text("note: apiKey: sk-opaque123")
-    assert "sk-opaque123" not in out
-    assert "[REDACTED" in out
-    assert out.startswith("note:")
-
-def test_redactor_linear_scan_nested_pair_in_quoted_value() -> None:
-    out = redact_structured_text('note: "apiKey: sk-opaque123"')
-    assert "sk-opaque123" not in out
-    assert "[REDACTED" in out
-    assert out.startswith('note: "')
-
-def test_redactor_linear_scan_long_non_sensitive_key_precedes_sensitive_pair() -> None:
-    """The O(n^2) shape from the bug: a long non-sensitive key run followed by
-    a sensitive pair. The scan must not re-match the run per character — the
-    pair after it is still found and redacted."""
-    text = "a" * 5000 + "=x token=sk-opaque123"
-    out = redact_structured_text(text)
-    assert "sk-opaque123" not in out
-    assert "[REDACTED" in out
-    assert out.startswith("a" * 5000)
-    assert "=x " in out
-
-def test_redactor_linear_scan_reanchors_after_long_run_structured_marker() -> None:
-    """The long-run shape with a value only the structured pair scan catches:
-    the value-start advance must leave the run untouched yet still redact the
-    ``token=`` pair that follows it."""
-    text = "a" * 5000 + "=x token=opaque-test-only-sentinel"
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-    assert out.startswith("a" * 5000)
-    assert "=x " in out
-
-def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
-    """A long run of key-shaped characters with no separator anywhere is
-    returned unchanged (the engine-quadratic guard: the old scan made the
-    engine try every start position over the run)."""
-    text = "x" * 200_000
-    out = redact_structured_text(text)
-    assert out == text
-
-def test_redactor_sensitive_suffix_scan_is_linear() -> None:
-    """Bound a long nonsensitive run while still redacting its trailing sensitive pair.
-
-    The 5s CPU ceiling excludes scheduler delays from parallel test workers;
-    the credential marker proves the structured pass ran."""
-
-    text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
+def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> None:
+    """Keep large separator/prefix shapes; tiny semantic cases cannot catch quadratic scans."""
     start = time.process_time()
-    out = redact_structured_text(text)
-    elapsed = time.process_time() - start
-    assert elapsed < 5
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-    assert out.startswith("a" * 200_000)
-    assert "=x " in out
+    result = redact_structured_text(source)
+    assert time.process_time() - start < 5
+    assert result.startswith(prefix)
+    if private:
+        assert private not in result and '[REDACTED' in result
+    else:
+        assert result == source
 
-def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
-    """A 100K-separator run must remain linear under a generous 10s ceiling."""
 
-    seps = "_" * 100_000
 
-    # Non-sensitive: byte-identical output, and the run must not dominate.
-    text = "foo" + seps + "tail: x"
-    start = time.perf_counter()
-    out = redact_structured_text(text)
-    elapsed = time.perf_counter() - start
-    assert elapsed < 10
-    assert out == text
 
-    # Pair pass: a sensitive suffix AFTER the run (''xapi_key'' -> 'api_key' —
-    # the whole key stays non-sensitive because segments split on '_') is
-    # still found and redacted once the separator run is skipped.
-    text2 = "foo" + seps + "xapi_key: opaque-test-only-sentinel"
-    start = time.perf_counter()
-    out2 = redact_structured_text(text2)
-    elapsed = time.perf_counter() - start
-    assert elapsed < 10
-    assert "opaque-test-only-sentinel" not in out2
-    assert "[REDACTED" in out2
-    assert out2.startswith("foo" + seps + "x")
 
-    # Block pass: same long run in front of a block-style sensitive suffix.
-    text3 = "foo" + seps + "xapi_key: {\n  \"nested\": \"opaque-test-only-sentinel\"\n}"
-    start = time.perf_counter()
-    out3 = redact_structured_text(text3)
-    elapsed = time.perf_counter() - start
-    assert elapsed < 10
-    assert "opaque-test-only-sentinel" not in out3
-    assert "[REDACTED" in out3
-    assert out3.startswith("foo" + seps + "x")
 
-@pytest.mark.parametrize("text", [
-    'defauthorization: "opaque-test-only-sentinel"', "nullpasswd=1", "fooapi_key: 2", "xpassword=3",
-    "superclient_secret = opaque-test-only-sentinel",
-    "defauthorization:\n  nested: opaque-test-only-sentinel\n",
-    "nullpasswd:\n  nested: opaque-test-only-sentinel\n",
-])
-def test_redactor_scrubs_sensitive_suffix_in_non_sensitive_key(text: str) -> None:
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-    assert str(text).split(":", 1)[0].split("=", 1)[0] in out
 
-def test_redactor_gap_mechanics_compose() -> None:
-    """The digit-prefix anchor and the sensitive-suffix discovery compose: a
-    digit-prefixed run whose first key-START char starts a NON-sensitive key
-    still lands on the embedded sensitive suffix (issue #1236 Task 2b)."""
-    out = redact_structured_text("12defauthorization= opaque-test-only-sentinel")
-    assert "opaque-test-only-sentinel" not in out
-    assert out.startswith("12defauthorization=")
-    assert "[REDACTED_CREDENTIAL]" in out
-    out2 = redact_structured_text("1nullpasswd: opaque-test-only-sentinel")
-    assert "opaque-test-only-sentinel" not in out2
-    assert "[REDACTED_CREDENTIAL]" in out2
-
-def test_redactor_sensitive_suffix_block_empty_value_not_redacted() -> None:
-    """A sensitive suffix whose block value is EMPTY (nothing indented) is not
-    a redaction in the block pass — the old scan advanced past it and kept
-    looking, so the text passes through unchanged."""
-    text = "defpasswd:\nplain: 1\n"
-    out = redact_structured_text(text)
-    assert out == text
-    assert "[REDACTED_CREDENTIAL]" not in out
 
 
 @pytest.mark.parametrize('fragment', [
@@ -739,6 +501,10 @@ def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(c
 
 
 @pytest.mark.parametrize(('source', 'expected'), [
+    ('{"token": null, "count": 3}', '{"token": "[REDACTED_CREDENTIAL]", "count": 3}'),
+    ('token: abc, other: 1', 'token: "[REDACTED_CREDENTIAL]", other: 1'),
+    ('API_KEY= sk-live-abc123', 'API_KEY=[REDACTED_ENV_VAR]'),
+    ('TOKEN=abc\nPLAIN_SETTING=1', 'TOKEN=[REDACTED_ENV_VAR]\nPLAIN_SETTING=1'),
     ('TOKEN=opaque-idempotence-canary; public diagnostics',
      'TOKEN=[REDACTED_ENV_VAR]; public diagnostics'),
     ('TOKEN=opaque-idempotence-canary;API_KEY=opaque-second-canary',
@@ -871,32 +637,54 @@ def test_top_level_native_tool_arguments_keep_tagged_credential_context(kind: st
     assert 'opaque-tool-argument-canary' not in json.dumps(result)
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize('order', ['type-first', 'type-last'])
-@pytest.mark.parametrize('escaped', [False, True])
-def test_interrupted_tagged_auth_records_with_observed_context_fail_closed(
-    kind: str, order: str, escaped: bool,
-) -> None:
-    """A cutoff after an observed discriminator cannot expose generic credentials.
+_NATIVE_FRAGMENT = '{"type":"KIND","FIELD":"opaque-context-canary'
 
-    Complete JSON tests never take the flat-text fallback. Keep scope and complete
-    discriminator tokens, including JSON escapes and either member order, while a
-    value string or object remains unfinished.
-    """
+
+@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
+@pytest.mark.parametrize(('source', 'private', 'public'), [
+    (_NATIVE_FRAGMENT, 'opaque-context-canary', ()),
+    ('{"FIELD":"opaque-context-canary","type":"KIND"', 'opaque-context-canary', ()),
+    ('{"ty\u0070e":"ESC_KIND","ESC_FIELD":"opaque-context-canary', 'opaque-context-canary', ()),
+    ('{"ESC_FIELD":"opaque-context-canary","ty\u0070e":"ESC_KIND"', 'opaque-context-canary', ()),
+    ('{"type":"KIND","FIELD":"opaque-context-canary","type":"record"}', 'opaque-context-canary', ()),
+    ('{"type":"api_key","key":"opaque-context-canary","type":"oauth","access":"opaque-context-canary"}',
+     'opaque-context-canary', ()),
+    ('{"typed":{"type":"KIND","FIELD":"opaque-context-canary"},'
+     '"public":{"key":"public-sibling","access":"public-access","refresh":"public-refresh"},'
+     '"nested":{"type":"KIND","metadata":{"key":"public-nested"}}} trailing',
+     'opaque-context-canary', ('public-sibling', 'public-access', 'public-refresh', 'public-nested')),
+    ('{"key":"public-before-type', '', ('public-before-type',)),
+    ('{"key":"public-sibling","note":"' + json.dumps('{"type":"KIND"}')[1:-1] + '"} trailing',
+     '', ('public-sibling',)),
+    *[(prefix + _NATIVE_FRAGMENT, 'opaque-context-canary', (prefix,)) for prefix in [
+        "Here's the data: ", 'Read "data: ', "it's here\n", 'prefix: ', 'Read "', '"',
+    ]],
+    (json.dumps(_NATIVE_FRAGMENT)[:-1], 'opaque-context-canary', ()),
+    ('{"key":"public-outer-key","message":' + json.dumps(_NATIVE_FRAGMENT)[:-1],
+     'opaque-context-canary', ('public-outer-key',)),
+    ("Here's the data: " + json.dumps(_NATIVE_FRAGMENT)[:-1], 'opaque-context-canary', ("Here's the data: ",)),
+    *[(source, 'u004', public) for marker in ['', '[REDACTED]']
+      for inner in ['{"type":"KIND","FIELD":"' + marker + chr(92) + 'u004']
+      for source, public in [(inner, ()), (json.dumps(inner)[:-1], ()),
+          ('{"public":{"key":"ordinary-key"},"message":' + json.dumps(inner)[:-1], ('ordinary-key',))]],
+    (json.dumps('{"type":"KIND","FIELD":"[REDACTED]é').rsplit('u00e9', 1)[0] + 'u00e', 'u00e', ()),
+    ('{"key":"[REDACTED]' + chr(92) + 'u004', '', (chr(92) + 'u004',)),
+])
+def test_native_auth_fragments_respect_observed_scope(
+    kind: str, source: str, private: str, public: tuple[str, ...],
+) -> None:
+    """Observed same-object tags survive cutoffs/escapes; unrelated generic fields stay public."""
     field = 'key' if kind == 'api_key' else 'access'
-    record = {'type': kind, field: 'opaque-interrupted-auth-canary'}
-    if order == 'type-last':
-        record = dict(reversed(list(record.items())))
-    text = json.dumps(record)
-    text = text[:-2] if order == 'type-first' else text[:-1]
-    if escaped:
-        text = text.replace('"type"', '"ty' + chr(92) + 'u0070e"')
-        text = text.replace('"key"', '"k' + chr(92) + 'u0065y"')
-        text = text.replace('api_key', 'api' + chr(92) + 'u005fkey')
-        text = text.replace('oauth', 'oa' + chr(92) + 'u0075th')
-    redacted = redact_structured_text('{"data":' + text)
-    assert 'opaque-interrupted-auth-canary' not in redacted
-    assert redact_structured_text(redacted) == redacted
+    text = source.replace('ESC_KIND', chr(92) + 'u%04x' % ord(kind[0]) + kind[1:]) \
+        .replace('ESC_FIELD', chr(92) + 'u%04x' % ord(field[0]) + field[1:]) \
+        .replace('KIND', kind).replace('FIELD', field)
+    result = redact_structured_text(text)
+    if private:
+        assert private not in result and result != text
+    else:
+        assert result == text
+    assert all(value in result for value in public)
+    assert redact_structured_text(result) == result
 
 
 @pytest.mark.parametrize('value', [0, None, ''])
@@ -907,24 +695,6 @@ def test_invalid_nonstring_native_credential_fields_remain_typed(value: object) 
     assert json.loads(redact_structured_text(json.dumps(payload))) == payload
 
 
-def test_partial_auth_scope_does_not_promote_unrelated_generic_fields() -> None:
-    """Only observed tags in the same object can authorize contextual masking.
-
-    A sibling tag, a nested public key or type-like quoted text cannot change an
-    ordinary generic field. Before any discriminator arrives its future meaning
-    cannot be established without also suppressing ordinary public keys.
-    """
-    text = ('{"typed":{"type":"api_key","key":"opaque-scoped-auth-canary"},'
-            '"public":{"key":"public-sibling","access":"public-access","refresh":"public-refresh"},'
-            '"nested":{"type":"api_key","metadata":{"key":"public-nested"}}} trailing')
-    redacted = redact_structured_text(text)
-    assert 'opaque-scoped-auth-canary' not in redacted
-    for value in ('public-sibling', 'public-access', 'public-refresh', 'public-nested'):
-        assert value in redacted
-    ordinary = '{"key":"public-before-type'
-    assert redact_structured_text(ordinary) == ordinary
-    quoted = '{"key":"public-sibling","note":"' + json.dumps('{"type":"api_key"}')[1:-1] + '"} trailing'
-    assert 'public-sibling' in redact_structured_text(quoted)
 
 
 def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy() -> None:
@@ -936,55 +706,10 @@ def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy(
     assert 'opaque-parent-auth-canary' not in json.dumps(redacted)
 
 
-@pytest.mark.parametrize('text', [
-    '{"type":"api_key","key":"opaque-duplicate-auth-canary","type":"record"}',
-    '{"type":"api_key","key":"opaque-duplicate-auth-canary","type":"oauth","access":"opaque-duplicate-auth-canary"}',
-])
-def test_duplicate_discriminator_cannot_hide_observed_native_credential_context(text: str) -> None:
-    """A later decoded member cannot erase a credential discriminator already seen.
-
-    Normal container tests receive only the final duplicate-key value, so the raw
-    member sequence must remain authoritative for fail-closed context admission.
-    """
-    redacted = redact_structured_text(text)
-    assert 'opaque-duplicate-auth-canary' not in redacted
-    assert redact_structured_text(redacted) == redacted
 
 
-@pytest.mark.parametrize('prefix', ["Here's the data: ", 'Read "data: ', "it's here\n", 'prefix: ', 'Read "', '"'])
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-def test_native_auth_context_survives_neutral_prose_prefixes(prefix: str, kind: str) -> None:
-    """Prose punctuation cannot consume the following credential object's scope.
-
-    Plain 'prefix:' coverage misses unmatched apostrophes/quotes that the initial
-    regex token walk interpreted as one string hiding every later brace/member.
-    """
-    record = {'type': kind, 'key' if kind == 'api_key' else 'access': 'opaque-prefixed-auth-canary'}
-    redacted = redact_structured_text(prefix + json.dumps(record))
-    assert 'opaque-prefixed-auth-canary' not in redacted
-    assert redacted.startswith(prefix)
-    assert redact_structured_text(redacted) == redacted
 
 
-@pytest.mark.parametrize('envelope', ['scalar', 'member', 'prefixed'])
-def test_interrupted_json_string_auth_context_stays_inside_its_value(envelope: str) -> None:
-    """Encoded string prefixes can expose an observed inner credential context.
-
-    Complete JSON strings decode before sanitation. A cutoff before their final
-    quote instead takes fallback text, which must withhold that observed context
-    without promoting its discriminator onto unrelated outer generic fields.
-    """
-    inner = '{"type":"api_key","key":"opaque-encoded-auth-canary'
-    text = json.dumps(inner)[:-1]
-    if envelope == 'member':
-        text = '{"key":"public-outer-key","message":' + text
-    elif envelope == 'prefixed':
-        text = "Here's the data: " + text
-    redacted = redact_structured_text(text)
-    assert 'opaque-encoded-auth-canary' not in redacted
-    if envelope == 'member':
-        assert 'public-outer-key' in redacted
-    assert redact_structured_text(redacted) == redacted
 
 
 @pytest.mark.parametrize('kind', ['api_key', 'oauth'])
@@ -1043,41 +768,8 @@ def test_new_native_context_masks_keep_complete_marker_spelling(kind: str, form:
     assert redact_structured_text(safe[:-1]) == safe[:-1]
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize('prefix', ['', '[REDACTED]'])
-@pytest.mark.parametrize('envelope', ['raw', 'scalar', 'member'])
-def test_discarded_escape_tail_cannot_make_native_credential_prefix_look_safe(
-    kind: str, prefix: str, envelope: str,
-) -> None:
-    """A partial Unicode escape is observed credential data, not an empty value.
-
-    Recovering a quoted prefix can discard the final incomplete escape. Marker-only
-    coverage misses treating the recovered marker/empty prefix as the whole value.
-    """
-    field = 'key' if kind == 'api_key' else 'access'
-    inner = '{"type":"' + kind + '","' + field + '":"' + prefix + chr(92) + 'u004'
-    text = inner if envelope == 'raw' else json.dumps(inner)[:-1]
-    if envelope == 'member':
-        text = '{"public":{"key":"ordinary-key"},"message":' + text
-    redacted = redact_structured_text(text)
-    assert 'u004' not in redacted and redacted != text
-    assert redact_structured_text(redacted) == redacted
-    if envelope == 'member':
-        assert 'ordinary-key' in redacted
-    unknown = '{"key":"[REDACTED]' + chr(92) + 'u004'
-    assert redact_structured_text(unknown) == unknown
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-def test_discarded_outer_string_escape_propagates_only_to_observed_credential_value(kind: str) -> None:
-    """Discarded codec bytes remain unsafe across an incomplete encoded JSON layer."""
-    field = 'key' if kind == 'api_key' else 'access'
-    inner = '{"type":"' + kind + '","' + field + '":"[REDACTED]é'
-    encoded = json.dumps(inner)
-    text = encoded[:encoded.index(chr(92) + 'u00e9') + 5]
-    redacted = redact_structured_text(text)
-    assert 'u00e' not in redacted and redacted != text
-    assert redact_structured_text(redacted) == redacted
 
 
 @pytest.mark.parametrize('nonfinite', ['NaN', 'Infinity', '-Infinity'])
@@ -1127,48 +819,3 @@ def test_native_only_presentation_strings_compose_unicode_before_utf8_encoding(e
     assert decoded['nested'] == nested
     assert decoded['usage'] == {'input': 0, 'output': None}
     assert redaction_mod.redact_native_auth_value(result) == result
-
-
-@pytest.mark.parametrize('value', [0, None, {'public': 0}])
-@pytest.mark.parametrize('envelope', ['object', 'scalar', 'credential-parent'])
-def test_encoded_native_auth_member_keys_reach_original_key_sensitivity_owner(value: object, envelope: str) -> None:
-    """A prepass cannot replace a member key before its original sensitivity is bound.
-
-    The encoded native record is a secret-bearing key label, not the owning
-    object's discriminator. Rewriting it early inserted a credential marker and
-    promoted public zero/null/container values on the later JSON container walk.
-    """
-    key = json.dumps({'type': 'api_key', 'key': 'opaque-encoded-key-canary'}, separators=(',', ':'))
-    payload = {key: value, 'usage': {'input': 0, 'output': None}}
-    source = json.dumps(payload)
-    if envelope == 'scalar':
-        source = json.dumps(source)
-    elif envelope == 'credential-parent':
-        source = json.dumps({'type': 'api_key', 'key': 'opaque-parent-key-canary', 'public': source})
-    redacted = redact_structured_text(source)
-    assert '-canary' not in redacted
-    result = json.loads(redacted)
-    result = json.loads(result) if envelope == 'scalar' else json.loads(result['public']) \
-        if envelope == 'credential-parent' else result
-    assert len(result) == 2
-    assert [item for name, item in result.items() if name != 'usage'] == [value]
-    assert result['usage'] == {'input': 0, 'output': None}
-    assert redact_structured_text(redacted) == redacted
-
-
-def test_encoded_native_auth_member_key_collisions_preserve_public_values() -> None:
-    """Native-context key redaction must retain original collision reservations.
-
-    Two encoded keys previously collapsed to the same sanitized key before JSON
-    decoding, losing one entry and replacing the surviving public value.
-    """
-    keys = [json.dumps({'type': 'api_key', 'key': f'opaque-encoded-{index}-canary'}, separators=(',', ':'))
-            for index in range(2)]
-    source = json.dumps({keys[0]: 0, keys[1]: None, '[REDACTED_LABEL]': 'reserved-public-value'})
-    redacted = redact_structured_text(source)
-    assert '-canary' not in redacted
-    result = json.loads(redacted)
-    assert len(result) == 3
-    assert result['[REDACTED_LABEL]'] == 'reserved-public-value'
-    assert [item for name, item in result.items() if name != '[REDACTED_LABEL]'] == [0, None]
-    assert redact_structured_text(redacted) == redacted

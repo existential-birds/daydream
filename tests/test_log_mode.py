@@ -17,7 +17,8 @@ import anyio
 import pytest
 from rich.console import Console
 
-from daydream.agent import _LogRedactingConsole, console as phases_console, run_agent
+from daydream.agent import run_agent
+from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -36,7 +37,7 @@ from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
-from daydream.ui.agent_stream import AgentDisplay, _print_log, _summarize_input, _summarize_output
+from daydream.ui.agent_stream import AgentDisplay
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -72,12 +73,22 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.parametrize(("events", "config_overrides", "required", "forbidden"),
     [
+        pytest.param([ToolStartEvent('t', 'TaskCreate', {'subject': 'Add rate limiting',
+            'description': 'Investigate and implement rate limiting for the API gateway',
+            'prompt': 'Add rate limiting'})], {'log_mode': True}, ('[tool:TaskCreate] Add rate limiting',),
+            ('Investigate and implement',), id='task-subject'),
+        pytest.param([ToolStartEvent('t', 'Bash', {'command': 'the config: token=opaque-summary-canary'})],
+            {'log_mode': True}, ('[REDACTED',), ('opaque-summary-canary',), id='structured-command'),
+        pytest.param([ToolResultEvent('t', 'Authorization: Basic dXNlcjpwYXNzd29yZA== more', False)],
+            {'log_mode': True}, ('[REDACTED',), ('dXNlcjpwYXNzd29yZA==',), id='basic-header-output'),
+        pytest.param([ToolResultEvent('t', 'x' * 190 + ' ' + 'ghp_' + 'y' * 18, False)],
+            {'log_mode': True}, ('[REDACTED',), ('ghp_',), id='output-crossing-cap'),
         # Sentinel-absence is asserted at the agent boundary in
         # test_log_mode_emission_redacts_sentinels_on_agent_path; marker presence
         # here proves the agent's `_print_log` redaction runs on the real path.
         # The forbidden tuples keep the log-mode markup-free invariant guarded:
         # captured stdout on this path is plain text (no Rich escape sequences).
-        pytest.param([TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
+        pytest.param([TextEvent(f"hello token={REDACTION_SENTINEL} world")],
             {"log_mode": True, "quiet": True, "output_mode": "review"}, ("hello", "[REDACTED_API_KEY]"),
             ("\x1b[", "[bold]", "[dim]"),
             id="plain-text",
@@ -116,42 +127,25 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
         ),
     ],
 )
-def test_log_mode_rendering(
-    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
+async def test_log_mode_rendering(
+    capsys: pytest.CaptureFixture[str],
     events: list[AgentEvent], config_overrides: dict[str, object], required: tuple[str, ...],
     forbidden: tuple[str, ...],
 ) -> None:
-    """Render only the event fields appropriate to each log-mode scenario."""
-    install_backend(ScriptedBackend(events=[*events, TextEvent("Update the changed code.")], retryable=False))
-    config = make_config(tiny_diff_target, non_interactive=True, **config_overrides,)
-    output = _capture_stdout_and_run(config, monkeypatch)
+    """Public AgentDisplay owns event routing; the CLI smoke owns runner integration."""
+    display = AgentDisplay(Console(file=io.StringIO()),
+        InteractionPolicy(log_mode=bool(config_overrides['log_mode'])), None, structured=False)
+    for event in events:
+        await display.observe(event)
+    await display.flush()
+    display.tools.finish_all()
+    output = capsys.readouterr().out
 
     for substring in required:
         assert substring in output
     for substring in forbidden:
         assert substring not in output
 
-def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
-    """A token straddling the 200-char summary boundary is redacted, not truncated
-    into an unmatchable fragment. Redact-after-slice would leak the raw 'ghp_'."""
-
-    # The space before the token is REQUIRED: `_API_KEY_PATTERN` anchors on `\b`,
-    # so a token glued directly after a word char is never matchable and the test
-    # would fail against BOTH implementations. With the space, redact_text matches
-    # the complete ``ghp_`` + 8 alnum token, while ``[:200]`` still cuts 9 chars
-    # into it — a redact-after implementation leaks the unmatchable ``ghp_yyyyy``
-    # fragment (the ``{6,}`` rule needs 6+ chars after the prefix).
-    command = "x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10   # [:200] cuts into the token
-    out = _summarize_input({"command": command}, "Bash")
-    assert "ghp_" not in out        # no raw fragment survives the 200-cut
-    assert "[REDACTED" in out       # redaction marker (even truncated) present
-
-    # Same boundary check on the output summary: a token straddling the [:200]
-    # first-line cut must be caught before strip/first-line/slice.
-
-    out = _summarize_output("x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10)
-    assert "ghp_" not in out
-    assert "[REDACTED" in out
 
 @pytest.mark.parametrize("name", ["Bash", "shell"])
 def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
@@ -183,44 +177,8 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
     assert event.input == {"command": command}
 
 
-def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
-    """The (command, description) preference is Bash-only in the --log summary.
-
-    TaskCreate/Agent inputs carry a long ``description`` field; the Bash-only pair must not shadow the short
-    ``subject`` the generic fallback surfaces (mirrors ``_derive_task_label``'s subject-before-description
-    ordering)."""
-
-    args: dict[str, object] = {
-        "subject": "Add rate limiting", "description": "Investigate and implement rate limiting for the API gateway",
-        "prompt": "Add rate limiting",
-    }
-    assert _summarize_input(args, "TaskCreate") == "Add rate limiting"
 
 
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
-async def test_log_tool_summary_preserves_native_auth_context_until_redaction(
-    credential_type: str, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Selecting a generic first string must not discard its credential type tag.
-
-    Existing summaries use self-identifying command text and cannot expose an
-    opaque key/access value selected from a complete typed native auth mapping.
-    Emit real tool events, preserving ordinary public keys and replayable input.
-    """
-    secret = 'opaque-ui-log-native-auth-canary'
-    values = ({'key': secret} if credential_type == 'api_key' else
-              {'access': secret + '-access', 'refresh': secret + '-refresh'})
-    values['type'] = credential_type
-    before = dict(values)
-    event = ToolStartEvent('credential', 'Inspect', values)
-    display = AgentDisplay(Console(file=io.StringIO()), InteractionPolicy(log_mode=True), None, structured=False)
-    await display.observe(event)
-    await display.observe(ToolStartEvent('public', 'Inspect', {'key': 'ordinary-public-key', 'type': 'record'}))
-    output = capsys.readouterr().out
-    assert output.count('[tool:Inspect]') == 2
-    assert secret not in output and '[REDACTED' in output
-    assert 'ordinary-public-key' in output
-    assert event.input == before
 
 @pytest.mark.parametrize('credential_type', ['api_key', 'oauth', 'public'])
 @pytest.mark.parametrize('closed_pipe', [False, True])
@@ -292,130 +250,41 @@ async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellat
     assert ''.join(event.text for event in events) == content
 
 
-def test_log_mode_summaries_redact_structured_credentials() -> None:
-    """Log-mode summaries must use the structured redactor, not the flat one.
-
-    Issue #455 broadens structured credential redaction. Flat ``redact_text`` leaks structured credentials that
-    ``redact_structured_text`` catches -- e.g. a nested ``key=value`` assignment (``token=opaque-test-12345``) and
-    a Basic auth header's base64 credential. These flow through the real agent summary paths (``_summarize_input``
-    / ``_summarize_output`` / ``_print_log``), so a flat-only redactor would print the secret in --log mode."""
-
-    # Nested assignment under a sensitive key: flat redaction leaks the token.
-    out = _summarize_input({"command": "the config: token=opaque-test-12345"}, "Bash")
-    assert "opaque-test-12345" not in out
-    assert "[REDACTED" in out
-
-    # Basic auth header value (base64): flat redaction leaks it.
-    out = _summarize_output("Authorization: Basic dXNlcjpwYXNzd29yZA== more")
-    assert "dXNlcjpwYXNzd29yZA==" not in out
-    assert "[REDACTED" in out
-
-    # And the direct _print_log emitter on a command with a structured pair.
-
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        _print_log("run: token=opaque-test-12345 done")
-    assert "opaque-test-12345" not in buf.getvalue()
-    assert "[REDACTED" in buf.getvalue()
-
-def test_log_mode_console_redacts_string_payloads() -> None:
-    """phases.py imports agent's module-level console; in --log mode that console redacts string payloads, so
-    phase/UI output (e.g. the failure handoff body) cannot bypass the log-mode redaction boundary."""
-
-    sentinel = REDACTION_SENTINEL
-    buffer = io.StringIO()
-    rec = _LogRedactingConsole(file=buffer, force_terminal=True, width=100)
-
-    with bind_run_context(RunContext(InteractionPolicy())):
-        # Normal mode: raw pass-through (Rich UI is unredacted by design).
-        rec.print(f"handoff token={sentinel}")
-        assert sentinel in buffer.getvalue()
-
-    # --log mode: the same emission path is redacted at the console boundary.
-    buffer.truncate(0)
-    buffer.seek(0)
-    with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
-        rec.print(f"handoff token={sentinel}")
-        out = buffer.getvalue()
-        # Rich's highlighter splits the marker's brackets into styled spans, so
-        # assert on the marker body (and the sentinel's absence) rather than the
-        # exact bracketed string.
-        assert "REDACTED_API_KEY" in out
-        assert sentinel not in out
 
 
-class _CredentialSummarizerBackend(ScriptedBackend):
-    """Yield a credential-bearing FAILURE_SUMMARIZER_SCHEMA result.
 
-    The shared ScriptedBackend surface drives real run_agent and failure summarization.
-    """
 
-    def __init__(self, body: str) -> None:
-        super().__init__(
-            events=[TextEvent(text=""), ResultEvent(structured_output={"handoff_prompt": body}, continuation=None)]
-        )
-
-@pytest.mark.asyncio
+@pytest.mark.parametrize('log_mode', [False, True])
 async def test_log_mode_failure_handoff_redacts_credential_body(
-    git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
+    git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str], log_mode: bool,
 ) -> None:
-    """Integration regression (issue #547): driving the REAL _emit_failure_handoff with a credential-bearing
-    summarizer body under --log mode must not leak the raw token to stdout. The console-level _LogRedactingConsole
-    boundary is the mechanism (RD-1); this proves it on the real handoff path."""
+    """The actual failure handoff owns the mode-dependent console boundary."""
+    backend = ScriptedBackend(events=[TextEvent(''), ResultEvent(
+        structured_output={'handoff_prompt': f'token {REDACTION_SENTINEL}'}, continuation=None)])
+    with bind_run_context(RunContext(InteractionPolicy(log_mode=log_mode))):
+        await _emit_failure_handoff(backend, make_work(git_repo), 'failing test output',
+                                   offer_clipboard=False, allow_standalone=True)
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert (REDACTION_SENTINEL in output) is not log_mode
+    if log_mode:
+        assert 'REDACTED' in output
 
-    # False-pass trap: the module console phases.py binds MUST be the redacting
-    # console, otherwise a passing test would mean nothing.
-    assert type(phases_console).__name__ == "_LogRedactingConsole", (
-        "phases.py no longer binds the log-redacting console — the redaction "
-        "boundary for issue #547 is broken"
-    )
-
-    sentinel = "ghp_" + "A" * 12   # matches _API_KEY_PATTERN (ghp_ + >=6 alnum)
-    work = make_work(git_repo)
-    # Stub backend returns the credential-bearing summarizer body as structured
-    # handoff_prompt (real run_agent path, backend mocked only).
-    backend = _CredentialSummarizerBackend(f"token {sentinel}")
-
-    with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
-        await _emit_failure_handoff(backend, work, "failing test output", offer_clipboard=False, allow_standalone=True,
-        )
-        captured = capsys.readouterr()
-        out = captured.out + captured.err
-        assert sentinel not in out   # raw token never reaches stdout
-        assert "REDACTED" in out     # redaction marker present
-
-def test_log_mode_trajectory_still_written(
-    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that --log mode still writes trajectory file (recorder unaffected)."""
-    install_backend(ScriptedBackend(events=[TextEvent("generating trajectory")], retryable=False))
-
-    trajectory_path = tmp_path / "trajectory.json"
-
-    config = make_config(
-        tiny_diff_target, log_mode=True, quiet=True, output_mode="review", trajectory_path=trajectory_path,
-    )
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify trajectory file was created
-    assert trajectory_path.exists(), "Trajectory file should be written even in log mode"
-
-    # Verify log output still works
-    assert "generating trajectory" in output
 
 def test_verbose_flag_invocation_reaches_log_mode_pipeline(
-    tiny_diff_target: Path, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """The real --verbose flag (not a config dict) drives log_mode end-to-end."""
-    install_backend(ScriptedBackend(events=[TextEvent(f"token=hello {REDACTION_SENTINEL} world")], retryable=False,))
+    install_backend(ScriptedBackend(events=[TextEvent(f"hello token={REDACTION_SENTINEL} world")], retryable=False,))
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda repo, **_kwargs: ("test", "repo"))
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None)
-    config = _parse_args(["--verbose", str(tiny_diff_target)])
+    trajectory = tmp_path / "trajectory.json"
+    config = _parse_args(["--verbose", "--trajectory", str(trajectory), str(tiny_diff_target)])
     assert config.log_mode is True
     output = _capture_stdout_and_run(config, monkeypatch)
     assert "hello" in output
     assert "[REDACTED_API_KEY]" in output     # redaction markers unchanged
     assert "\x1b[" not in output              # plain text, no Rich escapes
+    document = json.loads(trajectory.read_bytes())
+    assert atif_validate(document, validate_images=False)
+    assert REDACTION_SENTINEL not in trajectory.read_text()

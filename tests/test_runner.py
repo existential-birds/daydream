@@ -1558,43 +1558,17 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     assert identity.deep is not shallow
 
 
-@pytest.mark.parametrize(("source", "expected_model"), [
-    ("frozen", "operator-frozen-model"), ("empty", DEFAULT_PI_MODEL),
-    ("cwd", "case-model"), ("ambient", "case-model"), ("explicit", "phase-explicit-model"),
+
+
+@pytest.mark.parametrize(('source', 'expected_model'), [
+    ('frozen', 'operator-frozen-model'), ('empty', DEFAULT_PI_MODEL),
+    ('cwd', 'case-model'), ('ambient', 'case-model'), ('explicit', 'phase-explicit-model'),
 ])
-def test_manifest_pi_model_preserves_native_execution_precedence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, expected_model: str,
-) -> None:
-    """Persisted model identity must honor frozen defaults rather than case settings.
-
-    The per-stack tier tests above cover RunConfig overrides but miss native Pi
-    model resolution from an embedded execution capability in another cwd.
-    """
-    case = tmp_path / "case"
-    (case / ".pi").mkdir(parents=True)
-    (case / ".pi/settings.json").write_text(json.dumps({"defaultModel": "case-model"}))
-    agent_dir = tmp_path / "agent"
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
-    execution = BackendExecutionInput.from_environment({"PI_CODING_AGENT_DIR": str(agent_dir)}, backend="pi")
-    if source in {"frozen", "empty", "explicit"}:
-        execution = replace(execution,
-                            pi_settings={} if source == "empty" else {"defaultModel": "operator-frozen-model"})
-    config = RunConfig(backend="pi", model="phase-explicit-model" if source == "explicit" else None)
-    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), case,
-                                            execution_input=None if source == "ambient" else execution)
-    assert identity.per_stack_review_backend == "pi"
-    assert identity.per_stack_review_model == expected_model
-
-
 async def test_runner_archive_manifest_uses_per_stack_native_capability(
     feature_branch_repo: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    fake_gh: Any,
+    fake_gh: Any, source: str, expected_model: str,
 ) -> None:
-    """A mixed-backend run must archive the Pi phase's frozen model identity.
-
-    Direct manifest tests cannot detect runner routing the general Claude
-    capability to manifest capture while its per-stack backend receives Pi's.
-    """
+    """Actual archive identity must use the Pi capability and native model precedence."""
     from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 
     (feature_branch_repo / ".pi").mkdir()
@@ -1603,19 +1577,23 @@ async def test_runner_archive_manifest_uses_per_stack_native_capability(
     _commit(feature_branch_repo, "case native defaults")
     environment = {"PI_CODING_AGENT_DIR": str(tmp_path / "agent")}
     fallback = BackendExecutionInput.from_environment(environment, backend="claude")
-    pi = replace(BackendExecutionInput.from_environment(environment, backend="pi"),
-                 pi_settings={"defaultModel": "operator-frozen-model"})
-    execution = runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends={"claude": fallback, "pi": pi})
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', environment['PI_CODING_AGENT_DIR'])
+    pi = BackendExecutionInput.from_environment(environment, backend='pi')
+    if source in {'frozen', 'empty', 'explicit'}:
+        pi = replace(pi, pi_settings={} if source == 'empty' else {'defaultModel': 'operator-frozen-model'})
+    execution = runner.RunnerExecutionInput(fallback, GitHubExecutionInput(),
+        backends={'claude': fallback, 'pi': None if source == 'ambient' else pi})
     monkeypatch.setattr(runner, "create_backend", lambda _name, **kwargs:
                         EmptyReviewBackend(kwargs.get("cwd") or feature_branch_repo))
-    config = empty_review_config(feature_branch_repo, tmp_path / "trajectory.json", archive=True,
-        file_config=DaydreamFileConfig(backend="claude", phases={"per_stack_review": {"backend": "pi"}}))
+    phase = {'backend': 'pi', **({'model': 'phase-explicit-model'} if source == 'explicit' else {})}
+    config = empty_review_config(feature_branch_repo, tmp_path / 'trajectory.json', archive=True,
+        file_config=DaydreamFileConfig(backend='claude', phases={'per_stack_review': phase}))
     assert await runner.run(config, execution=execution,
                             private_roots=private_root_locations(base=tmp_path / "private")) == 0
     _, archived_run = _assert_one_published_run(feature_branch_repo, archive_dir)
     manifest = json.loads((archived_run / "manifest.json").read_text())["run"]
     assert manifest["backend"] == "claude" and manifest["per_stack_review_backend"] == "pi"
-    assert manifest["per_stack_review_model"] == "operator-frozen-model"
+    assert manifest["per_stack_review_model"] == expected_model
 
 
 async def test_overlapping_posting_runs_keep_their_own_github_auth(
