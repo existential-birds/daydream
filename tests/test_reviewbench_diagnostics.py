@@ -266,7 +266,11 @@ async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
             assert outside.read_text() == '{"private": "outside-receipt-canary"}'
 
 
-@pytest.mark.parametrize('label_kind', ['api_key', 'marker_json'])
+@pytest.mark.parametrize('label_kind', [
+    'api_key', 'marker_json', 'scheme_token', 'scheme_suffix', 'marker_after_bare_value',
+    'marker_after_quoted_value', 'marker_prefixed_value', 'repeated_marker_prefixed_value',
+    'sensitive_container', 'duplicate_sensitive_container',
+])
 @pytest.mark.parametrize('identified_dispatch', [False, True], ids=['legacy-fork', 'identified-dispatch'])
 async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_publication(
     tmp_path: Path, identified_dispatch: bool, label_kind: str,
@@ -294,6 +298,24 @@ async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_p
     if label_kind == 'marker_json':
         canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
         labels = [json.dumps({'api_key': '[REDACTED] ' + canary}) for canary in canaries]
+    elif label_kind != 'api_key':
+        canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
+        if label_kind == 'sensitive_container':
+            labels = [json.dumps({'api_key': {'v': canary}}) for canary in canaries]
+        elif label_kind == 'duplicate_sensitive_container':
+            labels = ['{"outer":{"api_key":{"v":"' + canary + '"}},"outer":{}}' for canary in canaries]
+        elif label_kind == 'scheme_token':
+            labels = ['auth=Bearer [REDACTED]' + canary for canary in canaries]
+        elif label_kind == 'scheme_suffix':
+            labels = ['auth=Bearer ' + canary + '[REDACTED]' for canary in canaries]
+        elif label_kind == 'marker_prefixed_value':
+            labels = ['refresh_token=[REDACTED]' + canary for canary in canaries]
+        elif label_kind == 'repeated_marker_prefixed_value':
+            labels = ['refresh_token=[REDACTED][REDACTED_API_KEY]' + canary for canary in canaries]
+        elif label_kind == 'marker_after_bare_value':
+            labels = ['refresh_token=' + canary + ' [REDACTED]' for canary in canaries]
+        else:
+            labels = ['refresh_token="' + canary + '" [REDACTED]' for canary in canaries]
     async with root:
         async with dispatch_scope(root if identified_dispatch else None, phase=DaydreamPhase.DEEP,
                                   descriptors=labels) as dispatch:
