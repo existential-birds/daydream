@@ -6,18 +6,6 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-Embedded consumers may pass `review_result_handler` to `runner.run`. It receives
-one `FinalizedReview` from the actual terminal boundary: validated canonical
-items, the frozen typed terminal result (including run/source identity), and
-configured phase policy, observed native request identities and available usage.
-Usage uses the trajectory recorder's single-owner totals after review writers
-join; missing dimensions remain absent and observed zeros remain zero. It requires
-no GitHub publication target. The integer
-return remains the workflow exit code; missing delivery is unavailable analysis.
-Valid partial findings survive analysis failure. Consumer mutation cannot change
-the native result; consumer exceptions fail the invocation. This handoff does
-not establish later artifact, capture or external publication success.
-
 `--findings-out` uses schema version 2 with `terminal_result` version 1.
 Producer and poster must use the same reviewed revision. Diagram artifacts carry
 no review coverage; old/unknown schemas are rejected.
@@ -63,15 +51,6 @@ runs in an operational worktree. Join writers before freezing evidence. Tracked
 artifact paths cause refusal; competing bytes survive conflicts. Output-publication
 failure restores prior checkout artifacts. Optional archive, evaluation, index,
 or upload failure preserves completed review outputs and emits safe diagnostics.
-
-Embedded hosts may supply `RunnerExecutionInput.on_trajectory_snapshot` to
-observe validated immutable `RunWriteSnapshot` bytes. This optional synchronous
-diagnostic observer owns its persistence/availability receipts; errors cannot veto
-native artifact finalization. Partial snapshots carry active root/fork references
-and a common cutoff, distinct from completed review authority. Consumers must
-publish a coherent document set atomically and preserve prior valid checkpoints
-on interruption, without reading/copying mutable private artifact trees. See the
-[ReviewBench readout](benchmark.md#investigating-interrupted-public-trials-offline).
 
 Pass generated model inputs through exact sanctioned paths or bounded inline
 contents; private storage is discovery isolation, not an OS sandbox. Never broaden
