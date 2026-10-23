@@ -24,11 +24,12 @@ class LocalReviewerEnvironment:
     """Buffered exec with Harbor's cancellation boundary: children outlive awaits."""
 
     def __init__(self, environment: dict[str, str], repository: Path, *,
-                 publication_fault: str | None = None, close_stdout: bool = False) -> None:
+                 publication_fault: str | None = None, close_stdout: bool = False, foreign_stderr: bytes = b'') -> None:
         self.environment = environment
         self.repository = repository
         self.publication_fault = publication_fault
         self.close_stdout = close_stdout
+        self.foreign_stderr = foreign_stderr
         self.results: list[SimpleNamespace] = []
         self.children: list[asyncio.subprocess.Process] = []
         self.collectors: list[asyncio.Task[tuple[bytes, bytes]]] = []
@@ -37,12 +38,13 @@ class LocalReviewerEnvironment:
         arguments = shlex.split(command)
         assert arguments[0] == 'python'
         arguments[0] = sys.executable
-        if self.publication_fault is not None and arguments[1:4] == [
+        if (self.publication_fault is not None or self.foreign_stderr) and arguments[1:4] == [
             '-I', '-m', 'daydream.benchmark.reviewbench.harbor_process',
         ]:
             # Patch the actual filesystem install only in the supervisor. The
             # production entrypoint/native CLI remain separate, unpatched children.
-            bootstrap = ('import errno,os,runpy,sys\nfrom pathlib import Path\n'
+            bootstrap = ('import errno,os,runpy,sys\nfrom pathlib import Path\n' +
+                f'os.write(2,{self.foreign_stderr!r})\n' +
                 'original_link = os.link\n'
                 'def fail_link(source,destination,**kwargs):\n'
                 f'    if Path(destination).name == {self.publication_fault!r}:\n'
@@ -310,12 +312,20 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('diagnostic_failure', [
-    'none', 'log_conflict', 'receipt_conflict', 'log_symlink', 'receipt_symlink',
-    'supervisor_enospc', 'host_fallback_enospc', 'closed_collector_pipe',
+@pytest.mark.parametrize('diagnostic_failure,foreign_stderr', [
+    pytest.param('none', b'', id='none'),
+    pytest.param('log_conflict', b'', id='log_conflict'),
+    pytest.param('receipt_conflict', b'', id='receipt_conflict'),
+    pytest.param('log_symlink', b'', id='log_symlink'),
+    pytest.param('receipt_symlink', b'', id='receipt_symlink'),
+    pytest.param('supervisor_enospc', b'', id='supervisor_enospc'),
+    pytest.param('host_fallback_enospc', b'', id='host_fallback_enospc'),
+    pytest.param('closed_collector_pipe', b'', id='closed_collector_pipe'),
+    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', id='foreign_stderr'),
 ])
 async def test_completed_process_review_keeps_native_result_and_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
+    foreign_stderr: bytes,
 ) -> None:
     """Process supervision must preserve the ordinary scorable successful path.
 
@@ -323,6 +333,9 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
     this runs a scripted successful native review through the production host.
     Optional diagnostic install failures must preserve the actual successful
     native result; finalized native evidence/findings remain authoritative.
+    A real executable bootstrap emits harmless foreign stderr in one row: an
+    aggregate output-size assertion otherwise mistakes runtime warnings for
+    oversized Daydream diagnostics, which quiet process fixtures cannot expose.
     """
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
@@ -334,7 +347,7 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']),
         publication_fault='reviewer-process.json' if diagnostic_failure == 'supervisor_enospc' else None,
-        close_stdout=diagnostic_failure == 'closed_collector_pipe')
+        close_stdout=diagnostic_failure == 'closed_collector_pipe', foreign_stderr=foreign_stderr)
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
     protected: Path | None = None
     destination: Path | None = None
@@ -377,12 +390,25 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
         if protected is not None and destination is not None:
             assert protected.read_text() == 'prior competing diagnostic bytes'
             assert destination.read_text() == 'prior competing diagnostic bytes'
+        captured = capfd.readouterr()
+        all_output = captured.out + captured.err + ''.join(
+            (result.stdout or '') + (result.stderr or '') for result in local.results)
+        diagnostics = [line for line in all_output.splitlines() if line.startswith('ReviewBench ')]
         if diagnostic_failure != 'none':
-            captured = capfd.readouterr()
-            diagnostics = captured.err + ''.join(result.stderr for result in local.results)
-            assert 'diagnostics unavailable' in diagnostics
-            assert 'errno=' in diagnostics and len(diagnostics) < 1024
-            assert 'publication-secret-canary' not in diagnostics
+            surface, error, code = {
+                'host_fallback_enospc': ('host log', 'OSError', errno.ENOSPC),
+                'closed_collector_pipe': ('process output', 'BrokenPipeError', errno.EPIPE),
+                'supervisor_enospc': ('process', 'OSError', errno.ENOSPC),
+            }.get(diagnostic_failure, ('process', 'FileExistsError', errno.EEXIST))
+            assert diagnostics == [f'ReviewBench {surface} diagnostics unavailable ({error}; errno={code}).']
+            assert sum(len(line.encode()) + 1 for line in diagnostics) < 1024
+        else:
+            assert diagnostics == []
+        if foreign_stderr:
+            assert foreign_stderr.decode() in all_output
+        for canary in ('publication-secret-canary', 'private-refresh-canary', 'private-id-canary',
+                       'forbidden-api-canary', 'forbidden-github-canary'):
+            assert canary not in all_output
     finally:
         await local.close()
 
