@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -955,17 +956,25 @@ async def _run_agent(
                         _emit_ladder_stop("retry_attempts_exhausted")
                     raise
                 finally:
-                    if telemetry.attempt_started_at is not None:
-                        # Post-stop cleanup (the bounded backend aclose) is not
-                        # dispatched-attempt time: exclude it so backend_s keeps
-                        # its documented 'time inside dispatched attempts'
-                        # semantics and backend_s + backoff_s can never exceed
-                        # elapsed_s (which already subtracts cleanup_elapsed_s).
-                        charged = telemetry.charge_attempt(
-                            clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
-                        )
-                        if telemetry.attempt_is_retry:
-                            recovery.charge(charged)
+                    primary_error = sys.exception()
+                    try:
+                        display.finish_log_text()
+                    except Exception as exc:  # noqa: BLE001 - preserve the active attempt failure
+                        if primary_error is None:
+                            raise
+                        primary_error.add_note(f"Log text unavailable ({type(exc).__name__[:64]})")
+                    finally:
+                        if telemetry.attempt_started_at is not None:
+                            # Post-stop cleanup (the bounded backend aclose) is not
+                            # dispatched-attempt time: exclude it so backend_s keeps
+                            # its documented 'time inside dispatched attempts'
+                            # semantics and backend_s + backoff_s can never exceed
+                            # elapsed_s (which already subtracts cleanup_elapsed_s).
+                            charged = telemetry.charge_attempt(
+                                clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
+                            )
+                            if telemetry.attempt_is_retry:
+                                recovery.charge(charged)
 
             # Emit at most one stop record. In-flight deadline stops retain partials;
             # pre-dispatch stops discard them. Recorder failure cannot change the return value.

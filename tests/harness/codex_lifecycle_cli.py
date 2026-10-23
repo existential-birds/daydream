@@ -55,13 +55,15 @@ def install_codex_lifecycle_cli(
     root: Path, *, mode: LifecycleMode = "healthy", fix_modes: dict[str, LifecycleMode] | None = None,
     structure_mode: LifecycleMode | None = None, shutdown_delay_s: float = 0.0,
     empty_reviews: bool = False, spawn_on_term: bool = False,
+    tool_output_path: Path | None = None,
 ) -> CodexLifecycleCli:
     root = root.resolve()
     for name in ("bin", "observations", "controls", "fix_started"):
         (root / name).mkdir(parents=True)
     config = {"root": str(root), "mode": mode, "fix_modes": fix_modes or {},
               "structure_mode": structure_mode, "shutdown_delay_s": shutdown_delay_s, "empty_reviews": empty_reviews,
-              "spawn_on_term": spawn_on_term}
+              "spawn_on_term": spawn_on_term,
+              "tool_output_path": None if tool_output_path is None else str(tool_output_path)}
     executable = root / "bin" / "codex"
     executable.write_text(
         f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n" + Path(__file__).read_text(), encoding="utf-8",
@@ -182,6 +184,17 @@ def _run() -> int:
     _emit({"type": "thread.started", "thread_id": f"synthetic-{os.getpid()}"})
     _emit({"type": "item.completed", "item": {"type": "agent_message", "id": "initial",
                                                "text": "Synthetic initial commentary", "phase": "commentary"}})
+    if input_path := _FIXTURE_CONFIG.get("tool_output_path"):
+        # This operator-owned fixture input is read by the real CLI process;
+        # its public tool event must traverse native decoding and recording.
+        command = "cat " + str(input_path)
+        _emit({"type": "item.started", "item": {"type": "command_execution", "id": "fixture-input",
+                                                  "command": command, "status": "in_progress"}})
+        payload = {"data": json.loads(Path(input_path).read_text()),
+                   "public": {"type": "record", "key": "ordinary-public-key"},
+                   "usage": {"input": 0, "output": None}}
+        _emit({"type": "item.completed", "item": {"type": "command_execution", "id": "fixture-input",
+                "command": command, "status": "completed", "aggregated_output": json.dumps(payload), "exit_code": 0}})
     if mode == "preterminal_silence":
         if _FIXTURE_CONFIG.get("spawn_on_term"):
             def spawn_and_exit(signum: int, frame: Any) -> None:

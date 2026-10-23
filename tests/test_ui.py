@@ -30,6 +30,7 @@ from daydream.ui import (
     print_verification_summary,
     render_exploration_summary,
 )
+from daydream.ui.agent_stream import AgentDisplay
 from daydream.ui.colorize import render_segments
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
@@ -194,6 +195,111 @@ def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
     registry.remove("reused")
     assert list(registry.iter_active_panels()) == []
     assert not console._live_stack
+
+
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+@pytest.mark.parametrize('layout', ['wrapped', 'line_cut'])
+async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
+    credential_type: str, layout: str,
+) -> None:
+    """Rich must not destroy auth-object context before sanitizing its result.
+
+    Existing display tests cover shaped command strings, not opaque generic
+    credential fields whose type tag can be beyond the displayed line cap.
+    Exercise real event presentation and Console wrapping, retaining public keys
+    and the original host result rather than blanking or mutating the payload.
+    """
+    secret = 'opaque-ui-native-auth-canary'
+    credentials = ({'key': secret} if credential_type == 'api_key' else
+                   {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    payload: dict[str, object] = {**credentials, 'public': {'key': 'ordinary-public-key'}}
+    if layout == 'line_cut':
+        payload.update({f'public_{index}': index for index in range(30)})
+    payload['type'] = credential_type
+    content = json.dumps(payload, indent=2 if layout == 'line_cut' else None)
+    event = ToolResultEvent('credential', content, is_error=False)
+    console = Console(file=StringIO(), record=True, width=42, force_terminal=False)
+    display = AgentDisplay(console, InteractionPolicy(), None, structured=False)
+    await display.observe(ToolStartEvent('credential', 'Read', {'file_path': 'fixture-input.json'}))
+    await display.observe(event)
+    display.tools.finish_all()
+    rendered = ''.join(console.export_text().replace('│', '').split())
+    assert secret not in rendered
+    assert 'ordinary-public-key' in rendered and '[REDACTED' in rendered
+    assert event.output == content
+
+
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+@pytest.mark.parametrize('route', ['panel', 'callback', 'thinking', 'log'])
+async def test_text_displays_redact_complete_native_auth_before_selecting_or_formatting(
+    credential_type: str, route: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Display copies must retain split auth context and redact before line/cap cuts.
+
+    Command and tool-result tests do not own accumulated narration, last-line
+    callbacks or the thinking cap. Real Rich/callback/log emissions must protect
+    opaque fields while raw public events remain unchanged.
+    """
+    secret = 'opaque-ui-text-native-auth-canary'
+    fields = ({'key': secret} if credential_type == 'api_key' else
+              {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    public = {'public': {'key': 'ordinary-public-key'}}
+    payload = ({**fields, **public, 'padding': 'x' * 400, 'type': credential_type} if route == 'thinking' else
+               {'type': credential_type, **fields, **public})
+    content = json.dumps(payload).replace(', "', ',\n"', 1)
+    console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
+    callback: list[Text] = []
+    display = AgentDisplay(console, InteractionPolicy(log_mode=route == 'log'),
+        callback.append if route == 'callback' else None, structured=False)
+    if route == 'thinking':
+        thinking = ThinkingEvent(content)
+        await display.observe(thinking)
+        assert thinking.text == content
+    else:
+        split = content.index(secret)
+        events = [TextEvent(content[:split]), TextEvent(content[split:])]
+        for event in events:
+            await display.observe(event)
+        await display.flush()
+        display.text.finish()
+        assert ''.join(event.text for event in events) == content
+    display.tools.finish_all()
+    rendered = console.export_text() + '\n'.join(value.plain for value in callback) + capsys.readouterr().out
+    visible = ''.join(rendered.replace('│', '').split())
+    assert secret not in visible
+    assert 'ordinary-public-key' in visible and '[REDACTED' in visible
+
+
+@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
+@pytest.mark.parametrize('route', ['direct', 'callback', 'panel'])
+async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
+    credential_type: str, route: str,
+) -> None:
+    """Public callback formatting must not expose a bare value after losing its tag.
+
+    The panel and verbose paths do not cover the exported formatter or real
+    callback route. Preserve their ordinary literal-key and raw-input contract.
+    """
+    secret = 'opaque-ui-callback-native-auth-canary'
+    values: dict[str, object] = ({'key': secret} if credential_type == 'api_key' else
+                                 {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    values['type'] = credential_type
+    before = dict(values)
+    public: dict[str, object] = {'key': 'ordinary-public-key', 'type': 'record'}
+    console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
+    lines: list[Text] = []
+    if route == 'direct':
+        lines = [format_callback_progress('Inspect', values, None), format_callback_progress('Inspect', public, None)]
+    else:
+        display = AgentDisplay(console, InteractionPolicy(),
+            lines.append if route == 'callback' else None, structured=False)
+        await display.observe(ToolStartEvent('credential', 'Inspect', values))
+        await display.observe(ToolStartEvent('public', 'Inspect', public))
+        display.tools.finish_all()
+    rendered = ''.join((console.export_text() + '\n'.join(line.plain for line in lines)).replace('│', '').split())
+    assert secret not in rendered and '[REDACTED' in rendered
+    assert 'ordinary-public-key' in rendered
+    assert values == before
 
 
 def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:

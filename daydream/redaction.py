@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from daydream.credential_patterns import (
@@ -118,7 +119,8 @@ def redact_value(value: Any, sensitive: bool = False) -> Any:
         return {
             (redact_text(k) if isinstance(k, str) else k): redact_value(
                 v, sensitive or (_is_sensitive_key(k) if isinstance(k, str) else False)
-            )
+            ) if sensitive or not isinstance(k, str) or not _is_native_credential_field(k, value)
+            else _redact_sensitive_text(v)
             for k, v in value.items()
         }
     if isinstance(value, list):
@@ -184,6 +186,59 @@ def _is_sensitive_key(key: str) -> bool:
     if any(normalized.endswith(f"_{member}") for member in _SENSITIVE_KEY_SUFFIXES):
         return True
     return any(segment in _SENSITIVE_KEY_SUFFIXES for segment in normalized.split("_"))
+
+
+_NATIVE_CREDENTIAL_FIELDS = {'api_key': frozenset({'key'}), 'oauth': frozenset({'access', 'refresh'})}
+
+
+def _is_native_credential_field(key: str, container: Mapping[str, Any]) -> bool:
+    """Admitted native credentials use generic string fields under an explicit tag."""
+    kind = container.get('type')
+    item = container.get(key)
+    return (isinstance(kind, str) and key in _NATIVE_CREDENTIAL_FIELDS.get(kind, frozenset())
+            and isinstance(item, str) and bool(item.strip()))
+
+
+def _redact_native_auth_value(value: Any) -> Any:
+    """Copy presentation data, redacting only observed native credential context.
+
+    Ordinary keys, search patterns, paths and nonstring leaves remain unchanged;
+    the full recorder/Bash text policy remains owned by the existing redactors.
+    """
+    if isinstance(value, dict):
+        return {key: (_redact_sensitive_text(item) if isinstance(key, str)
+                      and _is_native_credential_field(key, value) else _redact_native_auth_value(item))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_native_auth_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_native_auth_value(item) for item in value)
+    if isinstance(value, str):
+        return _redact_native_credential_objects(value)
+    return value
+
+
+def _utf8_native_presentation(value: Any) -> Any:
+    """Encode final string leaves once after raw native-context composition."""
+    if isinstance(value, str):
+        return value.encode('utf-8', errors='backslashreplace').decode('utf-8')
+    if isinstance(value, dict):
+        return {key: _utf8_native_presentation(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_utf8_native_presentation(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_utf8_native_presentation(item) for item in value)
+    return value
+
+
+def redact_native_auth_value(value: Any) -> Any:
+    """Return a fresh native-context-only presentation copy with UTF-8-safe text.
+
+    Ordinary keys/search patterns/paths and value types keep their policy. Compose
+    nested JSON privately before encoding final leaves so code points are not
+    double-escaped. The full recorder/Bash text policy remains separate.
+    """
+    return _utf8_native_presentation(_redact_native_auth_value(value))
 
 
 # Match headers case-insensitively at line start or embedded in output.
@@ -649,7 +704,7 @@ def _redact_json_container(value: Any) -> Any:
         for key, item in value.items():
             # Keys are text too. Avoid JSON decoding here: a JSON-looking key
             # remains a label, and ordinary formatting must remain unchanged.
-            sensitive_key = _is_sensitive_key(key)
+            sensitive_key = _is_sensitive_key(key) or _is_native_credential_field(key, value)
             safe_key = _redact_unstructured_text(key)
             if safe_key != key:
                 if not sensitive_key and _is_sensitive_key(safe_key):
@@ -677,9 +732,182 @@ def _redact_json_container(value: Any) -> Any:
     return value
 
 
+@dataclass
+class _CredentialTextObject:
+    start: int
+    end: int
+    replacement: str | None = None
+    kinds: set[str] = field(default_factory=set)
+    unsafe_fields: set[str] = field(default_factory=set)
+    pending_key: str | None = None
+    pending_end: int = 0
+
+
+def _quoted_credential_token(token: str) -> str | None:
+    """Decode a complete quoted token; incomplete tokens establish no type tag."""
+    if token.startswith("'"):
+        if len(token) < 2 or not token.endswith("'"):
+            return None
+        token = '"' + token[1:-1].replace("\\'", "'").replace('"', '\\"') + '"'
+    try:
+        value = json.loads(token)
+    except ValueError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _credential_string_prefix(token: str) -> tuple[str, int] | None:
+    """Inspect a bounded incomplete escape tail without inventing a discriminator."""
+    for removed in range(min(6, len(token) - 1) + 1):
+        prefix = token[:len(token) - removed] if removed else token
+        decoded = _quoted_credential_token(prefix + token[0])
+        if decoded is not None:
+            return decoded, removed
+    return None
+
+
+def _credential_quote_end(text: str, start: int) -> int:
+    """Consume one quoted token deterministically, including malformed escapes."""
+    offset = start + 1
+    while offset < len(text):
+        if text[offset] == text[start]:
+            return offset + 1
+        offset += 2 if text[offset] == '\\' else 1
+    return len(text)
+
+
+def _redact_native_credential_objects(
+    text: str, *, discarded_tail: bool = False, defer_keys: bool = False,
+) -> str:
+    """Withhold observed credential objects in malformed/partial JSON text.
+
+    This private scan retains only member/container scope. Complete inner objects
+    reuse the JSON sanitizer; interrupted secret objects are withheld. Prose
+    quotes cannot hide a following object or promote a quoted tag onto its parent.
+    """
+    stack: list[_CredentialTextObject | None] = []
+    objects: list[_CredentialTextObject] = []
+    offset = 0
+    while offset < len(text):
+        character = text[offset]
+        if character in '{[':
+            if stack and stack[-1] is not None:
+                stack[-1].pending_key = None
+            scope = _CredentialTextObject(offset, len(text)) if character == '{' else None
+            stack.append(scope)
+            if scope is not None:
+                objects.append(scope)
+            offset += 1
+            continue
+        if character in '}]':
+            if stack and ((stack[-1] is None) == (character == ']')):
+                closed = stack.pop()
+                if closed is not None:
+                    closed.end = offset + 1
+            offset += 1
+            continue
+        if character not in "\"'":
+            offset += 1
+            continue
+        previous = offset - 1
+        while previous >= 0 and text[previous].isspace():
+            previous -= 1
+        body = offset + 1
+        while body < len(text) and text[body].isspace():
+            body += 1
+        structured_string = bool(stack) and previous >= 0 and text[previous] in '{[,:'
+        encoded_object = character == '"' and body < len(text) and text[body] in '{['
+        if not structured_string and not encoded_object and not (character == '"' and previous < 0):
+            offset += 1
+            continue
+        end = _credential_quote_end(text, offset)
+        # An unmatched prose quotation can end at the following JSON key's quote.
+        # A top-level scalar string must occupy the whole input unless its body
+        # is itself an encoded object, which can be inspected independently.
+        if not stack and not encoded_object and end < len(text) and text[end:].strip():
+            offset += 1
+            continue
+        spelling = text[offset:end]
+        decoded = _quoted_credential_token(spelling)
+        if (not stack and encoded_object and decoded is not None and decoded.strip() in ('{', '[')
+                and end < len(text) and text[end:].strip()):
+            # A prose quote immediately before a raw object is not an encoded
+            # JSON string. Leave its following brace available to the scope scan.
+            offset += 1
+            continue
+        recovered = _credential_string_prefix(spelling) if decoded is None else None
+        content = decoded if decoded is not None else recovered[0] if recovered is not None else None
+        # A trimmed escape tail is observed data, not proof of an empty value or
+        # a safe marker. Carry this fact only through the last incomplete string;
+        # discriminator admission still requires an original complete token.
+        incomplete_tail = (bool(recovered and recovered[1])
+                           or (discarded_tail and decoded is None and end == len(text)))
+        member_key = bool(stack and stack[-1] is not None and previous >= 0 and text[previous] in '{,')
+        if content is not None and '{' in content and not (defer_keys and member_key):
+            redacted_content = _redact_native_credential_objects(
+                content, discarded_tail=incomplete_tail, defer_keys=defer_keys,
+            )
+            if redacted_content != content:
+                objects.append(_CredentialTextObject(offset, end,
+                    replacement=json.dumps(redacted_content, ensure_ascii=False, allow_nan=False)))
+        if stack and stack[-1] is not None:
+            scope = stack[-1]
+            assert scope is not None
+            if scope.pending_key is not None and text[scope.pending_end:offset].strip() == ':':
+                key = scope.pending_key
+                if key == 'type' and isinstance(decoded, str) and decoded in _NATIVE_CREDENTIAL_FIELDS:
+                    scope.kinds.add(decoded)
+                elif key in ('key', 'access', 'refresh'):
+                    value = content if content is not None else spelling[1:]
+                    if incomplete_tail or (value.strip() and _redact_sensitive_text(value) != value):
+                        scope.unsafe_fields.add(key)
+                scope.pending_key = None
+            else:
+                scope.pending_key = decoded if previous >= 0 and text[previous] in '{,' else None
+                scope.pending_end = end
+        offset = end
+    out: list[str] = []
+    cutoff = 0
+    # Opening order makes selected spans disjoint. Complete objects are decoded
+    # once; quoted token scanning never retries at escaped quotes or future bytes.
+    for scope in objects:
+        if scope.start < cutoff:
+            continue
+        replacement = scope.replacement
+        if replacement is None:
+            fields: set[str] = set()
+            for kind in scope.kinds:
+                fields.update(_NATIVE_CREDENTIAL_FIELDS[kind])
+            if not scope.unsafe_fields.intersection(fields):
+                continue
+            try:
+                container = json.loads(text[scope.start:scope.end])
+                current = container.get('type') if isinstance(container, dict) else None
+                current_fields = (_NATIVE_CREDENTIAL_FIELDS.get(current, frozenset())
+                                  if isinstance(current, str) else frozenset())
+                if not scope.unsafe_fields.intersection(fields).issubset(current_fields):
+                    # A duplicate discriminator cannot erase observed context.
+                    replacement = json.dumps(_REDACTED_CREDENTIAL)
+                else:
+                    # Full JSON callers must bind original key sensitivity and
+                    # collision reservations before any encoded member-key rewrite.
+                    sanitized = (_redact_json_container(container) if defer_keys
+                                 else _redact_native_auth_value(container))
+                    replacement = json.dumps(sanitized, ensure_ascii=False, allow_nan=False)
+            except (ValueError, TypeError, RecursionError):
+                # Malformed or unrepresentable auth spans cannot abort a UI
+                # consumer, and withholding this span preserves public siblings.
+                replacement = json.dumps(_REDACTED_CREDENTIAL)
+        out.extend((text[cutoff:scope.start], replacement))
+        cutoff = scope.end
+    out.append(text[cutoff:])
+    return ''.join(out)
+
+
 def _redact_unstructured_text(s: str) -> str:
     """Apply the shared text policy without normalizing JSON-looking host labels."""
     try:
+        s = _redact_native_credential_objects(s)
         s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
         return _redact_structured_key_values(redact_text(s))
     except Exception:  # noqa: BLE001 - a host label must never fail open
@@ -692,6 +920,7 @@ def _redact_structured_text(s: str) -> str:
     Earlier markers are preserved, preventing partial or double redaction. Any
     stage failure replaces the whole field; raw text never passes through."""
     try:
+        s = _redact_native_credential_objects(s, defer_keys=True)
         # JSON envelopes require leaf redaction: a fail-closed unmatched PEM or
         # quoted credential tail must not consume the enclosing quote/braces.
         if s.lstrip().startswith(('{', '[', '"')):

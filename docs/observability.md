@@ -36,6 +36,16 @@ JSON text evidence applies structured redaction to object keys as well as values
 Opaque key aliases and collision suffixes record host redaction while preserving
 distinct entries and public value types.
 
+Native credential context masks nonempty string `api_key.key` and
+`oauth.access`/`oauth.refresh` fields before recorder checkpoints and final bytes.
+Ordinary `key`/`access`/`refresh` fields, nonstring values and nonsecret identity,
+expiry and usage metadata retain their existing policy and types. Existing
+sensitive-parent masking still applies. Recognized interrupted or malformed credential objects
+are withheld when they cannot be represented safely; a prefix ending before its discriminator arrives
+cannot establish credential context.
+Tool presentation sanitizes complete input/output copies before summarizing,
+wrapping or truncating them; raw events and model results remain authoritative.
+
 Only the resolved billing owner emits usage/cost; parent aggregation must not
 charge it again. Cache tokens are within input; reasoning tokens within output.
 Missing values stay absent; observed zero stays zero. Pi generation intervals need

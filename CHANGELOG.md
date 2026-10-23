@@ -85,8 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retain coherent native review checkpoints and bounded process diagnostics when
   a public ReviewBench reviewer is interrupted. Propagate outer cancellation to
   its owned reviewer/native processes, permit bounded joined export, and preserve
-  Harbor's timeout/cancellation outcome for offline investigation. Reviewer
-  settings, budgets and scoring are unchanged; this is a compatible bug fix.
+  Harbor's timeout/cancellation outcome for offline investigation. Keep native
+  `api_key`/OAuth credentials private in retained evidence and console copies before
+  formatting. Reviewer settings, budgets and scoring are unchanged; this is a
+  compatible bug fix.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
