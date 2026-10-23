@@ -5,11 +5,8 @@ The public agent boundary requires an explicit keyword-only phase.
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import inspect
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -29,21 +26,12 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.codex import CodexBackend
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
-    RunWriteSnapshot,
-    dispatch_scope,
-    flush_active_signal_recorders,
-    phase_scope,
-    run_directory,
-    run_document_path,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
-from tests.harness.processes import wait_for_process_group_gone
 from tests.harness.trajectory import make_recorder
 
 
@@ -238,99 +226,3 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
     # output — not a synthetic empty step.
     assert errored[0]["message"] == "applying fix"
     assert errored[0]["tool_calls"][0]["tool_call_id"] == "t1"
-
-async def test_active_native_fork_checkpoints_retain_live_lifecycle_without_finishing_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A blocked native attempt must be diagnosable before any finalizer runs.
-
-    Existing process-cancellation tests inspect joined terminal exports, and
-    recorder-only partial tests never bind a live backend collector. This real
-    CLI/agent/fork boundary detects lifecycle retention deferred until finalization,
-    absent active sibling references, and checkpoint sampling that freezes the
-    live collector or changes a previous immutable common-cutoff snapshot.
-    """
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="preterminal_silence")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    snapshots: list[RunWriteSnapshot] = []
-    session = "bdfc09ea-3f5a-4a58-88c9-d24d82742d32"
-    root = make_recorder(tmp_path, session_id=session,
-                         path=run_document_path(run_directory(tmp_path / ".daydream", session)),
-                         on_write=lambda _recorder, snapshot: snapshots.append(snapshot))
-    async with root:
-        async with dispatch_scope(root, phase=DaydreamPhase.REVIEW, descriptors=["active-native"]) as dispatch:
-            assert dispatch is not None
-
-            async def review() -> None:
-                async with root.fork("active-native", dispatch=dispatch):
-                    async with phase_scope(DaydreamPhase.REVIEW, stage="first-pass"):
-                        await run_agent(CodexBackend(model="fixture-model", reasoning_effort="high"),
-                                        tmp_path, "synthetic lifecycle request", phase=DaydreamPhase.REVIEW,
-                                        wall_budget_s=30, review_stage_scope_id="assigned-scope")
-
-            task = asyncio.create_task(review())
-            try:
-                observation = await fixture.wait_for_stage("initial")
-                # The readiness file belongs to the external process. Wait also
-                # for its known public commentary to cross the real host adapter.
-                async with asyncio.timeout(5):
-                    while True:
-                        flush_active_signal_recorders()
-                        if snapshots and any(b"Synthetic initial commentary" in document.json_bytes
-                                             for document in snapshots[-1].documents):
-                            break
-                        await asyncio.sleep(0.01)
-                first = snapshots[-1]
-                first.validate(session)
-                first_bytes = tuple(document.json_bytes for document in first.documents)
-                documents = {document.trajectory_id: json.loads(document.json_bytes)
-                             for document in first.documents}
-                parent = documents[session]
-                fork = next(row for row in parent["extra"]["subtrajectories"]
-                            if row.get("descriptor") == "active-native")
-                child = documents[fork["trajectory_id"]]
-                assert fork["ended_at"] is None and fork["dispatch_id"] == dispatch.dispatch_id
-                assert fork["fork_id"] == child["trajectory_id"]
-                assert fork["sibling_trajectory_ref"] == next(
-                    document.path.relative_to(tmp_path / ".daydream").as_posix().removesuffix(".partial")
-                    for document in first.documents if document.trajectory_id == fork["trajectory_id"])
-                invocation = child["extra"]["subtrajectories"][0]
-                assert invocation == fork["invocations"][0]
-                assert invocation["ended_at"] is None and "generation_lifecycle" not in invocation
-                assert invocation["host_dispatch"]["stage_scope_id"] == "assigned-scope"
-                lifecycle = invocation["backend_lifecycle"]
-                assert lifecycle["backend"] == "codex" and lifecycle["attempt"] == 1
-                assert lifecycle["last_native_event_kind"] == "item_completed"
-                assert lifecycle["last_native_event_s"] is not None
-                assert lifecycle["spawn_completed_s"] is not None and lifecycle["elapsed_s"] > 0
-                assert lifecycle["wall_allowance_s"] > 0 and lifecycle["remaining_wall_s"] > 0
-                assert lifecycle["terminal_received_s"] is None and lifecycle["stdout_eof_s"] is None
-                assert lifecycle["process_returncode"] is None and lifecycle["teardown_started_s"] is None
-                assert child["extra"]["phase_events"][0]["metadata"] == {"stage": "first-pass"}
-                assert child["final_metrics"].get("total_prompt_tokens") is None
-                assert all(atif_validate(payload) for payload in documents.values())
-                assert {payload["extra"]["snapshot_at"] for payload in documents.values()} == {first.cutoff_at}
-                assert not task.done()
-
-                flush_active_signal_recorders()
-                second = snapshots[-1]
-                assert second.cutoff_at != first.cutoff_at
-                second_child = next(json.loads(document.json_bytes) for document in second.documents
-                                    if document.trajectory_id == child["trajectory_id"])
-                current = second_child["extra"]["subtrajectories"][0]["backend_lifecycle"]
-                assert current["elapsed_s"] > lifecycle["elapsed_s"]
-                assert current["last_native_event_s"] == lifecycle["last_native_event_s"]
-                assert tuple(document.json_bytes for document in first.documents) == first_bytes
-            finally:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-
-    final = json.loads(root.path.read_text())
-    completed = next(row for row in final["extra"]["subtrajectories"] if row.get("descriptor") == "active-native")
-    lifecycle = completed["invocations"][0]["backend_lifecycle"]
-    assert lifecycle["teardown_completed_s"] is not None
-    assert lifecycle["process_exit_s"] is not None and lifecycle["process_returncode"] is not None
-    assert lifecycle["elapsed_s"] >= current["elapsed_s"]
-    assert completed["invocations"][0]["ended_at"] is not None

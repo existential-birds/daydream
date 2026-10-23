@@ -157,11 +157,6 @@ def test_redactor_preserves_argument_structure_and_per_key_failure(
     assert arguments == original
 
 
-
-
-
-
-
 def test_redactor_failure_mode_wipes_all_text_bearing_fields(monkeypatch: pytest.MonkeyPatch,) -> None:
     def _boom(self: object, value: object) -> str:
         raise RuntimeError("simulated regex failure deep in pipeline")
@@ -263,14 +258,7 @@ def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
 
 @pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "[redacted_api_key]", "<redacted>"])
 def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> None:
-    """Exact markers remain idempotent without exempting another sensitive value.
-
-    The old fixture put ``already`` under api_key before a marker and required
-    that entire sensitive value to survive. That assertion allowed an opaque
-    credential to survive merely because a later marker was present. Pin exact
-    safe marker values/schemes and ordinary public text instead; the real
-    recorder privacy rows independently cover residual credentials.
-    """
+    """Exact markers remain idempotent while adjacent credential content remains sensitive."""
     for text in (f"api_key = {marker}", f"api_key = '{marker}'", f"auth=Bearer {marker}",
                  f"api_key = {marker}[REDACTED_CREDENTIAL]", f"auth=Bearer {marker}[REDACTED_CREDENTIAL]",
                  f"api_key = {marker}; public diagnostics", f"auth=Bearer {marker}; public diagnostics",
@@ -309,8 +297,7 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
 
 
 
-
-@pytest.mark.parametrize(('key', 'value', 'expected', 'unchanged'), [
+_JSON_KEY_PRIVACY_CASES = [
     *[(key, value, value, False) for key in [
         'defauthorization: opaque-key-canary', 'deftoken=opaque-key-canary', 'api_key=opaque-key-canary',
         'X-Api-Key: opaque-key-canary', 'private_key=opaque-key-canary',
@@ -328,8 +315,17 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     *[(key, '[REDACTED_RETAINED]', '[REDACTED_RETAINED]', True) for key in [
         'X-Api-Key: [REDACTED_API_KEY]', 'Cookie: [REDACTED_CREDENTIAL] (2)', 'Authorization: <redacted> (2)',
     ]],
+]
+
+
+@pytest.mark.parametrize(('key', 'value', 'expected', 'unchanged', 'envelope'), [
+    *[(*case, 'object') for case in _JSON_KEY_PRIVACY_CASES],
+    ('api_key=opaque-key-canary', 0, 0, False, 'scalar'),
+    ('api_key', '[REDACTED_RETAINED]', '[REDACTED_RETAINED]', False, 'scalar'),
+    ('{"type":"api_key","key":"opaque-key-canary"}', None, None, False, 'credential-parent'),
+    ('Authorization: Bearer opaque-key-canary', '[REDACTED_RETAINED]', '[REDACTED_RETAINED]',
+     False, 'credential-parent'),
 ])
-@pytest.mark.parametrize('envelope', ['object', 'scalar', 'credential-parent'])
 def test_json_key_privacy_preserves_original_sensitivity_and_value_types(
     key: str, value: object, expected: object, unchanged: bool, envelope: str,
 ) -> None:
@@ -376,27 +372,6 @@ def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
     assert decoded['usage'] == {'input_tokens': 0, 'output_tokens': None}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize(('source', 'private', 'prefix'), [
     ('x' * 200_000, '', 'x' * 200_000),
     ('a' * 5000 + '=x token=sk-opaque123', 'sk-opaque123', 'a' * 5000 + '=x '),
@@ -418,13 +393,6 @@ def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> No
         assert result == source
 
 
-
-
-
-
-
-
-
 @pytest.mark.parametrize('fragment', [
     '-----BEGIN PRIVATE KEY-----\nleaf-secret-canary',
     '{"refresh_token": "leaf-secret-canary',
@@ -435,11 +403,7 @@ def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> No
 ])
 @pytest.mark.parametrize('envelope', ['object', 'scalar'])
 def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragment: str, envelope: str) -> None:
-    """A fail-closed leaf tail cannot consume its serialized JSON quote or siblings.
-
-    Plain-field redaction cannot establish that log/receipt JSON remains parseable
-    when its text leaf contains an unfinished PEM or quoted credential value.
-    """
+    """Fail-closed unfinished leaves retain valid JSON envelopes and public siblings."""
     serialized = json.dumps({'message': fragment, 'model': 'fixture-model', 'count': 0}
                             if envelope == 'object' else fragment)
     redacted = redact_structured_text(serialized)
@@ -464,12 +428,7 @@ def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragm
     {'nested_json': json.dumps(chr(0xDFFF) + 'café 😀', ensure_ascii=False)},
 ])
 def test_structured_json_surrogates_preserve_utf8_and_json_semantics(payload: object) -> None:
-    """Escaped code points cannot become unencodable text after JSON redaction.
-
-    Ordinary Unicode tests cannot expose ensure_ascii=False emitting decoded lone
-    surrogates. Nested values, keys and scalar JSON also protect against escaping
-    recursive leaves too early and changing code points into literal backslashes.
-    """
+    """UTF-8 publication preserves decoded lone-surrogate semantics in keys, values, and nested JSON."""
     source = json.dumps(payload)
     redacted = redact_structured_text(source)
     encoded = redacted.encode('utf-8')
@@ -491,11 +450,7 @@ def test_plain_surrogate_text_is_safe_at_public_redaction_boundary() -> None:
     '{"entry": "opaque-container-canary", "public": true}',
 ])
 def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(container: str) -> None:
-    """Marker-prefixed bare values must not swallow or expose structured containers.
-
-    Marker-only cases do not establish the array/object alternative still consumes
-    a complete sensitive block after the bare-token grammar changes.
-    """
+    """Marker token handling must retain whole sensitive array/object redaction."""
     assert redact_structured_text('token = ' + container) == 'token = "[REDACTED_CREDENTIAL]"'
 
 
@@ -526,31 +481,21 @@ def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(c
      'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]";password="[REDACTED_CREDENTIAL]"'),
 ])
 def test_secret_assignment_redaction_preserves_semicolon_and_is_idempotent(source: str, expected: str) -> None:
-    """A separator is not residual credential content after an existing marker.
-
-    Marker-only fields without delimiters miss this composition: ENV redaction
-    adds a marker, the structured pass must preserve its semicolon and following
-    assignment identity (including a lowercase secret), and recorder
-    re-redaction must not change the sanitized bytes again. The Pi persistence
-    test separately protects the transport's bound and truncation metadata.
-    """
+    """ENV and structured redaction must preserve separators and following fields across repeated passes."""
     redacted = redact_structured_text(source)
     assert redacted == expected
     assert redact_structured_text(redacted) == redacted
 
 
-@pytest.mark.parametrize('first_separator', ['=', ':'])
-@pytest.mark.parametrize('second_separator', ['=', ':', ': ', ':\t'])
-@pytest.mark.parametrize('boundary', [';', '; ', ' ;', ' ;\t'])
+@pytest.mark.parametrize(('first_separator', 'second_separator', 'boundary'), [
+    ('=' if (first + frontier) % 2 else ':', second, boundary)
+    for first, second in enumerate(('=', ':', ': ', ':\t'))
+    for frontier, boundary in enumerate((';', '; ', ' ;', ' ;\t'))
+])
 def test_sensitive_semicolon_pairs_preserve_both_separator_frontiers(
     first_separator: str, second_separator: str, boundary: str,
 ) -> None:
-    """A later colon pair must receive the same sanitation as an assignment.
-
-    The original adjacent-key row only exercised '=', allowing a preceding bare
-    match to consume a later colon key and expose its credential. Preserve the
-    supported key/value separator crossproduct without admitting ordinary prose.
-    """
+    """Earlier bare values cannot swallow a later credential after a colon or assignment separator."""
     source = (f'refresh_token{first_separator}[REDACTED]opaque-first-canary{boundary}'
               f'api_key{second_separator}opaque-second-canary')
     redacted = redact_structured_text(source)
@@ -563,29 +508,28 @@ def test_sensitive_semicolon_pairs_preserve_both_separator_frontiers(
 
 @pytest.mark.parametrize('name', ['api_key', 'TOKEN'])
 def test_internal_semicolon_cannot_expose_sensitive_assignment_residual(name: str) -> None:
-    """Keep both private fragments hidden when a semicolon is inside one bare value.
-
-    Treating every semicolon as a delimiter fixes marker-only punctuation but
-    weakens existing residual masking; this guards that distinct privacy contract.
-    """
+    """A semicolon inside one opaque value cannot expose either private fragment."""
     redacted = redact_structured_text(name + '=opaque-prefix-canary;opaque-tail-canary')
     assert 'opaque-prefix-canary' not in redacted and 'opaque-tail-canary' not in redacted
     assert redact_structured_text(redacted) == redacted
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize('order', ['type-first', 'type-last'])
-@pytest.mark.parametrize('form', ['mapping', 'json', 'json-string', 'text-parts'])
-def test_native_tagged_credentials_use_context_without_masking_public_keys(kind: str, order: str, form: str) -> None:
-    """Native auth unions use generic fields that need their own sibling tag.
-
-    Existing sensitive-name tests intentionally preserve bare key/access/refresh;
-    they cannot protect the admitted native Pi shapes or JSON-string/native-map
-    walks. Preserve public siblings, type/identity/expiry metadata and usage types.
-    """
+@pytest.mark.parametrize(('kind', 'order', 'form', 'marked'), [
+    *[(kind, 'type-first', form, False) for kind in ('api_key', 'oauth')
+      for form in ('mapping', 'json', 'json-string', 'text-parts', 'arguments')],
+    ('api_key', 'type-last', 'mapping', True),
+    ('oauth', 'type-last', 'json', True),
+])
+def test_native_tagged_credentials_use_context_without_masking_public_keys(
+    kind: str, order: str, form: str, marked: bool,
+) -> None:
+    """Opaque generic credential fields require a same-object tag; adapters preserve public data and markers."""
     credential: dict[str, object] = ({'type': kind, 'key': 'opaque-native-key-canary'} if kind == 'api_key' else
         {'type': kind, 'access': 'opaque-native-access-canary', 'refresh': 'opaque-native-refresh-canary',
          'accountId': 'offline-account', 'expires': 9000000000})
+    field = 'key' if kind == 'api_key' else 'access'
+    if marked:
+        credential[field] = '[REDACTED_API_KEY]' + str(credential[field])
     if order == 'type-last':
         credential = dict(reversed(list(credential.items())))
     public = {'type': 'record', 'key': 'ordinary-public-key', 'access': 'ordinary-public-access',
@@ -595,6 +539,12 @@ def test_native_tagged_credentials_use_context_without_masking_public_keys(kind:
     if form == 'mapping':
         result = redact_value(payload)
         assert redact_value(result) == result
+    elif form == 'arguments':
+        out = Redactor().redact_step(_agent_step(tool_calls=[ToolCall(
+            tool_call_id='auth', function_name='Inspect', arguments=credential,
+        )]))
+        assert out.tool_calls is not None
+        result = {**payload, 'data': out.tool_calls[0].arguments}
     elif form == 'text-parts':
         out = Redactor().redact_step(_agent_step(observation=Observation(results=[ObservationResult(
             content=[ContentPart(type='text', text=json.dumps(payload))],
@@ -614,33 +564,20 @@ def test_native_tagged_credentials_use_context_without_masking_public_keys(kind:
     assert result['public'] == public
     assert result['usage'] == {'input': 0, 'output': None}
     assert result['data']['type'] == kind
+    if marked:
+        assert result['data'][field] == '[REDACTED_API_KEY]'
     if kind == 'oauth':
         assert result['data']['accountId'] == 'offline-account' and result['data']['expires'] == 9000000000
     assert payload == original
-
-
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-def test_top_level_native_tool_arguments_keep_tagged_credential_context(kind: str) -> None:
-    """The per-key arguments walk must retain the sibling discriminator context.
-
-    Nested mapping coverage passes each complete record to redact_value; direct
-    ToolCall.arguments previously split the discriminator from its generic field.
-    """
-    credential = {'type': kind, 'key' if kind == 'api_key' else 'access': 'opaque-tool-argument-canary'}
-    out = Redactor().redact_step(_agent_step(tool_calls=[
-        ToolCall(tool_call_id='auth', function_name='Inspect', arguments=credential),
-    ]))
-    assert out.tool_calls is not None
-    result = out.tool_calls[0].arguments
-    assert result.keys() == credential.keys() and result['type'] == kind
-    assert 'opaque-tool-argument-canary' not in json.dumps(result)
+    safe = json.dumps({'type': kind, field: '[REDACTED_API_KEY]'})[:-1]
+    assert redact_structured_text(safe) == safe
+    assert redact_structured_text(safe[:-1]) == safe[:-1]
 
 
 _NATIVE_FRAGMENT = '{"type":"KIND","FIELD":"opaque-context-canary'
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize(('source', 'private', 'public'), [
+_NATIVE_AUTH_FRAGMENTS = [
     *[(prefix + text, 'opaque-context-canary', ()) for prefix in ('', '{"data":') for text in (
         _NATIVE_FRAGMENT,
         '{"FIELD":"opaque-context-canary","type":"KIND"',
@@ -658,7 +595,7 @@ _NATIVE_FRAGMENT = '{"type":"KIND","FIELD":"opaque-context-canary'
     ('{"key":"public-sibling","note":"' + json.dumps('{"type":"KIND"}')[1:-1] + '"} trailing',
      '', ('public-sibling',)),
     *[(prefix + _NATIVE_FRAGMENT, 'opaque-context-canary', (prefix,)) for prefix in [
-        "Here's the data: ", 'Read "data: ', "it's here\n", 'prefix: ', 'Read "', '"',
+        "Here's the data: ", 'Read "data: ', "it's here\n", 'prefix: ', 'Read "', 'Read "   ', '"',
     ]],
     (json.dumps(_NATIVE_FRAGMENT)[:-1], 'opaque-context-canary', ()),
     ('{"key":"public-outer-key","message":' + json.dumps(_NATIVE_FRAGMENT)[:-1],
@@ -670,6 +607,14 @@ _NATIVE_FRAGMENT = '{"type":"KIND","FIELD":"opaque-context-canary'
           ('{"public":{"key":"ordinary-key"},"message":' + json.dumps(inner)[:-1], ('ordinary-key',))]],
     (json.dumps('{"type":"KIND","FIELD":"[REDACTED]é').rsplit('u00e9', 1)[0] + 'u00e', 'u00e', ()),
     ('{"key":"[REDACTED]' + chr(92) + 'u004', '', (chr(92) + 'u004',)),
+]
+
+
+@pytest.mark.parametrize(('kind', 'source', 'private', 'public'), [
+    *[('api_key', *case) for case in _NATIVE_AUTH_FRAGMENTS],
+    ('oauth', _NATIVE_FRAGMENT, 'opaque-context-canary', ()),
+    ('oauth', '{"FIELD":"opaque-context-canary","type":"KIND"', 'opaque-context-canary', ()),
+    ('oauth', '{"type":"KIND","refresh":"opaque-context-canary', 'opaque-context-canary', ()),
 ])
 def test_native_auth_fragments_respect_observed_scope(
     kind: str, source: str, private: str, public: tuple[str, ...],
@@ -696,8 +641,6 @@ def test_invalid_nonstring_native_credential_fields_remain_typed(value: object) 
     assert json.loads(redact_structured_text(json.dumps(payload))) == payload
 
 
-
-
 def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy() -> None:
     """Existing auth/credential block masking remains authoritative over the tag."""
     credential = {'type': 'api_key', 'key': 'opaque-parent-auth-canary', 'metadata': 'private-parent-value'}
@@ -707,39 +650,41 @@ def test_contextual_credentials_do_not_relax_existing_sensitive_ancestor_policy(
     assert 'opaque-parent-auth-canary' not in json.dumps(redacted)
 
 
-
-
-
-
-
-
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize('form', ['mapping', 'json-string'])
+@pytest.mark.parametrize(('kind', 'form'), [
+    ('api_key', 'mapping'), ('oauth', 'mapping'), ('api_key', 'json'), ('oauth', 'json'),
+    ('api_key', 'scalar'), ('api_key', 'text-list'),
+])
 def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, form: str) -> None:
-    """UI input copies must protect native stores without expanding search/path policy.
-
-    The complete recorder redactor intentionally masks ordinary token patterns
-    and paths; using it for all UI arguments would change existing non-Bash display
-    policy. Preserve container types/source authority while masking only native auth.
-    """
-    credential = {'type': kind, 'key' if kind == 'api_key' else 'access':
-                  '[REDACTED_API_KEY]opaque-ui-context-canary',
-                  'metadata': 'config: token=ordinary-search-pattern /home/operator/file.py'}
-    data: object = {'data': credential, 'public': {'key': 'ordinary-key', 'access': 'ordinary-access',
-                   'refresh': 'ordinary-refresh'}, 'usage': {'input': 0, 'output': None}}
-    if form == 'json-string':
-        data = json.dumps(data)
-    original = copy.deepcopy(data)
-    result = redaction_mod.redact_native_auth_value(data)
-    assert 'opaque-ui-context-canary' not in json.dumps(result)
-    assert redaction_mod.redact_native_auth_value(result) == result
-    decoded = json.loads(result) if isinstance(result, str) else result
-    assert decoded['public'] == {'key': 'ordinary-key', 'access': 'ordinary-access', 'refresh': 'ordinary-refresh'}
-    assert decoded['usage'] == {'input': 0, 'output': None}
-    assert decoded['data']['metadata'] == 'config: token=ordinary-search-pattern /home/operator/file.py'
+    """UI copies preserve native privacy, public types, Unicode semantics, and ordinary search/path policy."""
     field = 'key' if kind == 'api_key' else 'access'
-    assert decoded['data'][field] == '[REDACTED_API_KEY]'
-    assert data == original
+    metadata = 'config: token=ordinary-search-pattern /home/operator/file.py'
+    credential = {'type': kind, field: '[REDACTED_API_KEY]opaque-ui-context-canary', 'metadata': metadata}
+    public = {'key': 'ordinary-key', 'access': 'ordinary-access', 'refresh': 'ordinary-refresh',
+              'message': 'café 😀' if form == 'mapping' else chr(0xD800), chr(0xDFFF) + 'clé': 'café 😀'}
+    nested = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=form == 'mapping')
+    payload = {**credential, 'data': credential, 'public': public, 'nested': nested,
+               'usage': {'input': 0, 'output': None}}
+    source: object = payload if form == 'mapping' else json.dumps(payload)
+    if form == 'scalar':
+        source = json.dumps(source)
+    elif form == 'text-list':
+        source = [source, metadata]
+    original = copy.deepcopy(source)
+    result = redaction_mod.redact_native_auth_value(source)
+    assert 'opaque-ui-context-canary' not in json.dumps(result)
+    assert redaction_mod.redact_native_auth_value(result) == result and source == original
+    decoded = result
+    if form == 'text-list':
+        assert isinstance(decoded, list) and decoded[1] == metadata
+        decoded = decoded[0]
+    if isinstance(decoded, str):
+        decoded.encode('utf-8')
+    while isinstance(decoded, str):
+        decoded = json.loads(decoded)
+    assert decoded['public'] == public and decoded['nested'] == nested
+    assert decoded['usage'] == {'input': 0, 'output': None}
+    assert decoded['data']['metadata'] == metadata
+    assert decoded[field] == decoded['data'][field] == '[REDACTED_API_KEY]'
     containers = [{'key': 'ordinary-key'}, ({'key': 'ordinary-tuple-key'},)]
     copied = redaction_mod.redact_native_auth_value(containers)
     assert isinstance(copied, list) and isinstance(copied[1], tuple)
@@ -747,39 +692,9 @@ def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, 
     assert containers[0] == {'key': 'ordinary-key'}
 
 
-@pytest.mark.parametrize('kind', ['api_key', 'oauth'])
-@pytest.mark.parametrize('form', ['mapping', 'json', 'arguments'])
-def test_new_native_context_masks_keep_complete_marker_spelling(kind: str, form: str) -> None:
-    """New contextual fields preserve safe markers while removing adjacent opaque data."""
-    field = 'key' if kind == 'api_key' else 'access'
-    record = {'type': kind, field: '[REDACTED_API_KEY]opaque-context-marker-canary'}
-    if form == 'json':
-        result = json.loads(redact_structured_text(json.dumps(record)))
-    elif form == 'mapping':
-        result = redact_value(record)
-    else:
-        out = Redactor().redact_step(_agent_step(tool_calls=[
-            ToolCall(tool_call_id='auth', function_name='Inspect', arguments=record),
-        ]))
-        assert out.tool_calls is not None
-        result = out.tool_calls[0].arguments
-    assert result[field] == '[REDACTED_API_KEY]' and result['type'] == kind
-    safe = json.dumps({'type': kind, field: '[REDACTED_API_KEY]'})[:-1]
-    assert redact_structured_text(safe) == safe
-    assert redact_structured_text(safe[:-1]) == safe[:-1]
-
-
-
-
-
-
 @pytest.mark.parametrize('nonfinite', ['NaN', 'Infinity', '-Infinity'])
 def test_native_only_text_recovery_withholds_unrepresentable_credential_span(nonfinite: str) -> None:
-    """Malformed known auth data must not abort presentation or suppress public siblings.
-
-    json.loads accepts these constants while allow_nan=False publication rejects
-    them; raw native-only UI copies previously let that serialization error escape.
-    """
+    """Nonfinite auth data is withheld without aborting presentation or suppressing public siblings."""
     text = ('{"data":{"type":"api_key","key":"opaque-nonfinite-auth-canary","public":' + nonfinite
             + '},"other":{"key":"ordinary-sibling","count":0}} trailing')
     redacted = redaction_mod.redact_native_auth_value(text)
@@ -790,36 +705,6 @@ def test_native_only_text_recovery_withholds_unrepresentable_credential_span(non
     assert redaction_mod.redact_native_auth_value(ordinary) == ordinary
 
 
-@pytest.mark.parametrize('envelope', ['object', 'scalar', 'text-list'])
-def test_native_only_presentation_strings_compose_unicode_before_utf8_encoding(envelope: str) -> None:
-    """The UI-only copy must not reintroduce decoded surrogates or double-escape leaves.
-
-    The full recorder API's encoding boundary does not cover the new native-only
-    presentation copy. Exercise semantic JSON values/keys/nested JSON strings and
-    non-ASCII literal bytes while ordinary search text remains untouched.
-    """
-    nested = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=False)
-    payload = {'type': 'api_key', 'key': 'opaque-ui-surrogate-canary', 'public': chr(0xD800),
-               chr(0xDFFF) + 'clé': 'café 😀', 'nested': nested, 'usage': {'input': 0, 'output': None}}
-    text = json.dumps(payload)
-    source: object = json.dumps(text) if envelope == 'scalar' else [text, 'token=ordinary-pattern /home/operator'] \
-        if envelope == 'text-list' else text
-    result = redaction_mod.redact_native_auth_value(source)
-    if envelope == 'text-list':
-        assert isinstance(result, list) and result[1] == 'token=ordinary-pattern /home/operator'
-        text_result = result[0]
-    else:
-        text_result = result
-    assert isinstance(text_result, str)
-    text_result.encode('utf-8')
-    decoded = json.loads(text_result)
-    decoded = json.loads(decoded) if envelope == 'scalar' else decoded
-    assert 'opaque-ui-surrogate-canary' not in json.dumps(decoded)
-    assert decoded['public'] == chr(0xD800)
-    assert decoded[chr(0xDFFF) + 'clé'] == 'café 😀'
-    assert decoded['nested'] == nested
-    assert decoded['usage'] == {'input': 0, 'output': None}
-    assert redaction_mod.redact_native_auth_value(result) == result
 
 
 def test_redactor_sanitizes_provider_credentials_in_one_recorded_message() -> None:

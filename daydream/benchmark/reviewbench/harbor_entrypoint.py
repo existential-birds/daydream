@@ -19,10 +19,14 @@ from typing import Any
 
 import anyio
 
+from daydream import git_ops, runner
 from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
-from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case, reviewer_config
-from daydream.json_utils import atomic_create_bytes
+from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
+from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, convert_findings, reviewer_config
+from daydream.deep.artifacts import diff_key
 from daydream.redaction import redact_structured_text
+from daydream.review_result import FinalizedReview, validate_terminal_result
+from daydream.run_config import FrozenAuthorDescription
 from daydream.trajectory import RUN_DOCUMENT_NAME, flush_active_signal_recorders, run_directory
 
 
@@ -83,7 +87,7 @@ def _reviewer_environment(
 
 def _write_new_json(destination: Path, value: Any) -> None:
     body = redact_structured_text(json.dumps(value, indent=2, allow_nan=False)) + '\n'
-    atomic_create_bytes(destination, body.encode('utf-8'))
+    publish_diagnostic_bytes(destination, body.encode('utf-8'))
 
 
 @contextmanager
@@ -118,10 +122,10 @@ def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Pa
         if source.is_symlink():
             raise PublicReviewerError('native evidence contains an unexpected symlink')
         if source.is_file():
-            atomic_create_bytes(bundle / source.relative_to(staged), source.read_bytes())
+            publish_diagnostic_bytes(bundle / source.relative_to(staged), source.read_bytes())
     if trajectory.is_file():
-        atomic_create_bytes(evidence / RUN_DOCUMENT_NAME, trajectory.read_bytes())
-        atomic_create_bytes(harbor_trajectory, trajectory.read_bytes())
+        publish_diagnostic_bytes(evidence / RUN_DOCUMENT_NAME, trajectory.read_bytes())
+        publish_diagnostic_bytes(harbor_trajectory, trajectory.read_bytes())
 
 
 async def main(environment: Mapping[str, str]) -> int:
@@ -137,6 +141,13 @@ async def main(environment: Mapping[str, str]) -> int:
                 or harbor_trajectory.exists() or harbor_trajectory.is_symlink()):
             raise PublicReviewerError('prior reviewer artifacts exist; use a fresh trial')
         task, profile = load_public_task(inputs / 'daydream-profile.json', inputs / 'pr.json', inputs / 'diff.patch')
+        git_ops.assert_is_worktree(repository)
+        if git_ops.status_porcelain(repository).strip():
+            raise PublicReviewerError('source repository is not clean')
+        merge_base = task.verify(repository)
+        comparison = {'head_sha': task.case.head,
+            'merge_base_sha': merge_base,
+            'diff_key': diff_key(task.patch)}
         reviewer = profile['reviewer']
         backend = reviewer['backend']
         from daydream.benchmark.reviewbench.diagnostics import InterruptedReviewDiagnostics
@@ -187,7 +198,10 @@ async def main(environment: Mapping[str, str]) -> int:
                     elif reviewer.get('pi_models') is not None:
                         (role_home / 'models.json').write_text(json.dumps(reviewer['pi_models']))
                     controls = _reviewer_environment(environment, role_home, reviewer, canonical)
-                    config = reviewer_config(reviewer, repository)
+                    config = replace(reviewer_config(reviewer, repository), base=task.case.base, flow_name='review',
+                        approved_head_sha=task.case.head, dump_artifacts=str(staged),
+                        frozen_author_description=None if task.author_description is None else
+                            FrozenAuthorDescription(task.case.head, task.author_description))
                     from daydream.backends import BackendExecutionInput
                     from daydream.git_ops import StaticGitHubAuth
                     from daydream.github_app import GitHubExecutionInput
@@ -201,38 +215,68 @@ async def main(environment: Mapping[str, str]) -> int:
                         on_trajectory_snapshot=diagnostics.retain if diagnostics is not None else None)
                     invocation = environment.get('DAYDREAM_RB_INVOCATION')
                     if invocation is not None:
-                        from daydream.benchmark.reviewbench.harbor_process import invocation_directory
+                        from daydream.benchmark.reviewbench.harbor_process import _requested_interruption
 
-                        if (invocation_directory(invocation) / 'cancel').exists():
+                        if _requested_interruption(dict(environment), invocation) is not None:
                             raise asyncio.CancelledError
+                    staged.mkdir()
+                    execution = CaseExecution('failed', source_identity=task.case.repo,
+                                              analyzed_comparison=comparison)
+                    finalized: list[FinalizedReview] = []
+                    exit_code = None
                     checkpoint_task = asyncio.create_task(_checkpoint_loop())
                     try:
-                        execution = await review_case(task, repository, config,
-                            execution_input=capability, evidence_directory=staged)
+                        try:
+                            exit_code = await runner.run(config, review_result_handler=finalized.append,
+                                                         execution=capability)
+                        except Exception as exc:
+                            execution.diagnostics.append(f'native reviewer raised {type(exc).__name__}')
                         await anyio.lowlevel.checkpoint_if_cancelled()
                     finally:
                         checkpoint_task.cancel()
                         with anyio.CancelScope(shield=True):
                             await asyncio.gather(checkpoint_task, return_exceptions=True)
-            except asyncio.CancelledError:
-                cancelled = True
+                    if len(finalized) > 1:
+                        raise PublicReviewerError('native reviewer produced multiple terminal results')
+                    if finalized:
+                        result = finalized[0]
+                        execution.terminal_result = result.terminal_result
+                        execution.usage, execution.retained_findings = result.usage, result.items
+                        validate_terminal_result(result.terminal_result, expected_head_sha=task.case.head)
+                        revision = result.terminal_result['analyzed_revision']
+                        if any(revision.get(key) != value for key, value in comparison.items()):
+                            raise PublicReviewerError('native analyzed comparison differs from supplied comparison')
+                        if (git_ops.head_sha(repository) != task.case.head
+                                or git_ops.diff_worktree_against(repository, task.case.head, ['.'])):
+                            raise PublicReviewerError('native reviewer changed the frozen checkout revision')
+                        findings, execution.conversion_omissions = convert_findings(result.items,
+                            repository=repository, case=task.case, producer='daydream-native-' + backend,
+                            comparison=task.patch)
+                        state = result.terminal_result['analysis_state']
+                        if state != 'complete':
+                            execution.status = 'incomplete' if state == 'incomplete' else 'failed'
+                            execution.diagnostics.append('native analysis is ' + state)
+                        elif exit_code != 0:
+                            execution.diagnostics.append('native reviewer did not exit successfully')
+                        else:
+                            execution.candidate = {'pr': asdict(task.case), 'agent': 'daydream-native-' + backend,
+                                                   'findings': findings}
+                            if execution.usage:
+                                execution.candidate['usage'] = execution.usage.copy()
+                            execution.status = ('conversion_limited' if execution.conversion_omissions
+                                else 'complete' if findings else 'completed_empty')
+                    else:
+                        execution.diagnostics.append('native reviewer did not produce a finalized terminal result')
+            except BaseException as exc:
+                cancelled = isinstance(exc, asyncio.CancelledError)
                 if execution is not None:
-                    execution.status = 'cancelled'
+                    execution.status = 'cancelled' if cancelled else 'failed'
                     execution.candidate = None
-                    execution.diagnostics.append('native reviewer cancelled after returning an execution result')
-                raise
-            except Exception:
-                if execution is not None:
-                    execution.status = 'failed'
-                    execution.candidate = None
-                    execution.diagnostics.append('reviewer credential invocation did not finalize')
+                    execution.diagnostics.append('native reviewer cancelled' if cancelled
+                        else str(exc) if isinstance(exc, PublicReviewerError) else 'native invocation did not finalize')
                 raise
             finally:
-                if execution is not None or staged.exists():
-                    if execution is None:
-                        execution = CaseExecution('cancelled' if cancelled else 'failed', diagnostics=[
-                            'native reviewer cancelled before returning an execution result' if cancelled else
-                            'native reviewer did not return an execution result'])
+                if execution is not None:
                     if not (staged / RUN_DOCUMENT_NAME).is_file():
                         execution.diagnostics.append('native trajectory unavailable; no ATIF export was manufactured')
                         if execution.status in {'complete', 'completed_empty'}:
@@ -255,7 +299,7 @@ async def main(environment: Mapping[str, str]) -> int:
             raise PublicReviewerError('native review is unscorable: ' + execution.status)
         _write_new_json(output, execution.candidate)
         return 0
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (git_ops.GitError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f'public ReviewBench reviewer failed: {type(exc).__name__}: {exc}', file=sys.stderr)
         return 1
 

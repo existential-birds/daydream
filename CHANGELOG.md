@@ -38,10 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Replace unreleased public ReviewBench interfaces with `harbor-export` and
-  `harbor-run`. Identify candidates by their supplied wheel, removing installed-package
-  scans and the requirement to export or launch from a matching installation.
-  Fresh schema-4 exports and candidate wheels are required. PR-only compatibility change; no version bump.
+- Replace unreleased benchmark commands with `harbor-export`/`harbor-run` and
+  wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
 
 ### Fixed
 
@@ -73,8 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
-- Redact native credentials in evidence and UI; retain diagnostics for interrupted
-  ReviewBench runs. Compatible fix; reviewer settings, budgets and scoring stay unchanged.
+- Redact native credentials and retain atomic interruption checkpoints; preserve native budgets/scoring.
+  Simplify cancellation and use supplied judge reports instead of a separate session archive.
 
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into

@@ -8,25 +8,22 @@ import json
 import os
 import shlex
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from daydream import runner
-from daydream.backends import AgentEvent, TextEvent
+from daydream import git_ops, runner
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
-from daydream.trajectory import RUNS_DIRNAME, run_directory, run_document_path
-from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+from daydream.trajectory import RUNS_DIRNAME
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import commit, git
 from tests.harness.reviewbench import public_input
 
 
-@pytest.mark.parametrize('stage', ['setup', 'run'])
+@pytest.mark.parametrize('stage', ['setup', 'run', 'preflight'])
 async def test_public_agent_python_startup_cannot_import_reviewed_repository_packages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
 ) -> None:
@@ -39,6 +36,21 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
         package.mkdir()
         (package / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
             + ').write_text("reviewed package executed")\nraise RuntimeError("hostile source imported")\n')
+    git(repository, 'add', 'daydream', 'daydream_ext')
+    head = commit(repository, 'reviewed hostile package names')
+    git(repository, 'update-ref', 'refs/reviewbench/head', head)
+    inputs = Path(environment['DAYDREAM_RB_INPUTS'])
+    pr = json.loads((inputs / 'pr.json').read_text())
+    pr['head'] = head
+    (inputs / 'pr.json').write_text(json.dumps(pr))
+    (inputs / 'diff.patch').write_text(git_ops.diff_paths(repository, pr['base'], head, ['.'], merge_base_diff=True))
+    profile_path = inputs / 'daydream-profile.json'
+    profile = json.loads(profile_path.read_text())
+    profile['pr'] = pr
+    profile['profile_sha256'] = hashlib.sha256(json.dumps(
+        {key: value for key, value in profile.items() if key != 'profile_sha256'},
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    profile_path.write_text(json.dumps(profile))
     # Setup only checks CLI availability; this stand-in cannot run inference.
     binary = tmp_path / 'bin' / 'codex'
     binary.parent.mkdir()
@@ -55,12 +67,20 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
             # Harbor's image resolves `python` to its installed environment.
             # Execute those actual arguments with this test environment's Python.
             arguments[0] = sys.executable
+            if stage == 'preflight':
+                bootstrap = ('import asyncio,errno,sys\n'
+                    'from daydream.benchmark.reviewbench import harbor_process as owner\n'
+                    'async def fail(*args,**kwargs):\n'
+                    '    raise OSError(errno.EMFILE,"private-startup-canary")\n'
+                    'owner.asyncio.create_subprocess_exec=fail\n'
+                    'sys.argv=["supervisor",*sys.argv[1:]]\nraise SystemExit(owner.main())\n')
+                arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
             child = await asyncio.create_subprocess_exec(*arguments, cwd=repository, env=child_environment,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
             return SimpleNamespace(return_code=child.returncode, stdout=stdout.decode(), stderr=stderr.decode())
 
-    logs = tmp_path / 'agent'
+    logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
     monkeypatch.setattr(agent, 'version', lambda: '0.0.0-host')
     if stage == 'setup':
@@ -68,7 +88,13 @@ async def test_public_agent_python_startup_cannot_import_reviewed_repository_pac
     else:
         with pytest.raises(RuntimeError, match='native reviewer failed'):
             await agent.run('supplied task', Environment(), SimpleNamespace())
-        assert 'SubscriptionAuthError' in (logs / 'reviewer-entrypoint.log').read_text()
+        text = (logs / 'reviewer-entrypoint.log').read_text()
+        if stage == 'preflight':
+            receipt = json.loads((logs / 'reviewer-process.json').read_text())
+            assert receipt['startup_error'] == 'OSError' and receipt['child_returncode'] is None
+            assert receipt['errno'] == errno.EMFILE and 'private-startup-canary' not in text
+        else:
+            assert 'SubscriptionAuthError' in text
     assert not marker.exists()
     assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
 
@@ -161,87 +187,3 @@ async def test_native_storage_failure_retains_diagnostics_without_manufacturing_
     assert not (evidence.parent / 'trajectory.json').exists()
     assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
     assert 'FileNotFoundError' not in capsys.readouterr().err
-
-
-async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_propagates_cancellation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, dataset_store: Path, archive_dir: Path,
-) -> None:
-    """Cancellation joins native streams before exporting fork evidence and restoring auth isolation."""
-    environment = public_input(tmp_path)
-    entered, joined = asyncio.Event(), asyncio.Event()
-    role_homes: list[Path] = []
-    monkeypatch.delenv('DAYDREAM_ARCHIVE_DIR', raising=False)
-    prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
-    emitted = 'Synthetic generation stream before cancellation'
-    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
-    destinations = {evidence / 'trajectory.json', evidence.parent / 'trajectory.json'}
-    published: list[Path] = []
-    link = os.link
-
-    def publish_after_join(source: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
-        target = Path(destination)
-        if target in destinations:
-            assert joined.is_set(), 'ATIF publication raced generation cleanup'
-            published.append(target)
-        link(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(os, 'link', publish_after_join)
-
-    class BlockedBackend(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if ('you are reviewing the ' not in prompt.lower()
-                    and 'you are the structural reviewer' not in prompt.lower()):
-                async for event in super().execute(cwd, prompt, *args, **kwargs):
-                    yield event
-                return
-            yield TextEvent(emitted)
-            entered.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                joined.set()
-
-    def create(*args: Any, **kwargs: Any) -> EmptyReviewBackend:
-        home = Path(kwargs['execution_input'].child_environment()['CODEX_HOME'])
-        role_homes.append(home)
-        auth = json.loads((home / 'auth.json').read_text())
-        auth['tokens']['refresh_token'] = 'private-cancelled-rotation'
-        (home / 'auth.json').write_text(json.dumps(auth))
-        return BlockedBackend(Path(environment['DAYDREAM_RB_REPOSITORY']))
-
-    monkeypatch.setattr(runner, 'create_backend', create)
-    running = asyncio.create_task(main(environment))
-    await asyncio.wait_for(entered.wait(), timeout=5)
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(running, timeout=5)
-    assert joined.is_set()
-    assert set(published) == destinations
-    assert (evidence / 'trajectory.json').is_file()
-    assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
-    trajectory = json.loads((evidence / 'trajectory.json').read_text())
-    siblings = [entry for entry in trajectory['extra']['subtrajectories'] if 'sibling_trajectory_ref' in entry]
-    assert siblings, 'cancellation must retain the real fork, not only the intent root'
-    documents = [json.loads((evidence / entry['sibling_trajectory_ref']).read_text()) for entry in siblings]
-    assert all(document['session_id'] == trajectory['session_id'] for document in documents)
-    assert any(step['source'] == 'agent' and step.get('message') == emitted
-               and step.get('extra', {}).get('stop_reason') == 'cancelled'
-               for document in documents for step in document['steps'])
-    assert run_document_path(run_directory(evidence, trajectory['session_id'])).read_bytes() == (
-        evidence / 'trajectory.json').read_bytes()
-    assert os.environ.get('DAYDREAM_ARCHIVE_DIR') == prior_archive
-    assert not list(archive_dir.iterdir()) and not dataset_store.exists()
-    assert trajectory['extra']['partial'] is True
-    assert any(event['event'] == 'phase_end' and event.get('status') == 'cancelled'
-               for event in trajectory['extra']['phase_events'])
-    record = json.loads((evidence / 'execution.json').read_text())
-    assert record['status'] == 'cancelled' and record['terminal_result'] is None
-    assert 'cancelled before returning' in record['diagnostics'][0]
-    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-
-    assert role_homes and all(not home.exists() for home in role_homes)
-    from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
-
-    canonical = Path(environment['DAYDREAM_RB_CODEX_HOME'])
-    with reviewer_credentials(canonical, tmp_path / 'after-cancel') as home:
-        assert json.loads((home / 'auth.json').read_text())['tokens']['refresh_token'] == 'private-cancelled-rotation'

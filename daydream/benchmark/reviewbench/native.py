@@ -4,28 +4,27 @@ from __future__ import annotations
 import copy
 import os
 import re
-import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from daydream import git_ops, runner
+from daydream import git_ops
 from daydream.backends import BackendExecutionInput, create_backend
 from daydream.backends.pi import _configured_pi_model, native_pi_provider, native_pi_settings
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
-from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import parse_hunks
-from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import (
-    FrozenAuthorDescription,
     RunConfig,
     _resolved_backend_name,
     _resolved_model,
     _resolved_reasoning_effort,
 )
+
+_REVIEW_PHASES = ('review', 'intent', 'exploration', 'alternatives', 'per_stack_review',
+                  'parse', 'wonder', 'merge', 'arbiter', 'suppression', 'supervise', 'diagram')
 
 
 def parse_native_config(arguments: list[str]) -> RunConfig:
@@ -65,7 +64,7 @@ def freeze_reviewer(config: RunConfig) -> dict[str, Any]:
             or config.scope_issue_filing or (config.observability is not None and config.observability.destinations)):
         raise ValueError('unsupported benchmark native policy: '
                          'copying, tests, publication and tracing are not admitted')
-    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    phases = set(_REVIEW_PHASES) | set(config.file_config.phases if config.file_config else {})
     backend = _resolved_backend_name(config, 'per_stack_review')
     if backend not in {'pi', 'codex'} or {_resolved_backend_name(config, phase) for phase in phases} != {backend}:
         raise ValueError('public ReviewBench requires one selected native Pi or Codex reviewer for every phase')
@@ -118,7 +117,7 @@ def reviewer_config(reviewer: Mapping[str, Any], repository: Path) -> RunConfig:
     config = RunConfig(target=str(repository), **copy.deepcopy(overrides),
         file_config=DaydreamFileConfig(**copy.deepcopy(reviewer['file_config'])), review_profile=resolved_profile,
         output_mode='review', non_interactive=True, dataset_capture_disabled=True, archive=False, run_eval=False)
-    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    phases = set(_REVIEW_PHASES) | set(config.file_config.phases if config.file_config else {})
     if {_resolved_backend_name(config, phase) for phase in phases} != {reviewer['backend']}:
         raise ValueError('frozen reviewer requires an unavailable mixed native capability')
     return config
@@ -154,7 +153,7 @@ class PublicHarborTask:
         merge_base = git_ops.merge_base(repository, case.base, case.head)
         if merge_base is None or git_ops.diff_paths(repository, merge_base, case.head, ['.']) != self.patch:
             raise ValueError("public Harbor patch differs from supplied frozen comparison")
-        return case.repo
+        return merge_base
 
 
 @dataclass
@@ -164,7 +163,6 @@ class CaseExecution:
     status: str
     candidate: dict[str, Any] | None = None
     terminal_result: dict[str, Any] | None = None
-    configuration: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
     retained_findings: list[dict[str, Any]] = field(default_factory=list)
     conversion_omissions: list[dict[str, Any]] = field(default_factory=list)
@@ -236,86 +234,3 @@ def convert_findings(
         findings.append({"producer": producer, "file": path, "start_line": line, "end_line": line,
                          "message": message})
     return findings, omissions
-
-
-async def review_case(task: PublicHarborTask, repository: Path, config: RunConfig, *,
-                      execution_input: runner.RunnerExecutionInput,
-                      evidence_directory: Path) -> CaseExecution:
-    """Review an admitted Harbor snapshot, retaining joined native evidence."""
-    case = task.case
-    producer = 'daydream-native-' + _resolved_backend_name(config, 'per_stack_review')
-    execution = CaseExecution("failed")
-    finalized: list[FinalizedReview] = []
-    try:
-        git_ops.assert_is_worktree(repository)
-        if git_ops.status_porcelain(repository).strip():
-            raise ValueError("source repository is not clean")
-        execution.source_identity = task.verify(repository)
-        evidence_directory.mkdir(parents=True, exist_ok=False)
-        with tempfile.TemporaryDirectory(prefix="daydream-reviewbench-case-") as directory:
-            checkout = Path(directory) / "repo"
-            checkout.mkdir()
-            git_ops.init_repository(checkout)
-            # Fetch both endpoints: cloning HEAD can lose a divergent base.
-            _run_git(checkout, ["fetch", "--no-tags", str(repository.resolve()), case.base, case.head],
-                     retries=0, timeout=300, error_context="frozen local endpoint materialization failed")
-            git_ops.checkout_detach(checkout, case.head)
-            if git_ops.head_sha(checkout) != case.head or git_ops.status_porcelain(checkout).strip():
-                raise ValueError("isolated checkout does not match supplied clean head")
-            merge_base = git_ops.merge_base(checkout, case.base, case.head)
-            if merge_base is None:
-                raise ValueError("supplied comparison has no merge base")
-            comparison = git_ops.diff_paths(checkout, merge_base, case.head, ["."])
-            expected = {"head_sha": case.head, "merge_base_sha": merge_base, "diff_key": diff_key(comparison)}
-            execution.analyzed_comparison = expected
-            native = replace(config, target=str(checkout), base=case.base, branch=None, force_worktree=False,
-                output_mode="review", flow_name="review", pr_number=None, pr_repo=None,
-                approved_head_sha=case.head, discover_github_provenance=False, findings_out=None,
-                frozen_author_description=(None if task.author_description is None
-                    else FrozenAuthorDescription(case.head, task.author_description)),
-                dataset_capture=False, dataset_capture_disabled=True, trajectory_hub_repo=None,
-                archive=False, run_eval=False, trajectory_path=None,
-                dump_artifacts=str(evidence_directory), non_interactive=True)
-            exit_code: int | None = None
-            try:
-                exit_code = await runner.run(native, review_result_handler=finalized.append, execution=execution_input)
-            except Exception as exc:
-                execution.diagnostics.append(f"native reviewer raised {type(exc).__name__}")
-            result = finalized[0] if len(finalized) == 1 else None
-            if result is not None:
-                execution.terminal_result = result.terminal_result
-                execution.configuration = result.configuration
-                execution.usage = result.usage
-                execution.retained_findings = result.items
-            if not finalized:
-                execution.diagnostics.append("native reviewer did not produce a finalized terminal result")
-                return execution
-            if result is None:
-                raise ValueError("native reviewer produced multiple terminal results")
-            validate_terminal_result(result.terminal_result, expected_head_sha=case.head)
-            revision = result.terminal_result["analyzed_revision"]
-            if any(revision.get(key) != value for key, value in expected.items()):
-                raise ValueError("native analyzed comparison differs from supplied frozen comparison")
-            if git_ops.head_sha(checkout) != case.head or git_ops.diff_worktree_against(checkout, case.head, ["."]):
-                raise ValueError("native reviewer changed the frozen checkout revision")
-            findings, execution.conversion_omissions = convert_findings(
-                result.items, repository=checkout, case=case, producer=producer, comparison=comparison)
-            state = result.terminal_result["analysis_state"]
-            if state != "complete":
-                execution.status = "incomplete" if state == "incomplete" else "failed"
-                execution.diagnostics.append("native analysis is " + state)
-                return execution
-            if exit_code != 0:
-                execution.diagnostics.append("native reviewer did not exit successfully")
-                return execution
-            execution.candidate = {"pr": asdict(case), "agent": producer, "findings": findings}
-            if execution.usage:
-                execution.candidate['usage'] = copy.deepcopy(execution.usage)
-            execution.status = ("conversion_limited" if execution.conversion_omissions
-                                else "complete" if findings else "completed_empty")
-            return execution
-    except (git_ops.GitError, OSError, UnicodeError, ValueError) as exc:
-        execution.status = "failed"
-        execution.candidate = None
-        execution.diagnostics.append(str(exc))
-        return execution

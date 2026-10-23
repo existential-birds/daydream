@@ -254,12 +254,15 @@ def test_shards_cover_collection_and_combine_real_branch_data(
     assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
 
 
-@pytest.mark.parametrize("fault", [
+@pytest.mark.parametrize(("fault", "diagnostic"), [
+    *((fault, False) for fault in [
     "missing-shard", "unexpected-shard", "missing-coverage", "corrupt-coverage", "wrong-checksum",
     "wrong-head", "wrong-tree", "wrong-run", "wrong-attempt", "wrong-index", "wrong-profile", "wrong-algorithm",
     "different-collection", "duplicate-test",
     "wrong-selection", "missing-test", "missing-teardown", "missing-call", "failed-test", "failed-process",
     "worker-crash", "line-only", "low-coverage",
+]),
+    ("failed-test", True), ("failed-process", True), ("worker-crash", True), ("low-coverage", True),
 ])
 def test_combine_rejects_incomplete_or_wrong_run_artifacts(
     shard_artifacts: ShardProject, tmp_path: Path, fault: str,
@@ -326,8 +329,10 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
     result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts), "--diagnostic", env=env)
     assert result.returncode != 0, result.stdout + result.stderr
     assert "ci-shard:" in result.stderr or "coverage.exceptions.DataError" in result.stderr
-    if fault not in {"failed-test", "failed-process", "worker-crash", "low-coverage"}:
-        assert not (repo / "coverage.xml").exists()
+    publishes_coverage = fault == "low-coverage" or diagnostic and fault in {
+        "failed-test", "failed-process", "worker-crash",
+    }
+    assert (repo / "coverage.xml").exists() is publishes_coverage
 
 
 @pytest.mark.parametrize(("mode", "static", "shards", "coverage", "success"), [

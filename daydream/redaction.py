@@ -751,143 +751,92 @@ def _credential_string_prefix(token: str) -> tuple[str, int] | None:
     return None
 
 
-def _credential_quote_end(text: str, start: int) -> int:
-    """Consume one quoted token deterministically, including malformed escapes."""
-    offset = start + 1
-    while offset < len(text):
-        if text[offset] == text[start]:
-            return offset + 1
-        offset += 2 if text[offset] == '\\' else 1
-    return len(text)
+_CREDENTIAL_TOKEN = re.compile(r'''[{}\[\]]|"(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)''')
 
 
 def _redact_native_credential_objects(
     text: str, *, discarded_tail: bool = False, defer_keys: bool = False,
 ) -> str:
-    """Withhold observed credential objects in malformed/partial JSON text.
-
-    This private scan retains only member/container scope. Complete inner objects
-    reuse the JSON sanitizer; interrupted secret objects are withheld. Prose
-    quotes cannot hide a following object or promote a quoted tag onto its parent.
-    """
+    """Redact tagged auth within complete or interrupted object/string scopes."""
     stack: list[_CredentialTextObject | None] = []
     objects: list[_CredentialTextObject] = []
     offset = 0
-    while offset < len(text):
-        character = text[offset]
+    while token := _CREDENTIAL_TOKEN.search(text, offset):
+        start, end = token.span()
+        spelling = token.group()
+        character = spelling[0]
+        offset = end
         if character in '{[':
             if stack and stack[-1] is not None:
                 stack[-1].pending_key = None
-            scope = _CredentialTextObject(offset, len(text)) if character == '{' else None
+            scope = _CredentialTextObject(start, len(text)) if character == '{' else None
             stack.append(scope)
             if scope is not None:
                 objects.append(scope)
-            offset += 1
             continue
         if character in '}]':
             if stack and ((stack[-1] is None) == (character == ']')):
-                closed = stack.pop()
-                if closed is not None:
-                    closed.end = offset + 1
-            offset += 1
+                scope = stack.pop()
+                if scope is not None:
+                    scope.end = end
             continue
-        if character not in "\"'":
-            offset += 1
-            continue
-        previous = offset - 1
+        previous = start - 1
         while previous >= 0 and text[previous].isspace():
             previous -= 1
-        body = offset + 1
-        while body < len(text) and text[body].isspace():
-            body += 1
-        structured_string = bool(stack) and previous >= 0 and text[previous] in '{[,:'
-        encoded_object = character == '"' and body < len(text) and text[body] in '{['
-        if not structured_string and not encoded_object and not (character == '"' and previous < 0):
-            offset += 1
+        encoded_object = character == '"' and spelling[1:].lstrip().startswith(('{', '['))
+        if not ((stack and previous >= 0 and text[previous] in '{[,:') or encoded_object
+                or (character == '"' and previous < 0)):
+            offset = start + 1
             continue
-        end = _credential_quote_end(text, offset)
-        # An unmatched prose quotation can end at the following JSON key's quote.
-        # A top-level scalar string must occupy the whole input unless its body
-        # is itself an encoded object, which can be inspected independently.
-        if not stack and not encoded_object and end < len(text) and text[end:].strip():
-            offset += 1
-            continue
-        spelling = text[offset:end]
         decoded = _quoted_credential_token(spelling)
-        if (not stack and encoded_object and decoded is not None and decoded.strip() in ('{', '[')
-                and end < len(text) and text[end:].strip()):
-            # A prose quote immediately before a raw object is not an encoded
-            # JSON string. Leave its following brace available to the scope scan.
-            offset += 1
+        if (not stack and end < len(text) and text[end:].strip()
+                and (not encoded_object or (isinstance(decoded, str) and decoded.strip() in ('{', '[')))):
+            offset = start + 1
             continue
         recovered = _credential_string_prefix(spelling) if decoded is None else None
         content = decoded if decoded is not None else recovered[0] if recovered is not None else None
-        # A trimmed escape tail is observed data, not proof of an empty value or
-        # a safe marker. Carry this fact only through the last incomplete string;
-        # discriminator admission still requires an original complete token.
-        incomplete_tail = (bool(recovered and recovered[1])
-                           or (discarded_tail and decoded is None and end == len(text)))
-        member_key = bool(stack and stack[-1] is not None and previous >= 0 and text[previous] in '{,')
+        incomplete_tail = bool(recovered and recovered[1]) or (discarded_tail and decoded is None and end == len(text))
+        scope = stack[-1] if stack else None
+        member_key = scope is not None and previous >= 0 and text[previous] in '{,'
         if content is not None and '{' in content and not (defer_keys and member_key):
-            redacted_content = _redact_native_credential_objects(
-                content, discarded_tail=incomplete_tail, defer_keys=defer_keys,
-            )
-            if redacted_content != content:
-                objects.append(_CredentialTextObject(offset, end,
-                    replacement=json.dumps(redacted_content, ensure_ascii=False, allow_nan=False)))
-        if stack and stack[-1] is not None:
-            scope = stack[-1]
-            assert scope is not None
-            if scope.pending_key is not None and text[scope.pending_end:offset].strip() == ':':
-                key = scope.pending_key
-                if key == 'type' and isinstance(decoded, str) and decoded in _NATIVE_CREDENTIAL_FIELDS:
-                    scope.kinds.add(decoded)
-                elif key in ('key', 'access', 'refresh'):
-                    value = content if content is not None else spelling[1:]
-                    if incomplete_tail or (value.strip() and _redact_sensitive_text(value) != value):
-                        scope.unsafe_fields.add(key)
-                scope.pending_key = None
-            else:
-                scope.pending_key = decoded if previous >= 0 and text[previous] in '{,' else None
-                scope.pending_end = end
-        offset = end
+            safe = _redact_native_credential_objects(content, discarded_tail=incomplete_tail, defer_keys=defer_keys)
+            if safe != content:
+                objects.append(_CredentialTextObject(start, end, replacement=json.dumps(safe, ensure_ascii=False)))
+        if scope is None:
+            continue
+        if scope.pending_key is not None and text[scope.pending_end:start].strip() == ':':
+            if scope.pending_key == 'type' and isinstance(decoded, str) and decoded in _NATIVE_CREDENTIAL_FIELDS:
+                scope.kinds.add(decoded)
+            elif scope.pending_key in ('key', 'access', 'refresh'):
+                value = content if content is not None else spelling[1:]
+                if incomplete_tail or (value.strip() and _redact_sensitive_text(value) != value):
+                    scope.unsafe_fields.add(scope.pending_key)
+            scope.pending_key = None
+        else:
+            scope.pending_key = decoded if member_key else None
+            scope.pending_end = end
     out: list[str] = []
     cutoff = 0
-    # Opening order makes selected spans disjoint. Complete objects are decoded
-    # once; quoted token scanning never retries at escaped quotes or future bytes.
     for scope in objects:
         if scope.start < cutoff:
             continue
         replacement = scope.replacement
         if replacement is None:
-            fields: set[str] = set()
-            for kind in scope.kinds:
-                fields.update(_NATIVE_CREDENTIAL_FIELDS[kind])
-            if not scope.unsafe_fields.intersection(fields):
+            unsafe = scope.unsafe_fields & {field for kind in scope.kinds for field in _NATIVE_CREDENTIAL_FIELDS[kind]}
+            if not unsafe:
                 continue
             try:
                 container = json.loads(text[scope.start:scope.end])
-                current = container.get('type') if isinstance(container, dict) else None
-                current_fields = (_NATIVE_CREDENTIAL_FIELDS.get(current, frozenset())
-                                  if isinstance(current, str) else frozenset())
-                if not scope.unsafe_fields.intersection(fields).issubset(current_fields):
-                    # A duplicate discriminator cannot erase observed context.
-                    replacement = json.dumps(_REDACTED_CREDENTIAL)
-                else:
-                    # Full JSON callers must bind original key sensitivity and
-                    # collision reservations before any encoded member-key rewrite.
-                    sanitized = (_redact_json_container(container) if defer_keys
-                                 else _redact_native_auth_value(container))
-                    replacement = json.dumps(sanitized, ensure_ascii=False, allow_nan=False)
+                kind = container.get('type') if isinstance(container, dict) else None
+                fields = _NATIVE_CREDENTIAL_FIELDS.get(kind, ()) if isinstance(kind, str) else ()
+                sanitized = (_redact_json_container(container) if defer_keys else _redact_native_auth_value(container))
+                replacement = json.dumps(sanitized if unsafe.issubset(fields) else _REDACTED_CREDENTIAL,
+                                         ensure_ascii=False, allow_nan=False)
             except (ValueError, TypeError, RecursionError):
-                # Malformed or unrepresentable auth spans cannot abort a UI
-                # consumer, and withholding this span preserves public siblings.
                 replacement = json.dumps(_REDACTED_CREDENTIAL)
         out.extend((text[cutoff:scope.start], replacement))
         cutoff = scope.end
-    out.append(text[cutoff:])
-    return ''.join(out)
-
+    return ''.join([*out, text[cutoff:]])
 
 def _redact_unstructured_text(s: str) -> str:
     """Apply the shared text policy without normalizing JSON-looking host labels."""

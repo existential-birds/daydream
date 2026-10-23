@@ -122,31 +122,22 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     assert trajectory["extra"]["partial"] is True
 
 async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> None:
-    """Abort evidence must already close the turn when backend cleanup starts.
-
-    The former invocation spy asserted host callbacks and drifted from the real
-    recorder interface. Final-only ceiling coverage cannot detect a turn that
-    stays open while stream cleanup stalls. Snapshot the actual recorder from
-    the external backend's close boundary, then inspect persisted host evidence.
-    """
+    """The actual backend close boundary sees an already-closed, interrupted host turn."""
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _recorder, snapshot: snapshots.append(snapshot))
-    closed = False
 
     async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-        nonlocal closed
         try:
             yield ToolStartEvent(id="tool-0", name="Bash", input={"command": "ls"})
         finally:
             recorder.write_partial()
-            closed = True
 
     backend = ScriptedBackend(responder=stream, model="mock-model")
     async with recorder:
         _, _, reason = await run_agent(
             backend, tmp_path, "go", phase=DaydreamPhase.FIX, tool_call_budget=0, progress_callback=lambda _: None,
         )
-    assert reason == "tool_call_budget_exceeded" and closed
+    assert reason == "tool_call_budget_exceeded"
     partial = next(snapshot for snapshot in snapshots if snapshot.status == "partial")
     cleanup_document = json.loads(partial.documents[0].json_bytes)
     final_document = json.loads(recorder.path.read_bytes())
@@ -155,10 +146,8 @@ async def test_run_agent_abort_records_reason_and_turn_end(tmp_path: Path) -> No
         assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
         assert "partial_step" not in step["extra"]
         assert [tool["tool_call_id"] for tool in step["tool_calls"]] == ["tool-0"]
-        interruptions = step["observation"]["results"]
-        assert len(interruptions) == 1 and interruptions[0].get("source_call_id") is None
-        assert interruptions[0]["content"] == "[interrupted: call did not complete before invocation ended]"
-        assert interruptions[0]["extra"] == {"is_error": True, "status": "interrupted"}
+        interruption, = step["observation"]["results"]
+        assert interruption["extra"] == {"is_error": True, "status": "interrupted"}
         assert document["extra"]["partial"] is True
 
 

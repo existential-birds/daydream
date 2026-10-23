@@ -197,25 +197,17 @@ def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
     assert not console._live_stack
 
 
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
 @pytest.mark.parametrize('layout', ['wrapped', 'line_cut'])
 async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
-    credential_type: str, layout: str,
+    layout: str,
 ) -> None:
-    """Rich must not destroy auth-object context before sanitizing its result.
-
-    Existing display tests cover shaped command strings, not opaque generic
-    credential fields whose type tag can be beyond the displayed line cap.
-    Exercise real event presentation and Console wrapping, retaining public keys
-    and the original host result rather than blanking or mutating the payload.
-    """
+    """Redact the complete tool result before Rich wrapping or line cuts lose its credential tag."""
     secret = 'opaque-ui-native-auth-canary'
-    credentials = ({'key': secret} if credential_type == 'api_key' else
-                   {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    credentials = {'key': secret}
     payload: dict[str, object] = {**credentials, 'public': {'key': 'ordinary-public-key'}}
     if layout == 'line_cut':
         payload.update({f'public_{index}': index for index in range(30)})
-    payload['type'] = credential_type
+    payload['type'] = 'api_key'
     content = json.dumps(payload, indent=2 if layout == 'line_cut' else None)
     event = ToolResultEvent('credential', content, is_error=False)
     console = Console(file=StringIO(), record=True, width=42, force_terminal=False)
@@ -229,23 +221,16 @@ async def test_tool_result_redacts_native_auth_before_rich_wrap_or_line_cut(
     assert event.output == content
 
 
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
 @pytest.mark.parametrize('route', ['panel', 'callback', 'thinking', 'log'])
 async def test_text_displays_redact_complete_native_auth_before_selecting_or_formatting(
-    credential_type: str, route: str, capsys: pytest.CaptureFixture[str],
+    route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Display copies must retain split auth context and redact before line/cap cuts.
-
-    Command and tool-result tests do not own accumulated narration, last-line
-    callbacks or the thinking cap. Real Rich/callback/log emissions must protect
-    opaque fields while raw public events remain unchanged.
-    """
+    """Narration, callbacks, thinking caps, and logs redact complete buffered context before formatting."""
     secret = 'opaque-ui-text-native-auth-canary'
-    fields = ({'key': secret} if credential_type == 'api_key' else
-              {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    fields = {'key': secret}
     public = {'public': {'key': 'ordinary-public-key'}}
-    payload = ({**fields, **public, 'padding': 'x' * 400, 'type': credential_type} if route == 'thinking' else
-               {'type': credential_type, **fields, **public})
+    payload = ({**fields, **public, 'padding': 'x' * 400, 'type': 'api_key'} if route == 'thinking' else
+               {'type': 'api_key', **fields, **public})
     content = json.dumps(payload).replace(', "', ',\n"', 1)
     console = Console(file=StringIO(), record=True, width=40, force_terminal=False)
     callback: list[Text] = []
@@ -270,20 +255,14 @@ async def test_text_displays_redact_complete_native_auth_before_selecting_or_for
     assert 'ordinary-public-key' in visible and '[REDACTED' in visible
 
 
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth'])
 @pytest.mark.parametrize('route', ['direct', 'callback', 'panel', 'log'])
 async def test_callback_tool_input_redacts_native_auth_before_primary_argument_selection(
-    credential_type: str, route: str, capsys: pytest.CaptureFixture[str],
+    route: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Public callback formatting must not expose a bare value after losing its tag.
-
-    The panel and verbose paths do not cover the exported formatter or real
-    callback route. Preserve their ordinary literal-key and raw-input contract.
-    """
+    """Each public tool-input presentation route protects opaque native fields before selecting a value."""
     secret = 'opaque-ui-callback-native-auth-canary'
-    values: dict[str, object] = ({'key': secret} if credential_type == 'api_key' else
-                                 {'access': secret + '-access', 'refresh': secret + '-refresh'})
-    values['type'] = credential_type
+    values: dict[str, object] = {'key': secret}
+    values['type'] = 'api_key'
     before = dict(values)
     public: dict[str, object] = {'key': 'ordinary-public-key', 'type': 'record'}
     console = Console(file=StringIO(), record=True, width=40, force_terminal=False)

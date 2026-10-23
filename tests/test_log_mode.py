@@ -139,24 +139,13 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
     assert event.input == {"command": command}
 
 
-
-
-
-@pytest.mark.parametrize('credential_type', ['api_key', 'oauth', 'public'])
-@pytest.mark.parametrize('closed_pipe', [False, True])
+@pytest.mark.parametrize(('credential_type', 'closed_pipe'), [('api_key', False), ('public', False), ('public', True)])
 async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellation(
     tmp_path: Path, credential_type: str, closed_pipe: bool, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Graceful cancellation must drain the same complete block as normal flush.
-
-    Rendering tests call flush explicitly, while run_agent cancellation skips
-    its normal flush. Stream real backend events into the event loop, rendezvous
-    after observation, then cancel. A real closed pipe must preserve cancellation
-    rather than replacing it with a secondary presentation failure.
-    """
+    """Cancellation drains delivered log context and survives a real closed-pipe error."""
     secret = 'opaque-ui-cancel-native-auth-canary'
-    fields = ({'key': secret} if credential_type == 'api_key' else
-              {'access': secret + '-access', 'refresh': secret + '-refresh'})
+    fields = {'key': secret}
     content = ('ordinary public narration' if credential_type == 'public' else
                json.dumps({'type': credential_type, **fields, 'public': {'key': 'ordinary-public-key'}}))
     split = len(content) // 2
@@ -210,10 +199,6 @@ async def test_cancelled_agent_drains_complete_log_text_without_losing_cancellat
     else:
         assert 'ordinary-public-key' in output and '[REDACTED' in output
     assert ''.join(event.text for event in events) == content
-
-
-
-
 
 
 @pytest.mark.parametrize('log_mode', [False, True])

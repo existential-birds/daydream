@@ -167,105 +167,44 @@ class _SignalFlushRegistry:
                 pass
         return snapshot
 
-    def _partial_summaries(
-        self, recorders: Sequence[TrajectoryRecorder],
-    ) -> dict[int, list[dict[str, Any]]]:
-        """Sample each active invocation once before choosing a shared immutable cutoff.
-
-        Active forks have not yet joined the parent's completed summaries. Keep
-        their original logical references and identities in checkpoint-only
-        summaries, without folding unfinished usage or declaring completion.
-        """
-        invocations = {id(recorder): [inv.summary(partial=True) for inv in recorder._active_invocations]
-                       for recorder in recorders}
-        summaries: dict[int, list[dict[str, Any]]] = {}
-
-        def prepare(recorder: TrajectoryRecorder) -> list[dict[str, Any]]:
-            active = list(invocations[id(recorder)])
-            for child in recorders:
-                if child.parent is not recorder:
-                    continue
-                child_active = prepare(child)
-                if (not child._snapshot_in_flight_steps() and not child_active and not child._active_dispatches
-                        and not any("sibling_trajectory_ref" in summary for summary in child._subtrajectories)):
-                    continue
-                child_invocations = child._recursive_invocation_summaries()
-                child_events = child._recursive_phase_event_summaries()
-                for summary in child_active:
-                    if "invocation_id" in summary:
-                        child_invocations.append(summary)
-                    else:
-                        child_invocations.extend(summary.get("invocations", []))
-                        child_events.extend(summary.get("phase_events", []))
-                fork: dict[str, Any] = {
-                    "trajectory_id": child.trajectory_id,
-                    "descriptor": child.descriptor,
-                    "started_at": child._run_started_at,
-                    "ended_at": None,
-                    "sibling_trajectory_ref": recorder._logical_child_trajectory_ref(child.path),
-                    "phase_events": child_events,
-                    "invocations": child_invocations,
-                }
-                if child_invocations:
-                    fork["phase"] = child_invocations[-1]["phase"]
-                if ":fork:" in child.trajectory_id:
-                    fork["fork_id"] = child.trajectory_id
-                    fork["dispatch_id"] = child.trajectory_id.rsplit(":fork:", 1)[0]
-                active.append(fork)
-            summaries[id(recorder)] = active
-            return active
-
-        root = self._root()
-        if root is not None:
-            prepare(root)
-        return summaries
-
     def flush_active(self) -> None:
-        """Freeze every active recorder, write all, then call the root once."""
+        """Prepare the entire live graph before publishing one common-cutoff snapshot."""
         recorders = tuple(self._active.values())
         root = self._root()
         if root is None:
             return
-        summaries = self._partial_summaries(recorders)
+        summaries = {id(recorder): [inv.summary(partial=True) for inv in recorder._active_invocations]
+                     for recorder in recorders}
+        for child in recorders:
+            if child.parent is None:
+                continue
+            # The child document owns its live invocations and phase events.
+            # Ancestors retain only graph identity; completed summaries keep
+            # their ordinary folded shape when the fork joins.
+            fork: dict[str, Any] = {
+                "trajectory_id": child.trajectory_id, "descriptor": child.descriptor,
+                "started_at": child._run_started_at, "ended_at": None,
+                "sibling_trajectory_ref": child.parent._logical_child_trajectory_ref(child.path),
+                "invocations": [],
+            }
+            if ":fork:" in child.trajectory_id:
+                fork.update(fork_id=child.trajectory_id, dispatch_id=child.trajectory_id.rsplit(":fork:", 1)[0])
+            summaries[id(child.parent)].append(fork)
         cutoff = self._partial_cutoff(recorders, summaries)
         prepared: list[TrajectoryDocumentSnapshot] = []
-        for recorder in recorders:
-            if recorder is root:
-                continue
-            try:
-                active = summaries[id(recorder)]
-                document = recorder._prepare_document(
-                    status="partial", cutoff_at=cutoff, active_summaries=active,
-                    allow_empty_root=bool(recorder._active_dispatches) or any(
-                        "sibling_trajectory_ref" in summary for summary in [*recorder._subtrajectories, *active]),
-                )
+        try:
+            for recorder in recorders:
+                document = recorder._prepare_document(status="partial", cutoff_at=cutoff,
+                    active_summaries=summaries[id(recorder)],
+                    allow_empty_root=bool(recorder.parent or recorder._active_dispatches or
+                        recorder._subtrajectories or summaries[id(recorder)] or self._completed))
                 if document is not None:
                     prepared.append(document)
-            except Exception as exc:  # noqa: BLE001 - retain the prior coherent run snapshot
-                _warn_partial_write(exc)
-                return
-        child_evidence = bool(prepared or self._completed)
-        try:
-            root_document = root._prepare_document(
-                status="partial",
-                cutoff_at=cutoff,
-                allow_empty_root=child_evidence or bool(root._active_dispatches),
-                active_summaries=summaries[id(root)],
-            )
-            if root_document is not None:
-                prepared.insert(0, root_document)
-        except Exception as exc:  # noqa: BLE001 - isolate each signal write
+        except Exception as exc:  # noqa: BLE001 - preserve the previous coherent graph on any prepare failure
             _warn_partial_write(exc)
             return
-        if child_evidence and root_document is None:
-            return
-        if prepared or self._completed:
-            self._write_snapshot(
-                status="partial",
-                root=root,
-                prepared=prepared,
-                cutoff_at=cutoff,
-            )
+        if prepared:
+            self._write_snapshot(status="partial", root=root, prepared=prepared, cutoff_at=cutoff)
 
     def write_final(self, root: TrajectoryRecorder) -> None:
         """Write the final root document and publish one retained run snapshot."""
@@ -754,8 +693,8 @@ class TrajectoryRecorder:
         )
         self._extend_steps([self.redactor.redact_step(step)])
 
-    def review_measurements(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Project joined request identities and single-owner whole-run usage.
+    def review_usage(self) -> dict[str, Any]:
+        """Project single-owner whole-run usage.
 
         Fork scopes already fold successful child metrics into the root once.
         These are usage totals, not review wall time or cleanup duration.
@@ -766,11 +705,8 @@ class TrajectoryRecorder:
             ("cached_tokens", metrics.total_cached_tokens), ("cost_usd", metrics.total_cost_usd)) if value is not None}
         if "prompt_tokens" in usage and "completion_tokens" in usage:
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
-        requests = [{"phase": invocation["phase"], **request}
-                    for invocation in self._recursive_invocation_summaries()
-                    for request in invocation.get("requests", [])]
-        admitted = redact_value(requests)
-        return usage, admitted if isinstance(admitted, list) else []
+        return usage
+
 
     def _build_final_metrics(self, total_steps: int) -> FinalMetrics:
         """Keep ATIF and embedded result usage on the same billing projection."""

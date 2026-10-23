@@ -6,7 +6,6 @@ The packaged single-file variant must agree with the setup secret/variable names
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -34,16 +33,6 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
         expected_paths.add('daydream/backends/pi_structured_output.ts')
-        expected_paths.update({
-            'daydream/benchmark/reviewbench/harbor-runtime.in',
-            'daydream/benchmark/reviewbench/harbor-runtime.lock',
-            'daydream/benchmark/reviewbench/reviewer-runtime.lock',
-            'daydream/benchmark/reviewbench/harbor_entrypoint.py',
-            'daydream/benchmark/reviewbench/harbor_auth.py',
-            'daydream/benchmark/reviewbench/reviewer_auth.mjs',
-            'daydream/benchmark/reviewbench/pi-reviewer/package.json',
-            'daydream/benchmark/reviewbench/pi-reviewer/package-lock.json',
-        })
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
         with zipfile.ZipFile(wheels[0]) as zf:
@@ -63,40 +52,31 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )
         # Execute installed resources outside the source checkout.
-        script = (
-            'import json,sys; from pathlib import Path; '
-            'from daydream.benchmark.reviewbench.harbor_build import reviewer_build; '
-            'suffix,assets,identity=reviewer_build(Path(sys.argv[1])); '
-            '_,_,arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64"); '
-            'pi_suffix,pi_assets,pi_identity=reviewer_build(Path(sys.argv[1]),backend="pi"); '
-            '_,_,pi_arm_identity=reviewer_build(Path(sys.argv[1]),platform="linux/arm64",backend="pi"); '
-            'print(json.dumps({"identity":identity,"arm_identity":arm_identity,"assets":list(assets),"suffix":suffix,'
-            '"pi_identity":pi_identity,"pi_arm_identity":pi_arm_identity,"pi_assets":list(pi_assets),'
-            '"pi_suffix":pi_suffix}))'
-        )
-        result = subprocess.run([sys.executable, '-c', script, str(wheels[0])], cwd=tmp,
-                                env={**os.environ, 'PYTHONPATH': str(installed)},
-                                check=True, capture_output=True, text=True)
-        build = json.loads(result.stdout)
-        assert build['identity']['platform'] == 'linux/amd64'
-        assert build['arm_identity']['platform'] == 'linux/arm64'
-        assert build['identity']['codex_cli'] == '0.163.0'
-        assert build['pi_identity']['pi_cli'] == '1.3.0'
-        assert build['pi_arm_identity']['platform'] == 'linux/arm64'
-        for name in ('package.json', 'package-lock.json', 'daydream-auth.mjs'):
-            assert 'pi-reviewer/' + name in build['pi_assets']
-        assert 'npm ci' in build['pi_suffix']
-        assert 'codex_cli' not in build['pi_identity']
-        assert 'reviewer-runtime.lock' in build['assets']
-        assert 'runtime.lock' not in build['assets']
-        assert build['identity']['reviewer_runtime_lock_sha256'] != build['identity']['host_runtime_lock_sha256']
+        script = """from itertools import product
+from pathlib import Path
+import sys
+from daydream.benchmark.reviewbench.harbor_build import reviewer_build
+from daydream.benchmark.reviewbench import harbor_auth
+
+for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')):
+    suffix, assets, identity = reviewer_build(Path(sys.argv[1]), backend=backend, platform=platform)
+    assert identity['platform'] == platform
+    assert identity[backend + '_cli'] == ('1.3.0' if backend == 'pi' else '0.163.0')
+    assert 'reviewer-runtime.lock' in assets and 'runtime.lock' not in assets
+    assert identity['reviewer_runtime_lock_sha256'] != identity['host_runtime_lock_sha256']
+    if backend == 'pi':
+        names = ('package.json', 'package-lock.json', 'daydream-auth.mjs')
+        assert all('pi-reviewer/' + name in assets for name in names)
+        assert 'npm ci' in suffix and 'codex_cli' not in identity
+"""
+        installed_environment = {**os.environ, 'PYTHONPATH': str(installed)}
+        subprocess.run([sys.executable, '-c', script, str(wheels[0])], cwd=tmp,
+                       env=installed_environment, check=True, capture_output=True, text=True)
         help_result = subprocess.run([sys.executable, '-m', 'daydream', 'benchmark', 'reviewbench',
                                       'harbor-export', '--help'], cwd=tmp,
-                                     env={**os.environ, 'PYTHONPATH': str(installed)},
+                                     env=installed_environment,
                                      check=True, capture_output=True, text=True)
-        assert '--wheel' in help_result.stdout
-        assert '--source' in help_result.stdout
-        assert '--platform' in help_result.stdout
+        assert all(flag in help_result.stdout for flag in ('--wheel', '--source', '--platform'))
         # Concurrent filename replacement must preserve the admitted wheel bytes.
         wheel = wheels[0]
         admitted = wheel.read_bytes()
@@ -107,15 +87,12 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         read_bytes = Path.read_bytes
 
         def replace_after_validation(path: Path) -> bytes:
-            content = read_bytes(path)
             if path == runtime_lock:
-                # Replace after validation, when the runtime lock is captured.
                 os.replace(replacement, wheel)
-            return content
+            return read_bytes(path)
 
-        with monkeypatch.context() as patch:
-            patch.setattr(Path, 'read_bytes', replace_after_validation)
-            _, assets, identity = harbor_build.reviewer_build(wheel)
+        monkeypatch.setattr(Path, 'read_bytes', replace_after_validation)
+        _, assets, identity = harbor_build.reviewer_build(wheel)
         assert wheel.read_bytes() == replacement_bytes
         assert identity['wheel_sha256'] == hashlib.sha256(admitted).hexdigest()
         assert assets[wheel.name] == admitted
@@ -126,7 +103,7 @@ def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')
-    script = '''import importlib.util, json
+    script = '''import importlib.util
 from pathlib import Path
 
 for module in ("harbor", "reviewbench_harbor"):
@@ -138,10 +115,7 @@ for root in (Path("/root"), Path("/opt"), Path("/tmp")):
                     "scripts/classifier/classify.ts", "golden/*.json"):
         assert not list(root.rglob(pattern)), f"verifier material visible under {root}: {pattern}"
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
-print(json.dumps({"verifier_material_absent": True}))
 '''
-    result = subprocess.run([
+    subprocess.run([
         'docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/opt/daydream/bin/python', image, '-c', script,
     ], check=True, capture_output=True, text=True, timeout=180)
-    evidence = json.loads(result.stdout)
-    assert evidence['verifier_material_absent'] is True

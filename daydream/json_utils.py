@@ -1,4 +1,4 @@
-"""Shared atomic file publication and tolerant model-output JSON extraction."""
+"""Shared atomic JSON/byte writers and tolerant model-output JSON extraction."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
+
+from jsonschema import Draft202012Validator
 
 
 def _fsync_directory(path: Path) -> None:
@@ -106,20 +108,6 @@ def atomic_write_bytes(
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 
 
-def atomic_create_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
-    """Install flushed bytes only at an absent path, preserving competing output.
-
-    Stage beside the destination so the no-clobber hard link stays on its
-    filesystem. Clean staging on success or failure; never replace final bytes.
-    """
-    tmp = _stage_bytes(path, content, fsync=True, mode=mode)
-    try:
-        os.link(tmp, path, follow_symlinks=False)
-    finally:
-        with suppress(OSError):
-            tmp.unlink()
-
-
 def atomic_write_pair(
     first: tuple[Path, bytes],
     second: tuple[Path, bytes],
@@ -169,25 +157,6 @@ def atomic_write_json(
     atomic_write_bytes(path, text.encode("utf-8"), fsync=fsync, dir_fsync=dir_fsync, mode=mode)
 
 
-def publish_staged_directory(staged: Path, destination: Path, *, commit_last: str) -> None:
-    """Exclusively install a flat staged file set, committing its marker last.
-
-    Files must be regular files on the destination filesystem. Each hard-link
-    install is atomic and refuses competing bytes; the final marker authorizes
-    readers to consume the complete set. A failure leaves the new directory
-    visibly incomplete and preserves all installed or competing files. Callers
-    own stage cleanup and must use a fresh destination after publication fails.
-    """
-    files = sorted(staged.iterdir())
-    if (not commit_last or Path(commit_last).name != commit_last
-            or not any(path.name == commit_last for path in files)
-            or any(path.is_symlink() or not path.is_file() for path in files)):
-        raise ValueError("publication requires flat regular staged files and a commit marker")
-    destination.mkdir(exist_ok=False)
-    for path in sorted(files, key=lambda path: (path.name == commit_last, path.name)):
-        os.link(path, destination / path.name, follow_symlinks=False)
-
-
 def dataclass_payload(value: Any) -> dict[str, Any]:
     """Project a dataclass tree to dictionaries, converting tuple fields to JSON arrays."""
     return asdict(value, dict_factory=lambda fields: {
@@ -229,8 +198,6 @@ def extract_json(text: str) -> Any:
 
 def validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     """Return whether ``value`` validates against ``schema`` (the strict full gate)."""
-    from jsonschema import Draft202012Validator
-
     return not any(Draft202012Validator(schema).iter_errors(value))
 
 
@@ -251,8 +218,6 @@ def schema_rejection(value: Any, schema: dict[str, Any], *, candidate_count: int
     """Only a complete object candidate can qualify for a fresh strict-schema attempt."""
     if not isinstance(value, dict):
         return None
-    from jsonschema import Draft202012Validator
-
     errors = list(islice(Draft202012Validator(schema).iter_errors(value), 128))
     if not errors:
         return None
@@ -375,8 +340,6 @@ def extract_json_by_schema(
     # Nothing accepted: trace the largest span with content-free rejection evidence.
     largest = _largest_span(candidates)
     reason = None
-    from jsonschema import Draft202012Validator
-
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"
         break

@@ -20,9 +20,6 @@ from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
 from daydream.run_context import current_run_context
 
-REVIEW_CONFIGURATION_PHASES = ('review', 'intent', 'exploration', 'alternatives', 'per_stack_review',
-                               'parse', 'wonder', 'merge', 'arbiter', 'suppression', 'supervise', 'diagram')
-
 
 @dataclass(frozen=True)
 class FinalizedReview:
@@ -34,19 +31,17 @@ class FinalizedReview:
 
     terminal_result: dict[str, Any]
     items: list[dict[str, Any]]
-    configuration: dict[str, Any]
     usage: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
-                             configuration: dict[str, Any], *, usage: dict[str, Any] | None = None) -> None:
+                             *, usage: dict[str, Any] | None = None) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
     context = current_run_context()
     handler = None if context is None else context.review_result_handler
     if handler is not None:
         validate_terminal_result(result)
-        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(configuration),
-                                copy.deepcopy(usage or {})))
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {})))
 
 
 class ReasonCode(StrEnum):
