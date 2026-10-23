@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -19,7 +18,7 @@ PUBLIC_PROFILE_SCHEMA = 4
 
 @dataclass(frozen=True)
 class Case:
-    """Full supplied PR identity; key spelling is ReviewBench's prKey contract."""
+    """Supplied PR identity with ReviewBench's prKey spelling."""
 
     repo: str
     pr_number: int
@@ -46,21 +45,20 @@ class Case:
             raise ValueError('missing or malformed ReviewBench PR identity') from exc
 
 
-def verify_source(source: Path) -> dict[str, Any]:
-    """Refuse another revision or modified executable/reference source."""
+def verify_source(source: Path) -> dict[str, str]:
+    """Require pinned source and unchanged benchmark inputs."""
     if git_ops.head_sha(source) != REVIEWBENCH_REVISION:
         raise ValueError(f'ReviewBench source must be pinned at {REVIEWBENCH_REVISION}')
-    if git_ops.status_porcelain(source, all_untracked=True):
-        raise ValueError('ReviewBench source is modified or contains untracked inputs')
-    paths = ('corpus/manifest.json', 'corpus/test/test.json', 'package-lock.json',
-             'scripts/eval/scorer.ts', 'scripts/eval/print-summary.ts', 'scripts/eval/eval.ts',
-             'scripts/eval/matcher.ts', 'scripts/classifier/prompts.ts')
-    return {'repository': REVIEWBENCH_REPOSITORY, 'revision': REVIEWBENCH_REVISION,
-            'hashes': {path: hashlib.sha256((source / path).read_bytes()).hexdigest() for path in paths}}
+    if git_ops.changed_paths_z(source, 'HEAD', include_untracked=False):
+        raise ValueError('ReviewBench source is modified')
+    tracked = set(git_ops.ls_files(source, strict=True))
+    if set(git_ops.search_files(source, ['scripts'], include_ignored=True)) - tracked:
+        raise ValueError('ReviewBench scripts contain untracked inputs')
+    return {'repository': REVIEWBENCH_REPOSITORY, 'revision': REVIEWBENCH_REVISION}
 
 
 def load_cases(source: Path, selection: str) -> list[Case]:
-    """Use actual supplied starter/full membership, never judge --limit."""
+    """Load supplied membership from a verified source checkout."""
     if selection not in {'test', 'full'}:
         raise ValueError('ReviewBench set must be test or full')
     filename = 'corpus/test/test.json' if selection == 'test' else 'corpus/manifest.json'
@@ -68,10 +66,6 @@ def load_cases(source: Path, selection: str) -> list[Case]:
     if not isinstance(raw, list):
         raise ValueError('ReviewBench set must be an array')
     cases = [Case.from_dict(value) for value in raw]
-    if len(cases) != (25 if selection == 'test' else 219) or len({case.key for case in cases}) != len(cases):
-        raise ValueError('ReviewBench supplied set membership is incomplete or duplicated')
-    if selection == 'test':
-        full = {case.key: case for case in load_cases(source, 'full')}
-        if any(full.get(case.key) != case for case in cases):
-            raise ValueError('starter identity differs from full manifest')
+    if len({case.key for case in cases}) != len(cases):
+        raise ValueError('ReviewBench supplied task keys are duplicated')
     return cases

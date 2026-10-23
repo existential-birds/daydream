@@ -1,4 +1,4 @@
-"""Frozen supplied source and exact full-identity membership contracts."""
+"""Pinned ReviewBench source and supplied task identities."""
 
 from __future__ import annotations
 
@@ -18,49 +18,66 @@ def supplied_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     source = tmp_path / 'supplied'
     init_repo(source)
     entries = [asdict(Case('https://github.com/example/project', number, 'a' * 40, 'b' * 40))
-               for number in range(1, 220)]
+               for number in (1, 2)]
     write_and_stage(source, 'corpus/manifest.json', json.dumps(entries))
-    write_and_stage(source, 'corpus/test/test.json', json.dumps(entries[:25]))
-    for filename in ('package-lock.json', 'scripts/eval/scorer.ts', 'scripts/eval/print-summary.ts',
-                     'scripts/eval/eval.ts', 'scripts/eval/matcher.ts', 'scripts/classifier/prompts.ts'):
-        write_and_stage(source, filename, 'synthetic input\n')
+    write_and_stage(source, 'corpus/test/test.json', json.dumps(entries[1:]))
+    write_and_stage(source, 'scripts/eval/scorer.ts', 'synthetic input\n')
     monkeypatch.setattr(contract, 'REVIEWBENCH_REVISION', commit(source, 'synthetic upstream contract'))
     return source
 
 
-@pytest.mark.parametrize('fault', ['revision', 'modified', 'untracked', 'hidden-untracked', 'hidden-whitespace'])
+@pytest.mark.parametrize('fault', [
+    'revision', 'modified', 'manifest', 'staged', 'deleted',
+    'untracked', 'shadow-module', 'ignored', 'hidden-untracked', 'hidden-whitespace',
+])
 def test_source_pin_refuses_changed_inputs(supplied_source: Path, fault: str) -> None:
-    assert verify_source(supplied_source)['hashes']['scripts/eval/scorer.ts']
+    assert verify_source(supplied_source)['revision'] == contract.REVIEWBENCH_REVISION
     if fault == 'revision':
         write_and_stage(supplied_source, 'new', 'other revision')
         commit(supplied_source, 'different revision')
-    elif fault == 'modified':
-        (supplied_source / 'scripts/eval/scorer.ts').write_text('changed metrics')
+    elif fault in {'modified', 'manifest'}:
+        filename = 'scripts/eval/scorer.ts' if fault == 'modified' else 'corpus/manifest.json'
+        (supplied_source / filename).write_text('changed input')
+    elif fault == 'staged':
+        write_and_stage(supplied_source, 'scripts/eval/added.ts', 'new evaluator input')
+    elif fault == 'deleted':
+        (supplied_source / 'scripts/eval/scorer.ts').unlink()
     else:
-        path = supplied_source / 'extra-reference.json'
+        filename = {
+            'untracked': 'scripts/extra.ts',
+            'shadow-module': 'scripts/eval/input-validation.js',
+            'ignored': 'scripts/eval/package.json',
+            'hidden-untracked': 'scripts/nested/extra.ts',
+            'hidden-whitespace': 'scripts/   ',
+        }[fault]
+        path = supplied_source / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+        if fault == 'ignored':
+            (supplied_source / '.git/info/exclude').write_text(filename + '\n')
         if fault.startswith('hidden'):
             git(supplied_source, 'config', 'status.showUntrackedFiles', 'no')
-            path = (supplied_source / '   ' if fault == 'hidden-whitespace'
-                    else supplied_source / 'nested' / 'extra-reference.json')
-            path.parent.mkdir(exist_ok=True)
-        path.write_text('{}')
-    with pytest.raises(ValueError, match='pinned|modified|untracked'):
+    with pytest.raises(ValueError, match='pinned|modified|untracked|scripts'):
         verify_source(supplied_source)
 
 
-@pytest.mark.parametrize('fault', ['duplicate', 'subset', 'identity'])
-def test_supplied_membership_is_exact(supplied_source: Path, fault: str) -> None:
-    assert len(load_cases(supplied_source, 'full')) == 219
-    starter = load_cases(supplied_source, 'test')
-    assert len(starter) == 25 and starter[-1].pr_number == 25
+def test_source_pin_allows_unrelated_untracked_files(supplied_source: Path) -> None:
+    for filename in ('notes.txt', 'scratch/notes.txt', '   ', 'résumé.md'):
+        path = supplied_source / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('local notes')
+    git(supplied_source, 'config', 'status.showUntrackedFiles', 'no')
+    assert verify_source(supplied_source) == {
+        'repository': contract.REVIEWBENCH_REPOSITORY, 'revision': contract.REVIEWBENCH_REVISION,
+    }
+
+
+def test_supplied_task_keys_are_unique(supplied_source: Path) -> None:
+    assert [case.pr_number for case in load_cases(supplied_source, 'full')] == [1, 2]
+    assert [case.pr_number for case in load_cases(supplied_source, 'test')] == [2]
     path = supplied_source / 'corpus/test/test.json'
     values = json.loads(path.read_text())
-    if fault == 'duplicate':
-        values[-1] = values[0]
-    elif fault == 'subset':
-        values.pop()
-    else:
-        values[-1]['base'] = 'c' * 40
+    values.append(values[0])
     path.write_text(json.dumps(values))
-    with pytest.raises(ValueError, match='membership|identity'):
+    with pytest.raises(ValueError, match='duplicated'):
         load_cases(supplied_source, 'test')

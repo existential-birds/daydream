@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Replace unreleased benchmark commands with `harbor-export`/`harbor-run` and
   wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
+- Simplify ReviewBench source provenance and manifest loading; allow unrelated
+  untracked files while rejecting source changes and extra scripts.
 
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
