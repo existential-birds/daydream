@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import shutil
@@ -17,12 +18,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import AgentEvent, CostEvent, EffectiveRequestConfig, RequestEvent
+from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, EffectiveRequestConfig, RequestEvent
+from daydream.backends.pi import native_pi_settings
 from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
-from daydream.benchmark.reviewbench.contract import Case
+from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.benchmark.reviewbench.native import (
+    CaseExecution,
+    PublicHarborTask,
     convert_findings,
-    freeze_native_execution,
     freeze_reviewer,
     parse_native_config,
     review_case,
@@ -30,166 +33,207 @@ from daydream.benchmark.reviewbench.native import (
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
+from daydream.github_app import GitHubExecutionInput
 from daydream.review_result import FinalizedReview, deliver_finalized_review
+from daydream.run_config import RunConfig, _resolved_backend_name
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git, init_repo, tracked_source_state, write_and_stage
+from tests.harness.git_helpers import commit, git, tracked_source_state, write_and_stage
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.review_result import terminal_result
+from tests.harness.reviewbench import finding, frozen_case, public_input
 from tests.harness.stub_backend import review_stage_state, stage_result
 
 
-def frozen_case(tmp_path: Path, *, additional_sources: int = 0) -> tuple[Path, Case]:
-    repo = tmp_path / "frozen-input"
-    init_repo(repo)
-    write_and_stage(repo, "README.md", "Synthetic native ReviewBench integration fixture.\n")
-    base = commit(repo, "base")
-    git(repo, "checkout", "-b", "candidate")
-    write_and_stage(repo, "api.py", "def resolve(value):\n    return value[0]\n")
-    for index in range(additional_sources):
-        write_and_stage(repo, f"source_{index}.py", f"VALUE = {index}\n")
-    head = commit(repo, "candidate")
-    git(repo, "remote", "add", "origin", "https://github.com/example/project.git")
-    return repo, Case("https://github.com/example/project", 7, base, head)
+def _execution_input(config: RunConfig) -> runner.RunnerExecutionInput:
+    backend = _resolved_backend_name(config, 'per_stack_review')
+    environment = dict(os.environ)
+    if environment.get('PI_CODING_AGENT_DIR'):
+        environment['PI_CODING_AGENT_DIR'] = str(Path(environment['PI_CODING_AGENT_DIR']).resolve())
+    native = BackendExecutionInput.from_environment(environment, backend=backend)
+    if backend == 'pi':
+        native = replace(native, pi_settings=native_pi_settings(Path(config.target or Path.cwd()),
+                                                               agent_dir=native.pi_agent_dir))
+    return runner.RunnerExecutionInput(native, GitHubExecutionInput(), backends={backend: native})
 
 
-def finding(**overrides: Any) -> dict[str, Any]:
-    return {"id": 1, "file": "api.py", "line": 2, "description": "Empty input raises IndexError",
-            "rationale": "The API accepts an empty sequence.", "evidence": "api.py:2 indexes value[0].",
-            "severity": "medium", "confidence": "MEDIUM", **overrides}
+async def _review(repo: Path, case: Case, config: RunConfig, *,
+                  execution_input: runner.RunnerExecutionInput | None = None,
+                  candidate_sha256: str | None = None) -> CaseExecution:
+    task = PublicHarborTask(case, REVIEWBENCH_REVISION,
+        git_ops.diff_paths(repo, git_ops.merge_base(repo, case.base, case.head) or case.base, case.head, ['.']),
+        7, 99, 'a' * 64)
+    return await review_case(task, repo, config, execution_input=execution_input or _execution_input(config),
+        candidate_sha256=candidate_sha256 or candidate_package_digest(),
+        evidence_directory=repo.parent / 'native-evidence')
 
 
-@pytest.mark.parametrize(("outcome", "status"), [
-    ("empty", "completed_empty"), ("finding", "complete"), ("partial", "incomplete"),
-    ("failed", "failed"), ("relocated", "conversion_limited"), ("pipeline_failure", "incomplete"),
+@pytest.mark.parametrize('outcome,status', [
+    ('empty', 'completed_empty'), ('finding', 'complete'), ('partial', 'incomplete'),
+    ('incomplete', 'incomplete'),
+    ('failed', 'failed'), ('relocated', 'conversion_limited'), ('pipeline_failure', 'incomplete'),
+    ('divergent', 'completed_empty'),
 ])
-async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evidence(
+async def test_admitted_review_preserves_terminal_authority_and_isolation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str, status: str,
-    dataset_store: Path, dataset_hub: FakeDatasetHub, operator_dataset_sentinel: Path,
+    dataset_store: Path, dataset_hub: FakeDatasetHub,
 ) -> None:
-    """Frozen native attempts preserve terminal authority, isolation and available usage."""
-    repo, case = frozen_case(tmp_path)
+    """One real admitted runner journey owns terminal, public-output and C5 policy."""
+    from daydream.artifacts import external
+    from daydream.backends import TextEvent, ToolResultEvent, ToolStartEvent
+    from daydream.backends.codex import CodexBackend
+    from daydream.benchmark.reviewbench.harbor_entrypoint import main
+    from daydream.trajectory import run_directory, run_document_path
+
+    environment = public_input(tmp_path, divergent_base=outcome == 'divergent')
+    repo, evidence = Path(environment['DAYDREAM_RB_REPOSITORY']), Path(environment['DAYDREAM_RB_EVIDENCE'])
+    case = Case.from_dict(json.loads((Path(environment['DAYDREAM_RB_INPUTS']) / 'pr.json').read_text()))
     original = tracked_source_state(repo)
-    roots: list[Path] = []
+    protected = tmp_path / 'operator-archive'
+    protected.mkdir()
+    (protected / 'keep').write_text('operator history')
+    monkeypatch.setenv('DAYDREAM_ARCHIVE_DIR', str(protected))
+    environment['DAYDREAM_ARCHIVE_DIR'] = str(protected)
+    active = peak = 0
+    homes: set[Path] = set()
+    archives: set[Path] = set()
+    checkouts: set[Path] = set()
+    prompts: list[str] = []
+    exchange = external._AtomicNameExchange.call
+
+    def unavailable_exchange(binding: Any, parent_fd: int, staged: str, target: str) -> Any:
+        if evidence.exists() and os.fstat(parent_fd).st_ino == evidence.stat().st_ino:
+            return external._NameExchangeResult(-1, errno.ENOTSUP)
+        return exchange(binding, parent_fd, staged, target)
+
+    monkeypatch.setattr(external._AtomicNameExchange, 'call', unavailable_exchange)
 
     @dataclass(frozen=True)
-    class CustomConfig(EffectiveRequestConfig):
-        arbitrary: str = "custom-unstructured-canary"
+    class PrivateConfig(EffectiveRequestConfig):
+        arbitrary: str = 'unstructured-private-canary'
 
-    class MeasuredBackend(EmptyReviewBackend):
+    class Backend(EmptyReviewBackend):
         async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            yield RequestEvent(prompt="Unpersisted request prompt", config=CustomConfig())
-            yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
-            async for event in super().execute(*args, **kwargs):
-                yield event
-
-    nonempty = outcome in {"finding", "partial", "relocated", "pipeline_failure"}
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                checkout = args[0]
+                checkouts.add(checkout)
+                prompts.append(args[1])
+                assert checkout != repo and not git_ops.remote_urls(checkout)
+                assert not git_ops.list_local_branches(checkout) and git_ops.commit_exists(checkout, case.base)
+                await asyncio.sleep(0.01)
+                if outcome not in {'empty', 'divergent'}:
+                    yield RequestEvent(prompt='private request', config=PrivateConfig())
+                    yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
+                yield TextEvent('retained public activity')
+                yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
+                yield ToolResultEvent(id='read', output='retained public tool result', is_error=False)
+                async for event in super().execute(*args, **kwargs):
+                    yield event
+            finally:
+                active -= 1
 
     def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
-        assert name == "pi"
-        checkout = kwargs["cwd"]
-        assert checkout != repo and not git_ops.remote_urls(checkout)
-        roots.append(checkout)
-        backend_type = EmptyReviewBackend if outcome == "empty" else MeasuredBackend
-        backend = backend_type(checkout, forbid_merge=False, forbid_supervise=False,
-            review_by_stack={"structure": [finding(line=500 if outcome == "relocated" else 2)]} if nonempty else {},
-            fail_stack="python" if outcome == "partial" else None,
-            responder=(lambda prompt: [RuntimeError("offline failure")] if (
-                outcome == "failed" and ("you are reviewing the " in prompt.lower()
-                                         or "you are the structural reviewer" in prompt.lower())
-                or outcome == "pipeline_failure" and "supervisor adjudication" in prompt.lower()) else None))
+        assert name == 'codex' and kwargs['execution_input'].fanout_concurrency == 1
+        child = kwargs['execution_input'].child_environment()
+        assert not {'OPENAI_API_KEY', 'GH_TOKEN', 'OPENAI_BASE_URL', 'DAYDREAM_ARCHIVE_DIR'} & child.keys()
+        home = Path(child['CODEX_HOME'])
+        homes.add(home)
+        archives.add(Path(os.environ['DAYDREAM_ARCHIVE_DIR']))
+        auth = json.loads((home / 'auth.json').read_text())
+        assert home != Path(environment['DAYDREAM_RB_CODEX_HOME']) and auth['auth_mode'] == 'chatgpt'
+        auth['tokens']['refresh_token'] = 'private-rotated-canary'
+        (home / 'auth.json').write_text(json.dumps(auth))
+        backend = Backend(repo, forbid_merge=False, forbid_supervise=False,
+            review_by_stack={'structure': [finding(line=500 if outcome == 'relocated' else 2)]}
+                if outcome in {'finding', 'partial', 'incomplete', 'relocated', 'pipeline_failure'} else {},
+            fail_stack='python' if outcome == 'partial' else None,
+            incomplete_stack='python' if outcome == 'incomplete' else None,
+            responder=lambda prompt: [RuntimeError('offline failure')] if (
+                outcome == 'failed' and ('you are reviewing the ' in prompt.lower()
+                    or 'you are the structural reviewer' in prompt.lower())
+                or outcome == 'pipeline_failure' and 'supervisor adjudication' in prompt.lower()) else None)
+        backend.fanout_concurrency = CodexBackend(model=kwargs['model'], reasoning_effort=kwargs['reasoning_effort'],
+            execution_input=kwargs['execution_input']).fanout_concurrency
         backend.merge_echo_records = True
         return backend
 
-    monkeypatch.setattr(runner, "create_backend", create)
-    config = empty_review_config(repo, tmp_path / "ignored-trajectory.json", backend="pi",
-        model="deepseek/deepseek-v4.1-flash", dataset_capture=True, output_mode="loop",
-        dataset_store_path=operator_dataset_sentinel, trajectory_hub_repo="fixture/forbidden-benchmark-capture",
-        findings_out=str(tmp_path / "must-not-publish.json"))
-    result = await review_case(case, repo, config, "native-fixture")
-    assert result.status == status, result.diagnostics
-    assert result.terminal_result is not None and result.terminal_result["run_id"]
-    assert result.analyzed_comparison == {"head_sha": case.head, "merge_base_sha": case.base,
-        "diff_key": diff_key(git_ops.diff_paths(repo, case.base, case.head, ["."]))}
-    assert tracked_source_state(repo) == original and not (repo / ".daydream").exists()
-    assert roots and all(not root.exists() for root in roots)
-    assert not (tmp_path / "must-not-publish.json").exists()
-    assert not (tmp_path / "ignored-trajectory.json").exists()
-    assert not dataset_store.exists() and dataset_hub.commits == []
-    assert not fake_gh.calls("POST")
-    assert result.configuration["phases"]["per_stack_review"]["model"] == config.model
-    assert result.usage == ({} if outcome == "empty" else {"completion_tokens": 0, "cost_usd": 0.0})
-    if outcome != "empty":
-        assert result.configuration["observed_requests"]
-        assert all(row["controls"] == {} for row in result.configuration["observed_requests"])
-    assert "custom-unstructured-canary" not in json.dumps(asdict(result))
-    if status in {"failed", "incomplete"}:
-        assert result.candidate is None
-    else:
-        assert result.candidate is not None
-        assert result.candidate["pr"] == asdict(case)
-        assert bool(result.candidate["findings"]) == (outcome == "finding")
-        if outcome == "empty":
-            assert "usage" not in result.candidate
-        else:
-            assert result.candidate["usage"] == result.usage
-    if nonempty:
-        assert result.retained_findings[0]["description"] == finding()["description"]
-    if outcome == "relocated":
-        assert result.conversion_omissions[0]["reason"] == "native_location_was_relocated_or_distrusted"
-    if outcome == "finding":
-        # Optional external proof uses the pinned upstream's actual no-inference
-        # parser on this real native output, not a handcrafted candidate envelope.
-        if source := os.environ.get("DAYDREAM_REVIEWBENCH_SOURCE"):
-            candidate, metadata = tmp_path / "produced.json", tmp_path / "pr.json"
-            candidate.write_text(json.dumps(result.candidate))
-            metadata.write_text(json.dumps(asdict(case)))
-            checked = subprocess.run(["npm", "run", "harbor:validate-findings", "--", "--candidate", str(candidate),
-                                      "--pr", str(metadata)], cwd=source, capture_output=True, text=True, timeout=60)
+    monkeypatch.setattr(runner, 'create_backend', create)
+    code = await main(environment)
+    result = json.loads((evidence / 'execution.json').read_text())
+    successful = status in {'complete', 'completed_empty'}
+    assert result['status'] == status and code == (0 if successful else 1), result['diagnostics']
+    assert result['analyzed_comparison'] == {'head_sha': case.head,
+        'merge_base_sha': git_ops.merge_base(repo, case.base, case.head),
+        'diff_key': diff_key(git_ops.diff_paths(repo, case.base, case.head, ['.'], merge_base_diff=True))}
+    assert result['terminal_result']['analyzed_revision']['head_sha'] == case.head
+    assert result['task_id'] == 7 and result['evaluation_id'] == 99 and active == 0 and peak == 1
+    assert (result['reviewer_backend'], result['reviewer_provider'], result['reviewer_authentication']) == (
+        'codex', 'openai', 'chatgpt-oauth')
+    assert result['configuration']['phases']['per_stack_review']['model'] == 'gpt-6.1-sol'
+    assert result['usage'] == ({} if outcome in {'empty', 'divergent'} else {'completion_tokens': 0, 'cost_usd': 0.0})
+    if outcome not in {'empty', 'divergent'}:
+        assert result['configuration']['observed_requests']
+        assert all(row['controls'] == {} for row in result['configuration']['observed_requests'])
+    assert 'unstructured-private-canary' not in json.dumps(result)
+    output = Path(environment['DAYDREAM_RB_OUTPUT'])
+    assert output.exists() == successful
+    if output.exists():
+        candidate = json.loads(output.read_text())
+        assert candidate['pr'] == asdict(case) and bool(candidate['findings']) == (outcome == 'finding')
+        assert candidate.get('usage', {}) == result['usage']
+        if not result['usage']:
+            assert 'usage' not in candidate
+        if source := os.environ.get('DAYDREAM_REVIEWBENCH_SOURCE'):
+            checked = subprocess.run(['npm', 'run', 'harbor:validate-findings', '--', '--candidate', str(output),
+                '--pr', str(Path(environment['DAYDREAM_RB_INPUTS']) / 'pr.json')], cwd=source,
+                capture_output=True, text=True, timeout=60)
             assert checked.returncode == 0, checked.stdout + checked.stderr
-            assert "No judging or inference performed" in checked.stdout
-
-
-@pytest.mark.parametrize("fault", ["dirty", "identity", "missing", "mirror", "no_origin"])
-async def test_frozen_input_is_verified_before_native_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
-) -> None:
-    """Reject dirty, mismatched or unavailable frozen sources before dispatch."""
-    repo, case = frozen_case(tmp_path)
-    if fault == "dirty":
-        (repo / "untracked.py").write_text("not part of the frozen case")
-    elif fault == "identity":
-        git(repo, "remote", "set-url", "origin", "https://github.com/another/project.git")
-    elif fault == "missing":
-        case = replace(case, head="f" * 40)
-    elif fault == "no_origin":
-        git(repo, "remote", "remove", "origin")
-    else:
-        git(repo, "remote", "set-url", "origin", "https://github.com/review-bench/example_project.git")
-
-    def create(*_args: Any, **kwargs: Any) -> EmptyReviewBackend:
-        assert fault == "mirror", "invalid frozen inputs reached backend creation"
-        return EmptyReviewBackend(kwargs["cwd"])
-
-    monkeypatch.setattr(runner, "create_backend", create)
-    result = await review_case(case, repo, empty_review_config(repo, tmp_path / "trajectory", backend="pi"), "fixture")
-    assert result.status == ("completed_empty" if fault == "mirror" else "failed"), result.diagnostics
-    if fault != "mirror":
-        assert result.candidate is None and result.terminal_result is None and result.diagnostics
+            assert 'No judging or inference performed' in checked.stdout
+    if outcome in {'finding', 'partial', 'incomplete', 'relocated', 'pipeline_failure'}:
+        assert result['retained_findings'][0]['description'] == finding()['description']
+    if outcome == 'relocated':
+        assert result['conversion_omissions'][0]['reason'] == 'native_location_was_relocated_or_distrusted'
+    root = json.loads((evidence / 'trajectory.json').read_text())
+    bundle = run_directory(evidence, root['session_id'])
+    assert (bundle / 'manifest.json').is_file() and (bundle / 'diff.patch').is_file()
+    assert run_document_path(bundle).read_bytes() == (
+        evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
+    siblings = [fork for fork in root['extra']['subtrajectories'] if 'sibling_trajectory_ref' in fork]
+    assert {fork['descriptor'] for fork in siblings} == {'deep-python', 'deep-structure'}
+    for fork in siblings:
+        content = (evidence / fork['sibling_trajectory_ref']).read_text()
+        child = json.loads(content)
+        assert child['session_id'] == root['session_id'] and child['trajectory_id'] == fork['trajectory_id']
+        assert 'retained public activity' in content and 'retained public tool result' in content
+    assert any('Frozen supplied author explanation' in prompt for prompt in prompts)
+    assert checkouts and all(not checkout.exists() for checkout in checkouts)
+    assert homes and all(not home.exists() for home in homes)
+    assert archives and all(path != protected and not path.exists() for path in archives)
+    assert os.environ['DAYDREAM_ARCHIVE_DIR'] == str(protected)
+    assert (protected / 'keep').read_text() == 'operator history'
+    assert list(protected.iterdir()) == [protected / 'keep']
+    assert json.loads((Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').read_text())[
+        'tokens']['refresh_token'] == 'private-rotated-canary'
+    files = [path for path in evidence.rglob('*') if path.is_file()]
+    assert all(path.name != 'auth.json' for path in files)
+    retained = b''.join(path.read_bytes() for path in files)
+    assert not any(value in retained for value in (b'private-refresh-canary', b'private-rotated-canary',
+                                                   b'forbidden-api-canary', b'unstructured-private-canary'))
+    assert tracked_source_state(repo) == original and not (repo / '.daydream').exists()
+    assert not dataset_store.exists() and dataset_hub.commits == []
+    assert not fake_gh.calls('POST')
 
 
 @pytest.mark.parametrize('profile_source', ['explicit', 'env', 'repo', 'default', 'escape', 'symlink'])
 async def test_frozen_native_profile_preserves_operator_precedence_and_confines_repository_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, profile_source: str,
 ) -> None:
-    """Freeze the ordinary CLI policy, then execute it after operator paths disappear.
-
-    Transferred from the removed standalone plan/status journey. Native transport
-    tests cover provider defaults, but not CLI/env/repository profile precedence or
-    repository profile traversal. The runner must see the frozen selected profile.
-    """
+    """Frozen CLI/env/repository precedence survives removed operator files; profile paths stay confined."""
     from daydream.review_profile import ProfileError
 
     repo, case = frozen_case(tmp_path)
@@ -222,7 +266,7 @@ async def test_frozen_native_profile_preserves_operator_precedence_and_confines_
         path.unlink()
     config = reviewer_config(json.loads(json.dumps(frozen)), repo)
     monkeypatch.setattr(runner, 'create_backend', lambda *_args, **_kwargs: EmptyReviewBackend(repo))
-    result = await review_case(case, repo, config, 'native-profile-fixture')
+    result = await _review(repo, case, config)
     assert result.status == 'completed_empty', result.diagnostics
     assert result.configuration['phases']['per_stack_review']['model'] == 'explicit-model'
     profile = result.configuration['profile']
@@ -240,11 +284,7 @@ async def test_frozen_native_profile_preserves_operator_precedence_and_confines_
 def test_export_refuses_native_controls_without_an_admitted_runtime_capability(
     tmp_path: Path, arguments: list[str],
 ) -> None:
-    """Reject accepted ordinary CLI controls instead of silently dropping their effects.
-
-    The profile journey covers policy that the image carries; none of its rows
-    asks for copying host files, tests, GitHub publication, or trace egress.
-    """
+    """Reject copying, tests, publication and trace controls whose capabilities cannot be delivered."""
     config = parse_native_config([str(tmp_path), '--backend', 'codex', *arguments])
     with pytest.raises(ValueError, match='unsupported benchmark native policy'):
         freeze_reviewer(config)
@@ -295,7 +335,9 @@ async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, m
             async for event in super().execute(*args, **kwargs):
                 yield event
 
-    frozen = freeze_native_execution(config)
+    frozen = _execution_input(config)
+    frozen = replace(frozen, backends={**frozen.backends,
+        'claude': BackendExecutionInput.from_environment(os.environ, backend='claude')})
     frozen_candidate = candidate_package_digest()
     if mutation == 'before':
         selected_mutation.write_text(selected_mutation.read_text() + (
@@ -317,7 +359,7 @@ async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, m
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(runner, 'create_backend', create)
-        result = await review_case(case, repo, config, 'fixture', execution_input=frozen,
+        result = await _review(repo, case, config, execution_input=frozen,
                                    candidate_sha256=frozen_candidate)
     report.write_text(json.dumps({'execution': asdict(result), 'frozen_extension': expected_extension,
         'created': len(created), 'measured_calls': measured_calls,
@@ -330,13 +372,7 @@ async def _packaged_extension_journey(repo: Path, case: Case, extension: Path, m
 async def test_native_packaged_extension_is_bound_before_and_after_real_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, mutation: str,
 ) -> None:
-    """Keep ordinary packaged customization and reject changed executable inputs.
-
-    The earlier ExtDir phase test could prove backend policy while allowing a
-    mutable, untracked extension through both benchmark identity checks. Run an
-    actual owned default extension in an isolated copy of the candidate, with real
-    Git and runner execution, then edit its real source before/during admission.
-    """
+    """Run real packaged hooks; reject extension or core bytes changed before or during generation."""
     import daydream
 
     repo, case = frozen_case(tmp_path)
@@ -404,15 +440,10 @@ async def test_native_packaged_extension_is_bound_before_and_after_real_review(
 async def test_native_explicit_runtime_cannot_admit_external_extension_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Public callers supplying capabilities must still pass host extension admission.
-
-    Explicit runtime capabilities bypass ambient configuration; this boundary
-    must reject an external selector before scanning arbitrary operator files or
-    invoking its register function, even when backend capabilities are frozen.
-    """
+    """Explicit native capabilities cannot load or read a mutable external extension."""
     repo, case = frozen_case(tmp_path)
     config = empty_review_config(repo, tmp_path / 'trajectory', backend='codex')
-    frozen = freeze_native_execution(config)
+    frozen = _execution_input(config)
     frozen_candidate = candidate_package_digest()
     extension = tmp_path / 'operator-directory'
     extension.mkdir()
@@ -434,7 +465,7 @@ async def test_native_explicit_runtime_cannot_admit_external_extension_override(
         pytest.fail('external extension selection reached generation')
 
     monkeypatch.setattr(runner, 'create_backend', forbidden)
-    result = await review_case(case, repo, config, 'fixture', execution_input=frozen, candidate_sha256=frozen_candidate)
+    result = await _review(repo, case, config, execution_input=frozen, candidate_sha256=frozen_candidate)
     assert result.status == 'failed' and result.candidate is None and result.terminal_result is None
     assert not marker.exists()
     assert 'DAYDREAM_EXT_DIR' in result.diagnostics[0]
@@ -444,12 +475,7 @@ async def test_native_explicit_runtime_cannot_admit_external_extension_override(
 async def test_frozen_pi_defaults_refuse_case_thinking_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pi must reject case-local effort when the frozen operator defaults omit it.
-
-    The native success cases freeze explicit effort; they miss inheritance of a
-    case setting when no operator effort was selected. Exercise the actual
-    backend guard that owns native argument selection before spawning Pi.
-    """
+    """Unavailable frozen operator effort cannot inherit higher case-local Pi settings."""
     from daydream.backends.pi import PiBackend, PiError
 
     repo, _ = frozen_case(tmp_path)
@@ -463,7 +489,7 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
 
     config = empty_review_config(operator, tmp_path / 'trajectory', backend='pi')
-    execution = freeze_native_execution(config)
+    execution = _execution_input(config)
     backend = PiBackend(cwd=repo, execution_input=execution.backends['pi'])
     with pytest.raises(PiError, match='Case Pi thinking conflicts with unavailable operator effort'):
         async for _ in backend.execute(repo, 'Review this change'):
@@ -482,8 +508,6 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     is_public = selection in {'harbor', 'harbor_phase'}
     public_environment = None
     if is_public:
-        from tests.test_reviewbench_harbor_agent import public_input
-
         # Ordinary Pi uses deterministic author context for <=3 source files.
         # Four real changed sources require the intent phase to execute, proving
         # its distinct native model reaches the subprocess and observed evidence.
@@ -534,6 +558,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         (settings_dir / 'settings.json').write_text(json.dumps(settings))
         write_and_stage(repo, ".pi/settings.json", '{"defaultProvider":"other","defaultModel":"wrong-model"}')
         case = replace(case, head=commit(repo, "case native settings cannot replace operator settings"))
+        git_ops.update_refs(repo, {'refs/reviewbench/head': case.head})
 
     async def native_process(*args: object, **kwargs: Any) -> MagicMock:
         if not args or args[0] != "pi":
@@ -603,7 +628,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         assert result.reviewer_backend == 'pi' and result.reviewer_provider == 'nous'
         assert result.reviewer_authentication == 'native-pi'
     else:
-        result = await review_case(case, repo, config, "native-pi-fixture")
+        result = await _review(repo, case, config)
     assert result.status == "completed_empty", result.diagnostics
     assert captured
     assert auth_bodies == [auth_body] * len(captured)
@@ -682,7 +707,7 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
     monkeypatch.setattr(runner, "create_backend", create)
     config = empty_review_config(repo, tmp_path / "trajectory", backend="pi",
         ignore_paths=["api.py"] if fault == "ignored_patch" else [])
-    result = await review_case(case, repo, config, "fixture")
+    result = await _review(repo, case, config)
     assert result.status == "failed", result.diagnostics
     assert result.candidate is None and result.diagnostics
     assert tracked_source_state(repo) == original
@@ -698,34 +723,6 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
     else:
         assert injected
         assert any("changed the frozen checkout revision" in diagnostic for diagnostic in result.diagnostics)
-
-
-async def test_unadvertised_divergent_base_survives_frozen_endpoint_materialization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
-) -> None:
-    """Materialize both frozen endpoints even when base is unadvertised and divergent."""
-    repo, initial = frozen_case(tmp_path)
-    git(repo, "checkout", "--detach", initial.base)
-    write_and_stage(repo, "base-progress.txt", "The upstream branch advanced independently.\n")
-    advanced_base = commit(repo, "advanced base tip")
-    git(repo, "checkout", "--detach", initial.head)
-    case = replace(initial, base=advanced_base)
-    assert advanced_base not in git(repo, "show-ref")
-    original = tracked_source_state(repo)
-
-    def create(*_args: Any, **kwargs: Any) -> EmptyReviewBackend:
-        checkout = kwargs["cwd"]
-        assert git_ops.commit_exists(checkout, advanced_base)
-        assert not git_ops.remote_urls(checkout)
-        assert not git_ops.list_local_branches(checkout)
-        return EmptyReviewBackend(checkout)
-
-    monkeypatch.setattr(runner, "create_backend", create)
-    result = await review_case(case, repo, empty_review_config(repo, tmp_path / "trajectory", backend="pi"), "fixture")
-    assert result.status == "completed_empty", result.diagnostics
-    assert result.analyzed_comparison["merge_base_sha"] == initial.base
-    assert result.candidate is not None and result.candidate["pr"]["base"] == advanced_base
-    assert tracked_source_state(repo) == original
 
 
 async def test_result_observer_preserves_terminal_report_and_invocation_scope(
@@ -758,24 +755,6 @@ async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     assert len(received) == 1, "a later ordinary invocation must not inherit the observer"
 
 
-def test_result_delivery_preserves_caller_owned_nested_values() -> None:
-    """Observer mutations leave nested caller-owned findings and configuration intact."""
-    items = [finding(source_uids=["native-source"])]
-    configuration = {"phases": {"per_stack_review": {"model": "native-model"}}}
-    received: list[FinalizedReview] = []
-
-    def observe(result: FinalizedReview) -> None:
-        received.append(result)
-        result.items[0]["source_uids"].append("observer-source")
-        result.configuration["phases"]["per_stack_review"]["model"] = "observer-model"
-
-    with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=observe)):
-        deliver_finalized_review(terminal_result(), items, configuration)
-    assert len(received) == 1
-    assert items[0]["source_uids"] == ["native-source"]
-    assert configuration["phases"]["per_stack_review"]["model"] == "native-model"
-
-
 async def test_result_delivery_follows_nested_and_concurrent_run_contexts() -> None:
     """Nested ordinary runs mask observers; sibling tasks keep their own deliveries."""
     received: dict[str, list[str]] = {name: [] for name in ("first", "second")}
@@ -784,18 +763,25 @@ async def test_result_delivery_follows_nested_and_concurrent_run_contexts() -> N
         raise RuntimeError("consumer failed")
 
     async def deliver(name: str) -> None:
+        items = [finding(source_uids=['native-source'])]
+        configuration: dict[str, Any] = {'owner': name, 'phases': {'review': {'model': 'native-model'}}}
+
         def observe(result: FinalizedReview) -> None:
-            received[name].append(result.configuration["owner"])
+            received[name].append(result.configuration['owner'])
+            result.items[0]['source_uids'].append('observer-source')
+            result.configuration['phases']['review']['model'] = 'observer-model'
 
         with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=observe)):
             with bind_run_context(RunContext(InteractionPolicy())):
                 deliver_finalized_review(terminal_result(), [], {"owner": "nested"})
             await asyncio.sleep(0)
-            deliver_finalized_review(terminal_result(), [], {"owner": name})
+            deliver_finalized_review(terminal_result(), items, configuration)
             with pytest.raises(RuntimeError, match="consumer failed"):
                 with bind_run_context(RunContext(InteractionPolicy(), review_result_handler=fail)):
                     deliver_finalized_review(terminal_result(), [], {})
-            deliver_finalized_review(terminal_result(), [], {"owner": name})
+            deliver_finalized_review(terminal_result(), items, configuration)
+        assert items[0]['source_uids'] == ['native-source']
+        assert configuration['phases']['review']['model'] == 'native-model'
 
     async with asyncio.TaskGroup() as tasks:
         for name in received:

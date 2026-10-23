@@ -18,32 +18,35 @@ from daydream.benchmark.reviewbench.diagnostics import (
     read_checkpoint,
 )
 from daydream.benchmark.reviewbench.harbor_auth import validate_judge_home, validate_pi_reviewer_home
-from daydream.trajectory import DaydreamPhase, RunWriteSnapshot, dispatch_scope, run_directory
+from daydream.trajectory import DaydreamPhase, RunWriteSnapshot, TrajectoryRecorder, dispatch_scope, run_directory
 from tests.harness.trajectory import make_recorder
+
+
+def _checkpoint_run(
+    tmp_path: Path, metadata: dict[str, Any] | None = None,
+) -> tuple[InterruptedReviewDiagnostics, TrajectoryRecorder, list[RunWriteSnapshot]]:
+    sink = InterruptedReviewDiagnostics(tmp_path / 'logs/daydream', {'task_id': 7} if metadata is None else metadata)
+    snapshots: list[RunWriteSnapshot] = []
+
+    def retain(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
+        snapshot.validate(recorder.session_id)
+        snapshots.append(snapshot)
+        sink.retain(snapshot)
+
+    session = str(uuid.uuid4())
+    recorder = make_recorder(tmp_path, session_id=session, on_write=retain,
+                             path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
+    return sink, recorder, snapshots
 
 
 @pytest.mark.parametrize('fault', ['sibling', 'commit', 'symlink', 'parent_symlink', 'ancestor_swap'])
 async def test_checkpoint_fault_preserves_previous_complete_document_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    """A torn generation cannot replace the last usable root/fork checkpoint.
-
-    Existing recorder common-cutoff tests stop at the immutable callback. This
-    independent export boundary must survive actual link failures and competing
-    symlinks while preserving exact source bytes and original references. Leaf
-    symlink checks miss a parent inserted at mkdir or replaced during publication.
-    """
+    """A torn generation cannot replace the last usable root/fork checkpoint."""
     evidence = tmp_path / 'logs' / 'daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7, 'api_key': 'private-key-canary'})
-    snapshots: list[RunWriteSnapshot] = []
-
-    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
-        snapshots.append(snapshot)
-        sink.retain(snapshot)
-
-    session = str(uuid.uuid4())
-    root = make_recorder(tmp_path, session_id=session, on_write=retain,
-                         path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
+    sink, root, snapshots = _checkpoint_run(tmp_path, {'task_id': 7, 'api_key': 'private-key-canary'})
+    session = root.session_id
     async with root:
         async with root.fork('deep-python') as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
@@ -128,17 +131,10 @@ async def test_checkpoint_fault_preserves_previous_complete_document_set(
 async def test_checkpoint_retention_and_readout_preserve_missing_usage_and_competing_bytes(
     tmp_path: Path, competition: str,
 ) -> None:
-    """Bounded retention preserves competing bytes and doesn't manufacture usage.
-
-    The terminal export tests cannot cover pruning old checkpoint generations
-    or selecting the newest committed generation after a damaged newest tree.
-    A same-content target behind a substituted parent detects pruning that
-    follows an ancestor symlink and deletes another owner's diagnostic bytes.
-    """
+    """Bounded retention preserves competing bytes and doesn't manufacture usage."""
     evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'outer_deadline_seconds': 900, 'native_allowance': 1200})
-    session = str(uuid.uuid4())
-    recorder = make_recorder(tmp_path, session_id=session, on_write=lambda _rec, snapshot: sink.retain(snapshot))
+    sink, recorder, _ = _checkpoint_run(tmp_path, {'outer_deadline_seconds': 900, 'native_allowance': 1200})
+    session = recorder.session_id
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.INTENT) as invocation:
             invocation.observe(TextEvent('first observation'))
@@ -189,11 +185,7 @@ def test_checkpoint_readout_rejects_symlinked_generation(tmp_path: Path, locatio
 
 @pytest.mark.parametrize('operation', ['create', 'readout'])
 def test_checkpoint_boundary_rejects_symlinked_evidence_parent(tmp_path: Path, operation: str) -> None:
-    """A safe final name cannot authorize writes or reads through a redirected parent.
-
-    Existing generation and leaf checks start below the checkpoint root, missing
-    operator-supplied ancestry and the constructor's initial metadata publication.
-    """
+    """A safe final name cannot authorize writes or reads through a redirected parent."""
     outside = tmp_path / 'another-owner'
     outside.mkdir()
     link = tmp_path / 'logs'
@@ -207,12 +199,7 @@ def test_checkpoint_boundary_rejects_symlinked_evidence_parent(tmp_path: Path, o
 
 
 def test_interrupted_readout_retains_host_receipt_when_reviewer_never_published(tmp_path: Path) -> None:
-    """Host-only startup failures remain visible without inventing reviewer evidence.
-
-    Joined-export and checkpoint readers miss cancellation before the reviewer
-    starts, where the adapter's independent receipt is the only available input.
-    This fixture supplies the external host artifact to the offline read boundary.
-    """
+    """Host-only startup failures remain visible without inventing reviewer evidence."""
     logs = tmp_path / 'logs'
     logs.mkdir()
     receipt = {'schema': 1, 'invocation_id': 'host-invocation', 'interruption': 'host_task_cancelled',
@@ -232,16 +219,10 @@ def test_interrupted_readout_retains_host_receipt_when_reviewer_never_published(
 async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
     tmp_path: Path, receipt: str, damage: str,
 ) -> None:
-    """Independent optional inputs cannot suppress a valid interrupted-run readout.
-
-    Healthy bundle tests miss torn Harbor metadata and redirected host receipts.
-    Keep the actual recorder-produced checkpoint; fault only the external reader
-    input, then require its safe availability reason alongside retained activity.
-    """
+    """Independent optional inputs cannot suppress a valid interrupted-run readout."""
     evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
-    session = str(uuid.uuid4())
-    recorder = make_recorder(tmp_path, session_id=session, on_write=lambda _rec, snapshot: sink.retain(snapshot))
+    sink, recorder, _ = _checkpoint_run(tmp_path)
+    session = recorder.session_id
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.INTENT) as invocation:
             invocation.observe(TextEvent('observed native activity'))
@@ -276,52 +257,26 @@ async def test_optional_receipt_damage_cannot_hide_valid_native_checkpoint(
 async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_publication(
     tmp_path: Path, identified_dispatch: bool, label_kind: str,
 ) -> None:
-    """Host labels must remain private without breaking original document refs.
-
-    Message/request privacy coverage does not exercise a caller-supplied fork
-    descriptor or a queued scope. Keep the real recorder, dispatch registration,
-    immutable callback and no-clobber filesystem publication, including two
-    different private labels that must not collapse onto one legacy identity.
-    """
-    evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
-    snapshots: list[RunWriteSnapshot] = []
-
-    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
-        snapshots.append(snapshot)
-        sink.retain(snapshot)
-
-    session = str(uuid.uuid4())
-    root = make_recorder(tmp_path, session_id=session, on_write=retain,
-                         path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
-    canaries = ['sk-activeforkcanary123', 'sk-otherforkcanary456', 'sk-queuedforkcanary789']
-    labels = canaries
-    if label_kind == 'marker_json':
-        canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
-        labels = [json.dumps({'api_key': '[REDACTED] ' + canary}) for canary in canaries]
-    elif label_kind in ('native_credential', 'duplicate_native_credential'):
-        canaries = ['opaque-native-label-one', 'opaque-native-label-two', 'opaque-native-label-queued']
-        labels = ['{"type":"api_key","key":"' + canary + '"'
-                  + (',"key":"[REDACTED]"}' if label_kind == 'duplicate_native_credential' else '}')
-                  for canary in canaries]
-    elif label_kind != 'api_key':
-        canaries = ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-descriptor-queued']
-        if label_kind == 'sensitive_container':
-            labels = [json.dumps({'api_key': {'v': canary}}) for canary in canaries]
-        elif label_kind == 'duplicate_sensitive_container':
-            labels = ['{"outer":{"api_key":{"v":"' + canary + '"}},"outer":{}}' for canary in canaries]
-        elif label_kind == 'scheme_token':
-            labels = ['auth=Bearer [REDACTED]' + canary for canary in canaries]
-        elif label_kind == 'scheme_suffix':
-            labels = ['auth=Bearer ' + canary + '[REDACTED]' for canary in canaries]
-        elif label_kind == 'marker_prefixed_value':
-            labels = ['refresh_token=[REDACTED]' + canary for canary in canaries]
-        elif label_kind == 'repeated_marker_prefixed_value':
-            labels = ['refresh_token=[REDACTED][REDACTED_API_KEY]' + canary for canary in canaries]
-        elif label_kind == 'marker_after_bare_value':
-            labels = ['refresh_token=' + canary + ' [REDACTED]' for canary in canaries]
-        else:
-            labels = ['refresh_token="' + canary + '" [REDACTED]' for canary in canaries]
+    """Host labels must remain private without breaking original document refs."""
+    sink, root, snapshots = _checkpoint_run(tmp_path)
+    session = root.session_id
+    templates = {
+        'api_key': 'CANARY',
+        'marker_json': '{"api_key": "[REDACTED] CANARY"}',
+        'native_credential': '{"type":"api_key","key":"CANARY"}',
+        'duplicate_native_credential': '{"type":"api_key","key":"CANARY","key":"[REDACTED]"}',
+        'sensitive_container': '{"api_key": {"v": "CANARY"}}',
+        'duplicate_sensitive_container': '{"outer":{"api_key":{"v":"CANARY"}},"outer":{}}',
+        'scheme_token': 'auth=Bearer [REDACTED]CANARY',
+        'scheme_suffix': 'auth=Bearer CANARY[REDACTED]',
+        'marker_prefixed_value': 'refresh_token=[REDACTED]CANARY',
+        'repeated_marker_prefixed_value': 'refresh_token=[REDACTED][REDACTED_API_KEY]CANARY',
+        'marker_after_bare_value': 'refresh_token=CANARY [REDACTED]',
+        'marker_after_quoted_value': 'refresh_token="CANARY" [REDACTED]',
+    }
+    canaries = (['sk-activeforkcanary123', 'sk-otherforkcanary456', 'sk-queuedforkcanary789']
+                if label_kind == 'api_key' else ['opaque-descriptor-one', 'opaque-descriptor-two', 'opaque-queued'])
+    labels = [templates[label_kind].replace('CANARY', canary) for canary in canaries]
     async with root:
         async with dispatch_scope(root if identified_dispatch else None, phase=DaydreamPhase.DEEP,
                                   descriptors=labels) as dispatch:
@@ -364,23 +319,9 @@ async def test_private_fork_labels_are_admitted_before_identity_and_checkpoint_p
 
 
 async def test_checkpoint_before_first_child_event_retains_host_only_fork_document(tmp_path: Path) -> None:
-    """An admitted invocation exists before its first user or native event.
-
-    Active-fork tests already observe text before flushing and miss this startup
-    window. A root with prior evidence must not publish a dangling child ref or
-    force the sink back to an older checkpoint while the child starts.
-    """
-    evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
-    snapshots: list[RunWriteSnapshot] = []
-
-    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
-        snapshots.append(snapshot)
-        sink.retain(snapshot)
-
-    session = str(uuid.uuid4())
-    root = make_recorder(tmp_path, session_id=session, on_write=retain,
-                         path=run_directory(tmp_path / '.daydream', session) / 'trajectory.json')
+    """An admitted invocation exists before its first user or native event."""
+    sink, root, snapshots = _checkpoint_run(tmp_path)
+    session = root.session_id
     async with root:
         async with root.invocation(phase=DaydreamPhase.INTENT) as prior:
             prior.observe(TextEvent('prior public activity'))
@@ -411,16 +352,9 @@ async def test_checkpoint_before_first_child_event_retains_host_only_fork_docume
     'digest_list', 'document_list', 'extra_list', 'subtrajectories_list_item', 'phase_events_list_item',
 ])
 async def test_checkpoint_schema_corruption_selects_previous_immutable_generation(tmp_path: Path, damage: str) -> None:
-    """Malformed committed containers must not hide the previous valid checkpoint.
-
-    Byte-corruption cases reach the digest guard, while a list manifest or
-    malformed document inventory previously escaped the reader with AttributeError.
-    Mutate actual files only after two valid generations were recorder-produced.
-    """
+    """Malformed committed containers must not hide the previous valid checkpoint."""
     evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
-    session = str(uuid.uuid4())
-    recorder = make_recorder(tmp_path, session_id=session, on_write=lambda _rec, snapshot: sink.retain(snapshot))
+    sink, recorder, _ = _checkpoint_run(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.INTENT) as invocation:
             invocation.observe(TextEvent('first public activity'))
@@ -482,12 +416,7 @@ async def test_checkpoint_schema_corruption_selects_previous_immutable_generatio
 async def test_admitted_native_auth_is_private_in_immutable_checkpoint_and_final_evidence(
     tmp_path: Path, kind: str, surface: str,
 ) -> None:
-    """A validator-admitted input store must not leak through generic auth fields.
-
-    Sensitive-name fixtures miss native type/api_key/key and type/oauth/access/
-    refresh. Read an actual admitted fake input file, then preserve real events,
-    snapshot validation, no-clobber checkpoint publication and joined final bytes.
-    """
+    """A validator-admitted input store must not leak through generic auth fields."""
     home = tmp_path / ('reviewer' if kind == 'api_key' else 'judge')
     home.mkdir()
     credential = ({'type': kind, 'key': 'opaque-admitted-key-canary'} if kind == 'api_key' else
@@ -506,15 +435,7 @@ async def test_admitted_native_auth_is_private_in_immutable_checkpoint_and_final
               'refresh': 'ordinary-public-refresh'}
     payload = {'data': json.loads(source_bytes), 'public': public, 'usage': {'input': 0, 'output': None}}
     evidence = tmp_path / 'logs/daydream'
-    sink = InterruptedReviewDiagnostics(evidence, {'task_id': 7})
-    snapshots: list[RunWriteSnapshot] = []
-
-    def retain(_recorder: Any, snapshot: RunWriteSnapshot) -> None:
-        snapshot.validate(_recorder.session_id)
-        snapshots.append(snapshot)
-        sink.retain(snapshot)
-
-    root = make_recorder(tmp_path, session_id=str(uuid.uuid4()), on_write=retain)
+    sink, root, snapshots = _checkpoint_run(tmp_path)
     async with root:
         async with root.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             if surface == 'arguments':

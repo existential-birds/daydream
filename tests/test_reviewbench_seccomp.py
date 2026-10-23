@@ -17,7 +17,7 @@ from tests.harness.reviewbench_docker import run_seccomp_probe
 
 @pytest.fixture
 def moby_policy(monkeypatch: pytest.MonkeyPatch) -> bytes:
-    """Replace only upstream HTTP; preserve real policy generation and export."""
+    """Replace only upstream HTTP; retain real seccomp generation and export."""
     upstream = b'{"defaultAction":"SCMP_ACT_ERRNO","syscalls":[{"names":["read"],"action":"SCMP_ACT_ALLOW"}]}'
     monkeypatch.setattr(harbor_seccomp, 'MOBY_SHA256', hashlib.sha256(upstream).hexdigest())
     monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
@@ -26,11 +26,7 @@ def moby_policy(monkeypatch: pytest.MonkeyPatch) -> bytes:
 
 
 def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_additions(moby_policy: bytes) -> None:
-    """A profile update must not silently replace Docker's default-deny policy.
-
-    The provenance binds unchanged upstream rules and the exact appended delta;
-    this is runtime isolation material independently of task/export bookkeeping.
-    """
+    """Preserve default-deny upstream rules and bind every bounded bootstrap addition to provenance."""
     policy_bytes, provenance_bytes = harbor_seccomp.seccomp_profile()
     policy = json.loads(policy_bytes)
     provenance = json.loads(provenance_bytes)
@@ -54,10 +50,7 @@ def test_generated_seccomp_preserves_pinned_default_and_only_declared_bootstrap_
 
 @pytest.mark.parametrize('status', [200, 404])
 def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
-    """Generation must fail rather than silently accept changed or missing rules.
-
-    Shipped-file tests never exercised the new network trust boundary.
-    """
+    """Reject changed or unavailable upstream isolation rules."""
     monkeypatch.setattr(httpx, 'get', lambda url, **kwargs: httpx.Response(
         status, content=b'{}', request=httpx.Request('GET', url)))
     with pytest.raises(ValueError if status == 200 else httpx.HTTPStatusError):
@@ -65,11 +58,7 @@ def test_seccomp_download_rejects_changed_or_unavailable_upstream(monkeypatch: p
 
 
 async def test_generated_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
-    """Exercise the generated filter through Docker/runc, without auth or models.
-
-    Distinct denied errno makes actual filter rejection observable independently
-    of the kernel's capability/path rejection for an admitted mount syscall.
-    """
+    """Use actual Docker/runc diagnostic errno to distinguish admitted and forbidden mount flags."""
     image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
     if not image:
         pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to a built public reviewer image')
@@ -103,13 +92,7 @@ print(json.dumps(rows))
 async def test_seccomp_probe_separates_startup_and_execution_and_cleans_only_owned_container(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, behavior: str,
 ) -> None:
-    """Docker startup cannot consume the filter allowance or leak a container.
-
-    Kernel errno assertions start only after Python runs; the original combined
-    45s timeout cannot distinguish a created container from a hung probe. Preserve
-    real pipes/processes/filesystem with a scripted external Docker protocol;
-    the opt-in node separately verifies the actual image/filter through Docker.
-    """
+    """Script real Docker pipes to prove distinct deadlines, process reap and exclusive container cleanup."""
     binary = tmp_path / 'bin/docker'
     binary.parent.mkdir()
     state = tmp_path / 'state'

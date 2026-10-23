@@ -79,6 +79,8 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
             ('Investigate and implement',), id='task-subject'),
         pytest.param([ToolStartEvent('t', 'Bash', {'command': 'the config: token=opaque-summary-canary'})],
             {'log_mode': True}, ('[REDACTED',), ('opaque-summary-canary',), id='structured-command'),
+        pytest.param([TextEvent('run: token=opaque-log-canary done')], {'log_mode': True},
+            ('run:', '[REDACTED'), ('opaque-log-canary',), id='structured-narration'),
         pytest.param([ToolResultEvent('t', 'Authorization: Basic dXNlcjpwYXNzd29yZA== more', False)],
             {'log_mode': True}, ('[REDACTED',), ('dXNlcjpwYXNzd29yZA==',), id='basic-header-output'),
         pytest.param([ToolResultEvent('t', 'x' * 190 + ' ' + 'ghp_' + 'y' * 18, False)],

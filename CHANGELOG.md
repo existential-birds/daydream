@@ -26,8 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Retain private diagnostics when public ReviewBench reviewers are interrupted.
-  Compatible bug fix; reviewer settings, budgets and scoring are unchanged.
+- Redact native credentials in evidence and UI; retain diagnostics for interrupted
+  ReviewBench runs. Compatible fix; reviewer settings, budgets and scoring stay unchanged.
 
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.

@@ -1,9 +1,4 @@
-"""Native review execution and conservative ReviewBench finding conversion.
-
-The native runner remains responsible for backend/configuration/authentication and
-review completeness. A benchmark label never supplies review success or source
-coordinates that the finalized native result did not establish.
-"""
+"""Native review execution and conservative conversion from finalized findings."""
 from __future__ import annotations
 
 import copy
@@ -14,7 +9,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlsplit
 
 from daydream import git_ops, runner
 from daydream.backends import BackendExecutionInput, create_backend
@@ -24,7 +18,6 @@ from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION, Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
-from daydream.github_app import GitHubExecutionInput
 from daydream.hunk_index import parse_hunks
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import (
@@ -53,35 +46,6 @@ def parse_native_config(arguments: list[str]) -> RunConfig:
     return config
 
 
-def freeze_native_execution(
-    config: RunConfig, environment: Mapping[str, str] | None = None,
-) -> runner.RunnerExecutionInput:
-    """Freeze only runtime capabilities needed across the disposable checkout.
-
-    Pi settings retain project/global precedence and distinguish unavailable settings
-    from an explicitly empty frozen map. Osprey retains its ordinary ambient transport.
-    Credentials and transport settings never become benchmark configuration metadata.
-    """
-    root = Path(config.target or Path.cwd()).resolve()
-    controls = dict(os.environ if environment is None else environment)
-    if controls.get('PI_CODING_AGENT_DIR'):
-        controls['PI_CODING_AGENT_DIR'] = str(Path(controls['PI_CODING_AGENT_DIR']).resolve())
-    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
-    inputs: dict[str, BackendExecutionInput | None] = {}
-    for name in sorted({_resolved_backend_name(config, phase) for phase in phases}):
-        if name == 'osprey':
-            inputs[name] = None
-            continue
-        capability = BackendExecutionInput.from_environment(controls, backend=name)
-        if name == 'pi':
-            capability = replace(capability, pi_settings=native_pi_settings(root, agent_dir=capability.pi_agent_dir))
-        inputs[name] = capability
-    fallback = next((value for value in inputs.values() if value is not None), None)
-    if fallback is None:
-        fallback = BackendExecutionInput.from_environment(controls, backend='claude')
-    return runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends=inputs)
-
-
 # These are ordinary review-policy overrides, not a second native configuration
 # resolver. Source, authentication, outputs, publication and transport stay host-owned.
 _REVIEW_OVERRIDES = ('stack', 'cleanup', 'quiet', 'diagram', 'backend', 'model', 'reasoning_effort',
@@ -102,15 +66,17 @@ def freeze_reviewer(config: RunConfig) -> dict[str, Any]:
             or config.scope_issue_filing or (config.observability is not None and config.observability.destinations)):
         raise ValueError('unsupported benchmark native policy: '
                          'copying, tests, publication and tracing are not admitted')
-    execution = freeze_native_execution(config)
-    names = set(execution.backends)
-    backend = _resolved_backend_name(config, 'per_stack_review')
-    if backend not in {'pi', 'codex'} or names != {backend}:
-        raise ValueError('public ReviewBench requires one selected native Pi or Codex reviewer for every phase')
-    capability = execution.backends[backend]
-    assert capability is not None
-    root = Path(config.target or Path.cwd())
     phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    backend = _resolved_backend_name(config, 'per_stack_review')
+    if backend not in {'pi', 'codex'} or {_resolved_backend_name(config, phase) for phase in phases} != {backend}:
+        raise ValueError('public ReviewBench requires one selected native Pi or Codex reviewer for every phase')
+    root = Path(config.target or Path.cwd()).resolve()
+    controls = dict(os.environ)
+    if controls.get('PI_CODING_AGENT_DIR'):
+        controls['PI_CODING_AGENT_DIR'] = str(Path(controls['PI_CODING_AGENT_DIR']).resolve())
+    capability = BackendExecutionInput.from_environment(controls, backend=backend)
+    if backend == 'pi':
+        capability = replace(capability, pi_settings=native_pi_settings(root, agent_dir=capability.pi_agent_dir))
     phase_models = {phase: create_backend(backend, model=_resolved_model(config, phase),
         reasoning_effort=_resolved_reasoning_effort(config, phase), cwd=root, execution_input=capability).model
         for phase in sorted(phases)}
@@ -161,12 +127,7 @@ def reviewer_config(reviewer: Mapping[str, Any], repository: Path) -> RunConfig:
 
 @dataclass(frozen=True)
 class PublicHarborTask:
-    """Host-admitted public task identity for origin-free frozen snapshots.
-
-    Harbor constructs snapshots without origin. Its frozen task/profile supplies
-    the identity; actual refs, HEAD and full patch still have to prove the input.
-    This capability is accepted only for origin-free public frozen snapshots.
-    """
+    """Frozen Harbor identity, verified against origin-free refs and the complete patch."""
 
     case: Case
     upstream_revision: str
@@ -176,8 +137,9 @@ class PublicHarborTask:
     profile_sha256: str
     author_description: str | None = None
 
-    def verify(self, repository: Path, case: Case) -> str:
-        if (self.case != case or self.upstream_revision != REVIEWBENCH_REVISION
+    def verify(self, repository: Path) -> str:
+        case = self.case
+        if (self.upstream_revision != REVIEWBENCH_REVISION
                 or type(self.task_id) is not int or self.task_id < 0
                 or type(self.evaluation_id) is not int or self.evaluation_id < 0
                 or re.fullmatch(r"[0-9a-f]{64}", self.profile_sha256) is None):
@@ -277,66 +239,32 @@ def convert_findings(
     return findings, omissions
 
 
-def _source_identity(repository: Path, case: Case) -> str:
-    expected = urlsplit(case.repo).path.strip("/").removesuffix(".git")
-    owner_repo = git_ops.split_owner_repo(expected)
-    if owner_repo is None:
-        raise ValueError("supplied repository identity is invalid")
-    identity = git_ops.resolve_github_repository(repository, base_environment={})
-    mirror = ("review-bench", "_".join(owner_repo))
-    if identity is None or tuple(part.casefold() for part in identity) not in {
-        tuple(part.casefold() for part in owner_repo), tuple(part.casefold() for part in mirror),
-    }:
-        raise ValueError("repository origin does not match supplied upstream or frozen mirror identity")
-    return "https://github.com/" + "/".join(identity)
-
-
-async def review_case(case: Case, repository: Path, config: RunConfig, producer: str, *,
-                      execution_input: runner.RunnerExecutionInput | None = None,
-                      candidate_sha256: str | None = None,
-                      public_task: PublicHarborTask | None = None,
-                      evidence_directory: Path | None = None) -> CaseExecution:
-    """Review one clean local frozen repository in a disposable independent checkout.
-
-    No GitHub publication target is manufactured. The callback supplies actual
-    terminal coverage even when the runner raises after admitting partial work.
-    Optional private evidence uses the ordinary finalized dump so immutable fork
-    documents remain bound to the same artifact owner as the root trajectory.
-    Its caller must confine DAYDREAM_ARCHIVE_DIR to disposable private storage:
-    the ordinary dump assembly also maintains an archive index.
-    """
+async def review_case(task: PublicHarborTask, repository: Path, config: RunConfig, *,
+                      execution_input: runner.RunnerExecutionInput, candidate_sha256: str,
+                      evidence_directory: Path) -> CaseExecution:
+    """Review an admitted Harbor snapshot, retaining joined native evidence."""
+    case = task.case
+    producer = 'daydream-native-' + _resolved_backend_name(config, 'per_stack_review')
     execution = CaseExecution("failed")
     finalized: list[FinalizedReview] = []
     try:
         extension = selected_extension_identity()
         admitted_candidate = candidate_package_digest()
-        if candidate_sha256 is not None and candidate_sha256 != admitted_candidate:
+        if candidate_sha256 != admitted_candidate:
             raise ValueError('candidate bytes changed before native review; create a fresh Harbor export')
-        native_execution = freeze_native_execution(config) if execution_input is None else execution_input
-        if not producer.strip():
-            raise ValueError("producer must be nonempty")
         git_ops.assert_is_worktree(repository)
         if git_ops.status_porcelain(repository).strip():
             raise ValueError("source repository is not clean")
-        execution.source_identity = (_source_identity(repository, case) if public_task is None
-                                     else public_task.verify(repository, case))
-        if evidence_directory is not None:
-            evidence_directory.mkdir(parents=True, exist_ok=False)
-        if not all(git_ops.commit_exists(repository, oid) for oid in (case.base, case.head)):
-            raise ValueError("supplied base or head is unavailable")
+        execution.source_identity = task.verify(repository)
+        evidence_directory.mkdir(parents=True, exist_ok=False)
         with tempfile.TemporaryDirectory(prefix="daydream-reviewbench-case-") as directory:
             checkout = Path(directory) / "repo"
             checkout.mkdir()
             git_ops.init_repository(checkout)
-            # A SHA-only frozen cache can retain a divergent base tip without
-            # advertising it under any ref. Cloning just HEAD loses that base.
-            # Fetch exactly both local endpoints into independent object storage;
-            # unrelated branches and their later fixes are not reviewer inputs.
+            # Fetch both endpoints: cloning HEAD can lose a divergent base.
             _run_git(checkout, ["fetch", "--no-tags", str(repository.resolve()), case.base, case.head],
                      retries=0, timeout=300, error_context="frozen local endpoint materialization failed")
             git_ops.checkout_detach(checkout, case.head)
-            # No remote is installed: this input cannot prefer another base or
-            # lazily fetch later repository history during review.
             if git_ops.head_sha(checkout) != case.head or git_ops.status_porcelain(checkout).strip():
                 raise ValueError("isolated checkout does not match supplied clean head")
             merge_base = git_ops.merge_base(checkout, case.base, case.head)
@@ -348,14 +276,14 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             native = replace(config, target=str(checkout), base=case.base, branch=None, force_worktree=False,
                 output_mode="review", flow_name="review", pr_number=None, pr_repo=None,
                 approved_head_sha=case.head, discover_github_provenance=False, findings_out=None,
-                frozen_author_description=(None if public_task is None or public_task.author_description is None
-                    else FrozenAuthorDescription(case.head, public_task.author_description)),
+                frozen_author_description=(None if task.author_description is None
+                    else FrozenAuthorDescription(case.head, task.author_description)),
                 dataset_capture=False, dataset_capture_disabled=True, trajectory_hub_repo=None,
                 archive=False, run_eval=False, trajectory_path=None,
-                dump_artifacts=None if evidence_directory is None else str(evidence_directory), non_interactive=True)
+                dump_artifacts=str(evidence_directory), non_interactive=True)
             exit_code: int | None = None
             try:
-                exit_code = await runner.run(native, review_result_handler=finalized.append, execution=native_execution)
+                exit_code = await runner.run(native, review_result_handler=finalized.append, execution=execution_input)
             except Exception as exc:
                 execution.diagnostics.append(f"native reviewer raised {type(exc).__name__}")
             result = finalized[0] if len(finalized) == 1 else None
@@ -389,8 +317,7 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             if exit_code != 0:
                 execution.diagnostics.append("native reviewer did not exit successfully")
                 return execution
-            execution.candidate = {"pr": {"repo": case.repo, "pr_number": case.pr_number,
-                "base": case.base, "head": case.head}, "agent": producer, "findings": findings}
+            execution.candidate = {"pr": asdict(case), "agent": producer, "findings": findings}
             if execution.usage:
                 execution.candidate['usage'] = copy.deepcopy(execution.usage)
             execution.status = ("conversion_limited" if execution.conversion_omissions

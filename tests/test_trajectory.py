@@ -351,6 +351,9 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                             assert parent.trajectory_id != second.trajectory_id and parent.path != second.path
                             assert (parent.descriptor != label) == private
                             assert (second.descriptor != second_label) == private
+                            if not identified and not private:
+                                assert parent.trajectory_id == root.session_id + ':' + label
+                                assert second.trajectory_id == root.session_id + ':' + second_label
                             for document in snapshot.documents:
                                 payload = json.loads(document.json_bytes)
                                 assert atif_validate(payload, validate_images=False)
@@ -578,11 +581,12 @@ async def test_private_event_evidence_survives_checkpoint_and_finalization(
             (tmp_path / 'inner-evidence.txt').write_text(text, encoding='utf-8')
         assert document['final_metrics']['total_prompt_tokens'] == document['final_metrics']['total_cached_tokens'] == 0
         assert document['final_metrics'].get('total_completion_tokens') is None
-        requests = document['extra']['subtrajectories'][0]['requests']
+    for requests in (json.loads(frozen)['extra']['subtrajectories'][0]['requests'],
+                     read_trajectory(recorder.path)['extra']['subtrajectories'][0]['requests'], embedded):
+        assert len(requests) == 2 and '-canary' not in json.dumps(requests)
         assert requests[1]['model'] == 'public-model' and requests[1]['provider'] == 'public-provider'
         assert requests[1]['reasoning_effort'] == 'medium'
         assert all(request['backend'] == 'pi' and request['controls']['read_only'] for request in requests)
-    assert len(embedded) == 2 and '-canary' not in json.dumps(embedded)
     assert json.dumps(payload) == raw
 
 

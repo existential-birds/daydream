@@ -5,7 +5,6 @@ import asyncio
 import errno
 import json
 import os
-import shlex
 import signal
 import sys
 import uuid
@@ -17,79 +16,7 @@ import pytest
 
 from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
 from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
-from tests.test_reviewbench_harbor_agent import public_input
-
-
-class LocalReviewerEnvironment:
-    """Buffered exec with Harbor's cancellation boundary: children outlive awaits."""
-
-    def __init__(self, environment: dict[str, str], repository: Path, *,
-                 publication_fault: str | None = None, close_stdout: bool = False, foreign_stderr: bytes = b'',
-                 entrypoint_bootstrap: str | None = None) -> None:
-        self.environment = environment
-        self.repository = repository
-        self.publication_fault = publication_fault
-        self.close_stdout = close_stdout
-        self.foreign_stderr = foreign_stderr
-        self.entrypoint_bootstrap = entrypoint_bootstrap
-        self.results: list[SimpleNamespace] = []
-        self.children: list[asyncio.subprocess.Process] = []
-        self.collectors: list[asyncio.Task[tuple[bytes, bytes]]] = []
-
-    async def exec(self, command: str, **kwargs: Any) -> Any:
-        arguments = shlex.split(command)
-        assert arguments[0] == 'python'
-        arguments[0] = sys.executable
-        inject = self.publication_fault is not None or self.foreign_stderr or self.entrypoint_bootstrap
-        if inject and arguments[1:4] == [
-            '-I', '-m', 'daydream.benchmark.reviewbench.harbor_process',
-        ]:
-            # Patch the actual filesystem install only in the supervisor. The
-            # production entrypoint/native CLI remain separate, unpatched children.
-            bootstrap = ('import errno,os,runpy,sys\nfrom pathlib import Path\n' +
-                f'os.write(2,{self.foreign_stderr!r})\n' +
-                'original_link = os.link\n'
-                'def fail_link(source,destination,**kwargs):\n'
-                f'    if Path(destination).name == {self.publication_fault!r}:\n'
-                '        raise OSError(errno.ENOSPC,"publication-secret-canary")\n'
-                '    return original_link(source,destination,**kwargs)\n'
-                'os.link = fail_link\n'
-                + ('import asyncio\noriginal_spawn=asyncio.create_subprocess_exec\n'
-                   'async def spawn(*args,**kwargs):\n'
-                   '    if args[1:4] == ("-I","-m","daydream.benchmark.reviewbench.harbor_entrypoint"):\n'
-                   f'        args=(args[0],"-I","-c",{self.entrypoint_bootstrap!r})\n'
-                   '    return await original_spawn(*args,**kwargs)\n'
-                   'asyncio.create_subprocess_exec=spawn\n' if self.entrypoint_bootstrap else '') +
-                'sys.argv = ["daydream.benchmark.reviewbench.harbor_process", *sys.argv[1:]]\n'
-                'runpy.run_module(sys.argv[0],run_name="__main__",alter_sys=True)\n')
-            arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
-        writer: int | None = None
-        if self.close_stdout:
-            reader, writer = os.pipe()
-            os.close(reader)  # A real collector pipe with no remaining reader.
-        try:
-            child = await asyncio.create_subprocess_exec(*arguments, cwd=self.repository, env=self.environment,
-                stdout=writer if writer is not None else asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, start_new_session=True)
-        finally:
-            if writer is not None:
-                os.close(writer)
-        self.children.append(child)
-        collector = asyncio.create_task(child.communicate())
-        self.collectors.append(collector)
-        stdout, stderr = await asyncio.shield(collector)
-        result = SimpleNamespace(return_code=child.returncode, stdout=(stdout or b'').decode(), stderr=stderr.decode())
-        self.results.append(result)
-        return result
-
-    async def close(self) -> None:
-        for child in self.children:
-            if child.returncode is None:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        await asyncio.wait_for(asyncio.gather(*self.collectors, return_exceptions=True), timeout=5)
+from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 
 
 @pytest.mark.parametrize('interruption', [
@@ -100,15 +27,7 @@ class LocalReviewerEnvironment:
 async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str,
 ) -> None:
-    """An interrupted host exec must stop its child and retain joined evidence.
-
-    test_cancelled_public_reviewer_exports_joined_native_evidence_and_propagates_cancellation
-    cancels inside the reviewer loop and cannot detect a detached child after a
-    cancelled host collector. This harness enters production host and executable
-    modules, real Git and Codex transport; only the external CLI is scripted.
-    Collector-error rows additionally cover an already-failed await; cancellation
-    rows alone cannot detect cleanup returning before that child finalizes.
-    """
+    """A cancelled or failed real host collector stops owned inference and retains joined native evidence."""
     if interruption == 'late_child' and sys.platform != 'linux':
         pytest.skip('late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
     if interruption == 'slow_process_listing' and sys.platform != 'darwin':
@@ -420,27 +339,23 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
     pytest.param('log_symlink', b'', b'', id='log_symlink'),
     pytest.param('receipt_symlink', b'', b'', id='receipt_symlink'),
     pytest.param('supervisor_enospc', b'', b'', id='supervisor_enospc'),
+    pytest.param('log_enospc', b'', b'', id='log_enospc'),
     pytest.param('host_fallback_enospc', b'', b'', id='host_fallback_enospc'),
     pytest.param('closed_collector_pipe', b'', b'', id='closed_collector_pipe'),
     pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', b'', id='foreign_stderr'),
     pytest.param('none', b'', b'{"message":"\\ud800"}\n', id='surrogate_json'),
+    pytest.param('none', b'', b'-----BEGIN PRIVATE KEY-----\nCOMPLETE_KEY_CANARY\n-----END PRIVATE KEY-----\n'
+                 b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n', id='complete_then_incomplete_pem'),
+    pytest.param('none', b'', b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n', id='structured_secret'),
+    pytest.param('none', b'', b'{"refresh_token": "INCOMPLETE_LINE_CANARY', id='incomplete_line'),
+    pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n',
+                 id='oversized_credential'),
 ])
 async def test_completed_process_review_keeps_native_result_and_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
     foreign_stderr: bytes, entrypoint_payload: bytes,
 ) -> None:
-    """Process supervision must preserve the ordinary scorable successful path.
-
-    Existing terminal tests bypass executable startup and supervisor buffering;
-    this runs a scripted successful native review through the production host.
-    Optional diagnostic install failures must preserve the actual successful
-    native result; finalized native evidence/findings remain authoritative.
-    A real executable bootstrap emits harmless foreign stderr in one row: an
-    aggregate output-size assertion otherwise mistakes runtime warnings for
-    oversized Daydream diagnostics, which quiet process fixtures cannot expose.
-    A child JSON surrogate must also survive supervisor redaction/UTF-8 log
-    publication; ordinary ASCII streams cannot expose that encoding boundary.
-    """
+    """Real supervision keeps native success despite lost or unsafe diagnostic output."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     declared_task = tmp_path / 'declared-task'
@@ -450,7 +365,8 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
     local = LocalReviewerEnvironment({**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']),
-        publication_fault='reviewer-process.json' if diagnostic_failure == 'supervisor_enospc' else None,
+        publication_fault={'supervisor_enospc': 'reviewer-process.json',
+                           'log_enospc': 'reviewer-entrypoint.log'}.get(diagnostic_failure),
         close_stdout=diagnostic_failure == 'closed_collector_pipe', foreign_stderr=foreign_stderr,
         entrypoint_bootstrap=('import asyncio,os\n'
             f'os.write(1,{entrypoint_payload!r})\n'
@@ -508,6 +424,7 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
                 'host_fallback_enospc': ('host log', 'OSError', errno.ENOSPC),
                 'closed_collector_pipe': ('process output', 'BrokenPipeError', errno.EPIPE),
                 'supervisor_enospc': ('process', 'OSError', errno.ENOSPC),
+                'log_enospc': ('process', 'OSError', errno.ENOSPC),
             }.get(diagnostic_failure, ('process', 'FileExistsError', errno.EEXIST))
             assert diagnostics == [f'ReviewBench {surface} diagnostics unavailable ({error}; errno={code}).']
             assert sum(len(line.encode()) + 1 for line in diagnostics) < 1024
@@ -516,8 +433,19 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
         if foreign_stderr:
             assert foreign_stderr.decode() in all_output
         if entrypoint_payload:
-            line = (logs / 'reviewer-entrypoint.log').read_text(encoding='utf-8').splitlines()[0]
-            assert json.loads(line) == {'message': '\ud800'}
+            from daydream.benchmark.reviewbench.harbor_process import OUTPUT_LIMIT_BYTES
+
+            retained = (logs / 'reviewer-entrypoint.log').read_bytes()
+            assert len(retained) <= 2 * OUTPUT_LIMIT_BYTES
+            if b'ud800' in entrypoint_payload:
+                assert json.loads(retained.decode().splitlines()[0]) == {'message': '\ud800'}
+            elif b'INCOMPLETE_LINE_CANARY' in entrypoint_payload:
+                assert receipt['stdout_capture']['incomplete_line_discarded']
+            elif len(entrypoint_payload) > OUTPUT_LIMIT_BYTES:
+                assert receipt['stdout_capture']['discarded'] and receipt['output_truncated']
+            else:
+                assert b'REDACTED' in retained
+            assert 'CANARY' not in all_output
         for canary in ('publication-secret-canary', 'private-refresh-canary', 'private-id-canary',
                        'forbidden-api-canary', 'forbidden-github-canary'):
             assert canary not in all_output
@@ -525,80 +453,19 @@ async def test_completed_process_review_keeps_native_result_and_configuration(
         await local.close()
 
 
-@pytest.mark.parametrize('payload', [
-    b'-----BEGIN PRIVATE KEY-----\nCOMPLETE_KEY_CANARY\n-----END PRIVATE KEY-----\n'
-    b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n',
-    b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n',
-    b'{"refresh_token": "INCOMPLETE_LINE_CANARY',
-    b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n',
-], ids=['complete_then_incomplete_pem', 'structured_secret', 'incomplete_line', 'oversized_credential'])
-async def test_supervisor_captures_real_child_output_without_partial_credential_disclosure(payload: bytes) -> None:
-    """Bounded capture cannot sever redaction context or leak an unfinished key.
-
-    Native trajectory redaction tests do not own supervisor pipe buffering. A
-    complete PEM before an unfinished PEM, chunk boundaries and a stream limit
-    can expose credentials if raw bytes are truncated before redaction.
-    """
-    from daydream.benchmark.reviewbench.harbor_process import OUTPUT_LIMIT_BYTES, _capture, _safe_output
-
-    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c',
-        'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()',
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
-    assert child.stdout is not None and child.stdin is not None
-    retained = bytearray()
-    flags: dict[str, bool] = {}
-    capture = asyncio.create_task(_capture(child.stdout, retained, flags))
-    child.stdin.write(payload)
-    child.stdin.close()
-    await asyncio.wait_for(capture, timeout=5)
-    await child.wait()
-    safe = _safe_output(retained, flags)
-    assert 'CANARY' not in safe
-    assert len(safe.encode()) <= OUTPUT_LIMIT_BYTES
-    assert 'REDACTED' in safe or flags.get('discarded') or flags.get('incomplete_line_discarded')
-
-
-@pytest.mark.parametrize('failure', ['competing_log', 'log_symlink', 'link_failure', 'parent_symlink'])
-def test_supervisor_publication_preserves_competing_bytes_on_real_filesystem(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
-) -> None:
-    """Diagnostic publication must not overwrite another invocation's evidence.
-
-    Existing native export persistence tests do not exercise the supervisor's
-    independent stdout/cleanup receipt. Inject at the actual hard-link operation.
-    """
+def test_supervisor_publication_refuses_redirected_log_parent(tmp_path: Path) -> None:
+    """The process-log publisher must reject redirected parents before either write."""
     from daydream.benchmark.reviewbench.harbor_process import _publish_process_evidence
 
-    evidence = tmp_path / 'logs/daydream'
-    evidence.parent.mkdir()
-    log = evidence.parent / 'reviewer-entrypoint.log'
-    protected = tmp_path / 'protected'
-    protected.write_text('competing diagnostic bytes')
-    if failure == 'competing_log':
-        log.write_bytes(protected.read_bytes())
-    elif failure == 'log_symlink':
-        log.symlink_to(protected)
-    elif failure == 'parent_symlink':
-        evidence.parent.rmdir()
-        protected_directory = tmp_path / 'protected-logs'
-        protected_directory.mkdir()
-        evidence.parent.symlink_to(protected_directory, target_is_directory=True)
-    else:
-        link = os.link
-
-        def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
-            if Path(destination).name == log.name:
-                raise OSError(errno.ENOSPC, 'injected full destination filesystem')
-            link(source, destination, **kwargs)
-
-        monkeypatch.setattr(os, 'link', fail_link)
+    protected = tmp_path / 'other-owner'
+    protected.mkdir()
+    (protected / 'preserve').write_text('competing diagnostic bytes')
+    logs = tmp_path / 'logs'
+    logs.symlink_to(protected, target_is_directory=True)
     with pytest.raises((OSError, ValueError)):
-        _publish_process_evidence({'DAYDREAM_RB_EVIDENCE': str(evidence)}, b'new diagnostic', {'schema': 1})
-    assert protected.read_text() == 'competing diagnostic bytes'
-    if failure in {'competing_log', 'log_symlink'}:
-        assert log.read_text() == 'competing diagnostic bytes'
-    assert not (evidence.parent / 'reviewer-process.json').exists()
-    assert not list(evidence.parent.glob('*.tmp'))
+        _publish_process_evidence({'DAYDREAM_RB_EVIDENCE': str(logs / 'daydream')}, b'new diagnostic', {'schema': 1})
+    assert [p.name for p in protected.iterdir()] == ['preserve']
+    assert (protected / 'preserve').read_text() == 'competing diagnostic bytes'
 
 
 @pytest.mark.parametrize('unsafe', ['root_symlink', 'insecure_root', 'child_symlink'])
@@ -636,12 +503,7 @@ def test_invocation_admission_rejects_unsafe_storage_before_creating_children(
 async def test_optional_host_log_failure_preserves_actual_native_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """An optional fallback log must not replace the reviewer's actual failure.
-
-    Successful-publication parity does not cover competing failures. Use real
-    credential admission failure in the reviewer child and fault only the host's
-    optional diagnostic hard link; native result/output publication stays real.
-    """
+    """A host log hard-link failure cannot replace the actual child credential admission failure."""
     environment = public_input(tmp_path)
     (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
@@ -673,13 +535,7 @@ async def test_optional_host_log_failure_preserves_actual_native_failure(
 async def test_checkpoint_initialization_is_optional_only_for_operational_io_failure(
     tmp_path: Path, failure: str,
 ) -> None:
-    """Optional checkpoint admission must not veto an otherwise healthy review.
-
-    Successful-process parity faults only optional final supervisor files. It
-    misses observer construction before runner admission. Fault actual mkdir or
-    metadata hard-link operations in the executable, keeping runner, native CLI,
-    Git and canonical publications real; conflicting paths remain strict.
-    """
+    """Observer mkdir/link failures are optional; reused or redirected checkpoint paths forbid inference."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
@@ -737,13 +593,7 @@ async def test_checkpoint_initialization_is_optional_only_for_operational_io_fai
 async def test_sigterm_joins_real_finalization_writer_before_export_or_uses_checkpoint(
     tmp_path: Path, shutdown: str,
 ) -> None:
-    """SIGTERM must respect the runner's shield around an actual filesystem writer.
-
-    The existing interrupted-review test cancels native inference before the
-    finalization thread exists. Block an actual atomic install in that thread,
-    then drive the production host/supervisor/signal path; no runner or finalizer
-    result is replaced. A stuck writer must still meet the supervisor force bound.
-    """
+    """SIGTERM joins the actual shielded filesystem writer or retains a checkpoint within the force bound."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     ready, signalled, exported, joined = [tmp_path / name for name in
@@ -864,13 +714,7 @@ raise SystemExit(asyncio.run(drive()))
 async def test_process_control_observation_requires_bounded_owned_regular_files(
     tmp_path: Path, surface: str, storage: str,
 ) -> None:
-    """A diagnostic/control read cannot follow another owner or block shutdown.
-
-    Real interruption tests publish healthy regular receipts/markers and cannot
-    detect a FIFO poll hanging the supervisor, redirected parent traversal, or a
-    huge receipt falsely completing failed-collector cleanup. Run the actual
-    readers in a bounded subprocess so a regressed blocking read fails safely.
-    """
+    """Actual control readers reject redirected, huge and nonregular files without blocking shutdown."""
     invocation = str(uuid.uuid4())
     real = tmp_path / 'real'
     directory = real / 'owner'

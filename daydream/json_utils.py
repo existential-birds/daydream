@@ -57,18 +57,12 @@ def umask_derived_mode() -> int:
     return 0o666 & ~_read_umask()
 
 
-def _stage_bytes(
-    path: Path, content: bytes, *, fsync: bool, mode: int | None, owner: tuple[int, int] | None = None,
-) -> Path:
+def _stage_bytes(path: Path, content: bytes, *, fsync: bool, mode: int | None) -> Path:
     """Write ``content`` to a sibling temp for ``path`` and return the temp path."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            if owner is not None:
-                current = os.fstat(f.fileno())
-                if (current.st_uid, current.st_gid) != owner:
-                    os.fchown(f.fileno(), *owner)
             f.write(content)
             f.flush()
             if fsync:
@@ -103,15 +97,12 @@ def atomic_write_bytes(
     fsync: bool = True,
     dir_fsync: bool = False,
     mode: int | None = None,
-    owner: tuple[int, int] | None = None,
 ) -> None:
     """Publish bytes through an exclusive sibling temp and atomic rename.
 
     Create parents and clean failed temps best-effort. fsync flushes staged bytes;
-    mode chmods both temp and final path; dir_fsync persists the parent rename.
-    An explicit owner applies uid/gid to the private staging file before publication."""
-    tmp = (_stage_bytes(path, content, fsync=fsync, mode=mode) if owner is None
-           else _stage_bytes(path, content, fsync=fsync, mode=mode, owner=owner))
+    mode chmods both temp and final path; dir_fsync persists the parent rename."""
+    tmp = _stage_bytes(path, content, fsync=fsync, mode=mode)
     _publish_staged(path, tmp, dir_fsync=dir_fsync, mode=mode)
 
 

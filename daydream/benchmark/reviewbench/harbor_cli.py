@@ -18,7 +18,6 @@ from daydream.benchmark.reviewbench.harbor_build import (
     HARBOR_REVISION,
     NODE_IMAGE,
     REVIEWBENCH_PLATFORMS,
-    reviewer_build,
 )
 
 
@@ -159,12 +158,10 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
         from daydream.benchmark.reviewbench.native import freeze_reviewer, parse_native_config
 
-        reviewer = freeze_reviewer(parse_native_config(getattr(args, 'native_args', [])))
-        suffix, assets, identity = reviewer_build(args.wheel.resolve(), platform=args.platform, reviewer=reviewer)
         result = export_harbor_profile(
-            args.source, args.directory, candidate={**candidate, **identity}, base_image=args.base_image,
-            reviewer=reviewer, reviewer_dockerfile_suffix=suffix, reviewer_assets=assets, rounds=args.rounds,
-            platform=args.platform,
+            args.source, args.directory, wheel=args.wheel, base_image=args.base_image,
+            reviewer=freeze_reviewer(parse_native_config(getattr(args, 'native_args', []))),
+            rounds=args.rounds, platform=args.platform,
         )
         print(json.dumps(result, indent=2))
         return 0

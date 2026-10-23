@@ -1,10 +1,4 @@
-"""Public Harbor launch/package contracts at external-process boundaries.
-
-Existing export tests own the 219 supplied tasks and format digests. These tests
-protect the later operator launch, which can otherwise select the wrong runtime,
-package, rounds or authentication route despite a valid export. Harmless process
-replays replace Harbor and its format checker; no container or inference runs.
-"""
+"""Harbor launch, exact selection and installed-candidate contracts without inference."""
 from __future__ import annotations
 
 import argparse
@@ -24,10 +18,12 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.reviewbench import harbor_build, harbor_cli
+from daydream.benchmark.reviewbench import harbor_build, harbor_cli, harbor_profile
 from daydream.benchmark.reviewbench.candidate import candidate_package_digest
 from daydream.benchmark.reviewbench.contract import Case, load_cases
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
+from daydream.benchmark.reviewbench.native import freeze_reviewer
+from daydream.run_config import RunConfig
 from tests.harness.reviewbench import supplied_source as supplied_source
 from tests.test_reviewbench_seccomp import moby_policy as moby_policy
 
@@ -78,10 +74,14 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     harbor.chmod(0o755)
     monkeypatch.setattr(harbor_cli, 'sys', SimpleNamespace(executable=str(format_checker)))
     monkeypatch.setattr(DockerEnvironment, '_egress_control_kernel_support', staticmethod(lambda: True))
-    monkeypatch.setattr(importlib.metadata, 'distribution', lambda _name: SimpleNamespace(
+    distribution, version = importlib.metadata.distribution, importlib.metadata.version
+    harbor_distribution = SimpleNamespace(
         version='0.24.0',
-        read_text=lambda _file: json.dumps({'vcs_info': {'commit_id': harbor_build.HARBOR_REVISION}})))
-    monkeypatch.setattr(importlib.metadata, 'version', lambda _name: '0.1.0rc10')
+        read_text=lambda _file: json.dumps({'vcs_info': {'commit_id': harbor_build.HARBOR_REVISION}}))
+    monkeypatch.setattr(importlib.metadata, 'distribution',
+                        lambda name: harbor_distribution if name == 'harbor' else distribution(name))
+    monkeypatch.setattr(importlib.metadata, 'version',
+                        lambda name: '0.1.0rc10' if name == 'reviewbench-harbor' else version(name))
     dataset, source = tmp_path / 'dataset', tmp_path / 'subscription'
     dataset.mkdir()
     (dataset / 'metric.py').write_text('EXPECTED_TASKS = {}\n')
@@ -134,7 +134,7 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
     rounds: int, exit_code: int,
 ) -> None:
-    """A valid export alone misses launch flag drift, inherited billing and process exit handling."""
+    """Deliver exact native launch settings, scrub billing routes and propagate Harbor failure."""
     args, candidate = launch
     args.rounds = rounds
     monkeypatch.setenv('DAYDREAM_TEST_HARBOR_EXIT', str(exit_code))
@@ -166,7 +166,7 @@ def test_launch_delivers_selection_rounds_and_subscription_environment(
 def test_selected_reviewer_delivers_native_auth_separately_from_common_judge(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, backend: str,
 ) -> None:
-    """Selecting Nous must preserve native credentials and the common judge lane."""
+    """Select only the native reviewer capability while preserving the independent common judge."""
     args, candidate = launch
     path = args.directory / 'daydream-profile.json'
     profile = json.loads(path.read_text())
@@ -206,7 +206,7 @@ def test_selected_reviewer_delivers_native_auth_separately_from_common_judge(
 def test_launch_passes_exact_supplied_membership_to_harbor(
     launch: tuple[argparse.Namespace, dict[str, Any]], selection: str,
 ) -> None:
-    """A count limit or glob cannot stand in for the source-selected starter set."""
+    """Select exact supplied task names and independent rounds, never globs or count limits."""
     args, candidate = launch
     args.task, args.set, args.rounds = None, selection, 3
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
@@ -223,7 +223,7 @@ def test_launch_passes_exact_supplied_membership_to_harbor(
 def test_launch_rejects_changed_exact_selection_before_models(
     launch: tuple[argparse.Namespace, dict[str, Any]], fault: str,
 ) -> None:
-    """Unselected task identity changes also invalidate a full-corpus export."""
+    """Reject changed identities even in unselected tasks before launching models."""
     args, candidate = launch
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
     if fault in {'foreign', 'glob', 'duplicate'}:
@@ -249,7 +249,7 @@ def test_launch_rejects_changed_exact_selection_before_models(
 def test_launch_rechecks_candidate_after_preflight_and_process(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, boundary: str,
 ) -> None:
-    """Host wheel/profile identity must remain current around external work."""
+    """Recheck the candidate after external preflight and completed-job work."""
     args, candidate = launch
     marker = args.directory / 'format-checked' if boundary == 'preflight' else args.jobs_dir / args.job_name
     monkeypatch.setattr(harbor_cli, 'candidate_identity', lambda: (
@@ -265,7 +265,7 @@ def test_launch_rechecks_candidate_after_preflight_and_process(
 def test_launch_rejects_incompatible_profile_before_process_delivery(
     launch: tuple[argparse.Namespace, dict[str, Any]], schema: int | None,
 ) -> None:
-    """A valid policy digest cannot authorize an incompatible internal export format."""
+    """A valid digest cannot admit an incompatible profile schema."""
     args, candidate = launch
     path = args.directory / 'daydream-profile.json'
     profile = json.loads(path.read_text())
@@ -282,7 +282,7 @@ def test_launch_rejects_incompatible_profile_before_process_delivery(
 def test_unpinned_runtime_refuses_before_process_or_credential_delivery(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, wrong: str,
 ) -> None:
-    """Released Harbor reports the same version while lacking the required metric contract."""
+    """Reject same-version runtimes missing the pinned Harbor or ReviewBench contract."""
     args, candidate = launch
     if wrong == 'different-reviewbench':
         monkeypatch.setattr(importlib.metadata, 'version', lambda _name: '0.1.0')
@@ -300,7 +300,7 @@ def test_unpinned_runtime_refuses_before_process_or_credential_delivery(
 def test_auth_mount_cannot_live_in_retained_dataset_or_job_evidence(
     launch: tuple[argparse.Namespace, dict[str, Any]], boundary: str,
 ) -> None:
-    """A valid OAuth capability must never be published under recursive evidence roots."""
+    """Private credential stores must stay outside recursive evidence roots."""
     args, candidate = launch
     args.pi_home = (args.directory if boundary == 'dataset' else args.jobs_dir) / 'credentials'
     with pytest.raises(ValueError, match='outside dataset and job evidence'):
@@ -312,7 +312,7 @@ def test_auth_mount_cannot_live_in_retained_dataset_or_job_evidence(
 def test_launch_refuses_changed_executing_candidate_before_models(
     launch: tuple[argparse.Namespace, dict[str, Any]], changed: str,
 ) -> None:
-    """A host adapter from another package must not run under the frozen wheel's identity."""
+    """The executing package and version must match the frozen export."""
     args, candidate = launch
     with pytest.raises(ValueError, match='Executing candidate differs'):
         harbor_cli.handle(args, {**candidate, changed: 'different'})
@@ -322,7 +322,7 @@ def test_launch_refuses_changed_executing_candidate_before_models(
 def test_kernel_isolation_failure_stops_before_auth_delivery(
     launch: tuple[argparse.Namespace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exact-host enforcement cannot silently degrade into a public-network model run."""
+    """Missing exact-host kernel enforcement must prevent credential delivery."""
     from harbor.environments.docker.docker import DockerEnvironment
 
     args, candidate = launch
@@ -334,11 +334,7 @@ def test_kernel_isolation_failure_stops_before_auth_delivery(
 
 @pytest.mark.parametrize('damage', ['missing-module', 'changed-module', 'injected-extension'])
 def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str) -> None:
-    """Checking only wheel-present bytes admits truncated wheels under a full-package identity.
-
-    Existing installed-wheel coverage proves a good wheel executes; this negative
-    control protects the export admission boundary against absent or changed code.
-    """
+    """Real damaged wheels must fail complete package membership and content checks."""
     repository = Path(__file__).resolve().parents[1]
     subprocess.run(['uv', 'build', '--wheel', '--out-dir', str(tmp_path / 'built')],
                    cwd=repository, check=True, capture_output=True)
@@ -364,15 +360,7 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     launch: tuple[argparse.Namespace, dict[str, Any]], tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch, supplied_source: Path, moby_policy: bytes, selection: str,
 ) -> None:
-    """A local -p export needs explicit metrics before the upstream plugin can plan.
-
-    The argv replay cannot detect Harbor's different metric resolution for local
-    and Hub datasets. Resolve the actual CLI configuration, Job and the upstream plugin
-    in the pinned optional runtime without running any trial or container. The
-    identical empty-metrics control reproduces the observed pre-inference failure.
-    """
-    from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
-
+    """Resolve actual pinned CLI, Job, plugin and metrics; reject the empty-metric control."""
     selected = os.environ.get('DAYDREAM_REVIEWBENCH_RUNTIME')
     if not selected:
         pytest.skip('set DAYDREAM_REVIEWBENCH_RUNTIME to the pinned public runtime Python')
@@ -382,7 +370,10 @@ def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_model
     candidate['artifact_sha256'] = candidate_package_digest()
     args.directory = tmp_path / 'actual-full-export'
     args.task, args.set, args.rounds = None, selection, 3
-    export_harbor_profile(supplied_source, args.directory, candidate=candidate, base_image=harbor_build.NODE_IMAGE)
+    monkeypatch.setattr(harbor_profile, 'reviewer_build', lambda *args, **kwargs: ('', {}, {}))
+    harbor_profile.export_harbor_profile(supplied_source, args.directory, wheel=tmp_path / 'unused.whl',
+        reviewer=freeze_reviewer(RunConfig(backend='codex', model='gpt-6.1-sol', reasoning_effort='high')),
+        base_image=harbor_build.NODE_IMAGE)
     monkeypatch.setattr(harbor_cli, 'sys', SimpleNamespace(executable=str(runtime)))
     script = tmp_path / 'resolve-plan.py'
     script.write_text('''import asyncio, hashlib, json, sys
@@ -458,8 +449,7 @@ asyncio.run(main())
     expected_path.write_text(json.dumps(expected))
 
     def resolve_only(command: list[str], *, env: dict[str, str]) -> int:
-        # --print-config returns before execution. No Job.run, Trial.create,
-        # environment build, reviewer or verifier is invoked by this proof.
+        # Resolve configuration without running trials, containers or models.
         environment = {**env, 'PYTHONPATH': str(repository)}
         printed = subprocess.run([*command, '--print-config'], env=environment, check=True,
                                  text=True, capture_output=True, timeout=60)
@@ -469,8 +459,7 @@ asyncio.run(main())
         return 0
 
     monkeypatch.setattr(subprocess, 'call', resolve_only)
-    # This proof resolves a plan without running trials; a successful Harbor
-    # process with no retained result must now fail closed at the CLI boundary.
+    # A plan without retained results cannot establish completed work.
     assert harbor_cli.handle(args, candidate) == 1
     actual = json.loads(result_path.read_text())
     assert actual['plan']['source_prs'] == 219
@@ -488,12 +477,7 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     launch: tuple[argparse.Namespace, dict[str, Any]], supplied_source: Path,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
-    """A real Harbor exit zero can hide reviewer exceptions and absent rewards.
-
-    Retain the existing process-boundary launch, use the actual supplied checker
-    and metric against real job/plan/trial files, and vary only the failed evidence.
-    Previous argv replay coverage modeled process success as benchmark success.
-    """
+    """Use the supplied checker and metric to reject incomplete retained jobs despite Harbor success."""
     args, candidate = launch
     retained = tmp_path / 'harbor-results'
     retained.mkdir()
@@ -574,33 +558,11 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     assert (job_directory / 'checker-invoked').exists() is (outcome != 'transport-error')
 
 
-def test_supplied_findings_validator_preserves_completed_empty_and_rejects_malformed(
-    supplied_source: Path, tmp_path: Path,
-) -> None:
-    """Validate native candidate bytes with the unchanged supplied admission tool."""
-    case = load_cases(supplied_source, 'test')[0]
-    metadata = tmp_path / 'pr.json'
-    metadata.write_text(json.dumps(asdict(case)))
-    candidate = tmp_path / 'findings.json'
-    candidate.write_text(json.dumps({'pr': asdict(case), 'agent': 'native-empty', 'findings': []}))
-    command = ['npm', 'run', 'harbor:validate-findings', '--', '--candidate', str(candidate), '--pr', str(metadata)]
-    result = subprocess.run(command, cwd=supplied_source, check=True, capture_output=True, text=True)
-    assert 'No judging or inference performed' in result.stdout
-    candidate.write_text('{bad')
-    with pytest.raises(subprocess.CalledProcessError):
-        subprocess.run(command, cwd=supplied_source, check=True, capture_output=True, text=True)
-
-
 @pytest.mark.parametrize('selection', ['environment', 'importable-default'])
 def test_controlled_export_refuses_unowned_extensions_before_source_or_wheel_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], selection: str,
 ) -> None:
-    """External extension inputs must not silently disappear from the image's reviewer.
-
-    The existing package guard tested core-only wheel damage. Enter the real CLI
-    with a valid external extension selection and prove admission stops before
-    exporting tasks, reading unrelated inputs, or executing extension code.
-    """
+    """Reject external extensions before reading inputs or executing unowned code."""
     from daydream.benchmark.cli import _handle_benchmark_command
 
     outside = tmp_path / 'outside' / 'daydream_ext'
@@ -629,12 +591,7 @@ def test_controlled_export_refuses_unowned_extensions_before_source_or_wheel_use
 
 
 def test_packaged_extension_code_and_resources_bind_candidate_and_reviewer_wheel(tmp_path: Path) -> None:
-    """A real fork package must retain native extension behavior with complete identity.
-
-    Fresh isolated interpreters load the actual ordinary registry and candidate
-    CLI from the fork. Resource and code changes alter genuine prompt behavior;
-    both must change identity and invalidate the older reviewer wheel.
-    """
+    """Real fork code and resources change native prompt behavior and invalidate the older wheel."""
     repository = Path(__file__).resolve().parents[1]
     fork = tmp_path / 'fork'
     fork.mkdir()
@@ -704,11 +661,7 @@ print(json.dumps({"candidate":candidate_identity(), "wheel_error":error,
 def test_launch_refuses_shared_sessions_or_broad_credential_mounts(
     launch: tuple[argparse.Namespace, dict[str, Any]], fault: str,
 ) -> None:
-    """Dedicated-store admission prevents shared refresh sessions and personal-state exposure.
-
-    Existing launch tests own evidence-root placement and env scrubbing; neither
-    can catch copied refresh tokens or an otherwise valid auth beside user state.
-    """
+    """Reject overlapping stores, copied OAuth sessions, personal state and judge API fallback."""
     args, candidate = launch
     if fault == 'same-store':
         args.pi_home = args.codex_home

@@ -63,18 +63,6 @@ def _warn_partial_write(exc: Exception) -> None:
     ui.print_warning(_console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}")
 
 
-_INITIAL_TOTALS: dict[str, Any] = {
-    "prompt": 0,
-    "completion": 0,
-    "cached": 0,
-    "cost": 0.0,
-    "any_cost_seen": False,
-    "any_prompt_seen": False,
-    "any_completion_seen": False,
-    "any_cached_seen": False,
-}  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
-
-
 def _admitted_descriptor(raw: str) -> str:
     """Retain ordinary labels verbatim; admit private labels as distinct opaque identities."""
     if _redact_unstructured_text(raw) == raw:
@@ -343,7 +331,9 @@ class TrajectoryRecorder:
     _phase_scope_counter: int = 0
     _dispatch_counter: int = 0
     _invocation_counter: int = 0
-    _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
+    _final_totals: dict[str, Any] = field(
+        default_factory=lambda: dict.fromkeys(("prompt", "completion", "cached", "cost"))
+    )
     _folded_fork_totals: bool = False
     _previous_token: Any = None
     # Active invocations whose in-flight steps haven't been flushed yet.
@@ -678,18 +668,10 @@ class TrajectoryRecorder:
         cached_tokens: int | None,
         cost_usd: float | None,
     ) -> None:
-        if prompt_tokens is not None:
-            self._final_totals["prompt"] += prompt_tokens
-            self._final_totals["any_prompt_seen"] = True
-        if completion_tokens is not None:
-            self._final_totals["completion"] += completion_tokens
-            self._final_totals["any_completion_seen"] = True
-        if cached_tokens is not None:
-            self._final_totals["cached"] += cached_tokens
-            self._final_totals["any_cached_seen"] = True
-        if cost_usd is not None:
-            self._final_totals["cost"] += cost_usd
-            self._final_totals["any_cost_seen"] = True
+        for key, value in (("prompt", prompt_tokens), ("completion", completion_tokens),
+                           ("cached", cached_tokens), ("cost", cost_usd)):
+            if value is not None:
+                self._final_totals[key] = (self._final_totals[key] or 0) + value
 
     def _sibling_path_for(
         self,
@@ -801,11 +783,10 @@ class TrajectoryRecorder:
             }
 
         return FinalMetrics(
-            total_prompt_tokens=self._final_totals["prompt"] if self._final_totals["any_prompt_seen"] else None,
-            total_completion_tokens=(self._final_totals["completion"]
-                                     if self._final_totals["any_completion_seen"] else None),
-            total_cached_tokens=self._final_totals["cached"] if self._final_totals["any_cached_seen"] else None,
-            total_cost_usd=(self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None),
+            total_prompt_tokens=self._final_totals["prompt"],
+            total_completion_tokens=self._final_totals["completion"],
+            total_cached_tokens=self._final_totals["cached"],
+            total_cost_usd=self._final_totals["cost"],
             total_steps=total_steps,
             extra=final_metrics_extra,
         )

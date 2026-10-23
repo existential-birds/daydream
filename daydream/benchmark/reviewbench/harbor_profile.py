@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest
+from daydream.benchmark.reviewbench.candidate import candidate_identity, candidate_package_digest
 from daydream.benchmark.reviewbench.contract import (
     REVIEWBENCH_REVISION,
     load_cases,
     verify_source,
 )
-from daydream.benchmark.reviewbench.harbor_build import REVIEWBENCH_PLATFORMS
+from daydream.benchmark.reviewbench.harbor_build import reviewer_build
 from daydream.benchmark.reviewbench.harbor_seccomp import seccomp_profile
 
 CODEX_MODEL = 'gpt-6.1-sol'
@@ -69,19 +69,13 @@ def package_digest(directory: Path) -> str:
     return hashlib.sha256(''.join(entries).encode()).hexdigest()
 
 
-def codex_models(model: str = CODEX_MODEL) -> dict[str, Any]:
-    """Explicit Pi metadata; maxTokens is metadata, not a transport-enforced cap.
-
-    Prices are API-equivalent estimates only. Subscription cash charges are not
-    available from the native transport and must not be inferred from these rates.
-    """
-    if model != CODEX_MODEL:
-        raise ValueError(f'This frozen subscription profile supports only {CODEX_MODEL}')
+def codex_models() -> dict[str, Any]:
+    """Pi model metadata; costs are API-equivalent and maxTokens is unenforced."""
     return {'providers': {'openai-codex': {
         'api': 'openai-codex-responses',
         'baseUrl': 'https://chatgpt.com/backend-api',
         'models': [{
-            'id': model, 'name': model, 'reasoning': True, 'input': ['text', 'image'],
+            'id': CODEX_MODEL, 'name': CODEX_MODEL, 'reasoning': True, 'input': ['text', 'image'],
             'contextWindow': 1050000, 'maxTokens': 8192,
             'cost': {'input': 2, 'output': 10, 'cacheRead': 0.1, 'cacheWrite': 2.5},
         }],
@@ -91,12 +85,6 @@ def codex_models(model: str = CODEX_MODEL) -> dict[str, Any]:
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n', encoding='utf-8')
-
-
-def _image(value: str) -> str:
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[a-f0-9]{64}', value):
-        raise ValueError('Runtime images must be pinned by sha256 digest')
-    return value
 
 
 def selected_reviewer_policy(reviewer: Mapping[str, Any], *,
@@ -146,64 +134,65 @@ def export_harbor_profile(
     source: Path,
     output: Path,
     *,
-    candidate: Mapping[str, Any],
+    wheel: Path,
+    reviewer: Mapping[str, Any],
     base_image: str,
-    reviewer: Mapping[str, Any] | None = None,
-    reviewer_dockerfile_suffix: str = '',
-    reviewer_assets: Mapping[str, bytes] | None = None,
     rounds: int = 3,
     platform: str = 'linux/amd64',
 ) -> dict[str, Any]:
-    """Export all 219 supplied tasks without inference into a NEW local profile.
-
-    ``candidate`` must contain only nonsecret immutable package/runtime identity.
-    Additional reviewer build assets belong beneath its environment directory.
-    Selection/concurrency/independent rounds are Harbor run controls applied AFTER
-    this full export; no tiny export can be mislabeled as the full benchmark.
-    """
+    """Freeze the executing wheel and all 219 supplied tasks into a new local profile."""
     source = source.resolve()
     output = output.absolute()
     if output.exists():
         raise ValueError('Export destination already exists; preserve existing evidence')
-    candidate_sha = candidate.get('artifact_sha256')
-    if candidate_sha is not None and candidate_package_digest() != candidate_sha:
-        raise ValueError('Executing candidate differs from the frozen export identity')
-    source_identity = verify_source(source)
-    cases = load_cases(source, 'full')
-    models = codex_models()
-    if reviewer is None:
-        from daydream.benchmark.reviewbench.native import freeze_reviewer
-        from daydream.run_config import RunConfig
-
-        reviewer = freeze_reviewer(RunConfig(backend='codex', model=CODEX_MODEL, reasoning_effort='high'))
     reviewer = dict(reviewer)
     if (reviewer.get('backend') not in {'codex', 'pi'} or reviewer.get('fanout_concurrency') != 1
             or not reviewer.get('allowed_hosts')):
         raise ValueError('Reviewer must be an admitted frozen native configuration')
-    if platform not in REVIEWBENCH_PLATFORMS:
-        raise ValueError('Public ReviewBench requires an explicit supported Linux platform')
-    if candidate.get('platform', platform) != platform:
-        raise ValueError('Reviewer build and task platform identities differ')
     if type(rounds) is not int or rounds < 1:
         raise ValueError('Independent comparison rounds must be positive')
-    _image(base_image)
-    # No arbitrary kwargs/environment escape hatch: profile data is retained in
-    # images and jobs. Explicitly refuse common credential-bearing identities.
-    serialized_candidate = json.dumps(dict(candidate), sort_keys=True)
-    if re.search(r'(?i)(api.?key|access.?token|refresh.?token|id.?token|password|secret)', serialized_candidate):
-        raise ValueError('Candidate identity must contain no credentials or secret fields')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[a-f0-9]{64}', base_image):
+        raise ValueError('Runtime images must be pinned by sha256 digest')
+    candidate = candidate_identity()
+    reviewer_dockerfile_suffix, reviewer_assets, identity = reviewer_build(
+        wheel.resolve(), platform=platform, backend=reviewer['backend'],
+    )
+    candidate.update(identity)
+    candidate_sha = candidate['artifact_sha256']
+    if candidate_package_digest() != candidate_sha:
+        raise ValueError('Executing candidate differs from the frozen export identity')
+    source_identity = verify_source(source)
+    cases = load_cases(source, 'full')
+    models = codex_models()
     from daydream import credential_patterns, json_utils, redaction
 
-    auth_asset = Path(__file__).with_name('harbor_auth.py').read_bytes()
-    judge_bootstrap = Path(__file__).with_name('judge_auth.mjs').read_bytes()
-    atomic_asset = Path(json_utils.__file__).read_bytes()
-    redaction_asset = Path(redaction.__file__).read_bytes()
-    credential_patterns_asset = Path(credential_patterns.__file__).read_bytes()
     seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
-    reviewer_compose = _compose(platform, reviewer=True, backend=reviewer['backend'])
-    verifier_compose = _compose(platform, reviewer=False)
+    bootstrap = (
+        '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
+        'exec python3 /tests/daydream-auth.py judge '
+        f'--canonical-home {JUDGE_HOME} '
+        '--classifier-sessions /tests/judge/classifier-output/sessions '
+        '--judge-evidence /logs/verifier/judge-sessions '
+        '--models /tests/judge/.daydream-codex/models.json '
+        '--pi-bootstrap /tests/judge/daydream-auth.mjs -- '
+        'node --import tsx scripts/harbor/verify.ts /tests/task.json\n'
+    )
+    task_assets = {
+        **{f'environment/{name}': content for name, content in reviewer_assets.items()},
+        'environment/reviewer-seccomp.json': seccomp_asset,
+        'environment/reviewer-seccomp-provenance.json': seccomp_provenance_asset,
+        'environment/docker-compose.yaml': _compose(platform, reviewer=True, backend=reviewer['backend']).encode(),
+        'tests/docker-compose.yaml': _compose(platform, reviewer=False).encode(),
+        'tests/daydream-auth.py': Path(__file__).with_name('harbor_auth.py').read_bytes(),
+        'tests/daydream/__init__.py': b'',
+        **{f'tests/daydream/{Path(filename).name}': Path(filename).read_bytes()
+           for filename in (json_utils.__file__, redaction.__file__, credential_patterns.__file__)},
+        'tests/judge/.daydream-codex/models.json': (json.dumps(models, sort_keys=True, indent=2) + '\n').encode(),
+        'tests/judge/daydream-auth.mjs': Path(__file__).with_name('judge_auth.mjs').read_bytes(),
+        'tests/test.sh': bootstrap.encode(),
+    }
     policy: dict[str, Any] = {
         'schema': 3, 'name': 'daydream-reviewbench-native',
         'source': source_identity, 'source_prs': len(cases),
@@ -271,36 +260,10 @@ def export_harbor_profile(
             docker = docker.replace('RUN git init -q .', reviewer_dockerfile_suffix + '\nRUN git init -q .', 1)
             docker += '\nCOPY daydream-profile.json /work/pr/daydream-profile.json\n'
             docker_path.write_text(docker, encoding='utf-8')
-            (task_dir / 'environment/reviewer-seccomp.json').write_bytes(seccomp_asset)
-            (task_dir / 'environment/reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
-            for relative, content in (reviewer_assets or {}).items():
-                relative_path = Path(relative)
-                if relative_path.is_absolute() or '..' in relative_path.parts:
-                    raise ValueError('Reviewer build assets must remain within the environment directory')
-                destination = task_dir / 'environment' / relative_path
+            for relative, content in task_assets.items():
+                destination = task_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
-            (task_dir / 'tests/daydream-auth.py').write_bytes(auth_asset)
-            (task_dir / 'tests/daydream').mkdir()
-            (task_dir / 'tests/daydream/__init__.py').write_bytes(b'')
-            (task_dir / 'tests/daydream/json_utils.py').write_bytes(atomic_asset)
-            (task_dir / 'tests/daydream/redaction.py').write_bytes(redaction_asset)
-            (task_dir / 'tests/daydream/credential_patterns.py').write_bytes(credential_patterns_asset)
-            (task_dir / 'environment/docker-compose.yaml').write_text(reviewer_compose, encoding='utf-8')
-            (task_dir / 'tests/docker-compose.yaml').write_text(verifier_compose, encoding='utf-8')
-            _write_json(task_dir / 'tests/judge/.daydream-codex/models.json', models)
-            (task_dir / 'tests/judge/daydream-auth.mjs').write_bytes(judge_bootstrap)
-            bootstrap = (
-                '#!/bin/bash\nset -euo pipefail\ncd /tests/judge\n'
-                'exec python3 /tests/daydream-auth.py judge '
-                f'--canonical-home {JUDGE_HOME} '
-                '--classifier-sessions /tests/judge/classifier-output/sessions '
-                '--judge-evidence /logs/verifier/judge-sessions '
-                '--models /tests/judge/.daydream-codex/models.json '
-                '--pi-bootstrap /tests/judge/daydream-auth.mjs -- '
-                'node --import tsx scripts/harbor/verify.ts /tests/task.json\n'
-            )
-            (task_dir / 'tests/test.sh').write_text(bootstrap, encoding='utf-8')
             toml_path = task_dir / 'task.toml'
             toml = toml_path.read_text()
             toml = toml.replace('[metadata]\n', f'[metadata]\ndaydream_policy_sha256 = "{policy_sha}"\n')
@@ -313,7 +276,6 @@ def export_harbor_profile(
         (exported / 'metric.py').write_text(metric, encoding='utf-8')
         metric_sha = hashlib.sha256(metric.encode()).hexdigest()
         _write_json(exported / 'daydream-profile.json', {**policy, 'policy_sha256': policy_sha})
-        profile_sha = hashlib.sha256((exported / 'daydream-profile.json').read_bytes()).hexdigest()
         (exported / 'reviewer-seccomp.json').write_bytes(seccomp_asset)
         (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
         (exported / 'dataset.toml').write_text(
@@ -321,20 +283,18 @@ def export_harbor_profile(
             f'name = {json.dumps("daydream-local/reviewbench-native")}\n'
             'description = "Full public ReviewBench: 219 frozen PRs; custom subscription Codex judge."\n'
             'keywords = ["code-review", "reviewbench", "daydream"]\n\n'
-            + '\n'.join(references) + '\n[[files]]\npath = "metric.py"\n'
-            f'digest = "sha256:{metric_sha}"\n'
-            '\n[[files]]\npath = "daydream-profile.json"\n'
-            f'digest = "sha256:{profile_sha}"\n'
-            '\n[[files]]\npath = "reviewer-seccomp.json"\n'
-            f'digest = "sha256:{seccomp_sha}"\n'
-            '\n[[files]]\npath = "reviewer-seccomp-provenance.json"\n'
-            f'digest = "sha256:{hashlib.sha256(seccomp_provenance_asset).hexdigest()}"\n', encoding='utf-8',
+            + '\n'.join(references) + ''.join(
+                f'\n[[files]]\npath = {json.dumps(name)}\ndigest = "sha256:'
+                f'{hashlib.sha256((exported / name).read_bytes()).hexdigest()}"\n'
+                for name in ('metric.py', 'daydream-profile.json', 'reviewer-seccomp.json',
+                             'reviewer-seccomp-provenance.json')
+            ), encoding='utf-8',
         )
         # Recheck the supplied checkout after generation so concurrent source
         # changes cannot silently claim the originally admitted revision.
         if verify_source(source) != source_identity:
             raise ValueError('Supplied source changed during export')
-        if candidate_sha is not None and candidate_package_digest() != candidate_sha:
+        if candidate_package_digest() != candidate_sha:
             raise ValueError('Executing candidate changed during export')
         shutil.copytree(exported, output)
     return {'tasks': len(cases), 'policy_sha256': policy_sha, 'metric_sha256': metric_sha,

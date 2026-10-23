@@ -34,7 +34,7 @@ pytestmark = pytest.mark.usefixtures('moby_policy')
                         ('linux/amd64', 'pi'), ('linux/arm64', 'pi')])
 def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.FixtureRequest,
                    monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Use real supplied inputs/export process, not a fake task generator."""
+    """Run the actual pinned full219 exporter for each supported reviewer and architecture."""
     output = tmp_path / 'public'
     platform, backend = request.param
     model = 'gpt-6-sol' if backend == 'codex' else 'deepseek/deepseek-v4.1-flash'
@@ -52,14 +52,11 @@ def public_profile(supplied_source: Path, tmp_path: Path, request: pytest.Fixtur
     reviewer = freeze_reviewer(RunConfig(target=str(tmp_path), backend=backend, model=model,
                                         parse_model=model_ids[-1],
                                         reasoning_effort='high'))
-    export_harbor_profile(
-        supplied_source, output,
-        candidate={'revision': 'test-candidate', 'wheel_sha256': 'a' * 64, 'platform': platform},
-        reviewer=reviewer,
-        base_image=NODE_IMAGE, reviewer_assets={'runtime.lock': b'offline test build input\n'},
-        reviewer_dockerfile_suffix='\nCOPY runtime.lock /opt/runtime.lock\n',
-        platform=platform,
-    )
+    monkeypatch.setattr(harbor_profile, 'reviewer_build', lambda _wheel, *, platform, backend: (
+        '\nCOPY runtime.lock /opt/runtime.lock\n', {'runtime.lock': b'offline test build input\n'},
+        {'platform': platform}))
+    export_harbor_profile(supplied_source, output, wheel=tmp_path / 'unused.whl', reviewer=reviewer,
+                          base_image=NODE_IMAGE, platform=platform)
     return output
 
 
@@ -70,11 +67,7 @@ def _hash(path: Path) -> str:
 def test_complete_custom_profile_passes_supplied_harbor_packager(
     supplied_source: Path, public_profile: Path,
 ) -> None:
-    """A judge-bootstrap change must update task, evaluation, metric and dataset versions.
-
-    Native execution tests never package Harbor tasks; stale upstream digests
-    would make the delivered custom export unusable before any model call.
-    """
+    """Validate real task, evaluation, metric and dataset identities with the supplied packager."""
     subprocess.run(['python', str(supplied_source / 'scripts/harbor/check-format.py'), str(public_profile)], check=True)
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     manifest = json.loads((supplied_source / 'corpus/manifest.json').read_text())
@@ -125,18 +118,13 @@ def test_complete_custom_profile_passes_supplied_harbor_packager(
 def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model(
     supplied_source: Path, public_profile: Path,
 ) -> None:
-    """A custom provider without usable Pi metadata can silently skip actual judging.
-
-    Prove model resolution using the pinned real SDK, and protect upstream source
-    parity independently of native backend replay fixtures.
-    """
+    """Resolve the actual judge SDK model and preserve supplied sources and isolated bootstrap wiring."""
     dataset = tomllib.loads((public_profile / 'dataset.toml').read_text())
     task_dir = public_profile / dataset['tasks'][0]['name'].split('/', 1)[1]
     judge = task_dir / 'tests/judge'
     atomic_asset = task_dir / 'tests/daydream/json_utils.py'
     assert atomic_asset.read_bytes() == Path(json_utils.__file__).read_bytes()
-    # Execute only the shipped verifier package, without host site-packages or
-    # PYTHONPATH. Byte parity cannot catch an unusable package/import layout.
+    # Shipped verifier imports must work without host packages or PYTHONPATH.
     subprocess.run([sys.executable, '-E', '-S', str(task_dir / 'tests/daydream-auth.py'), '--help'],
                    cwd=public_profile, check=True, capture_output=True)
     policy = json.loads((public_profile / 'daydream-profile.json').read_text())
@@ -145,9 +133,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert redaction_asset.read_bytes() == Path(redaction.__file__).read_bytes()
     assert credential_patterns_asset.read_bytes() == Path(credential_patterns.__file__).read_bytes()
     assert (task_dir / 'tests/daydream/__init__.py').read_bytes() == b''
-    # Auth-wrapper tests own session publication. The shipped task must actually
-    # opt into that contract, otherwise successful verifier cleanup loses its
-    # classifier conversations despite a working retention helper.
+    # The shipped verifier must enable classifier retention.
     bootstrap = (task_dir / 'tests/test.sh').read_text().splitlines()[-1]
     arguments = shlex.split(bootstrap)
     source = arguments[arguments.index('--classifier-sessions') + 1]
@@ -179,8 +165,7 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     assert model['reasoning'] is True
     dockerfile = (task_dir / 'environment/Dockerfile').read_text()
     assert dockerfile.index('COPY runtime.lock') < dockerfile.index('RUN git init -q .')
-    # Both roles share only auth. Only the reviewer receives the narrowly
-    # extended syscall profile needed to bootstrap Codex's native sandbox.
+    # Only the reviewer receives the extended sandbox bootstrap policy.
     reviewer = yaml.safe_load((task_dir / 'environment/docker-compose.yaml').read_text())['services']['main']
     verifier = yaml.safe_load((task_dir / 'tests/docker-compose.yaml').read_text())['services']['main']
     assert set(reviewer) == {'platform', 'security_opt', 'volumes'}
@@ -203,34 +188,29 @@ def test_custom_bootstrap_keeps_supplied_judge_semantics_and_loads_current_model
     ]
 
 
-@pytest.mark.parametrize('option', [
-    {'reviewer': {'backend': 'unsupported'}}, {'rounds': 0},
-    {'base_image': 'node:latest'},
-    {'candidate': {'refresh_token': 'must-never-be-retained'}},
-    {'reviewer_assets': {'../escaped': b'bytes'}},
-    {'platform': 'linux/ppc64le'}, {'platform': 'linux/arm64', 'candidate': {'platform': 'linux/amd64'}},
+@pytest.mark.parametrize(('option', 'error'), [
+    ({'reviewer': {'backend': 'unsupported'}}, 'admitted frozen native'),
+    ({'rounds': 0}, 'rounds must be positive'),
+    ({'base_image': 'node:latest'}, 'pinned by sha256'),
+    ({'platform': 'linux/ppc64le'}, 'supported Linux platform'),
 ])
 def test_invalid_public_profile_preserves_source_and_publishes_nothing(
-    supplied_source: Path, tmp_path: Path, option: dict[str, Any],
+    supplied_source: Path, tmp_path: Path, option: dict[str, Any], error: str,
 ) -> None:
-    """Invalid transport/billing policy and escaping assets must fail before publication."""
+    """Invalid reviewer, rounds, image or architecture must publish nothing."""
     output = tmp_path / 'refused'
-    options = {'candidate': {'revision': 'offline'}, 'base_image': NODE_IMAGE, **option}
-    with pytest.raises(ValueError):
+    options = {'wheel': tmp_path / 'unused.whl', 'base_image': NODE_IMAGE,
+               'reviewer': freeze_reviewer(RunConfig(backend='codex', model='gpt-6.1-sol')), **option}
+    with pytest.raises(ValueError, match=error):
         export_harbor_profile(supplied_source, output, **options)
     assert not output.exists()
-    assert not (tmp_path / 'escaped').exists()
     assert not list(tmp_path.glob('.reviewbench-export-*'))
 
 
 def test_competing_export_destination_preserves_the_winning_profile(
     supplied_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A destination created during export must not receive a nested candidate.
-
-    Successful format tests miss the race between admission and publication: a
-    move into an existing directory returns the winner's path with our policy.
-    """
+    """A competing publication keeps its exact bytes and cannot receive a nested losing export."""
     output = tmp_path / 'competing-profile'
     winning_files = {
         'daydream-profile.json': b'{"winner": "other-export"}\n',
@@ -243,16 +223,16 @@ def test_competing_export_destination_preserves_the_winning_profile(
         identity = verify_source(source)
         verifications += 1
         if verifications == 2:
-            # The real export is complete and source verification still passes.
-            # Publish competing bytes at the last boundary before installation.
             output.mkdir()
             for name, content in winning_files.items():
                 (output / name).write_bytes(content)
         return identity
 
     monkeypatch.setattr(harbor_profile, 'verify_source', competing_destination)
+    monkeypatch.setattr(harbor_profile, 'reviewer_build', lambda *args, **kwargs: ('', {}, {}))
     with pytest.raises(FileExistsError):
-        export_harbor_profile(supplied_source, output, candidate={'revision': 'losing-export'}, base_image=NODE_IMAGE)
+        export_harbor_profile(supplied_source, output, wheel=tmp_path / 'unused.whl', base_image=NODE_IMAGE,
+            reviewer=freeze_reviewer(RunConfig(backend='codex', model='gpt-6.1-sol')))
     assert verifications == 2
     assert {path.relative_to(output).as_posix(): path.read_bytes()
             for path in output.rglob('*') if path.is_file()} == winning_files
@@ -264,30 +244,32 @@ def test_competing_export_destination_preserves_the_winning_profile(
 def test_export_refuses_changed_candidate_before_publication(
     supplied_source: Path, tmp_path: Path, mutation: str,
 ) -> None:
-    """The executing candidate must still own every shipped export helper.
-
-    Real wheel capture protects the reviewer install, while source-pin checks
-    protect supplied inputs. Neither detects a candidate helper changing while
-    an actual supplied export is assembled. Mutate only an isolated package.
-    """
+    """Real package mutations across build, export and publication cannot retain a stale identity."""
     copied = tmp_path / 'candidate'
     copied.mkdir()
     package = Path(harbor_profile.__file__).resolve().parents[2]
     shutil.copytree(package, copied / 'daydream', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copyfile(package.parent / 'pyproject.toml', copied / 'pyproject.toml')
+    subprocess.run(['uv', 'build', '--wheel', '--out-dir', str(copied / 'wheels')],
+                   cwd=copied, check=True, capture_output=True)
     script = '''import json,sys
 from pathlib import Path
 from daydream.benchmark.reviewbench import harbor_profile
-from daydream.benchmark.reviewbench.candidate import candidate_package_digest
 from daydream.benchmark.reviewbench.harbor_build import NODE_IMAGE
 from daydream.benchmark.reviewbench.native import freeze_reviewer
 from daydream.run_config import RunConfig
 root,source,mutation=Path.cwd(),Path(sys.argv[1]),sys.argv[2]
 reviewer=freeze_reviewer(RunConfig(target=str(root),backend='codex',model='gpt-6.1-sol'))
-admitted=candidate_package_digest()
 helper=root/'daydream/benchmark/reviewbench/harbor_auth.py'
 marker=b'\\n# competing candidate helper bytes\\n'
 verify=harbor_profile.verify_source
+build=harbor_profile.reviewer_build
 checks=0
+def captured_build(*args,**kwargs):
+ _,_,identity=build(*args,**kwargs)
+ if mutation=='before-admission':helper.write_bytes(helper.read_bytes()+marker)
+ return '',{},identity
+harbor_profile.reviewer_build=captured_build
 def mutate(path):
  global checks
  identity=verify(path);checks+=1
@@ -297,11 +279,10 @@ def mutate(path):
 harbor_profile.verify_source=mutate
 # This HTTP-only dependency does not own candidate or supplied-source identity.
 harbor_profile.seccomp_profile=lambda:(b'{}\\n',b'{"policy_sha256":"synthetic-control"}\\n')
-if mutation=='before-admission':helper.write_bytes(helper.read_bytes()+marker)
 output=root/'exported'
 error=None
 try:
- harbor_profile.export_harbor_profile(source,output,candidate={'artifact_sha256':admitted},
+ harbor_profile.export_harbor_profile(source,output,wheel=next((root/'wheels').glob('*.whl')),
   base_image=NODE_IMAGE,reviewer=reviewer)
 except ValueError as exc:error=str(exc)
 print(json.dumps({'error':error,'published':output.exists(),'source_checks':checks,
@@ -323,11 +304,7 @@ print(json.dumps({'error':error,'published':output.exists(),'source_checks':chec
 def test_native_pi_export_rejects_unavailable_or_unisolated_operator_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
-    """Native operator routing must be admitted before exporting a runnable profile.
-
-    Codex's fixed hosts cannot expose a lost Nous model or a hidden secondary
-    endpoint. Preserve real operator files and enter through native freezing.
-    """
+    """Admit native model availability and exact HTTPS routing without mutating operator files."""
     provider: dict[str, Any] = {'baseUrl': 'https://inference-api.nousresearch.com/v1',
         'apiKey': 'synthetic-native-secret', 'models': [{'id': 'deepseek/deepseek-v4.1-flash',
                                                        'api': 'openai-completions'}]}

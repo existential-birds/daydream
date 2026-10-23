@@ -1,8 +1,4 @@
-"""Run the ordinary native reviewer against an admitted public Harbor snapshot.
-
-Only this public lane admits origin-free frozen tasks. Supplied verifier assets
-remain in Harbor's separate verifier environment; no private scorer is imported.
-"""
+"""Run the native reviewer on admitted Harbor snapshots, keeping verifier assets separate."""
 from __future__ import annotations
 
 import asyncio
@@ -92,12 +88,7 @@ def _write_new_json(destination: Path, value: Any) -> None:
 
 @contextmanager
 def _private_archive_directory(directory: Path) -> Iterator[None]:
-    """Confine dump assembly's archive side effects to this single-run process.
-
-    The ordinary dump pipeline also maintains an archive index. Its supported
-    environment selector must point at disposable private storage, never the
-    operator's archive. This selector is excluded from backend environments.
-    """
+    """Confine dump assembly and its archive index to disposable storage excluded from backend environments."""
     previous = os.environ.get('DAYDREAM_ARCHIVE_DIR')
     os.environ['DAYDREAM_ARCHIVE_DIR'] = str(directory)
     try:
@@ -110,12 +101,7 @@ def _private_archive_directory(directory: Path) -> Iterator[None]:
 
 
 def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Path) -> None:
-    """Copy only joined native evidence onto Harbor's non-exchange log mount.
-
-    The native artifact owner retains its private filesystem and live-exchange
-    guarantees. Harbor receives exact finalized exports after every writer has
-    joined, through a no-clobber install local to its own destination filesystem.
-    """
+    """Install joined native exports without clobbering Harbor's separate log filesystem."""
     evidence.mkdir(parents=True, exist_ok=False)
     trajectory = staged / RUN_DOCUMENT_NAME
     bundle = evidence
@@ -221,9 +207,9 @@ async def main(environment: Mapping[str, str]) -> int:
                             raise asyncio.CancelledError
                     checkpoint_task = asyncio.create_task(_checkpoint_loop())
                     try:
-                        execution = await review_case(task.case, repository, config, 'daydream-native-' + backend,
+                        execution = await review_case(task, repository, config,
                             execution_input=capability, candidate_sha256=profile['candidate']['artifact_sha256'],
-                            public_task=task, evidence_directory=staged)
+                            evidence_directory=staged)
                         await anyio.lowlevel.checkpoint_if_cancelled()
                     finally:
                         checkpoint_task.cancel()

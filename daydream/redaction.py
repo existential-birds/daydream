@@ -199,35 +199,20 @@ def _is_native_credential_field(key: str, container: Mapping[str, Any]) -> bool:
             and isinstance(item, str) and bool(item.strip()))
 
 
-def _redact_native_auth_value(value: Any) -> Any:
-    """Copy presentation data, redacting only observed native credential context.
-
-    Ordinary keys, search patterns, paths and nonstring leaves remain unchanged;
-    the full recorder/Bash text policy remains owned by the existing redactors.
-    """
+def _redact_native_auth_value(value: Any, *, presentation: bool = False) -> Any:
+    """Copy native-context data; encode only final presentation string leaves."""
     if isinstance(value, dict):
         return {key: (_redact_sensitive_text(item) if isinstance(key, str)
-                      and _is_native_credential_field(key, value) else _redact_native_auth_value(item))
+                      and _is_native_credential_field(key, value)
+                      else _redact_native_auth_value(item, presentation=presentation))
                 for key, item in value.items()}
     if isinstance(value, list):
-        return [_redact_native_auth_value(item) for item in value]
+        return [_redact_native_auth_value(item, presentation=presentation) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_native_auth_value(item) for item in value)
+        return tuple(_redact_native_auth_value(item, presentation=presentation) for item in value)
     if isinstance(value, str):
-        return _redact_native_credential_objects(value)
-    return value
-
-
-def _utf8_native_presentation(value: Any) -> Any:
-    """Encode final string leaves once after raw native-context composition."""
-    if isinstance(value, str):
-        return value.encode('utf-8', errors='backslashreplace').decode('utf-8')
-    if isinstance(value, dict):
-        return {key: _utf8_native_presentation(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_utf8_native_presentation(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_utf8_native_presentation(item) for item in value)
+        redacted = _redact_native_credential_objects(value)
+        return redacted.encode('utf-8', errors='backslashreplace').decode('utf-8') if presentation else redacted
     return value
 
 
@@ -238,7 +223,7 @@ def redact_native_auth_value(value: Any) -> Any:
     nested JSON privately before encoding final leaves so code points are not
     double-escaped. The full recorder/Bash text policy remains separate.
     """
-    return _utf8_native_presentation(_redact_native_auth_value(value))
+    return _redact_native_auth_value(value, presentation=True)
 
 
 # Match headers case-insensitively at line start or embedded in output.
