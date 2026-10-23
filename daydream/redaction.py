@@ -61,11 +61,9 @@ _PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
 _REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
 
 
-#: An already-redacted value survives every later pass: structured rules replace a
-#: value only when no marker is present, so re-redaction cannot swap one host
-#: marker for another. Both spellings count — this module's bracketed form and the
-#: angle-bracket form Improve's plan renderer emits.
-_REDACTION_MARKER = re.compile(r"\[REDACTED|<redacted>", re.IGNORECASE)
+#: Complete markers retain their identities on later passes; adjacent sensitive
+#: content is still removed. Both spellings count — this module's bracketed form
+#: and the angle-bracket form Improve's plan renderer emits.
 _COMPLETE_REDACTION_MARKER = re.compile(r"\[REDACTED(?:_[A-Z0-9]+)*\]|<redacted>", re.IGNORECASE)
 
 
@@ -205,12 +203,26 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 # escaped quotes, auth-scheme pairs, or bare tokens. Bare values exclude comma,
 # colon and equals separators so replacement preserves surrounding structure.
 # Skip opening braces to reach nested keys; handle blocks in the later block
-# pass. The lookahead protects redaction markers emitted by earlier stages.
+# pass. Sensitive values preserve complete redaction markers after matching.
+_BARE_STRUCTURED_VALUE = (
+    rf"(?:(?i:{_COMPLETE_REDACTION_MARKER.pattern})|" + r"[^\s\"'\[\]{}():,=])++"
+)
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
-    r"(?:\"((?:\\.|[^\"\\])*)(?:\"|\\?$)|'((?:\\.|[^'\\])*)(?:'|\\?$)|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)|([^\s\"'\[\]{}():,=]++))"  # noqa: E501 - quoted tails fail closed
-    r"(?![^\S\n\r]*(?:\[REDACTED|<redacted>))",
+    r"(?:\"((?:\\.|[^\"\\])*)(?:\"|\\?$)|'((?:\\.|[^'\\])*)(?:'|\\?$)"
+    r"|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)"
+    r"|(" + _BARE_STRUCTURED_VALUE + r"))"
 )
+
+
+def _redact_sensitive_text(value: str) -> str:
+    """Preserve complete markers and remove every other part of a sensitive value."""
+    markers = list(_COMPLETE_REDACTION_MARKER.finditer(value))
+    if not markers:
+        return _REDACTED_CREDENTIAL
+    if not _COMPLETE_REDACTION_MARKER.sub('', value).strip():
+        return value
+    return ' '.join(marker.group(0) for marker in markers)
 
 
 def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
@@ -226,16 +238,18 @@ def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
     if match.group(6) is not None:
         # Bearer|Basic|Token <opaque>: keep the scheme, replace the token.
         token = match.group(7)
-        if token is None or token == "" or _REDACTION_MARKER.search(token):
+        if token is None or token == "":
             return match.group(0)
-        return f"{wrapped_key}{sep}{match.group(6)} {_REDACTED_CREDENTIAL}"
+        safe = _redact_sensitive_text(token)
+        if safe == token:
+            return match.group(0)
+        return f"{wrapped_key}{sep}{match.group(6)} {safe}"
     value = match.group(4) or match.group(5) or match.group(8)
     if value is None or value == "":
         return match.group(0)
     if match.group(8) is not None and not _bare_value_redactable(sep, text, match.end()):
         return match.group(0)
-    markers = list(_COMPLETE_REDACTION_MARKER.finditer(value))
-    safe = ' '.join(marker.group(0) for marker in markers) if markers else _REDACTED_CREDENTIAL
+    safe = _redact_sensitive_text(value)
     if safe == value:
         return match.group(0)
     quote = '"' if (match.group(4) is not None or match.group(8) is not None) else "'"
@@ -468,7 +482,7 @@ def _redact_structured_pairs(text: str) -> str:
 
 _BLOCK_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
-    r"(?=[\[{](?!REDACTED)|\n)"
+    r"(?=(?!(?i:" + _COMPLETE_REDACTION_MARKER.pattern + r"))[\[{]|\n)"
 )
 
 
@@ -596,9 +610,8 @@ def _redact_json_container(value: Any) -> Any:
         result = {}
         for key, item in value.items():
             if _is_sensitive_key(key):
-                markers = list(_COMPLETE_REDACTION_MARKER.finditer(item)) if isinstance(item, str) else []
                 result[redact_text(key)] = (item if item == '' else
-                    ' '.join(marker.group(0) for marker in markers) if markers else _REDACTED_CREDENTIAL)
+                    _redact_sensitive_text(item) if isinstance(item, str) else _REDACTED_CREDENTIAL)
             else:
                 result[redact_text(key)] = _redact_json_container(item)
         return result

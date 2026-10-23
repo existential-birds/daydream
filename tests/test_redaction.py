@@ -338,11 +338,23 @@ def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
     assert "[REDACTED_PEM_KEY]" in out.message
 
 
-@pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "<redacted>"])
+@pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "[redacted_api_key]", "<redacted>"])
 def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> None:
-    """A later pass must not swap one host redaction marker for another."""
-    text = f"api_key = already {marker}"
-    assert redact_value({"note": text}) == {"note": text}
+    """Exact markers remain idempotent without exempting another sensitive value.
+
+    The old fixture put ``already`` under api_key before a marker and required
+    that entire sensitive value to survive. That assertion allowed an opaque
+    credential to survive merely because a later marker was present. Pin exact
+    safe marker values/schemes and ordinary public text instead; the real
+    recorder privacy rows independently cover residual credentials.
+    """
+    for text in (f"api_key = {marker}", f"api_key = '{marker}'", f"auth=Bearer {marker}",
+                 f"api_key = {marker}[REDACTED_CREDENTIAL]", f"auth=Bearer {marker}[REDACTED_CREDENTIAL]",
+                 f"Public note already {marker}"):
+        assert redact_value({"note": text}) == {"note": text}
+    combined = marker + '[REDACTED_CREDENTIAL]'
+    serialized = json.dumps({'api_key': combined})
+    assert json.loads(redact_structured_text(serialized))['api_key'] == combined
 
 
 def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
@@ -543,3 +555,16 @@ def test_unfinished_secret_leaf_redaction_preserves_complete_json_envelope(fragm
     else:
         assert '[REDACTED' in parsed['message']
         assert parsed['model'] == 'fixture-model' and parsed['count'] == 0
+
+
+@pytest.mark.parametrize('container', [
+    '["opaque-container-canary", "public"]',
+    '{"entry": "opaque-container-canary", "public": true}',
+])
+def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(container: str) -> None:
+    """Marker-prefixed bare values must not swallow or expose structured containers.
+
+    Marker-only cases do not establish the array/object alternative still consumes
+    a complete sensitive block after the bare-token grammar changes.
+    """
+    assert redact_structured_text('token = ' + container) == 'token = "[REDACTED_CREDENTIAL]"'

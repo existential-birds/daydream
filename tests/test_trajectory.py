@@ -534,7 +534,10 @@ async def test_existing_redaction_marker_cannot_exempt_adjacent_credentials_in_s
         assert document['final_metrics'].get('total_completion_tokens') is None
 
 
-@pytest.mark.parametrize('label', ['ordinary-python', '{"scope":"python"}', '{"scope":"python","scope":"rust"}'])
+@pytest.mark.parametrize('label', [
+    'ordinary-python', '{"scope":"python"}', '{"scope":"python","scope":"rust"}',
+    'auth=Bearer [REDACTED][REDACTED_CREDENTIAL]', 'api_key=[REDACTED][REDACTED_CREDENTIAL]',
+])
 async def test_benign_host_fork_labels_keep_original_identity(label: str, tmp_path: Path) -> None:
     """Privacy admission must not rename ordinary or merely JSON-looking labels.
 
@@ -555,6 +558,12 @@ async def test_benign_host_fork_labels_keep_original_identity(label: str, tmp_pa
      '\ncheckpoint-later-canary\n-----END PRIVATE KEY-----'),
     ('{"refresh_token": "checkpoint-first-canary', 'checkpoint-later-canary"}'),
     ('refresh_token="checkpoint-first-canary', 'checkpoint-later-canary"'),
+    pytest.param('refresh_token=checkpoint-first-canary[REDACTED]checkpoint-first-canary',
+                 'checkpoint-later-canary', id='bare-middle-marker'),
+    pytest.param('auth=Bearer [REDACTED]checkpoint-first-canary',
+                 'checkpoint-later-canary', id='scheme-marker-prefix'),
+    pytest.param('refresh_token=[REDACTED]checkpoint-first-canary',
+                 'checkpoint-later-canary', id='bare-marker-prefix'),
     ('refresh_token="checkpoint-first-canary' + chr(92), 'ncheckpoint-later-canary"'),
     ("refresh_token='checkpoint-first-canary" + chr(92), "ncheckpoint-later-canary'"),
     ('{"refresh_token": "checkpoint-first-canary' + chr(92), 'ncheckpoint-later-canary"}'),
