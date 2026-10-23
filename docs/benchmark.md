@@ -4,6 +4,8 @@
 
 Install the packaged [Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock), Node 20+,
 and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
+Tracked source must match that commit; extra files under `scripts/` are rejected.
+Unrelated untracked files elsewhere are allowed.
 Export performs no inference; model/judge runs require separate authorization.
 Keep inputs/results outside capture/training and use fresh paths:
 
