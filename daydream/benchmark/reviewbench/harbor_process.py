@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+import errno
 import json
 import os
+import select
 import signal
 import stat
 import sys
@@ -228,6 +230,42 @@ def _publish_process_evidence(environment: dict[str, str], output: bytes, receip
         (json.dumps(receipt, indent=2, allow_nan=False) + '\n').encode())
 
 
+def warn_diagnostics_unavailable(surface: str, error: Exception) -> None:
+    """Emit bounded availability facts without exception text or filesystem paths."""
+    error_number = error.errno if isinstance(error, OSError) else None
+    code = str(error_number) if type(error_number) is int and 0 <= error_number <= 2_147_483_647 else 'unavailable'
+    body = f'ReviewBench {surface} diagnostics unavailable ({type(error).__name__[:64]}; errno={code}).\n'.encode()
+    try:
+        descriptor = sys.stderr.fileno()
+        if select.select([], [descriptor], [], 0)[1]:
+            os.write(descriptor, body)
+    except Exception:
+        pass  # Even the warning channel is optional; never buffer for exit-time reflush.
+
+
+def _write_process_output(output: str) -> None:
+    """Send already bounded/redacted bytes without blocking or exit-time reflush."""
+    try:
+        descriptor = sys.stdout.fileno()
+        blocking = os.get_blocking(descriptor)
+        try:
+            os.set_blocking(descriptor, False)
+            body = output.encode()
+            if os.write(descriptor, body) != len(body):
+                raise BlockingIOError(errno.EAGAIN, 'optional process output was not fully collected')
+        finally:
+            os.set_blocking(descriptor, blocking)
+    except Exception as exc:
+        warn_diagnostics_unavailable('process output', exc)
+
+
+def _try_publish_process_evidence(environment: dict[str, str], output: bytes, receipt: dict[str, Any]) -> None:
+    try:
+        _publish_process_evidence(environment, output, receipt)
+    except Exception as exc:
+        warn_diagnostics_unavailable('process', exc)
+
+
 async def supervise(invocation: str, environment: dict[str, str], outer_timeout: float | None = None) -> int:
     """Own the exact child, stop inference on cancellation, bound export and reap."""
     directory = invocation_directory(invocation)
@@ -248,7 +286,7 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
     if _cancellation_requested(directory, environment, invocation):
         receipt.update(interruption='host_cancellation', cleanup_outcome='cancelled_before_start',
                        elapsed_seconds=time.monotonic() - started)
-        _publish_process_evidence(environment, b'reviewer cancelled before startup\n', receipt)
+        _try_publish_process_evidence(environment, b'reviewer cancelled before startup\n', receipt)
         return 130
     worker_environment = {**environment, 'DAYDREAM_RB_INVOCATION': invocation}
     if outer_timeout is not None:
@@ -337,8 +375,8 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
         safe_output = _safe_output(output, output_flags) + _safe_output(stderr, stderr_flags)
         receipt['stdout_capture'] = output_flags
         receipt['stderr_capture'] = stderr_flags
-        _publish_process_evidence(environment, safe_output.encode(), receipt)
-        print(safe_output, end='')
+        _try_publish_process_evidence(environment, safe_output.encode(), receipt)
+        _write_process_output(safe_output)
     return child.returncode if child.returncode is not None and child.returncode >= 0 else 130
 
 

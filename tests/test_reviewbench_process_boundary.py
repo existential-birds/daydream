@@ -22,9 +22,13 @@ from tests.test_reviewbench_harbor_agent import public_input
 class LocalReviewerEnvironment:
     """Buffered exec with Harbor's cancellation boundary: children outlive awaits."""
 
-    def __init__(self, environment: dict[str, str], repository: Path) -> None:
+    def __init__(self, environment: dict[str, str], repository: Path, *,
+                 publication_fault: str | None = None, close_stdout: bool = False) -> None:
         self.environment = environment
         self.repository = repository
+        self.publication_fault = publication_fault
+        self.close_stdout = close_stdout
+        self.results: list[SimpleNamespace] = []
         self.children: list[asyncio.subprocess.Process] = []
         self.collectors: list[asyncio.Task[tuple[bytes, bytes]]] = []
 
@@ -32,13 +36,39 @@ class LocalReviewerEnvironment:
         arguments = shlex.split(command)
         assert arguments[0] == 'python'
         arguments[0] = sys.executable
-        child = await asyncio.create_subprocess_exec(*arguments, cwd=self.repository, env=self.environment,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        if self.publication_fault is not None and arguments[1:4] == [
+            '-I', '-m', 'daydream.benchmark.reviewbench.harbor_process',
+        ]:
+            # Patch the actual filesystem install only in the supervisor. The
+            # production entrypoint/native CLI remain separate, unpatched children.
+            bootstrap = ('import errno,os,runpy,sys\nfrom pathlib import Path\n'
+                'original_link = os.link\n'
+                'def fail_link(source,destination,**kwargs):\n'
+                f'    if Path(destination).name == {self.publication_fault!r}:\n'
+                '        raise OSError(errno.ENOSPC,"publication-secret-canary")\n'
+                '    return original_link(source,destination,**kwargs)\n'
+                'os.link = fail_link\n'
+                'sys.argv = ["daydream.benchmark.reviewbench.harbor_process", *sys.argv[1:]]\n'
+                'runpy.run_module(sys.argv[0],run_name="__main__",alter_sys=True)\n')
+            arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
+        writer: int | None = None
+        if self.close_stdout:
+            reader, writer = os.pipe()
+            os.close(reader)  # A real collector pipe with no remaining reader.
+        try:
+            child = await asyncio.create_subprocess_exec(*arguments, cwd=self.repository, env=self.environment,
+                stdout=writer if writer is not None else asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        finally:
+            if writer is not None:
+                os.close(writer)
         self.children.append(child)
         collector = asyncio.create_task(child.communicate())
         self.collectors.append(collector)
         stdout, stderr = await asyncio.shield(collector)
-        return SimpleNamespace(return_code=child.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+        result = SimpleNamespace(return_code=child.returncode, stdout=(stdout or b'').decode(), stderr=stderr.decode())
+        self.results.append(result)
+        return result
 
     async def close(self) -> None:
         for child in self.children:
@@ -232,11 +262,19 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         await asyncio.gather(running, return_exceptions=True)
 
 
-async def test_completed_process_review_keeps_native_result_and_configuration(tmp_path: Path) -> None:
+@pytest.mark.parametrize('diagnostic_failure', [
+    'none', 'log_conflict', 'receipt_conflict', 'log_symlink', 'receipt_symlink',
+    'supervisor_enospc', 'host_fallback_enospc', 'closed_collector_pipe',
+])
+async def test_completed_process_review_keeps_native_result_and_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
+) -> None:
     """Process supervision must preserve the ordinary scorable successful path.
 
     Existing terminal tests bypass executable startup and supervisor buffering;
     this runs a scripted successful native review through the production host.
+    Optional diagnostic install failures must preserve the actual successful
+    native result; finalized native evidence/findings remain authoritative.
     """
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
@@ -246,10 +284,34 @@ async def test_completed_process_review_keeps_native_result_and_configuration(tm
     (tmp_path / 'config.json').write_text(json.dumps({'task': {'path': str(declared_task)}, 'agent': {}}))
     local = LocalReviewerEnvironment({**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
-        Path(environment['DAYDREAM_RB_REPOSITORY']))
+        Path(environment['DAYDREAM_RB_REPOSITORY']),
+        publication_fault='reviewer-process.json' if diagnostic_failure == 'supervisor_enospc' else None,
+        close_stdout=diagnostic_failure == 'closed_collector_pipe')
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
+    protected: Path | None = None
+    destination: Path | None = None
+    if diagnostic_failure.endswith(('conflict', 'symlink')):
+        logs.mkdir(parents=True)
+        protected = tmp_path / 'competing-diagnostic'
+        protected.write_text('prior competing diagnostic bytes')
+        destination = logs / ('reviewer-entrypoint.log' if diagnostic_failure.startswith('log')
+                              else 'reviewer-process.json')
+        if diagnostic_failure.endswith('symlink'):
+            destination.symlink_to(protected)
+        else:
+            destination.write_bytes(protected.read_bytes())
+    host_logs = tmp_path / 'host-logs' if diagnostic_failure == 'host_fallback_enospc' else logs
+    if diagnostic_failure == 'host_fallback_enospc':
+        link = os.link
+
+        def fail_host_log(source: Any, destination: Any, **kwargs: Any) -> None:
+            if Path(destination).name == 'reviewer-entrypoint.log':
+                raise OSError(errno.ENOSPC, 'publication-secret-canary')
+            link(source, destination, **kwargs)
+
+        monkeypatch.setattr(os, 'link', fail_host_log)
     try:
-        await asyncio.wait_for(DaydreamPublicReviewAgent(logs_dir=logs).run(
+        await asyncio.wait_for(DaydreamPublicReviewAgent(logs_dir=host_logs).run(
             'frozen public task', local, SimpleNamespace()), timeout=30)
         record = json.loads((Path(environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json').read_text())
         assert record['status'] == 'completed_empty'
@@ -257,11 +319,22 @@ async def test_completed_process_review_keeps_native_result_and_configuration(tm
         assert record['configuration']['phases']['per_stack_review']['model'] == 'gpt-6.1-sol'
         assert record['configuration']['phases']['per_stack_review']['reasoning_effort'] == 'high'
         assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
-        receipt = json.loads((logs / 'reviewer-process.json').read_text())
-        assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
-        assert receipt['outer_deadline_seconds'] == 900
-        assert receipt['outer_deadline_availability'] == 'declared trial config'
-        assert receipt['terminal_evidence_available'] is True
+        assert all(child.returncode == 0 for child in local.children)
+        if diagnostic_failure in {'none', 'host_fallback_enospc'}:
+            receipt = json.loads((logs / 'reviewer-process.json').read_text())
+            assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
+            assert receipt['outer_deadline_seconds'] == 900
+            assert receipt['outer_deadline_availability'] == 'declared trial config'
+            assert receipt['terminal_evidence_available'] is True
+        if protected is not None and destination is not None:
+            assert protected.read_text() == 'prior competing diagnostic bytes'
+            assert destination.read_text() == 'prior competing diagnostic bytes'
+        if diagnostic_failure != 'none':
+            captured = capfd.readouterr()
+            diagnostics = captured.err + ''.join(result.stderr for result in local.results)
+            assert 'diagnostics unavailable' in diagnostics
+            assert 'errno=' in diagnostics and len(diagnostics) < 1024
+            assert 'publication-secret-canary' not in diagnostics
     finally:
         await local.close()
 
@@ -374,3 +447,39 @@ def test_invocation_admission_rejects_unsafe_storage_before_creating_children(
     assert not list(external.iterdir())
     if unsafe == 'insecure_root':
         assert not list(root.iterdir())
+
+
+async def test_optional_host_log_failure_preserves_actual_native_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str],
+) -> None:
+    """An optional fallback log must not replace the reviewer's actual failure.
+
+    Successful-publication parity does not cover competing failures. Use real
+    credential admission failure in the reviewer child and fault only the host's
+    optional diagnostic hard link; native result/output publication stays real.
+    """
+    environment = public_input(tmp_path)
+    (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
+    local = LocalReviewerEnvironment({**os.environ, **environment,
+        'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
+        Path(environment['DAYDREAM_RB_REPOSITORY']))
+    link = os.link
+
+    def fail_host_log(source: Any, destination: Any, **kwargs: Any) -> None:
+        if Path(destination).name == 'reviewer-entrypoint.log':
+            raise OSError(errno.ENOSPC, 'publication-secret-canary')
+        link(source, destination, **kwargs)
+
+    monkeypatch.setattr(os, 'link', fail_host_log)
+    try:
+        with pytest.raises(RuntimeError, match='native reviewer failed'):
+            await asyncio.wait_for(DaydreamPublicReviewAgent(logs_dir=tmp_path / 'host-logs').run(
+                'frozen public task', local, SimpleNamespace()), timeout=10)
+        assert local.children[0].returncode == 1
+        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+        diagnostic = capfd.readouterr().err
+        assert 'diagnostics unavailable' in diagnostic and 'errno=28' in diagnostic
+        assert 'publication-secret-canary' not in diagnostic
+    finally:
+        await local.close()

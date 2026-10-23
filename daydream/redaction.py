@@ -66,6 +66,7 @@ _REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
 #: marker for another. Both spellings count — this module's bracketed form and the
 #: angle-bracket form Improve's plan renderer emits.
 _REDACTION_MARKER = re.compile(r"\[REDACTED|<redacted>", re.IGNORECASE)
+_COMPLETE_REDACTION_MARKER = re.compile(r"\[REDACTED(?:_[A-Z0-9]+)*\]|<redacted>", re.IGNORECASE)
 
 
 # Match complete secret-name segments, preserving MONKEY_PATCH, KEYBOARD_LAYOUT,
@@ -229,12 +230,16 @@ def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
             return match.group(0)
         return f"{wrapped_key}{sep}{match.group(6)} {_REDACTED_CREDENTIAL}"
     value = match.group(4) or match.group(5) or match.group(8)
-    if value is None or value == "" or _REDACTION_MARKER.search(value):
+    if value is None or value == "":
         return match.group(0)
     if match.group(8) is not None and not _bare_value_redactable(sep, text, match.end()):
         return match.group(0)
+    markers = list(_COMPLETE_REDACTION_MARKER.finditer(value))
+    safe = ' '.join(marker.group(0) for marker in markers) if markers else _REDACTED_CREDENTIAL
+    if safe == value:
+        return match.group(0)
     quote = '"' if (match.group(4) is not None or match.group(8) is not None) else "'"
-    return f"{wrapped_key}{sep}{quote}{_REDACTED_CREDENTIAL}{quote}"
+    return f"{wrapped_key}{sep}{quote}{safe}{quote}"
 
 
 def _bare_value_redactable(sep: str, text: str, end: int) -> bool:
@@ -591,8 +596,9 @@ def _redact_json_container(value: Any) -> Any:
         result = {}
         for key, item in value.items():
             if _is_sensitive_key(key):
-                result[redact_text(key)] = (item if isinstance(item, str)
-                    and (not item or _REDACTION_MARKER.search(item)) else _REDACTED_CREDENTIAL)
+                markers = list(_COMPLETE_REDACTION_MARKER.finditer(item)) if isinstance(item, str) else []
+                result[redact_text(key)] = (item if item == '' else
+                    ' '.join(marker.group(0) for marker in markers) if markers else _REDACTED_CREDENTIAL)
             else:
                 result[redact_text(key)] = _redact_json_container(item)
         return result
@@ -601,6 +607,15 @@ def _redact_json_container(value: Any) -> Any:
     if isinstance(value, str):
         return redact_structured_text(value)
     return value
+
+
+def _redact_unstructured_text(s: str) -> str:
+    """Apply the shared text policy without normalizing JSON-looking host labels."""
+    try:
+        s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
+        return _redact_structured_key_values(redact_text(s))
+    except Exception:  # noqa: BLE001 - a host label must never fail open
+        return "[REDACTION_FAILED]"
 
 
 def redact_structured_text(s: str) -> str:
@@ -618,8 +633,6 @@ def redact_structured_text(s: str) -> str:
                 container = None
             if isinstance(container, (dict, list, str)):
                 return json.dumps(_redact_json_container(container), ensure_ascii=False, allow_nan=False)
-        s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
-        s = redact_text(s)
-        return _redact_structured_key_values(s)
+        return _redact_unstructured_text(s)
     except Exception:  # noqa: BLE001 - fail closed at every host boundary
         return "[REDACTION_FAILED]"
