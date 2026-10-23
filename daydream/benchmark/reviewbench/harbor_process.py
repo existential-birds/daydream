@@ -22,12 +22,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes
+from daydream.benchmark.reviewbench.diagnostics import publish_diagnostic_bytes, read_diagnostic_bytes
 from daydream.redaction import redact_structured_text
 
 SHUTDOWN_GRACE_SECONDS = 20.0
 FORCE_REAP_SECONDS = 2.0
 OUTPUT_LIMIT_BYTES = 65536
+STOP_REASONS = ('host_task_cancelled', 'host_execution_failed')
 
 
 def invocation_directory(invocation: str) -> Path:
@@ -49,14 +50,18 @@ def _require_private_directory(path: Path) -> None:
         raise ValueError('reviewer invocation storage is not private')
 
 
-def request_cancellation(invocation: str) -> None:
+def request_cancellation(invocation: str, reason: str = 'host_task_cancelled') -> None:
     """A startup tombstone prevents a late reviewer from starting model work."""
     directory = invocation_directory(invocation)
     marker = directory / 'cancel'
+    if reason not in STOP_REASONS:
+        raise ValueError('unsupported reviewer stop reason')
+    body = b'cancelled\n' if reason == 'host_task_cancelled' else (json.dumps({
+        'invocation_id': invocation, 'interruption': reason}) + '\n').encode()
     try:
-        publish_diagnostic_bytes(marker, b'cancelled\n')
+        publish_diagnostic_bytes(marker, body)
     except FileExistsError:
-        if marker.is_symlink() or marker.read_bytes() != b'cancelled\n':
+        if _read_stop_reason(marker, invocation, legacy=True) is None:
             raise ValueError('reviewer cancellation marker conflicts')
 
 
@@ -80,19 +85,29 @@ def cancellation_marker(logs: Path, invocation: str) -> Path:
     return logs / ('reviewer-cancel-' + invocation + '.json')
 
 
-def _cancellation_requested(directory: Path, environment: dict[str, str], invocation: str) -> bool:
-    if (directory / 'cancel').exists():
-        return True
+def _requested_interruption(directory: Path, environment: dict[str, str], invocation: str) -> str | None:
+    if (reason := _read_stop_reason(directory / 'cancel', invocation, legacy=True)) is not None:
+        return reason
     evidence = Path(environment.get('DAYDREAM_RB_EVIDENCE', '/logs/agent/daydream'))
-    path = cancellation_marker(evidence.parent, invocation)
+    return _read_stop_reason(cancellation_marker(evidence.parent, invocation), invocation)
+
+
+def _read_stop_reason(path: Path, invocation: str, *, legacy: bool = False) -> str | None:
     try:
-        if path.is_symlink() or path.stat().st_size > 1024:
-            return False
-        marker = json.loads(path.read_bytes())
-        return isinstance(marker, dict) and marker == {
-            'invocation_id': invocation, 'interruption': 'host_task_cancelled'}
+        body = read_diagnostic_bytes(path, limit=1024)
+        if legacy and body == b'cancelled\n':
+            return 'host_task_cancelled'
+        return _stop_reason(json.loads(body), invocation)
     except (OSError, ValueError):
-        return False
+        return None
+
+
+def _stop_reason(marker: Any, invocation: str) -> str | None:
+    if isinstance(marker, dict):
+        for reason in STOP_REASONS:
+            if marker == {'invocation_id': invocation, 'interruption': reason}:
+                return reason
+    return None
 
 
 def _reap_adopted(owned: dict[int, str], reviewer_pid: int) -> None:
@@ -283,8 +298,9 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
         'outer_deadline_availability': 'declared trial config' if outer_timeout is not None else 'unavailable',
         'output_limit_bytes_per_stream': OUTPUT_LIMIT_BYTES, 'child_returncode': None,
         'descendant_containment': 'linux_subreaper' if subreaper else 'observed_parentage_only'}
-    if _cancellation_requested(directory, environment, invocation):
-        receipt.update(interruption='host_cancellation', cleanup_outcome='cancelled_before_start',
+    if (reason := _requested_interruption(directory, environment, invocation)) is not None:
+        receipt.update(interruption='host_cancellation' if reason == 'host_task_cancelled' else reason,
+                       cleanup_outcome='cancelled_before_start',
                        elapsed_seconds=time.monotonic() - started)
         _try_publish_process_evidence(environment, b'reviewer cancelled before startup\n', receipt)
         return 130
@@ -306,9 +322,10 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
             table = _process_table()
             owned.update(_descendants(os.getpid() if subreaper else child.pid, table))
             owned.pop(child.pid, None)
-            if _cancellation_requested(directory, environment, invocation) and cancellation_at is None:
+            reason = _requested_interruption(directory, environment, invocation)
+            if reason is not None and cancellation_at is None:
                 cancellation_at = time.monotonic()
-                receipt.update(interruption='host_cancellation',
+                receipt.update(interruption='host_cancellation' if reason == 'host_task_cancelled' else reason,
                     interruption_elapsed_seconds=cancellation_at - started, cleanup_outcome='graceful_pending')
                 # Stop native inference immediately, then let the reviewer join
                 # its writers and export. Children may have independent sessions.
@@ -384,10 +401,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--invocation', required=True)
     parser.add_argument('--cancel', action='store_true')
+    parser.add_argument('--stop-reason', choices=STOP_REASONS, default='host_task_cancelled')
     parser.add_argument('--outer-timeout', type=float)
     arguments = parser.parse_args()
     if arguments.cancel:
-        request_cancellation(arguments.invocation)
+        request_cancellation(arguments.invocation, arguments.stop_reason)
         return 0
     return asyncio.run(supervise(arguments.invocation, dict(os.environ), arguments.outer_timeout))
 

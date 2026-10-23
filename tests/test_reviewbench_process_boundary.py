@@ -8,6 +8,7 @@ import os
 import shlex
 import signal
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -82,16 +83,20 @@ class LocalReviewerEnvironment:
 
 @pytest.mark.parametrize('interruption', [
     'timeout', 'cancel', 'repeated_cancel', 'force', 'control_failure', 'late_child', 'slow_process_listing',
+    'collector_timeout', 'collector_transport', 'collector_repeated_cancel',
+    'collector_control_failure', 'collector_marker_failure',
 ])
 async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
-    tmp_path: Path, interruption: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str,
 ) -> None:
-    """An outer cancellation must cross exec and retain joined native evidence.
+    """An interrupted host exec must stop its child and retain joined evidence.
 
     test_cancelled_public_reviewer_exports_joined_native_evidence_and_propagates_cancellation
     cancels inside the reviewer loop and cannot detect a detached child after a
     cancelled host collector. This harness enters production host and executable
     modules, real Git and Codex transport; only the external CLI is scripted.
+    Collector-error rows additionally cover an already-failed await; cancellation
+    rows alone cannot detect cleanup returning before that child finalizes.
     """
     if interruption == 'late_child' and sys.platform != 'linux':
         pytest.skip('late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
@@ -114,10 +119,30 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         listing.chmod(0o700)
     child_environment = {**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))}
+    collector_failure = (TimeoutError('collector failure secret') if interruption == 'collector_timeout'
+                         else ConnectionError('collector failure secret'))
+    collector_release = asyncio.Event()
+    detached: list[asyncio.Task[Any]] = []
+    if interruption == 'collector_marker_failure':
+        link = os.link
+
+        def fail_marker(source: Any, destination: Any, **kwargs: Any) -> None:
+            if Path(destination).name.startswith('reviewer-cancel-'):
+                raise OSError(errno.ENOSPC, 'marker failure secret')
+            link(source, destination, **kwargs)
+
+        monkeypatch.setattr(os, 'link', fail_marker)
+
     class ControlFailureEnvironment(LocalReviewerEnvironment):
         async def exec(self, command: str, **kwargs: Any) -> Any:
-            if interruption == 'control_failure' and '--cancel' in command:
+            if interruption in {'control_failure', 'collector_control_failure'} and '--cancel' in command:
                 return SimpleNamespace(return_code=1, stdout='', stderr='control exec unavailable')
+            if interruption.startswith('collector_') and '--cancel' not in command:
+                # A transport failure loses the Docker client's await without
+                # killing the separate in-container supervisor/native process.
+                detached.append(asyncio.create_task(super().exec(command, **kwargs)))
+                await collector_release.wait()
+                raise collector_failure
             return await super().exec(command, **kwargs)
 
     local = ControlFailureEnvironment(child_environment, Path(environment['DAYDREAM_RB_REPOSITORY']))
@@ -140,7 +165,19 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
                 await asyncio.sleep(0.01)
             blocked = next(row for row in cli.observations() if row['mode'] == 'preterminal_silence')
             os.kill(blocked['ppid'], signal.SIGSTOP)
-        if interruption in {'timeout', 'slow_process_listing'}:
+        if interruption.startswith('collector_'):
+            collector_release.set()
+            if interruption == 'collector_repeated_cancel':
+                while not list(logs.glob('reviewer-cancel-*.json')) and not running.done():
+                    await asyncio.sleep(0.01)
+                running.cancel()
+                await asyncio.sleep(0.01)
+                running.cancel()
+            with pytest.raises(type(collector_failure)) as raised:
+                await asyncio.wait_for(running, timeout=30)
+            assert raised.value is collector_failure
+            await asyncio.wait_for(asyncio.gather(*detached), timeout=5)
+        elif interruption in {'timeout', 'slow_process_listing'}:
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(running, timeout=0.05)
         else:
@@ -151,7 +188,8 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(running, timeout=30)
         receipt = json.loads((logs / 'reviewer-process.json').read_text())
-        assert receipt['interruption'] == 'host_cancellation'
+        assert receipt['interruption'] == ('host_execution_failed'
+            if interruption.startswith('collector_') else 'host_cancellation')
         assert receipt['outer_deadline_seconds'] is None
         if interruption == 'late_child':
             escaped = json.loads((cli.root / 'escaped.json').read_text())
@@ -161,9 +199,18 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             assert receipt['owned_descendants_cleanup'] == 'joined'
         assert receipt['cleanup_outcome'] == ('forced_termination' if interruption == 'force' else 'graceful_exit')
         host_receipt = json.loads((logs / 'reviewer-host.json').read_text())
-        assert host_receipt['interruption'] == 'host_task_cancelled'
-        if interruption == 'control_failure':
+        assert host_receipt['interruption'] == ('host_execution_failed'
+            if interruption.startswith('collector_') else 'host_task_cancelled')
+        if interruption.startswith('collector_'):
+            assert host_receipt['output_collection'] == 'unavailable'
+            assert host_receipt['execution_error'] == type(collector_failure).__name__
+            assert host_receipt['process_completion'] == 'observed'
+            assert 'collector failure secret' not in (logs / 'reviewer-host.json').read_text()
+        if interruption in {'control_failure', 'collector_control_failure'}:
             assert host_receipt['cancellation_channels'] == {'shared_marker': 'published', 'control_exec': 'failed'}
+        if interruption == 'collector_marker_failure':
+            assert host_receipt['cancellation_channels'] == {
+                'shared_marker': 'unavailable:OSError', 'control_exec': 'returned_zero'}
         if interruption == 'force':
             assert not (evidence / 'execution.json').exists()
             assert list(checkpoints.glob('*/checkpoint.json'))
@@ -205,6 +252,7 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             except ProcessLookupError:
                 pass
         await local.close()
+        await asyncio.gather(*detached, return_exceptions=True)
         await asyncio.gather(running, return_exceptions=True)
 
 
@@ -425,8 +473,6 @@ def test_invocation_admission_rejects_unsafe_storage_before_creating_children(
     control-directory admission. Creating the child before validating the root
     writes outside the admitted owner even when the subsequent check rejects it.
     """
-    import uuid
-
     from daydream.benchmark.reviewbench.harbor_process import invocation_directory
 
     external = tmp_path / 'external-owner'
@@ -483,3 +529,150 @@ async def test_optional_host_log_failure_preserves_actual_native_failure(
         assert 'publication-secret-canary' not in diagnostic
     finally:
         await local.close()
+
+
+@pytest.mark.parametrize('failure', ['mkdir_enospc', 'metadata_enospc', 'reused', 'symlink'])
+async def test_checkpoint_initialization_is_optional_only_for_operational_io_failure(
+    tmp_path: Path, failure: str,
+) -> None:
+    """Optional checkpoint admission must not veto an otherwise healthy review.
+
+    Successful-process parity faults only optional final supervisor files. It
+    misses observer construction before runner admission. Fault actual mkdir or
+    metadata hard-link operations in the executable, keeping runner, native CLI,
+    Git and canonical publications real; conflicting paths remain strict.
+    """
+    environment = public_input(tmp_path)
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    checkpoints = evidence.with_name(evidence.name + '-checkpoints')
+    protected = tmp_path / 'other-owner'
+    if failure in {'reused', 'symlink'}:
+        checkpoints.parent.mkdir(parents=True)
+        protected.mkdir()
+        (protected / 'preserve').write_text('other owner bytes')
+        if failure == 'reused':
+            checkpoints.mkdir()
+            (checkpoints / 'preserve').write_text('prior checkpoint bytes')
+        else:
+            checkpoints.symlink_to(protected, target_is_directory=True)
+    bootstrap = ('import errno,os,runpy\nfrom pathlib import Path\n'
+        'original_mkdir,original_link=os.mkdir,os.link\n'
+        'def mkdir(path,*args,**kwargs):\n'
+        f'    if {failure == "mkdir_enospc"!r} and Path(path).name=="daydream-checkpoints":\n'
+        '        raise OSError(errno.ENOSPC,"checkpoint failure secret")\n'
+        '    return original_mkdir(path,*args,**kwargs)\n'
+        'def link(source,destination,**kwargs):\n'
+        f'    if {failure == "metadata_enospc"!r} and Path(destination).name=="metadata.json":\n'
+        '        raise OSError(errno.ENOSPC,"checkpoint failure secret")\n'
+        '    return original_link(source,destination,**kwargs)\n'
+        'os.mkdir,os.link=mkdir,link\n'
+        'runpy.run_module("daydream.benchmark.reviewbench.harbor_entrypoint",run_name="__main__")\n')
+    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', bootstrap,
+        cwd=environment['DAYDREAM_RB_REPOSITORY'],
+        env={**os.environ, **environment, 'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
+        if failure in {'reused', 'symlink'}:
+            assert child.returncode == 1
+            assert not cli.observations(), 'unsafe checkpoint path reached native inference'
+            assert not evidence.exists() and not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+            assert (protected / 'preserve').read_text() == 'other owner bytes'
+            if failure == 'reused':
+                assert (checkpoints / 'preserve').read_text() == 'prior checkpoint bytes'
+            return
+        assert child.returncode == 0, stderr.decode()
+        record = json.loads((evidence / 'execution.json').read_text())
+        assert record['status'] == 'completed_empty' and cli.observations()
+        assert record['checkpoint_error'] == 'checkpoint initialization unavailable: OSError errno=28'
+        assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
+        assert 'diagnostics unavailable' in stderr.decode() and 'errno=28' in stderr.decode()
+        assert 'checkpoint failure secret' not in (stdout + stderr).decode()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+@pytest.mark.parametrize('surface', ['receipt', 'private_stop', 'shared_stop'])
+@pytest.mark.parametrize('storage', [
+    'regular', 'wrong_invocation', 'fifo', 'oversize', 'leaf_symlink', 'parent_symlink',
+])
+async def test_process_control_observation_requires_bounded_owned_regular_files(
+    tmp_path: Path, surface: str, storage: str,
+) -> None:
+    """A diagnostic/control read cannot follow another owner or block shutdown.
+
+    Real interruption tests publish healthy regular receipts/markers and cannot
+    detect a FIFO poll hanging the supervisor, redirected parent traversal, or a
+    huge receipt falsely completing failed-collector cleanup. Run the actual
+    readers in a bounded subprocess so a regressed blocking read fails safely.
+    """
+    invocation = str(uuid.uuid4())
+    real = tmp_path / 'real'
+    directory = real / 'owner'
+    directory.mkdir(parents=True)
+    if storage == 'parent_symlink':
+        alias = tmp_path / 'alias'
+        alias.symlink_to(real, target_is_directory=True)
+        directory = alias / 'owner'
+    marker_id = str(uuid.uuid4()) if storage == 'wrong_invocation' else invocation
+    body = {'schema': 1, 'invocation_id': marker_id, 'child_returncode': 130}
+    if surface != 'receipt':
+        body = {'invocation_id': marker_id, 'interruption': 'host_execution_failed'}
+    name = ('reviewer-process.json' if surface == 'receipt' else 'cancel' if surface == 'private_stop'
+            else 'reviewer-cancel-' + invocation + '.json')
+    path = directory / name
+    if storage == 'fifo':
+        os.mkfifo(path, mode=0o600)
+    elif storage == 'leaf_symlink':
+        target = tmp_path / 'other-owner.json'
+        target.write_text(json.dumps(body))
+        path.symlink_to(target)
+    else:
+        path.write_text(json.dumps(body) + (' ' * 65537 if storage == 'oversize' else ''))
+    if surface == 'receipt':
+        program = ('from daydream.benchmark.reviewbench.harbor_agent import _process_completion_observed\n'
+            f'value = _process_completion_observed(Path({str(directory)!r}), {invocation!r})\n')
+    else:
+        private = directory if surface == 'private_stop' else tmp_path / 'unused-private'
+        evidence = directory / 'daydream' if surface == 'shared_stop' else tmp_path / 'unused-shared/daydream'
+        program = ('from daydream.benchmark.reviewbench.harbor_process import _requested_interruption\n'
+            f'value = _requested_interruption(Path({str(private)!r}), '
+            f'{{"DAYDREAM_RB_EVIDENCE": {str(evidence)!r}}}, {invocation!r})\n')
+    expected = storage == 'regular'
+    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c',
+        'from pathlib import Path\n' + program + f'assert bool(value) is {expected!r}, value\n',
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, stderr = await asyncio.wait_for(child.communicate(), timeout=3)
+        assert child.returncode == 0, stderr.decode()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+
+
+def test_owned_stop_tombstone_preserves_first_reason_and_rejects_competing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Competing control bytes cannot be accepted through the other stop channel.
+
+    Process cancellation tests have a fresh invocation. Admission must preserve
+    its first valid reason without overwriting bytes, while rejecting a different
+    owner's invalid private tombstone.
+    """
+    from daydream.benchmark.reviewbench.harbor_process import invocation_directory, request_cancellation
+
+    monkeypatch.setattr('daydream.benchmark.reviewbench.harbor_process.tempfile.gettempdir', lambda: str(tmp_path))
+    invocation = str(uuid.uuid4())
+    request_cancellation(invocation, 'host_execution_failed')
+    tombstone = invocation_directory(invocation) / 'cancel'
+    first = tombstone.read_bytes()
+    request_cancellation(invocation)
+    assert tombstone.read_bytes() == first
+    tombstone.write_bytes(b'competing owner bytes')
+    with pytest.raises(ValueError, match='marker conflicts'):
+        request_cancellation(invocation)
+    assert tombstone.read_bytes() == b'competing owner bytes'
