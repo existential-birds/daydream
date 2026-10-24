@@ -35,8 +35,6 @@ def _split_path(path: str) -> tuple[str, str] | None:
     if len(parts) < 2:
         return None
     owner, repo = parts[-2], parts[-1]
-    if not owner or not repo:
-        return None
     return owner, repo
 
 

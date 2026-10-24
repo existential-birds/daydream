@@ -127,14 +127,12 @@ def _finding_sort_key(finding: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _can_join_work_package(finding: dict[str, Any], group: list[dict[str, Any]]) -> bool:
-    members = [member for item in group for member in _package_members(item)]
-    candidate_members = _package_members(finding)
-    if len(members) + len(candidate_members) > _WORK_PACKAGE_MAX_FINDINGS:
+    if len(group) + 1 > _WORK_PACKAGE_MAX_FINDINGS:
         return False
-    paths = {path for member in [*members, *candidate_members] if (path := _finding_path(member))}
+    paths = {path for member in [*group, finding] if (path := _finding_path(member))}
     if len(paths) > _WORK_PACKAGE_MAX_PATHS:
         return False
-    return all(_findings_are_compatible(candidate, existing) for candidate in candidate_members for existing in members)
+    return all(_findings_are_compatible(finding, existing) for existing in group)
 
 
 def _findings_are_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:

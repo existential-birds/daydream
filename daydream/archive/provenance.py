@@ -44,15 +44,12 @@ def _resolve_install_source() -> str:
         dist = distribution("daydream")
         if dist is None:
             return "unknown"
-        try:
-            direct_url_json = dist.read_text("direct_url.json")
-            if direct_url_json is None:
-                # No direct_url.json -> conventional package install
-                # (site-packages, no install-time VCS/editable marker).
-                return "package"
-            info = json.loads(direct_url_json)
-        except Exception:  # noqa: BLE001 - unreadable/malformed direct_url, never raise
-            return "unknown"
+        direct_url_json = dist.read_text("direct_url.json")
+        if direct_url_json is None:
+            # No direct_url.json -> conventional package install
+            # (site-packages, no install-time VCS/editable marker).
+            return "package"
+        info = json.loads(direct_url_json)
         dir_info = info.get("dir_info")
         if isinstance(dir_info, dict) and dir_info.get("editable"):
             return "editable"

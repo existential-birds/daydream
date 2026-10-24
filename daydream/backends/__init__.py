@@ -300,12 +300,9 @@ _DIAG_JSON_VALUE = "config_json_value_rejected"
 _DIAG_TIMESTAMP_TYPE = "config_timestamp_type_rejected"
 _DIAG_TIMESTAMP_RANGE = "config_timestamp_range_rejected"
 
-# Unicode format/bidi-control categories (Cf includes LRM/RLM and the bidi
-# isolates/overrides) plus the non-ASCII line/paragraph separators. Controls
-# (Cc) are rejected separately; ordinary printable text passes.
-_BIDI_FORMAT_CATEGORIES = frozenset({"Cf"})
-_LINE_SEPARATOR_CATEGORIES = frozenset({"Zl", "Zp"})
-_CONTROL_CATEGORIES = frozenset({"Cc"})
+# Reject controls, format/bidi characters (Cf includes LRM/RLM and the bidi
+# isolates/overrides), and non-ASCII line/paragraph separators.
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 # POSIX + Windows absolute-path spellings, and the drive/UNC prefixes that
 # reveal a host filesystem location. Model namespace slashes (``org/model``,
@@ -324,14 +321,9 @@ class EvidenceDiagnostic:
 def _has_unicode_controls(value: str) -> bool:
     """Reject C0/C1 controls and bidi/line-separator format characters."""
     return any(
-        unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
+        unicodedata.category(ch) in _CONTROL_CATEGORIES
         for ch in value
     )
-
-
-def _changed_by_redaction(value: str) -> bool:
-    """Reject telemetry identity labels that contain credential-shaped text."""
-    return redact_structured_text(value) != value
 
 
 def _is_private_path(value: str) -> bool:
@@ -361,7 +353,7 @@ def _admit_identity_label(
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_TOO_LONG, context)
     if _has_unicode_controls(value):
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_UNSAFE_CHARS, context)
-    if _changed_by_redaction(value):
+    if redact_structured_text(value) != value:
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_REDACTED, context)
     if _is_private_path(value):
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_PRIVATE_PATH, context)

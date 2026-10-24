@@ -459,7 +459,7 @@ async def test_all_destinations_receive_same_sanitized_resource(
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",
         "deployment.environment.name=offline-audit,custom.zone=zone%2Done,"
-        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,"
+        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,plus.value=a+b,raw.unicode=café,"
         "service.name=false-operator,service.version=0.0.0-operator,"
         "telemetry.sdk.name=not-otel,telemetry.sdk.language=rust,telemetry.sdk.version=9.9.9,"
         "daydream.observability.contract.version=0.0.0-operator,"
@@ -490,6 +490,8 @@ async def test_all_destinations_receive_same_sanitized_resource(
                 assert resource["daydream.observability.contract.version"] == str(manifest["source"]["commit"])[:7]
                 assert resource["custom.zone"] == "zone-one"
                 assert resource["unicode.key"] == "café"
+                assert resource["plus.value"] == "a+b"
+                assert resource["raw.unicode"] == "café"
                 assert resource["comma.key"] == "a,b=c"
                 assert resource["empty.value"] == ""
                 assert resource["zero.value"] == "0"
