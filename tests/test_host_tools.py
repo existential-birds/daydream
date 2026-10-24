@@ -251,6 +251,7 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10,
         limits=HostToolLimits(max_calls=3, max_argument_bytes=256))
     binding.restrict(deadline=None, tool_call_budget=2)
+    deadline = binding.deadline
     async with _endpoint(binding) as (_, client):
         packet = {"id": "first", "name": NATIVE_READ_FILE, "arguments": {"path": str(path)}}
         assert (await client.post("/admit", json=packet)).json() == {"allowed": True}
@@ -259,10 +260,11 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
         oversized = (await client.post("/admit", json={**packet, "id": "large",
             "arguments": {"path": "x" * 300}})).json()
         assert oversized["allowed"] is False and "argument byte limit" in oversized["error"]
+        binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
+        assert binding.deadline == deadline
         spent = (await client.post("/admit", json={**packet, "id": "last"})).json()
         assert spent["allowed"] is False and "Original cumulative tool allowance" in spent["error"]
         assert binding.calls == 3
-        binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
         exhausted = (await client.post("/admit", json={**packet, "id": "overflow"})).json()
         assert exhausted["allowed"] is False and "capacity exhausted" in exhausted["error"]
         assert binding.calls == 3
