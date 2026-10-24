@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case, canonical_digest
 from daydream.benchmark.reviewbench.harbor_build import (
     HARBOR_REVISION,
     NODE_IMAGE,
@@ -147,7 +147,6 @@ def handle(args: argparse.Namespace) -> int:
     from harbor.environments.docker.docker import DockerEnvironment
 
     from daydream.benchmark.reviewbench.harbor_auth import subscription_environment, validate_credential_stores
-    from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
     profile = json.loads((args.directory / 'daydream-profile.json').read_text())
     if profile.get('schema') != PUBLIC_PROFILE_SCHEMA:

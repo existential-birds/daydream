@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from daydream.benchmark.reviewbench.contract import (
     PUBLIC_PROFILE_SCHEMA,
     REVIEWBENCH_REVISION,
+    canonical_digest as canonical_digest,
     load_cases,
     verify_source,
 )
@@ -45,12 +46,6 @@ def _compose(platform: str, *, reviewer: bool, backend: str = 'codex') -> str:
         source: ${{RB_HARBOR_{role}_AUTH_DIR:?Set a dedicated {role} credential directory}}
         target: {target}
 '''
-
-
-def canonical_digest(value: Any) -> str:
-    """Digest JSON policy and identities, never credential contents."""
-    encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def package_digest(directory: Path) -> str:
@@ -130,6 +125,8 @@ def export_harbor_profile(
     platform: str = 'linux/amd64',
 ) -> dict[str, Any]:
     """Freeze the supplied wheel and all 219 supplied tasks into a new local profile."""
+    from harbor.models.dataset.manifest import DatasetFileRef, DatasetInfo, DatasetManifest, DatasetTaskRef
+
     source = source.resolve()
     output = output.absolute()
     if output.exists():
@@ -208,7 +205,7 @@ def export_harbor_profile(
             '--judge-env', 'DAYDREAM_RB_PI_AUTH_PATH=RB_HARBOR_PI_AUTH_PATH',
         ], cwd=source, check=True)
         expected: dict[str, int] = {}
-        references: list[str] = []
+        references: list[DatasetTaskRef] = []
         for case in sorted(cases, key=lambda value: value.key):
             task_dir = exported / case.key
             task_path = task_dir / 'tests/task.json'
@@ -239,8 +236,8 @@ def export_harbor_profile(
             toml = toml_path.read_text()
             toml = toml.replace('[metadata]\n', f'[metadata]\ndaydream_policy_sha256 = "{policy_sha}"\n')
             toml_path.write_text(toml, encoding='utf-8')
-            references.append(f'[[tasks]]\nname = {json.dumps("daydream-local/" + case.key)}\n'
-                              f'digest = "sha256:{package_digest(task_dir)}"\n')
+            references.append(DatasetTaskRef(name=f'daydream-local/{case.key}',
+                                             digest=f'sha256:{package_digest(task_dir)}'))
         metric = (source / 'scripts/harbor/metric.py').read_text().replace(
             'EXPECTED_TASKS = {}', 'EXPECTED_TASKS = ' + json.dumps(expected, sort_keys=True),
         )
@@ -249,18 +246,15 @@ def export_harbor_profile(
         _write_json(exported / 'daydream-profile.json', {**policy, 'policy_sha256': policy_sha})
         (exported / 'reviewer-seccomp.json').write_bytes(seccomp_asset)
         (exported / 'reviewer-seccomp-provenance.json').write_bytes(seccomp_provenance_asset)
-        (exported / 'dataset.toml').write_text(
-            'schema_version = "1.0"\n[dataset]\n'
-            f'name = {json.dumps("daydream-local/reviewbench-native")}\n'
-            'description = "Full public ReviewBench: 219 frozen PRs; custom subscription Codex judge."\n'
-            'keywords = ["code-review", "reviewbench", "daydream"]\n\n'
-            + '\n'.join(references) + ''.join(
-                f'\n[[files]]\npath = {json.dumps(name)}\ndigest = "sha256:'
-                f'{hashlib.sha256((exported / name).read_bytes()).hexdigest()}"\n'
+        manifest = DatasetManifest(dataset=DatasetInfo(name='daydream-local/reviewbench-native',
+            description='Full public ReviewBench: 219 frozen PRs; custom subscription Codex judge.',
+            keywords=['code-review', 'reviewbench', 'daydream']), tasks=references,
+            files=[DatasetFileRef(path=name,
+                digest=f'sha256:{hashlib.sha256((exported / name).read_bytes()).hexdigest()}')
                 for name in ('metric.py', 'daydream-profile.json', 'reviewer-seccomp.json',
-                             'reviewer-seccomp-provenance.json')
-            ), encoding='utf-8',
+                             'reviewer-seccomp-provenance.json')],
         )
+        (exported / 'dataset.toml').write_text('schema_version = "1.0"\n' + manifest.to_toml(), encoding='utf-8')
         verify_source(source)
         shutil.copytree(exported, output)
     return {'tasks': len(cases), 'policy_sha256': policy_sha, 'metric_sha256': metric_sha,

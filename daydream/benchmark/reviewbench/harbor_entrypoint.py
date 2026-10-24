@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import signal
@@ -19,10 +18,9 @@ from typing import Any
 import anyio
 
 from daydream import git_ops, runner
-from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, Case, canonical_digest
 from daydream.benchmark.reviewbench.harbor_process import publish_diagnostic_bytes
 from daydream.benchmark.reviewbench.native import (
-    CaseExecution,
     PublicHarborTask,
     convert_findings,
     reviewer_config,
@@ -46,9 +44,7 @@ def load_public_task(profile_path: Path, pr_path: Path, patch_path: Path) -> tup
         raise PublicReviewerError('unsupported public reviewer profile; regenerate the export')
     digest = profile.get('profile_sha256')
     policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
-    calculated = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
-                                .encode()).hexdigest()
-    if digest != calculated:
+    if digest != canonical_digest(policy):
         raise PublicReviewerError('public reviewer profile digest differs')
     case = Case.from_dict(profile['pr'])
     pr = json.loads(pr_path.read_text())
@@ -160,7 +156,7 @@ async def main(environment: Mapping[str, str]) -> int:
             else '/run/reviewbench-reviewer'))
         from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 
-        execution = None
+        record: dict[str, Any] | None = None
         cancelled = False
         with tempfile.TemporaryDirectory(prefix='daydream-reviewbench-runtime-') as private_directory:
             private = Path(private_directory).resolve()
@@ -195,22 +191,31 @@ async def main(environment: Mapping[str, str]) -> int:
                         if _requested_interruption(dict(environment), invocation) is not None:
                             raise asyncio.CancelledError
                     staged.mkdir()
-                    execution = CaseExecution('failed', source_identity=task.case.repo,
-                                              analyzed_comparison=comparison)
+                    record = {
+                        'status': 'failed',
+                        'candidate': None,
+                        'terminal_result': None,
+                        'usage': {},
+                        'retained_findings': [],
+                        'conversion_omissions': [],
+                        'diagnostics': [],
+                        'source_identity': task.case.repo,
+                        'analyzed_comparison': comparison,
+                    }
                     finalized: list[FinalizedReview] = []
                     exit_code = None
                     try:
                         exit_code = await runner.run(config, review_result_handler=finalized.append,
                                                      execution=capability)
                     except Exception as exc:
-                        execution.diagnostics.append(f'native reviewer raised {type(exc).__name__}')
+                        record['diagnostics'].append(f'native reviewer raised {type(exc).__name__}')
                     await anyio.lowlevel.checkpoint_if_cancelled()
                     if len(finalized) > 1:
                         raise PublicReviewerError('native reviewer produced multiple terminal results')
                     if finalized:
                         result = finalized[0]
-                        execution.terminal_result = result.terminal_result
-                        execution.usage, execution.retained_findings = result.usage, result.items
+                        record['terminal_result'] = result.terminal_result
+                        record['usage'], record['retained_findings'] = result.usage, result.items
                         validate_terminal_result(result.terminal_result, expected_head_sha=task.case.head)
                         revision = result.terminal_result['analyzed_revision']
                         if any(revision.get(key) != value for key, value in comparison.items()):
@@ -218,41 +223,40 @@ async def main(environment: Mapping[str, str]) -> int:
                         if (git_ops.head_sha(repository) != task.case.head
                                 or git_ops.diff_worktree_against(repository, task.case.head, ['.'])):
                             raise PublicReviewerError('native reviewer changed the frozen checkout revision')
-                        findings, execution.conversion_omissions = convert_findings(result.items,
+                        findings, record['conversion_omissions'] = convert_findings(result.items,
                             repository=repository, case=task.case, producer='daydream-native-' + backend,
                             comparison=task.patch)
                         state = result.terminal_result['analysis_state']
                         if state != 'complete':
-                            execution.status = 'incomplete' if state == 'incomplete' else 'failed'
-                            execution.diagnostics.append('native analysis is ' + state)
+                            record['status'] = 'incomplete' if state == 'incomplete' else 'failed'
+                            record['diagnostics'].append('native analysis is ' + state)
                         elif exit_code != 0:
-                            execution.diagnostics.append('native reviewer did not exit successfully')
+                            record['diagnostics'].append('native reviewer did not exit successfully')
                         else:
-                            execution.candidate = {'pr': asdict(task.case), 'agent': 'daydream-native-' + backend,
+                            record['candidate'] = {'pr': asdict(task.case), 'agent': 'daydream-native-' + backend,
                                                    'findings': findings}
-                            if execution.usage:
-                                execution.candidate['usage'] = execution.usage.copy()
-                            execution.status = ('conversion_limited' if execution.conversion_omissions
+                            if record['usage']:
+                                record['candidate']['usage'] = record['usage'].copy()
+                            record['status'] = ('conversion_limited' if record['conversion_omissions']
                                 else 'complete' if findings else 'completed_empty')
                     else:
-                        execution.diagnostics.append('native reviewer did not produce a finalized terminal result')
+                        record['diagnostics'].append('native reviewer did not produce a finalized terminal result')
             except BaseException as exc:
                 cancelled = isinstance(exc, asyncio.CancelledError)
-                if execution is not None:
-                    execution.status = 'cancelled' if cancelled else 'failed'
-                    execution.candidate = None
-                    execution.diagnostics.append('native reviewer cancelled' if cancelled
+                if record is not None:
+                    record['status'] = 'cancelled' if cancelled else 'failed'
+                    record['candidate'] = None
+                    record['diagnostics'].append('native reviewer cancelled' if cancelled
                         else str(exc) if isinstance(exc, PublicReviewerError) else 'native invocation did not finalize')
                 raise
             finally:
-                if execution is not None:
+                if record is not None:
                     if not (staged / RUN_DOCUMENT_NAME).is_file():
-                        execution.diagnostics.append('native trajectory unavailable; no ATIF export was manufactured')
-                        if execution.status in {'complete', 'completed_empty'}:
-                            execution.status = 'failed'
-                            execution.candidate = None
+                        record['diagnostics'].append('native trajectory unavailable; no ATIF export was manufactured')
+                        if record['status'] in {'complete', 'completed_empty'}:
+                            record['status'] = 'failed'
+                            record['candidate'] = None
                     _publish_native_evidence(staged, evidence, harbor_trajectory)
-                    record = asdict(execution)
                     record.update(task_id=task.task_id, evaluation_id=task.evaluation_id,
                         profile_sha256=task.profile_sha256, elapsed_seconds=time.monotonic() - started,
                         reviewer_backend=backend, reviewer_provider=reviewer['provider'],
@@ -261,11 +265,11 @@ async def main(environment: Mapping[str, str]) -> int:
                         invocation_id=environment.get('DAYDREAM_RB_INVOCATION'),
                         interruption='reviewer_task_cancelled' if cancelled else None)
                     _write_new_json(evidence / 'execution.json', record)
-        if execution is None:
+        if record is None:
             raise PublicReviewerError('native review did not return an execution result')
-        if execution.status not in {'complete', 'completed_empty'} or execution.candidate is None:
-            raise PublicReviewerError('native review is unscorable: ' + execution.status)
-        _write_new_json(output, execution.candidate)
+        if record['status'] not in {'complete', 'completed_empty'} or record['candidate'] is None:
+            raise PublicReviewerError('native review is unscorable: ' + record['status'])
+        _write_new_json(output, record['candidate'])
         return 0
     except (git_ops.GitError, OSError, ValueError, KeyError, TypeError) as exc:
         print(f'public ReviewBench reviewer failed: {type(exc).__name__}: {exc}', file=sys.stderr)

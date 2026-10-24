@@ -319,15 +319,15 @@ async def drive():
  invocation=str(uuid.uuid4())
  environment={{**os.environ,'DAYDREAM_RB_EVIDENCE':str(root/'logs/daydream'),'CONTROL_ROOT':str(root)}}
  original_spawn=asyncio.create_subprocess_exec
- original_iterdir=Path.iterdir
+ original_listdir=os.listdir
  fail_listing=False
- def iterdir(path):
+ def listdir(path='.'):
   nonlocal fail_listing
-  if path==Path('/proc') and fail_listing:
+  if path==b'/proc' and fail_listing:
    fail_listing=False
    raise OSError(errno.EIO,'scripted process table read failure')
-  return original_iterdir(path)
- Path.iterdir=iterdir
+  return original_listdir(path)
+ os.listdir=listdir
  async def spawn(*args,**kwargs):
   child=await original_spawn(sys.executable,'-I','-c',{entrypoint!r},**kwargs)
   original_kill=child.kill
@@ -742,19 +742,23 @@ async def test_process_control_observation_requires_bounded_owned_regular_files(
     else:
         path.write_text(json.dumps(body) + (' ' * 65537 if storage == 'oversize' else ''))
     if surface == 'receipt':
-        program = ('from daydream.benchmark.reviewbench.harbor_agent import _process_completion_observed\n'
-            f'value = _process_completion_observed(Path({str(directory)!r}), {invocation!r})\n')
+        imports = 'from daydream.benchmark.reviewbench.harbor_agent import _process_completion_observed\n'
+        observation = f'value = _process_completion_observed(Path({str(directory)!r}), {invocation!r})\n'
     else:
         evidence = directory / 'daydream'
-        program = ('from daydream.benchmark.reviewbench.harbor_process import _requested_interruption\n'
-            f'value = _requested_interruption('
+        imports = 'from daydream.benchmark.reviewbench.harbor_process import _requested_interruption\n'
+        observation = (f'value = _requested_interruption('
             f'{{"DAYDREAM_RB_EVIDENCE": {str(evidence)!r}}}, {invocation!r})\n')
     expected = storage == 'regular'
     child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c',
-        'from pathlib import Path\n' + program + f'assert bool(value) is {expected!r}, value\n',
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        'from pathlib import Path\n' + imports + 'print("ready", flush=True)\ninput()\n' + observation
+        + f'assert bool(value) is {expected!r}, value\n',
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
-        _, stderr = await asyncio.wait_for(child.communicate(), timeout=3)
+        # Bound diagnostic I/O separately from cold imports under parallel suite load.
+        assert child.stdout is not None
+        assert await asyncio.wait_for(child.stdout.readline(), timeout=15) == b'ready\n'
+        _, stderr = await asyncio.wait_for(child.communicate(b'\n'), timeout=3)
         assert child.returncode == 0, stderr.decode()
     finally:
         if child.returncode is None:

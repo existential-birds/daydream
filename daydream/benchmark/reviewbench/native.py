@@ -6,7 +6,8 @@ import math
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -31,7 +32,6 @@ _REVIEW_PHASES = ('review', 'intent', 'exploration', 'alternatives', 'per_stack_
 def parse_native_config(arguments: list[str]) -> RunConfig:
     """Use the ordinary CLI's operator policy, with benchmark-owned outputs disabled."""
     from daydream.commands import review
-    from daydream.run_artifacts import _resolve_review_profile
 
     config = review._parse_args(['--review', '--non-interactive', '--no-archive', '--no-eval',
                                 '--no-capture-data', *(arguments[1:] if arguments[:1] == ['--'] else arguments)])
@@ -40,9 +40,7 @@ def parse_native_config(arguments: list[str]) -> RunConfig:
             or config.dataset_store_path or config.dataset_capture or config.force_worktree
             or config.pr_number is not None or config.pr_repo or config.approved_head_sha):
         raise ValueError('benchmark owns source/output and disables publication, resumes and dataset capture')
-    config = replace(config, discover_github_provenance=False)
-    _resolve_review_profile(config)
-    return config
+    return replace(config, discover_github_provenance=False)
 
 
 # These are ordinary review-policy overrides, not a second native configuration
@@ -196,21 +194,6 @@ class PublicHarborTask:
         return merge_base
 
 
-@dataclass
-class CaseExecution:
-    """One attempt, with partial evidence kept separate from scorable findings."""
-
-    status: str
-    candidate: dict[str, Any] | None = None
-    terminal_result: dict[str, Any] | None = None
-    usage: dict[str, Any] = field(default_factory=dict)
-    retained_findings: list[dict[str, Any]] = field(default_factory=list)
-    conversion_omissions: list[dict[str, Any]] = field(default_factory=list)
-    diagnostics: list[str] = field(default_factory=list)
-    source_identity: str | None = None
-    analyzed_comparison: dict[str, str] = field(default_factory=dict)
-
-
 def _omission(item: dict[str, Any], reason: str) -> dict[str, Any]:
     return {"uid": item.get("item_uid", item.get("uid")), "id": item.get("id"), "reason": reason}
 
@@ -231,18 +214,14 @@ def convert_findings(
     hunks = parse_hunks(comparison)
     findings: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []
-    sources: dict[tuple[str, str], list[bytes] | None] = {}
 
-    def source(revision: str, path: str) -> list[bytes] | None:
-        key = revision, path
-        if key not in sources:
-            try:
-                _, body = frozen_source(repository, revision, path)
-                sources[key] = (body.split(b"\n")[:-1] if body.endswith(b"\n")
-                                else body.split(b"\n") if body else [])
-            except (git_ops.GitError, OSError, UnicodeError, ValueError):
-                sources[key] = None
-        return sources[key]
+    @cache
+    def head_line_count(path: str) -> int | None:
+        try:
+            _, body = frozen_source(repository, case.head, path)
+            return body.count(b"\n") + bool(body and not body.endswith(b"\n"))
+        except (git_ops.GitError, OSError, UnicodeError, ValueError):
+            return None
 
     for item in items:
         path, line = _path(item.get("file")), item.get("line")
@@ -252,10 +231,10 @@ def convert_findings(
         elif "location_cited_line" in item or item.get("location_distrust"):
             reason = "native_location_was_relocated_or_distrusted"
         else:
-            head_lines = source(case.head, path)
+            head_count = head_line_count(path)
             ranges = hunks.get(path, {}).get("hunks", [])
             new_side = any(h["new_start"] <= line <= h["new_end"] for h in ranges)
-            if head_lines is None or line > len(head_lines):
+            if head_count is None or line > head_count:
                 reason = "location_absent_from_head_regular_file"
             elif not new_side:
                 reason = "no_new_side_location_in_captured_diff"
