@@ -460,15 +460,22 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     ls_section = result["destinations"]["langsmith"]
     assert ls_section["root_id"] == "root-1" and ls_section["trace_id"] == "trace-1"
 
-def test_langsmith_ambiguous_root_rejected(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("ambiguous", "terminal"),
+    [(True, _verifier.DISPOSITION_AMBIGUOUS_ROOT), (False, _verifier.DISPOSITION_NOT_FOUND)],
+    ids=["ambiguous", "empty"],
+)
+def test_langsmith_discovery_distinguishes_absence_from_ambiguity(
+    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
+    ambiguous: bool, terminal: str,
 ) -> None:
+    """Zero discovered runs is an honest absence (vendor ingest window), never root ambiguity."""
     receipt = _write_receipt(tmp_path, destinations=["langsmith"])
     project = json.loads(receipt.read_text())["langsmith_project"]
 
     def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         payload = json.loads(record["body"])
-        if "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
+        if not ambiguous or "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
             return _empty_runs()
         runs = [_ls_run("root-a", trace_id="trace-a"), _ls_run("root-b", trace_id="trace-b")]
         return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
@@ -477,7 +484,7 @@ def test_langsmith_ambiguous_root_rejected(
     fake_vendor.respond("POST", "/runs/query", query)
     result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_AMBIGUOUS_ROOT
+    assert result["terminal"] == terminal
 
 def test_langsmith_unstable_tree_fails_closed(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -903,21 +910,6 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
     rows = _verifier.compare_stored(data, matrix, acceptance_kind="sanitized_protocol_replay")
     assert any(r.get("field") == "honeyhive.rows[0].gen_ai.response.model" for r in rows)
 
-def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Zero discovered runs is an honest absence (vendor ingest window), never reported as root ambiguity."""
-    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
-    project = json.loads(receipt.read_text())["langsmith_project"]
-
-    def query(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return _empty_runs()
-
-    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
-    fake_vendor.respond("POST", "/runs/query", query)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 
 def test_replay_then_verify_end_to_end_on_fake_vendors(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]

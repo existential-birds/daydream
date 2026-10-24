@@ -490,10 +490,16 @@ def test_post_findings_reads_oversized_evidence_through_the_blob_endpoint(fake_g
     assert fake_gh.calls("GET", f"repos/o/r/git/blobs/{blob_sha}")
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
-def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+@pytest.mark.parametrize("unreadable", [False, True], ids=["contradiction", "unreadable"])
+def test_post_findings_posts_findings_when_invalid_diagram_is_dropped(
+    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], unreadable: bool,
 ) -> None:
-    _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
+    if unreadable:
+        fake_gh.set_response("GET", "repos/o/r/contents/a.py",
+            value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
+        )
+    else:
+        _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
     artifact = _api_head_artifact(
         tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
     )
@@ -507,6 +513,8 @@ def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
     assert "```mermaid" not in posts[0].payload["body"]
     printed = _console_text(capsys)
     assert "Diagram dropped (the findings are still posted)" in printed
+    if unreadable:
+        assert "could not be read from immutable head" in printed
 
 @pytest.mark.parametrize(("label", "response", "present_message", "absent_message"),
     [("not-found", {"__error__": "gh: Not Found (HTTP 404)"}, "is missing from immutable head",
@@ -515,8 +523,14 @@ def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
             "could not be read from immutable head",
         ), ("rate-limited", {"__error__": "gh: HTTP 403: API rate limit exceeded"},
             "could not be read from immutable head", "is missing from immutable head",
+        ), ("forbidden", {"__error__": "gh: HTTP 403: Resource not accessible by integration"},
+            "could not be read from immutable head", "is missing from immutable head",
+        ), ("unauthorized", {"__error__": "gh: HTTP 401: Bad credentials"},
+            "could not be read from immutable head", "is missing from immutable head",
+        ), ("undecodable", {"__stdout__": "<html>proxy error</html>"},
+            "could not be read from immutable head", "is missing from immutable head",
         ),
-    ],
+    ], ids=["not-found", "directory", "rate-limited", "forbidden", "unauthorized", "undecodable"],
 )
 def test_post_findings_classifies_api_head_reads(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], label: str, response: dict[str, str],
@@ -524,8 +538,9 @@ def test_post_findings_classifies_api_head_reads(
 ) -> None:
     """Only positive absence evidence (404 or non-file) means missing.
 
-    Rate limits mean unreadable. With no findings, all cases reach the ordinary
-    no-new-findings short-circuit and post no review."""
+    Rate limits, unrecognized statuses and undecodable bodies mean unreadable.
+    With no findings, all cases reach the ordinary no-new-findings short-circuit
+    and post no review."""
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
     artifact = _api_head_artifact(tmp_path)
 
@@ -563,45 +578,6 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
     assert len(posts) == 1
     assert "```mermaid" not in posts[0].payload["body"]
 
-@pytest.mark.parametrize(("label", "response"),
-    [("forbidden", {"__error__": "gh: HTTP 403: Resource not accessible by integration"}),
-        ("unauthorized", {"__error__": "gh: HTTP 401: Bad credentials"}),
-        ("undecodable", {"__stdout__": "<html>proxy error</html>"}),
-    ],
-)
-def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], label: str, response: dict[str, str],
-) -> None:
-    """Unrecognized API statuses and undecodable bodies cannot prove citation absence."""
-    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
-    artifact = _api_head_artifact(tmp_path)
-
-    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
-
-    assert code == 0
-    printed = _console_text(capsys)
-    assert "could not be read from immutable head" in printed, label
-    assert "is missing from immutable head" not in printed, label
-
-def test_post_findings_posts_findings_when_an_unreadable_diagram_is_dropped(
-    fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    fake_gh.set_response("GET", "repos/o/r/contents/a.py", value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
-    )
-    artifact = _api_head_artifact(
-        tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
-    )
-
-    code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
-
-    assert code == 0
-    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
-    assert len(posts) == 1
-    assert "Real finding" in json.dumps(posts[0].payload)
-    assert "```mermaid" not in posts[0].payload["body"]
-    printed = _console_text(capsys)
-    assert "Diagram dropped (the findings are still posted)" in printed
-    assert "could not be read from immutable head" in printed
 
 def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],

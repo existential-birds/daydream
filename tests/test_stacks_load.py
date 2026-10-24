@@ -85,12 +85,8 @@ def test_load_v2_projection_raises_on_split_drift(tmp_path: Path) -> None:
     # Tamper: change one record's recorded lineage.split without moving it
     # between files — the recompute gate must catch the drift fail-closed.
     lines = (out / "train.jsonl").read_text(encoding="utf-8").splitlines()
-    if not lines:  # train may be empty for tiny id sets; use whatever exists
-        for name in ("validation.jsonl", "holdout.jsonl"):
-            lines = (out / name).read_text(encoding="utf-8").splitlines()
-            if lines:
-                break
     records = [json.loads(line) for line in lines]
+    assert records, "the deterministic fixture must include train records"
     target = records[0]
     tampered_split = next(s for s in ("train", "validation", "holdout") if s != str(target["lineage"]["split"]))
     target["lineage"]["split"] = tampered_split
@@ -117,17 +113,8 @@ def test_load_v2_projection_non_v2_schema_version_fails_closed(tmp_path: Path,) 
         for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    if records:
-        records[0]["schema_version"] = "1"
-        (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    else:
-        # Deterministic splits may leave train empty for this id set; tamper
-        # whichever split file actually holds records.
-        for name in ("validation.jsonl", "holdout.jsonl"):
-            recs = [json.loads(line) for line in (out / name).read_text(encoding="utf-8").splitlines() if line.strip()]
-            if recs:
-                recs[0]["schema_version"] = "1"
-                (out / name).write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
-                break
+    assert records, "the deterministic fixture must include train records"
+    records[0]["schema_version"] = "1"
+    (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         load_v2_projection(out)
