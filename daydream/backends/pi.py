@@ -45,7 +45,6 @@ from daydream.backends import (
     TurnEndEvent,
     _admit_json_value,
     _admit_native_unix_ms,
-    _new_generation_id,
     _parsed_nonnegative_float,
     _parsed_nonnegative_int,
     resolve_fanout_concurrency,
@@ -58,8 +57,6 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
     raise_for_exit,
     reap,
@@ -483,23 +480,6 @@ def _tool_completion_metadata(event: dict[str, Any], *, output_control: bool = F
                       or structured.get('truncated') is True or result.get('truncated') is True)}
 
 
-def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
-    """Pull token + cost fields out of a Pi ``AssistantMessage``.
-
-    Returns ``input``, ``output``, ``cacheRead``, ``cacheWrite`` (ints or None)
-    and ``cost_total`` (float or None). Never raises — every field is optional.
-    """
-    usage = message.get("usage") or {}
-    cost = usage.get("cost") or {}
-    return {
-        "input": usage.get("input"),
-        "output": usage.get("output"),
-        "cacheRead": usage.get("cacheRead"),
-        "cacheWrite": usage.get("cacheWrite"),
-        "cost_total": cost.get("total"),
-    }
-
-
 def _schema_instruction(schema: dict[str, Any]) -> str:
     """Append the schema for excluded modes that retain prose serialization."""
     return (
@@ -910,9 +890,7 @@ class PiBackend:
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_mode=StdinMode.PIPE if tools_disabled else StdinMode.DEVNULL,
                 stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(cwd),
@@ -978,7 +956,7 @@ class PiBackend:
                         # Host-observed only — never relabeled as provider
                         # request start; the native start comes from the
                         # completed message's Unix-ms timestamp at message_end.
-                        open_generation_id = _new_generation_id()
+                        open_generation_id = str(uuid.uuid4())
                         last_generation_id = open_generation_id
                         generation_start_ns = time.time_ns()
                         if lifecycle is not None:
@@ -1163,12 +1141,12 @@ class PiBackend:
                     if stop_reason is not None:
                         saw_finish_reason = True
                         finish_reason = stop_reason
-                    usage = _extract_usage(msg)
-                    inp = usage["input"]
-                    outp = usage["output"]
-                    cached = usage["cacheRead"]
-                    created = usage["cacheWrite"]
-                    cost = usage["cost_total"]
+                    usage = msg.get("usage") or {}
+                    inp = usage.get("input")
+                    outp = usage.get("output")
+                    cached = usage.get("cacheRead")
+                    created = usage.get("cacheWrite")
+                    cost = (usage.get("cost") or {}).get("total")
                     if isinstance(inp, int):
                         inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
                         total_input = (total_input or 0) + inp

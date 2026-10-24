@@ -8,7 +8,6 @@ yields decoded lines and exit codes without protocol fallbacks.
 from __future__ import annotations
 
 import asyncio
-import enum
 import json
 import tempfile
 from collections.abc import AsyncIterator, Callable
@@ -26,24 +25,6 @@ from daydream.backends._subprocess import (
 )
 
 
-class StdinMode(enum.Enum):
-    """How the child's stdin is wired at spawn."""
-
-    DEVNULL = enum.auto()
-    PIPE = enum.auto()
-
-
-class StderrPolicy(enum.Enum):
-    """Merge stderr into JSONL, or drain it separately through a bounded sink.
-
-    DRAIN_TASK callers await drain_finished after wait/terminate so it cannot
-    outlive the transport.
-    """
-
-    MERGE_INTO_STDOUT = enum.auto()
-    DRAIN_TASK = enum.auto()
-
-
 class TransportExitError(Exception):
     """The child exited non-zero.
 
@@ -59,6 +40,9 @@ class CliTransport:
     """Spawn and stream decoded stdout; propagate stall, oversized-line, and spawn errors.
 
     Each backend maps transport failures into its own error contract.
+    Supplied stdin bytes use a pipe; absence uses DEVNULL. A stderr sink owns a
+    separate drain task; otherwise stderr merges into stdout. Sink callers await
+    drain_finished after wait/terminate so the task cannot outlive the transport.
     """
 
     def __init__(
@@ -66,9 +50,7 @@ class CliTransport:
         cli: str,
         argv: list[str],
         *,
-        stdin_mode: StdinMode = StdinMode.DEVNULL,
         stdin_data: bytes | None = None,
-        stderr_policy: StderrPolicy = StderrPolicy.MERGE_INTO_STDOUT,
         stderr_sink: Callable[[str], None] | None = None,
         decode_errors: str = "strict",
         limit: int,
@@ -80,13 +62,9 @@ class CliTransport:
         stdout_eof: Callable[[], None] | None = None,
         process_exited: Callable[[int], None] | None = None,
     ) -> None:
-        if stdin_mode is StdinMode.PIPE and stdin_data is None:
-            raise ValueError("stdin_mode=PIPE requires stdin_data")
         self._cli = cli
         self._argv = argv
-        self._stdin_mode = stdin_mode
         self._stdin_data = stdin_data
-        self._stderr_policy = stderr_policy
         self._stderr_sink = stderr_sink
         self._spawn_pending = spawn_pending
         self._spawn_completed = spawn_completed
@@ -113,13 +91,13 @@ class CliTransport:
         """Spawn the child, write+close stdin when piped, start stderr drain."""
         stdin = (
             asyncio.subprocess.PIPE
-            if self._stdin_mode is StdinMode.PIPE
+            if self._stdin_data is not None
             else asyncio.subprocess.DEVNULL
         )
         stderr = (
-            asyncio.subprocess.STDOUT
-            if self._stderr_policy is StderrPolicy.MERGE_INTO_STDOUT
-            else asyncio.subprocess.PIPE
+            asyncio.subprocess.PIPE
+            if self._stderr_sink is not None
+            else asyncio.subprocess.STDOUT
         )
         # Spawn OSError propagates: the caller maps it to its backend error type.
         if self._spawn_pending is not None:
@@ -139,23 +117,23 @@ class CliTransport:
         if self._spawn_completed is not None:
             self._spawn_completed()
 
-        if self._stdin_mode is StdinMode.PIPE:
+        if self._stdin_data is not None:
             stdin_writer = proc.stdin
             if stdin_writer is None:  # pragma: no cover - PIPE guarantees stdin
-                raise OSError("child stdin is not writable despite StdinMode.PIPE")
-            stdin_writer.write(self._stdin_data or b"")
+                raise OSError("child stdin is not writable despite piped input")
+            stdin_writer.write(self._stdin_data)
             stdin_writer.close()
             self.stdin_closed = True
 
-        if self._stderr_policy is StderrPolicy.DRAIN_TASK and proc.stderr is not None:
-            self._drain_task = asyncio.create_task(self._drain_stderr(proc.stderr))
+        if self._stderr_sink is not None and proc.stderr is not None:
+            self._drain_task = asyncio.create_task(self._drain_stderr(proc.stderr, self._stderr_sink))
 
     async def _observe_exit(self, proc: asyncio.subprocess.Process) -> None:
         returncode = await observe_process_exit(proc)
         if self._process_exited is not None:
             self._process_exited(returncode)
 
-    async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
+    async def _drain_stderr(self, stderr: asyncio.StreamReader, sink: Callable[[str], None]) -> None:
         while True:
             try:
                 raw = await stderr.readline()
@@ -164,14 +142,13 @@ class CliTransport:
                 # line before raising. Stderr is diagnostic-only, so note the
                 # discard and keep draining instead of failing an otherwise
                 # valid JSONL session during teardown.
-                if self._stderr_sink is not None:
-                    self._stderr_sink("stderr diagnostic line exceeded stream limit and was discarded")
+                sink("stderr diagnostic line exceeded stream limit and was discarded")
                 continue
             if not raw:
                 break
             line = raw.decode(errors="replace").strip()
-            if line and self._stderr_sink is not None:
-                self._stderr_sink(line)
+            if line:
+                sink(line)
 
     @property
     def returncode(self) -> int | None:
