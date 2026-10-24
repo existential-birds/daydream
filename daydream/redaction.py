@@ -378,17 +378,8 @@ def _match_start_before_separator(text: str, sep: int) -> int:
     return i
 
 
-def _nearest_separator(text: str, pos: int) -> int:
-    """Find the next : or =; return -1 without retrying separator-less key runs."""
-    colon = text.find(":", pos)
-    equals = text.find("=", pos)
-    if colon < 0 and equals < 0:
-        return -1
-    if colon < 0:
-        return equals
-    if equals < 0:
-        return colon
-    return colon if colon < equals else equals
+# One search avoids rescanning the remaining text for an absent delimiter.
+_STRUCTURED_SEPARATOR_PATTERN = re.compile(r"[:=]")
 
 
 def _value_start(match: re.Match[str]) -> int:
@@ -494,47 +485,34 @@ def _redact_structured_pairs(text: str) -> str:
     out: list[str] = []
     pos = 0
     while True:
-        sep = _nearest_separator(text, pos)
-        if sep < 0:
+        separator = _STRUCTURED_SEPARATOR_PATTERN.search(text, pos)
+        if separator is None:
             break
+        sep = separator.start()
         start = _match_start_before_separator(text, sep)
-        if start < pos:
-            # The derived anchor lands behind the emission frontier — the
-            # bytes [start, pos) were already emitted (or already consumed by
-            # an earlier redaction), so this separator anchors no NEW match.
-            out.append(text[pos : sep + 1])
-            pos = sep + 1
-            continue
-        match = _STRUCTURED_KEY_VALUE_PATTERN.match(text, start)
+        # Anchors behind the emission frontier cannot start a new match.
+        match = _STRUCTURED_KEY_VALUE_PATTERN.match(text, start) if start >= pos else None
         if match is None:
-            # No pair can consume this separator: the value would fail
-            # identically from every candidate start, so skip the separator
-            # verbatim and re-anchor after it.
+            # Skip rejected anchors or failed pairs and re-anchor after this separator.
             out.append(text[pos : sep + 1])
             pos = sep + 1
             continue
-        if _is_sensitive_key(match.group(2)):
-            out.append(text[pos : match.start()])
-            out.append(_redact_structured_key_value(match, text))
-            pos = match.end()
-        else:
-            # A non-sensitive anchored key may still hold a sensitive suffix
-            # (see _sensitive_suffix_matches). The old engine's one-character
-            # advance re-matched every suffix at the SAME separator and
-            # redacted the first sensitive one, so take the leftmost match and
-            # stop.
+        if not _is_sensitive_key(match.group(2)):
+            # Preserve the old engine's leftmost sensitive suffix at this
+            # separator. Without one, resume inside the nonsensitive value.
             suffix = next(
                 _sensitive_suffix_matches(text, match, _STRUCTURED_KEY_VALUE_PATTERN),
                 None,
             )
-            if suffix is not None:
-                out.append(text[pos : suffix.start()])
-                out.append(_redact_structured_key_value(suffix, text))
-                pos = suffix.end()
-            else:
+            if suffix is None:
                 value_start = _value_start(match)
                 out.append(text[pos:value_start])
                 pos = value_start
+                continue
+            match = suffix
+        out.append(text[pos : match.start()])
+        out.append(_redact_structured_key_value(match, text))
+        pos = match.end()
     out.append(text[pos:])
     return "".join(out)
 
@@ -554,55 +532,33 @@ def _redact_structured_blocks(text: str) -> str:
         out: list[str] = []
         pos = 0
         while True:
-            sep = _nearest_separator(text, pos)
-            if sep < 0:
+            separator = _STRUCTURED_SEPARATOR_PATTERN.search(text, pos)
+            if separator is None:
                 break
+            sep = separator.start()
             start = _match_start_before_separator(text, sep)
-            if start < pos:
-                # Same behind-the-frontier guard as the pair scan: this
-                # separator cannot anchor a NEW block match.
-                out.append(text[pos : sep + 1])
-                pos = sep + 1
-                continue
-            match = _BLOCK_VALUE_PATTERN.match(text, start)
+            # An anchor behind the frontier cannot start a new block match.
+            match = _BLOCK_VALUE_PATTERN.match(text, start) if start >= pos else None
             if match is None:
                 out.append(text[pos : sep + 1])
                 pos = sep + 1
                 continue
-            key = match.group(2)
-            if not _is_sensitive_key(key):
-                # Sensitive-suffix mirror of the pair scan, but a sensitive
-                # suffix whose block is EMPTY is not a redaction either way —
-                # the old scan advanced one character past it and kept
-                # looking, so the scan continues to later suffixes.
-                found: tuple[re.Match[str], int] | None = None
-                for m2 in _sensitive_suffix_matches(text, match, _BLOCK_VALUE_PATTERN):
-                    block_end = _block_value_end(text, m2.end())
-                    if block_end != m2.end():
-                        found = (m2, block_end)
-                        break
-                if found is not None:
-                    m2, block_end = found
-                    out.append(text[pos : m2.start()])
-                    quote = m2.group(1) or ""
-                    out.append(f'{quote}{m2.group(2)}{quote}{m2.group(3)}"{_REDACTED_CREDENTIAL}"')
-                    pos = block_end
+            # Empty block candidates consume no value; keep trying suffixes.
+            candidates = ((match,) if _is_sensitive_key(match.group(2)) else
+                          _sensitive_suffix_matches(text, match, _BLOCK_VALUE_PATTERN))
+            for candidate in candidates:
+                block_end = _block_value_end(text, candidate.end())
+                if block_end == candidate.end():
                     continue
-                # No value is consumed by a block match; keep the matched
-                # key/separator verbatim and re-anchor after it.
+                out.append(text[pos : candidate.start()])
+                quote = candidate.group(1) or ""
+                out.append(f'{quote}{candidate.group(2)}{quote}{candidate.group(3)}"{_REDACTED_CREDENTIAL}"')
+                pos = block_end
+                break
+            else:
+                # No value is consumed; keep the key/separator and re-anchor.
                 out.append(text[pos : match.end()])
                 pos = match.end()
-                continue
-            block_end = _block_value_end(text, match.end())
-            if block_end == match.end():
-                # no indented block follows (empty value): skip and re-scan
-                out.append(text[pos : match.end()])
-                pos = match.end()
-                continue
-            out.append(text[pos : match.start()])
-            quote = match.group(1) or ""
-            out.append(f'{quote}{key}{quote}{match.group(3)}"{_REDACTED_CREDENTIAL}"')
-            pos = block_end
         out.append(text[pos:])
         return "".join(out)
     except Exception:  # noqa: BLE001 - fail closed at every host boundary
