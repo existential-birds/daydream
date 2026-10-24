@@ -39,6 +39,7 @@ from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecy
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
+from daydream.host_tools import HostToolBinding
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -244,6 +245,7 @@ async def run_agent(
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
     review_stage_scope_id: str | None = None,
+    host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -252,6 +254,14 @@ async def run_agent(
     Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
     tool_call_start_floor prevents fresh attempts whose allocation cannot fit the stage's minimum work.
     """
+    if host_tools is not None:
+        if not getattr(backend, "supports_host_tools", False):
+            raise NotImplementedError(f"{type(backend).__name__} does not support host tools")
+        if tools_disabled or continuation is not None or review_limits is not None:
+            raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
+        deadline = min(deadline, host_tools.deadline) if deadline is not None else host_tools.deadline
+        tool_call_budget = min(tool_call_budget, host_tools.limits.max_calls) if tool_call_budget is not None else (
+            host_tools.limits.max_calls)
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
@@ -355,6 +365,7 @@ async def run_agent(
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
+                host_tools=host_tools,
             )
         except Exception as exc:
             from daydream.review_result import ReasonCode, reason_for_exception
@@ -444,6 +455,7 @@ async def _run_agent(
     finalization: bool = False,
     tools_disabled: bool = False,
     review_stage_scope_id: str | None = None,
+    host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Execute attempts under one deadline, retry allowance, and tool budget.
 
@@ -473,6 +485,10 @@ async def _run_agent(
             recorder = get_current_recorder()
             settings = _resolve_retry_settings(backend, retry_recovery_allowance_s)
             max_attempts = settings.max_attempts
+            # A bound host invocation has live authority and is never replayed.
+            # Native provider recovery remains within its original allowance.
+            if host_tools is not None:
+                max_attempts = 0
             base_delay = settings.base_delay_s
             max_delay = settings.max_delay_s
             resolved_allowance = settings.allowance_s
@@ -487,6 +503,8 @@ async def _run_agent(
                     effective_deadline = wall_deadline
                     limit_expired = "invocation_wall_budget"
             recovery = RetryRecoveryBudget(resolved_allowance)
+            if host_tools is not None:
+                host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its
@@ -606,6 +624,8 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if host_tools is not None:
+                        execute_kwargs["host_tools"] = host_tools
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):

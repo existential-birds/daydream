@@ -28,6 +28,37 @@ publication target. A moved PR head fails before export. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
 because a failed replacement may preserve an older complete artifact.
 
+## Pi host-tool lifetime and limits
+
+A requested Pi host-tool binding grants one invocation an exact set of file
+paths and a finite absolute deadline. Registration does not grant directory-wide
+access. The operation returns complete UTF-8 contents; non-UTF-8 files reject.
+The host validates the schema, operation, path, open authority, remaining
+capacity, and deadline before reading. Component-wise no-follow opens reject
+symlink traversal, and reads require regular files. A separate read process
+allows cancellation to end filesystem work before evidence freezes.
+
+Definition/schema, transport frames, arguments, results, item counts, cumulative
+calls/work, callback lifetime, concurrent requests, and reads have finite limits.
+Overflow rejects the whole result; it never returns a truncated authoritative
+file. Serialized MCP read results stay below Pi's direct MCP truncation threshold.
+The server does not queue excess callbacks. Native admission charges each tool
+call once, including rejection; delivery of the same native event cannot charge
+it again. Progress and retries cannot renew authority or its allowance.
+
+Close authority before awaiting shutdown. Join or isolate read processes,
+callbacks, and evidence writers before recorder/span finalization. Record
+authority closure, native settlement, and cleanup independently: endpoint
+shutdown, a successful tool, assistant prose, or child exit alone cannot establish
+native completion. Bound host-tool invocations require positive native settlement
+even when no structured output schema was requested. Preserve observed usage and
+truthful failure/incomplete outcomes on every exit path.
+
+The endpoint and credentials are private invocation capabilities, excluded from
+persisted configuration and public request evidence. Cached backend instances
+do not own sibling grants or callbacks. Enforcement does not require recording
+or tracing. See [the supported capability table](extensions.md#invocation-scoped-pi-host-tools).
+
 ## Validation and repair
 
 The host admits one canonical test recipe before an accepted actionable fix run.

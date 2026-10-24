@@ -9,6 +9,8 @@ and auth files under ~/.pi/agent; Daydream never writes a models.json override.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,9 +21,13 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack
 from functools import partial
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+import anyio
 
 from daydream.backends import (
     AgentEvent,
@@ -67,6 +73,7 @@ from daydream.backends._transport import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
+from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding
 from daydream.redaction import redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
@@ -76,6 +83,42 @@ _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _PI_FINAL_PAYLOAD_MAX_BYTES = 128 * 1024
 _PI_ERROR_MESSAGE_MAX_CHARS = 4096
 _PI_RAW_STOP_REASON_MAX_CHARS = 256
+
+
+class _HostToolServer(Protocol):
+    """Typed boundary to the explicitly installed optional native host feature."""
+
+    initialized: bool
+    listed: bool
+
+    async def start(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def packet(self) -> dict[str, Any]: ...
+
+
+def _create_host_tool_server(binding: HostToolBinding) -> _HostToolServer:
+    """Load bundled FastMCP only for requested bindings, never ordinary Pi use.
+
+    Other Daydream consumers can require MCP 2, which removed bundled FastMCP.
+    Keep that independent environment usable without weakening this feature's
+    verified SDK contract or replacing the official SDK with another framework.
+    """
+    guidance = "Pi host tools require daydream[host-tools] with official mcp==1.30.0 and its bundled FastMCP"
+    try:
+        sdk_version = version("mcp")
+    except PackageNotFoundError:
+        raise PiError(guidance + "; install the host-tools extra before using this binding",
+                      category="HOST_TOOLS") from None
+    if sdk_version != "1.30.0":
+        raise PiError(guidance + "; use an environment compatible with that extra", category="HOST_TOOLS")
+    try:
+        module = import_module("daydream.host_tools_server")
+    except ImportError:
+        raise PiError(guidance + "; install the complete host-tools extra", category="HOST_TOOLS") from None
+    server: _HostToolServer = module.PiHostToolServer(binding)
+    return server
 
 
 def _pi_diagnostic_text(value: str, limit: int) -> tuple[str, bool]:
@@ -95,6 +138,8 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
         "agent_start",
         "agent_end",
         "agent_settled",
+        "daydream_host_tools_ready",
+        "daydream_host_tools_failed",
         "turn_start",
         "turn_end",
         "message_start",
@@ -543,6 +588,7 @@ class PiBackend:
 
     supports_finalization = True
     supports_tools_disabled = True
+    supports_host_tools = True
     supports_review_instructions = True
     supports_budget_preamble = True
     # Validation opt-out selects text transport for downstream partial-object validation.
@@ -592,6 +638,58 @@ class PiBackend:
             self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
 
+    async def _require_host_tools_version(self, cwd: Path, environment: dict[str, str],
+                                         binding: HostToolBinding) -> None:
+        """Pin the fail-closed extension loader used by the readiness barrier."""
+        probe = CliTransport("pi", ["pi", "--version"], limit=4096, env=environment, cwd=str(cwd),
+                             stderr_policy=StderrPolicy.DRAIN_TASK)
+        self._transports.append(probe)
+        try:
+            allowance = min(binding.limits.setup_timeout_s, binding.deadline - time.monotonic())
+            async with asyncio.timeout(max(0.0, allowance)):
+                await self._start_host_transport(probe, binding)
+                lines = []
+                async for line in probe.lines(lambda: allowance):
+                    lines.append(line)
+                    if len(lines) > 1:
+                        break
+                code = await reap(probe, timeout_s=allowance)
+            if code != 0 or lines != ["1.4.0"]:
+                raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
+        except (TimeoutError, OSError, ValueError):
+            raise PiError("Could not verify required Pi 1.4.0 host-tool capabilities", category="HOST_TOOLS") from None
+        finally:
+            await teardown(probe, self._transports, cleanup_timeout_s=binding.limits.cleanup_timeout_s)
+
+    async def _start_host_transport(self, transport: CliTransport, binding: HostToolBinding) -> None:
+        """Own process creation even when cancellation races the returned handle."""
+        start = asyncio.create_task(transport.start())
+        try:
+            await asyncio.shield(start)
+        except BaseException:
+            binding.close_authority()
+            with anyio.CancelScope(shield=True):
+                try:
+                    await asyncio.wait_for(asyncio.shield(start), binding.limits.cleanup_timeout_s)
+                except TimeoutError:
+                    # A native child receives no open authority if startup returns
+                    # late. Its private extension must handle input without model
+                    # work; the transport owner still terminates/reaps its handle.
+                    binding.mark_cleanup_failed()
+
+                    def finish_start(completed: asyncio.Task[None]) -> None:
+                        if not completed.cancelled() and completed.exception() is None:
+                            binding.track_cleanup(teardown(transport, self._transports,
+                                                          cleanup_timeout_s=binding.limits.cleanup_timeout_s))
+
+                    start.add_done_callback(finish_start)
+                except Exception:
+                    pass  # Original startup failure owns the error.
+                else:
+                    await teardown(transport, self._transports,
+                                   cleanup_timeout_s=binding.limits.cleanup_timeout_s)
+            raise
+
     async def execute(
         self,
         cwd: Path,
@@ -608,6 +706,7 @@ class PiBackend:
         validate_structured_output: bool = True,
         wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
         tool_call_budget: int | None = None,
+        host_tools: HostToolBinding | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -637,6 +736,16 @@ class PiBackend:
             raise NotImplementedError(
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
+
+        if host_tools is not None and (tools_disabled or finalization or continuation is not None):
+            raise PiError("Host tools require a fresh tools-enabled native invocation",
+                          category="HOST_TOOLS", retryable=False)
+        if host_tools is not None:
+            host_tools.validate_platform()
+            tool_call_budget = min(tool_call_budget, host_tools.limits.max_calls) if tool_call_budget is not None else (
+                host_tools.limits.max_calls)
+            host_tools.restrict(deadline=(time.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
+                                tool_call_budget=tool_call_budget)
 
         args: list[str] = ["pi", "--mode", "json"]
         native_output = (output_schema is not None and validate_structured_output
@@ -755,7 +864,8 @@ class PiBackend:
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")])
+            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")
+                         + ("," + NATIVE_READ_FILE if host_tools is not None else "")])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -804,6 +914,11 @@ class PiBackend:
         saw_finish_reason = False
         saw_turn_start = False
         saw_native_settlement = False
+        host_ready = False
+        seen_host_starts: dict[str, tuple[str | None, str]] = {}
+        seen_host_results: dict[str, tuple[str | None, str]] = {}
+        ambiguous_host_identity = False
+        host_server: _HostToolServer | None = None
 
         transport: CliTransport | None = None
 
@@ -813,6 +928,35 @@ class PiBackend:
                     or (expected is None and len(submission_calls) >= 4096)):
                 raise PiError("Invalid structured output association", retryable=False, category="STREAM_TRUNCATION")
             submission_calls[call_id] = state
+
+        def host_event_identity(event: dict[str, Any]) -> tuple[str | None, str]:
+            try:
+                encoded = json.dumps(event, sort_keys=True, ensure_ascii=False,
+                                     allow_nan=False, separators=(",", ":")).encode()
+            except (ValueError, RecursionError):
+                raise PiError("Invalid native host-tool evidence", category="HOST_TOOLS") from None
+            return last_generation_id, hashlib.sha256(encoded).hexdigest()
+
+        def identity_diagnostic(event: dict[str, Any]) -> DiagnosticEvent:
+            # Preserve the first authoritative ATIF pair. A reused identity's
+            # actual native request/rejection belongs to diagnostic evidence,
+            # never a fabricated second correlation or silent disappearance.
+            payload = {key: event.get(key) for key in ("toolName", "args", "result", "isError") if key in event}
+            admitted, diagnostic = _admit_json_value(payload)
+            metadata: dict[str, Any] = {"call_id": event.get("toolCallId"),
+                                        "native_event_type": event.get("type"),
+                                        "generation_id": last_generation_id}
+            try:
+                size = len(json.dumps(payload, ensure_ascii=False, allow_nan=False).encode())
+            except (ValueError, RecursionError):
+                size = 32769
+            if diagnostic is None and size <= 32768:
+                metadata["native_payload"] = admitted
+            else:
+                metadata["native_payload_unavailable"] = "bounded_admission_failed"
+            return DiagnosticEvent(code="pi_host_tool_identity_conflict",
+                                   message="Native tool identity was reused or its completion disagreed",
+                                   metadata=metadata)
 
         def terminal_events() -> tuple[CostEvent, ResultEvent]:
             native_session = session_id or effective_session_id
@@ -863,14 +1007,14 @@ class PiBackend:
                 model_mode="single",
                 selected_tools_count=(
                     0 if finalization or tools_disabled else
-                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output)
+                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output) + int(host_tools is not None)
                     if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
-                no_extensions=read_only and native_output,
+                no_extensions=read_only and (native_output or host_tools is not None),
             ),
             model_source="configured",
             provider_source="configured" if provider is not None else None,
@@ -879,6 +1023,21 @@ class PiBackend:
 
         attachments = ExitStack()
         try:
+            if host_tools is not None:
+                host_server = _create_host_tool_server(host_tools)
+                await self._require_host_tools_version(cwd, child_env, host_tools)
+                await host_server.start()
+                host_packet = _write_prompt_attachment(json.dumps(host_server.packet()), attachments)
+                child_env["DAYDREAM_PI_HOST_PACKET"] = str(host_packet)
+                host_extension = attachments.enter_context(
+                    as_file(files("daydream.backends").joinpath("pi_host_tools.ts")))
+                if read_only and not native_output:
+                    args.append("--no-extensions")
+                if read_only:
+                    args.extend(["--extension", "builtin:mcp"])
+                args.extend(["--extension", str(host_extension)])
+            else:
+                child_env.pop("DAYDREAM_PI_HOST_PACKET", None)
             if native_output:
                 packet: dict[str, Any] = {"output_schema": output_schema}
                 if tool_call_budget is not None:
@@ -918,13 +1077,26 @@ class PiBackend:
                 raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,
             )
             self._transports.append(transport)
-            await transport.start()
+            if host_tools is not None:
+                await self._start_host_transport(transport, host_tools)
+            else:
+                await transport.start()
 
             active_tool_calls = 0
             is_first_line = True
-            async for raw_line in transport.lines(
-                lambda: tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
-            ):
+            setup_deadline = time.monotonic() + host_tools.limits.setup_timeout_s + 2 if host_tools else None
+
+            def line_timeout() -> float | None:
+                ordinary = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
+                if host_tools is None:
+                    return ordinary
+                bound = host_tools.deadline
+                if not host_ready and setup_deadline is not None:
+                    bound = min(bound, setup_deadline)
+                remaining = max(0.0, bound - time.monotonic())
+                return min(ordinary, remaining) if ordinary is not None else remaining
+
+            async for raw_line in transport.lines(line_timeout):
                 if not raw_line:
                     continue
                 try:
@@ -955,6 +1127,13 @@ class PiBackend:
                         continue
 
                 event_type = event.get("type", "")
+                if event_type == "daydream_host_tools_ready":
+                    if host_server is None or not (host_server.initialized and host_server.listed):
+                        raise PiError("Native host readiness was not established", category="HOST_TOOLS")
+                    host_ready = True
+                    continue
+                if event_type == "daydream_host_tools_failed":
+                    raise PiError("Required native host-tool binding is unavailable", category="HOST_TOOLS")
                 if lifecycle is not None and isinstance(event_type, str) and event_type in _PI_EVENT_TYPES:
                     lifecycle.native_event()
                 if event_type in {"agent_start", "turn_start", "message_start", "tool_execution_start"}:
@@ -1108,6 +1287,19 @@ class PiBackend:
                             pending_submission = admitted
 
                 elif event_type == "tool_execution_start":
+                    if host_tools is not None:
+                        native_id = event.get("toolCallId")
+                        if not isinstance(native_id, str) or not native_id or len(native_id.encode()) > 512:
+                            raise PiError("Invalid native tool identity", category="HOST_TOOLS")
+                        identity = host_event_identity(event)
+                        if native_id in seen_host_starts:
+                            if seen_host_starts[native_id] != identity:
+                                ambiguous_host_identity = True
+                                yield identity_diagnostic(event)
+                            continue
+                        if len(seen_host_starts) >= 256:
+                            raise PiError("Native tool evidence capacity exhausted", category="HOST_TOOLS")
+                        seen_host_starts[native_id] = identity
                     active_tool_calls += 1
                     if lifecycle is not None:
                         lifecycle.active_tools(active_tool_calls)
@@ -1124,6 +1316,17 @@ class PiBackend:
                         associate_submission(event.get("toolCallId"), "proposed", "started")
 
                 elif event_type == "tool_execution_end":
+                    if host_tools is not None:
+                        native_id = event.get("toolCallId")
+                        if not isinstance(native_id, str) or native_id not in seen_host_starts:
+                            raise PiError("Uncorrelated native tool result", category="HOST_TOOLS")
+                        identity = host_event_identity(event)
+                        if native_id in seen_host_results:
+                            if seen_host_results[native_id] != identity:
+                                ambiguous_host_identity = True
+                                yield identity_diagnostic(event)
+                            continue
+                        seen_host_results[native_id] = identity
                     active_tool_calls = max(0, active_tool_calls - 1)
                     if lifecycle is not None:
                         lifecycle.active_tools(active_tool_calls)
@@ -1149,7 +1352,7 @@ class PiBackend:
                         lifecycle.progress("tool")
 
                 elif event_type == "turn_end":
-                    if not native_output:
+                    if not native_output and host_tools is None:
                         active_tool_calls = 0
                         if lifecycle is not None:
                             lifecycle.active_tools(0)
@@ -1251,6 +1454,9 @@ class PiBackend:
                     pass
                 elif event_type == "agent_settled":
                     saw_native_settlement = True
+                    if host_tools is not None:
+                        host_tools.native_settled = True
+                        host_tools.close_authority()
 
                 # Streaming updates only retain content-free progress here;
                 # full output events still come from message_end/tool_execution_end.
@@ -1258,15 +1464,26 @@ class PiBackend:
             # Reap the child, then yield its terminal events before the shared
             # exit check formats the backend-specific message from the code and
             # captured stderr lines (the events must stay between the two).
-            returncode = await reap(transport)
+            returncode = await reap(transport, timeout_s=host_tools.limits.cleanup_timeout_s if host_tools else None)
 
-            native_unsettled = native_output and (
+            native_unsettled = (native_output or host_tools is not None) and (
                 active_tool_calls != 0 or open_generation_id is not None
                 or bool(incomplete_calls)
                 or any(state != "finalized" for state in submission_calls.values())
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
+                or (host_tools is not None and not host_ready)
+                or ambiguous_host_identity
             )
+            if host_server is not None and host_tools is not None:
+                await host_server.close()
+                if not host_tools.cleanup_complete:
+                    native_unsettled = True
+                yield DiagnosticEvent(code="pi_host_tools_lifecycle", message="Invocation host-tool outcomes",
+                                      metadata={"authority_closed": not host_tools.authority_open,
+                                                "native_settled": host_tools.native_settled,
+                                                "cleanup_complete": host_tools.cleanup_complete,
+                                                "calls": host_tools.calls, "rejections": host_tools.rejections})
             if native_output and returncode == 0 and not native_unsettled:
                 structured_result = pending_submission
             for terminal in terminal_events():
@@ -1286,17 +1503,31 @@ class PiBackend:
 
             if native_unsettled or (saw_turn_start and not saw_finish_reason):
                 raise PiError(
-                    "Native stream did not settle" if native_unsettled else "Stream ended without finish_reason",
+                    "Native host-tool identity conflict prevents complete correlation" if ambiguous_host_identity
+                    else "Native stream did not settle" if native_unsettled else "Stream ended without finish_reason",
                     retryable=True,
                     category="STREAM_TRUNCATION",
                 )
 
         finally:
+            if host_tools is not None:
+                host_tools.close_authority()
             try:
                 if transport is not None:
-                    await teardown(transport, self._transports)
+                    await teardown(transport, self._transports,
+                                   cleanup_timeout_s=host_tools.limits.cleanup_timeout_s if host_tools else None)
             finally:
-                attachments.close()
+                try:
+                    if host_server is not None:
+                        await host_server.close()
+                    elif host_tools is not None:
+                        await host_tools.close()
+                finally:
+                    if host_tools is not None and lifecycle is not None:
+                        lifecycle.host_tools_closed(native_settled=host_tools.native_settled,
+                                                    cleanup_complete=host_tools.cleanup_complete,
+                                                    calls=host_tools.calls, rejections=host_tools.rejections)
+                    attachments.close()
 
     async def cancel(self) -> None:
         """Terminate and reap every active Pi transport."""
