@@ -110,7 +110,9 @@ async def test_correlated_rejection_cannot_expand_response_past_frame_bound(tmp_
     async with _endpoint(binding) as (_, client):
         response = await client.post("/mcp", content=frame, headers={"Content-Type": "application/json"})
         assert len(response.content) <= limits.max_frame_bytes
-        assert "source" not in response.text
+        assert response.status_code == 200 and response.json()["id"] == "界" * 100
+        assert response.json()["result"] == {
+            "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}
     assert binding.calls == 0 and binding.cleanup_complete
 
 
