@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+from mcp.types import LATEST_PROTOCOL_VERSION
 
 from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding, HostToolLimits, HostToolRejected
 from daydream.host_tools_server import PiHostToolServer
@@ -88,8 +89,11 @@ async def test_http_admission_bounds_reject_before_tool_work(tmp_path: Path, fau
             assert (await client.get("/status")).status_code == 200
             assert (await client.get("/status")).status_code == 200
             response = await client.get("/status")
-        assert response.status_code == {"json": 400, "frame": 413, "items": 400, "depth": 400,
+        assert response.status_code == {"json": 400, "frame": 413, "items": 200, "depth": 200,
                                         "unauthorized": 403, "http-capacity": 429}[fault]
+        if fault in {"items", "depth"}:
+            assert response.json()["allowed"] is False
+        assert binding.authority_open is (fault in {"unauthorized", "http-capacity"})
     assert binding.calls == 0 and binding.cleanup_complete
 
 
@@ -115,6 +119,7 @@ async def test_escaped_invalid_unicode_is_a_bounded_frame_rejection(tmp_path: Pa
     """ASCII JSON escapes must not smuggle unencodable strings into authority or result processing.
 
     Valid UTF-8 native calls and byte-overflow cases miss escaped unpaired-surrogate strings and object keys.
+    A malformed argument still consumes its bounded identity; an unencodable identity closes authority instead.
     """
     binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10)
     packet: dict[str, Any] = {"id": "unicode", "name": NATIVE_READ_FILE, "arguments": {"path": "unused"}}
@@ -127,9 +132,64 @@ async def test_escaped_invalid_unicode_is_a_bounded_frame_rejection(tmp_path: Pa
     async with _endpoint(binding) as (_, client):
         response = await client.post("/admit", content=json.dumps(packet).encode(),
                                      headers={"Content-Type": "application/json"})
-        assert response.status_code == 400
+        assert response.status_code == 200 and response.json()["allowed"] is False
         assert len(response.content) <= binding.limits.max_frame_bytes
+        assert binding.authority_open is (field != "id")
+    assert binding.calls == (0 if field == "id" else 1) and binding.cleanup_complete
+
+
+async def test_readiness_requires_successful_sdk_results(tmp_path: Path) -> None:
+    """Real SDK HTTP-200 errors must not set readiness; intercepted native faults miss this observer."""
+    binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10)
+    initialization = {"protocolVersion": LATEST_PROTOCOL_VERSION, "capabilities": {},
+                      "clientInfo": {"name": "readiness-regression", "version": "1"}}
+    async with _endpoint(binding) as (server, client):
+        for index, (method, params, valid) in enumerate([
+            ("initialize", {}, False), ("initialize", initialization, True),
+            ("tools/list", {"cursor": 123}, False), ("tools/list", {}, True),
+        ]):
+            response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": index,
+                                                       "method": method, "params": params})
+            result = response.json()
+            assert response.status_code == 200 and result["id"] == index
+            assert "result" in result if valid else result["error"]["code"] == -32602
+            assert server.initialized is (index > 0) and server.listed is (index == 3)
+            assert (await client.get("/status")).json() == {"ready": index == 3}
     assert binding.calls == 0 and binding.cleanup_complete
+
+
+async def test_read_child_ignores_untrusted_working_directory_and_python_startup_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted read starts trusted helper code without executing repository Python startup code.
+
+    Normal granted-file reads run from the trusted checkout and miss cwd package shadowing and
+    PYTHONPATH startup hooks that execute before the helper's filesystem gate.
+    """
+    root = tmp_path.resolve()
+    allowed = root / "permitted"
+    expected = "ONLY_THE_TRUSTED_READER_MAY_RETURN_THIS\n"
+    allowed.write_text(expected)
+    untrusted = root / "untrusted"
+    package = untrusted / "daydream"
+    package.mkdir(parents=True)
+    marker = root / "untrusted-executed"
+    poison = f"open({str(marker)!r}, 'w').write('untrusted code executed')\n"
+    (package / "__init__.py").write_text(poison)
+    (package / "host_tools_read.py").write_text("print('SHADOW_MODULE_OUTPUT')\n")
+    (untrusted / "sitecustomize.py").write_text(poison)
+    binding = HostToolBinding((allowed,), deadline=time.monotonic() + 10)
+    binding.claim()
+    binding.admit("trusted-read", NATIVE_READ_FILE, {"path": str(allowed)})
+    monkeypatch.chdir(untrusted)
+    monkeypatch.setenv("PYTHONPATH", str(untrusted))
+    try:
+        result = await binding.read_file({"path": str(allowed)})
+        assert result == expected
+        assert not marker.exists()
+    finally:
+        await binding.close()
+    assert binding.calls == 1 and binding.cleanup_complete
 
 
 @pytest.mark.parametrize("fault", ["traversal", "final-symlink", "parent-symlink", "fifo", "binary",
@@ -254,7 +314,7 @@ async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
     children: list[asyncio.subprocess.Process] = []
 
     async def blocked_reader(*args: Any, **options: Any) -> asyncio.subprocess.Process:
-        if args[1:3] == ("-m", "daydream.host_tools_read"):
+        if len(args) >= 3 and args[1] == "-I" and Path(args[2]).name == "host_tools_read.py":
             script = "import os,sys; os.write(int(sys.argv[1]),b'R'); open(sys.argv[2],'rb').read(1)"
             child = await spawn(sys.executable, "-c", script, str(write_fd), str(fifo),
                                 **{**options, "pass_fds": (write_fd,)})

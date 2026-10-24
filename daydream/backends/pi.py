@@ -29,6 +29,7 @@ from typing import Any, Protocol
 
 import anyio
 
+from daydream import clock
 from daydream.backends import (
     AgentEvent,
     BackendExecutionInput,
@@ -645,7 +646,7 @@ class PiBackend:
                              stderr_policy=StderrPolicy.DRAIN_TASK)
         self._transports.append(probe)
         try:
-            allowance = min(binding.limits.setup_timeout_s, binding.deadline - time.monotonic())
+            allowance = min(binding.limits.setup_timeout_s, binding.deadline - clock.monotonic())
             async with asyncio.timeout(max(0.0, allowance)):
                 await self._start_host_transport(probe, binding)
                 lines = []
@@ -744,7 +745,7 @@ class PiBackend:
             host_tools.validate_platform()
             tool_call_budget = min(tool_call_budget, host_tools.limits.max_calls) if tool_call_budget is not None else (
                 host_tools.limits.max_calls)
-            host_tools.restrict(deadline=(time.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
+            host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
                                 tool_call_budget=tool_call_budget)
 
         args: list[str] = ["pi", "--mode", "json"]
@@ -1084,7 +1085,7 @@ class PiBackend:
 
             active_tool_calls = 0
             is_first_line = True
-            setup_deadline = time.monotonic() + host_tools.limits.setup_timeout_s + 2 if host_tools else None
+            setup_deadline = clock.monotonic() + host_tools.limits.setup_timeout_s + 2 if host_tools else None
 
             def line_timeout() -> float | None:
                 ordinary = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
@@ -1093,7 +1094,7 @@ class PiBackend:
                 bound = host_tools.deadline
                 if not host_ready and setup_deadline is not None:
                     bound = min(bound, setup_deadline)
-                remaining = max(0.0, bound - time.monotonic())
+                remaining = max(0.0, bound - clock.monotonic())
                 return min(ordinary, remaining) if ordinary is not None else remaining
 
             async for raw_line in transport.lines(line_timeout):

@@ -35,6 +35,7 @@ from daydream.host_tools import NATIVE_READ_FILE, READ_FILE, HostToolBinding, Ho
 from daydream.host_tools_server import PiHostToolServer, _ReadServer
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
+from tests.harness.fake_clock import FakeClock
 from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
 from tests.harness.trajectory import make_recorder
 
@@ -101,13 +102,15 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 
 @pytest.mark.parametrize("read_only", [False, True], ids=["ordinary", "read-only"])
 async def test_native_host_rejection_correction_records_exact_bytes_without_output_schema(
-    tmp_path: Path, native_provider: _NativeProvider, read_only: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, read_only: bool,
 ) -> None:
     """MCP authority rejects an existing forbidden file and permits correction in the same allowance.
 
     Structured-output and replay tests miss actual native MCP exposure, correlated rejection history,
     exact host bytes, prospective charging and recorder finalization without an output schema.
+    A shared fake clock also catches real-time arithmetic rejecting a valid host deadline during native setup.
     """
+    fake = FakeClock(monotonic_value=100).install(monkeypatch)
     root = tmp_path.resolve()
     allowed, forbidden = root / "permitted.txt", root / "forbidden.txt"
     expected = "Independently known bytes: café 界\nsecond line\n"
@@ -115,13 +118,13 @@ async def test_native_host_rejection_correction_records_exact_bytes_without_outp
     forbidden.write_text("FORBIDDEN_EXISTING_FILE_MUST_NOT_BE_READ")
     native_provider.turns = [[("denied", NATIVE_READ_FILE, {"path": str(forbidden)})],
                              [("corrected", NATIVE_READ_FILE, {"path": str(allowed)})]]
-    binding = HostToolBinding((allowed,), deadline=time.monotonic() + 30,
+    binding = HostToolBinding((allowed,), deadline=fake.monotonic() + 30,
                               limits=HostToolLimits(max_calls=2))
     recorder = make_recorder(root, agent_model_name="output-model", backend_name="pi")
     async with recorder:
         result, _, reason = await run_agent(PiBackend(model="output-model"), root, "Read the granted file.",
             phase=DaydreamPhase.REVIEW, read_only=read_only, persist_session=False, tool_call_budget=2,
-            host_tools=binding, progress_callback=lambda _: None)
+            host_tools=binding, wall_budget_s=30, progress_callback=lambda _: None)
 
     assert reason is None and "Native reasoning 2." in result
     assert len(native_provider.requests) == 3
@@ -356,13 +359,19 @@ async def test_required_host_binding_rejects_unsupported_mode_before_provider(
 
 
 @pytest.mark.parametrize("allowance", [1, 2], ids=["spent-by-schema-rejection", "correction-capacity"])
-@pytest.mark.parametrize("invalid_arguments", [{}, {"path": "x" * 20_000}], ids=["missing", "oversized"])
+@pytest.mark.parametrize("invalid_arguments", [
+    pytest.param({}, id="missing"),
+    pytest.param({"path": "x" * 20_000}, id="oversized"),
+    pytest.param({f"x{i}": "a" for i in range(70)}, id="items"),
+    pytest.param(json.loads('{"path":' + "[" * 18 + "0" + "]" * 18 + "}"), id="depth"),
+])
 async def test_native_schema_rejection_spends_original_host_allowance(
     tmp_path: Path, native_provider: _NativeProvider, allowance: int, invalid_arguments: dict[str, Any],
 ) -> None:
     """Native validation failures consume capacity before any corrected filesystem effect.
 
-    The Python authorization journey has valid native schemas and cannot catch charging after native validation.
+    The Python authorization journey has valid native schemas and cannot catch charging after native validation
+    or outer transport rejection of item/depth arguments before the native tool_call hook.
     Drive the adapter directly so run_agent's later observer cannot accidentally enforce the asserted admission.
     """
     allowed = tmp_path.resolve() / "permitted.txt"
@@ -478,7 +487,8 @@ async def test_native_cached_backend_cancellation_joins_callback_before_freeze_a
     children: list[asyncio.subprocess.Process] = []
 
     async def blocking_spawn(*args: Any, **options: Any) -> asyncio.subprocess.Process:
-        if args[1:3] == ("-m", "daydream.host_tools_read") and args[3] == str(blocked_path):
+        if (len(args) >= 4 and args[1] == "-I" and Path(args[2]).name == "host_tools_read.py"
+                and args[3] == str(blocked_path)):
             script = "import os,sys; os.write(int(sys.argv[1]),b'R'); open(sys.argv[2],'rb').read(1)"
             child = await spawn(sys.executable, "-c", script, str(write_fd), str(release_fifo),
                                 **{**options, "pass_fds": (write_fd,)})

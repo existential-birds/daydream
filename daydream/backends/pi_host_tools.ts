@@ -66,8 +66,9 @@ export default function (pi: ExtensionAPI) {
         id: event.toolCallId, name: event.toolName, arguments: argumentsValue,
       }));
     } catch {
-      if (admissions.size < 256) admissions.set(event.toolCallId, { allowed: false,
-        error: "Host-tool authority is unavailable or expired" });
+      // Without a confirmed host admission this invocation cannot authorize
+      // later calls, even when Pi rejects this call before tool_call fires.
+      failed = true;
     }
   });
   pi.on("tool_call", async event => {

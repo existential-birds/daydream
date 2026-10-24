@@ -21,7 +21,7 @@ import anyio
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import Tool, ToolAnnotations
+from mcp.types import InitializeResult, ListToolsResult, Tool, ToolAnnotations
 from starlette.types import Message, Receive, Scope, Send
 
 from daydream import clock
@@ -133,15 +133,20 @@ class PiHostToolServer:
             await self.app(scope, receive, send)
             return
         headers = dict(scope["headers"])
+        authorized = headers.get(b"authorization", b"") == ("Bearer " + self._secret).encode()
         if sum(len(key) + len(value) for key, value in scope["headers"]) > self.binding.limits.max_frame_bytes:
+            if authorized and scope["path"] == "/admit":
+                self.binding.close_authority()
             await self._reply(send, 431, {"error": "Host header byte limit exceeded"})
             return
-        if headers.get(b"authorization", b"") != ("Bearer " + self._secret).encode():
+        if not authorized:
             await self._reply(send, 403, {"error": "Unauthorized transport"})
             return
         self._requests += 1
         if (self._requests > self.binding.limits.max_http_requests
                 or self._active >= self.binding.limits.max_in_flight + 2):
+            if scope["path"] == "/admit":
+                self.binding.close_authority()
             await self._reply(send, 429, {"error": "Host transport capacity exhausted"})
             return
         self._active += 1
@@ -156,14 +161,20 @@ class PiHostToolServer:
                 length = headers.get(b"content-length")
                 if length is not None and (len(length) > 20 or not length.isdigit()
                                            or int(length) > self.binding.limits.max_frame_bytes):
+                    if scope["path"] == "/admit":
+                        self.binding.close_authority()
                     await self._reply(send, 413, {"error": "Host frame byte limit exceeded"})
                     return
                 while True:
                     chunk = await receive()
                     if chunk["type"] == "http.disconnect":
+                        if scope["path"] == "/admit":
+                            self.binding.close_authority()
                         return
                     data = chunk.get("body", b"")
                     if len(body) + len(data) > self.binding.limits.max_frame_bytes:
+                        if scope["path"] == "/admit":
+                            self.binding.close_authority()
                         await self._reply(send, 413, {"error": "Host frame byte limit exceeded"})
                         return
                     body.extend(data)
@@ -171,20 +182,30 @@ class PiHostToolServer:
                         break
                 try:
                     value = json.loads(body) if body else {}
-                    _bounded_items(value, self.binding.limits.max_items)
                     if not isinstance(value, dict):
                         raise ValueError("expected object")
                 except (ValueError, UnicodeError, RecursionError):
+                    if scope["path"] == "/admit":
+                        self.binding.close_authority()
                     await self._reply(send, 400, {"error": "Invalid bounded host frame"})
                     return
                 if scope["path"] == "/admit" and scope["method"] == "POST":
                     response: dict[str, Any]
                     try:
+                        try:
+                            _bounded_items(value, self.binding.limits.max_items)
+                        except (ValueError, UnicodeError, RecursionError):
+                            self.binding.reject_admission(value.get("id"), value.get("name"))
                         self.binding.admit(value.get("id"), value.get("name"), value.get("arguments"))
                         response = {"allowed": True}
                     except HostToolRejected as exc:
                         response = {"allowed": False, "error": str(exc)}
                     await self._reply(send, 200, response)
+                    return
+                try:
+                    _bounded_items(value, self.binding.limits.max_items)
+                except (ValueError, UnicodeError, RecursionError):
+                    await self._reply(send, 400, {"error": "Invalid bounded host frame"})
                     return
                 if scope["path"] != "/mcp":
                     await self._reply(send, 404, {"error": "Unknown host endpoint"})
@@ -240,12 +261,28 @@ class PiHostToolServer:
                     return
                 for message in response_messages:
                     await send(message)
-                if success:
-                    if method == "initialize":
-                        self.initialized = True
-                    elif method == "tools/list" and self.initialized:
-                        self.listed = True
+                if success and request_id is not None and method in {"initialize", "tools/list"}:
+                    # HTTP 200 also carries JSON-RPC errors. Readiness belongs
+                    # only to a successful, correlated SDK protocol result.
+                    try:
+                        result = json.loads(b"".join(message.get("body", b"") for message in response_messages))
+                        _bounded_items(result, self.binding.limits.max_items)
+                        if (not isinstance(result, dict) or result.get("jsonrpc") != "2.0"
+                                or type(result.get("id")) is not type(request_id)
+                                or result.get("id") != request_id or "error" in result):
+                            return
+                        if method == "initialize":
+                            InitializeResult.model_validate(result.get("result"))
+                            self.initialized = True
+                        elif self.initialized:
+                            tools = ListToolsResult.model_validate(result.get("result")).tools
+                            self.listed = (len(tools) == 1 and tools[0].name == READ_FILE.name
+                                           and tools[0].inputSchema == READ_FILE.schema())
+                    except (ValueError, UnicodeError, RecursionError):
+                        return
         except TimeoutError:
+            if scope["path"] == "/admit":
+                self.binding.close_authority()
             # Do not replace an already-started SDK response with another frame.
             return
         finally:

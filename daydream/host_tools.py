@@ -153,26 +153,37 @@ class HostToolBinding:
 
     def admit(self, call_id: Any, name: Any, arguments: Any) -> None:
         """Charge the native callback once, before the native tool can execute."""
+        self._charge(call_id, name)
+        if name == NATIVE_READ_FILE:
+            key = self._arguments_key(arguments)
+            self._admitted[call_id] = key
+            self._pending.setdefault(key, []).append(call_id)
+
+    def reject_admission(self, call_id: Any, name: Any) -> None:
+        """Charge a bounded identity whose frame cannot grant a callback."""
+        self._charge(call_id, name)
+        raise self._reject("Invalid bounded host frame")
+
+    def _charge(self, call_id: Any, name: Any) -> None:
         self._check_open()
         try:
             identity_bytes = len(call_id.encode()) if isinstance(call_id, str) else 0
         except UnicodeError:
+            self.close_authority()
             raise self._reject("Invalid native tool identity") from None
         if (not isinstance(call_id, str) or not call_id or identity_bytes > 512
                 or not isinstance(name, str) or len(name) > 256):
+            self.close_authority()
             raise self._reject("Invalid native tool identity")
         if call_id in self._admitted:
             raise self._reject("Native tool identity was already charged")
         if len(self._admitted) >= self.limits.max_calls:
+            self.close_authority()
             raise self._reject("Host-tool call capacity exhausted")
         self.calls += 1
         self._admitted[call_id] = None
         if self.calls > self._call_limit:
             raise self._reject("Original cumulative tool allowance exhausted")
-        if name == NATIVE_READ_FILE:
-            key = self._arguments_key(arguments)
-            self._admitted[call_id] = key
-            self._pending.setdefault(key, []).append(call_id)
 
     def _arguments_key(self, arguments: Any) -> str:
         try:
@@ -214,7 +225,8 @@ class HostToolBinding:
             timeout = min(self.limits.callback_timeout_s, self.deadline - clock.monotonic())
             async with asyncio.timeout(timeout):
                 spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                    sys.executable, "-m", "daydream.host_tools_read", path, str(self.limits.max_result_bytes),
+                    sys.executable, "-I", str(Path(__file__).resolve().with_name("host_tools_read.py")),
+                    path, str(self.limits.max_result_bytes),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                     start_new_session=True, limit=self.limits.max_result_bytes + 1024,
@@ -329,4 +341,3 @@ class HostToolBinding:
                 self.mark_cleanup_failed()
         self.cleanup_complete = (not self._cleanup_failed and not self._callbacks and not self._children
                                  and not self._spawns and not self._late_cleanup)
-

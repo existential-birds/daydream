@@ -52,8 +52,9 @@ is a tool result, so a corrected request remains in the same native history.
 Host admission does not emit synthetic tool events or provider billing.
 
 Invocation lifecycle observations distinguish authority closure, native
-settlement, callback/read-process completion, and endpoint cleanup. Cleanup runs
-before those observations freeze, including cancellation and setup failure.
+settlement, and aggregate cleanup across callbacks, read processes, and the
+endpoint. Cleanup runs before those observations freeze, including cancellation
+and setup failure.
 Missing native settlement remains incomplete even when the host read succeeded;
 missing cleanup proof cannot be inferred from a suppressed late result.
 
