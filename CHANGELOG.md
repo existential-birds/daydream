@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **pi:** bind an invocation-scoped, bounded host file-read operation through
+  native MCP, with pre-provider readiness checks, correctable authorization
+  errors, exact permitted bytes, and separate authority/settlement/cleanup
+  evidence ([#1620](https://github.com/existential-birds/daydream/issues/1620)).
+  The optional API is compatible with extension API 8. The `host-tools` extra
+  supplies the supported SDK; bound calls require verified Pi 1.4.0 and POSIX
+  file access and do not enable Improve isolation. Ordinary calls remain usable
+  with SDK 2 consumers such as the standalone RL package.
+
 ### Changed
 
 - Reduce the README to agent setup, code review, and research entry points; remove

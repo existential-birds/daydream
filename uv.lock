@@ -573,6 +573,11 @@ dependencies = [
 benchmark = [
     { name = "harbor" },
 ]
+host-tools = [
+    { name = "mcp" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
 hub = [
     { name = "huggingface-hub" },
 ]
@@ -603,6 +608,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "huggingface-hub", marker = "extra == 'hub'", specifier = ">=2.2.0" },
     { name = "jsonschema", specifier = ">=4.0" },
+    { name = "mcp", marker = "extra == 'host-tools'", specifier = "==1.30.0" },
     { name = "opentelemetry-api", specifier = ">=1.45.1,<2" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.42,<2" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.42,<2" },
@@ -614,14 +620,16 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.32,<3" },
     { name = "rich", specifier = ">=15.0.0" },
+    { name = "starlette", marker = "extra == 'host-tools'", specifier = ">=0.27" },
     { name = "traceloop-sdk", specifier = "==0.62.4" },
     { name = "tree-sitter", specifier = "==0.25.2" },
     { name = "tree-sitter-go", specifier = "==0.25.0" },
     { name = "tree-sitter-python", specifier = "==0.25.0" },
     { name = "tree-sitter-rust", specifier = "==0.24.2" },
     { name = "tree-sitter-typescript", specifier = "==0.23.2" },
+    { name = "uvicorn", marker = "extra == 'host-tools'", specifier = ">=0.31.1" },
 ]
-provides-extras = ["benchmark", "hub"]
+provides-extras = ["benchmark", "hub", "host-tools"]
 
 [package.metadata.requires-dev]
 dev = [

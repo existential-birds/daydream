@@ -129,6 +129,11 @@ class BackendLifecycleSnapshot:
     loop_sample_count: int = 0
     last_loop_sample_s: float | None = None
     loop_max_lag_s: float = 0.0
+    host_authority_closed: bool | None = None
+    host_native_settled: bool | None = None
+    host_cleanup_complete: bool | None = None
+    host_tool_call_count: int = 0
+    host_tool_rejection_count: int = 0
 
     def __post_init__(self) -> None:
         allowed_strings = {
@@ -151,6 +156,8 @@ class BackendLifecycleSnapshot:
                 valid = value is None or (type(value) is int and -_MAX_COUNT <= value <= _MAX_COUNT)
             elif field.name in {"idle_detection_enabled", "generation_open", "cleanup_expired"}:
                 valid = type(value) is bool
+            elif field.name in {"host_authority_closed", "host_native_settled", "host_cleanup_complete"}:
+                valid = value is None or type(value) is bool
             elif field.name == "attempt" or field.name.endswith("_count"):
                 valid = type(value) is int and (1 if field.name == "attempt" else 0) <= value <= _MAX_COUNT
             else:
@@ -316,6 +323,13 @@ class BackendLifecycleCollector:
         bounded_count = min(_MAX_COUNT, max(0, count))
         if bounded_count != self._snapshot.active_tool_count:
             self._update(active_tool_count=bounded_count, last_progress_s=self._elapsed())
+
+    def host_tools_closed(self, *, native_settled: bool, cleanup_complete: bool,
+                          calls: int, rejections: int) -> None:
+        """Retain separate host facts even when the event stream was cancelled."""
+        self._update(host_authority_closed=True, host_native_settled=native_settled,
+                     host_cleanup_complete=cleanup_complete, host_tool_call_count=min(_MAX_COUNT, calls),
+                     host_tool_rejection_count=min(_MAX_COUNT, rejections))
 
     def finalize(self) -> BackendLifecycleSnapshot | None:
         """Freeze without awaiting or yielding, including cancellation/GeneratorExit."""

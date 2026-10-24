@@ -6,6 +6,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -76,6 +78,65 @@ from tests.harness.stub_backend import (
     stage_result,
 )
 from tests.harness.trajectory import make_recorder
+
+
+def test_ordinary_pi_fresh_process_does_not_require_optional_host_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordinary Pi remains importable and executable when bundled FastMCP is unavailable.
+
+    In-process backend tests preload modules from the all-extras environment, hiding eager imports that
+    break consumers such as the independently locked RL project using MCP 2.
+    """
+    fixture = install_protocol_cli(tmp_path / "external", "pi")
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_PROVIDER", "nous")
+    monkeypatch.delenv("PI_API_KEY", raising=False)
+    script = '''
+import asyncio
+import importlib.abc
+import sys
+from pathlib import Path
+import claude_agent_sdk
+import mcp.types
+
+# SDK 1's mandatory Claude SDK dependency itself imports bundled FastMCP.
+# Bootstrap that independent dependency, then make the optional component
+# unavailable before any Daydream import. No Daydream module is preloaded.
+for name in tuple(sys.modules):
+    if name.startswith("mcp.server.fastmcp"):
+        del sys.modules[name]
+for name in ("FastMCP", "fastmcp"):
+    if hasattr(mcp.server, name):
+        delattr(mcp.server, name)
+assert not any(name == "daydream" or name.startswith("daydream.") for name in sys.modules)
+
+class MissingOptionalRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "daydream.host_tools_server" or fullname.startswith("mcp.server.fastmcp"):
+            raise ImportError("bundled FastMCP is unavailable in this environment")
+        return None
+
+sys.meta_path.insert(0, MissingOptionalRuntime())
+from daydream.backends.pi import PiBackend
+from daydream.backends import ResultEvent, TextEvent
+
+async def main():
+    events = [event async for event in PiBackend(model="fixture-model").execute(
+        Path(sys.argv[1]), "Ordinary Pi call", persist_session=False)]
+    assert any(isinstance(event, ResultEvent) for event in events)
+    assert [event.text for event in events if isinstance(event, TextEvent)] == ["CURRENT_REASONING_CANARY"]
+
+asyncio.run(main())
+assert "daydream.host_tools_server" not in sys.modules
+assert "mcp.server.fastmcp" not in sys.modules
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(target)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    observation, = fixture.read_observations()
+    assert observation["process_outcome"] == "success"
 
 
 @pytest.mark.parametrize("kind", ["text", "thinking", "toolcall", "tool", "diagnostic"])
