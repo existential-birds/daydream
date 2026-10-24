@@ -12,6 +12,7 @@ import shlex
 import time
 import tomllib
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,9 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
         declared_timeout = _declared_outer_timeout(Path(self.logs_dir))
         collection_allowance = SHUTDOWN_GRACE_SECONDS + FORCE_REAP_SECONDS + 10
         execution_allowance = None if declared_timeout is None else math.ceil(declared_timeout + collection_allowance)
-        command = ('python -I -m daydream.benchmark.reviewbench.harbor_process --invocation ' + invocation)
+        command = f'python -I -m daydream.benchmark.reviewbench.harbor_process --invocation {invocation}'
         if declared_timeout is not None:
-            command += ' --outer-timeout ' + str(declared_timeout)
+            command += f' --outer-timeout {declared_timeout}'
         execution = asyncio.create_task(environment.exec(command, cwd='/work/repo', timeout_sec=execution_allowance))
         try:
             result = await asyncio.shield(execution)
@@ -89,25 +90,16 @@ class DaydreamPublicReviewAgent(BaseAgent):  # type: ignore[misc]
             # One absolute bound also applies across repeated cancellation.
             deadline = time.monotonic() + collection_allowance
 
-            async def stop_and_collect() -> None:
+            with suppress(Exception):
                 while time.monotonic() < deadline:
                     if execution.done() and (not execution.cancelled() and execution.exception() is None
                             or _process_completion_observed(Path(self.logs_dir), invocation)):
-                        return
-                    await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-
-            cleanup = asyncio.create_task(stop_and_collect())
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    continue
-                except Exception:
-                    break
+                        break
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
             # Detached noncooperative collectors must not hold the agent's
             # cancellation open indefinitely; the supervisor has its own bound.
             execution.add_done_callback(_consume_task_result)
-            cleanup.add_done_callback(_consume_task_result)
             try:
                 from daydream.benchmark.reviewbench.harbor_process import publish_diagnostic_bytes
 

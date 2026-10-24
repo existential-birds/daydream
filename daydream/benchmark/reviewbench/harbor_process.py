@@ -12,10 +12,12 @@ import stat
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from daydream.redaction import redact_structured_text
 
@@ -28,34 +30,18 @@ STOP_REASONS = ('host_task_cancelled', 'host_execution_failed')
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
-@contextmanager
-def _directory(parent: int, parts: Sequence[str], *, create: bool = False) -> Iterator[int]:
-    """Walk each diagnostic directory component relative to an anchored descriptor."""
-    descriptor = os.dup(parent)
+def _open_diagnostic(directory: int, name: str, flags: int) -> int:
+    """Preserve symlink rejection for descriptor-relative diagnostic opens."""
     try:
-        for part in parts:
-            if part in {'', '.', '..'} or '/' in part or '\\' in part:
-                raise ValueError('unsafe diagnostic directory component')
-            if create:
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-            try:
-                child = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
-            except OSError as exc:
-                try:
-                    symbolic = stat.S_ISLNK(os.stat(part, dir_fd=descriptor, follow_symlinks=False).st_mode)
-                except OSError:
-                    symbolic = False
-                if symbolic:
-                    raise ValueError('diagnostic symlink rejected') from exc
-                raise
-            os.close(descriptor)
-            descriptor = child
-        yield descriptor
-    finally:
-        os.close(descriptor)
+        return os.open(name, flags, dir_fd=directory)
+    except OSError as exc:
+        try:
+            symbolic = stat.S_ISLNK(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode)
+        except OSError:
+            symbolic = False
+        if symbolic:
+            raise ValueError('diagnostic symlink rejected') from exc
+        raise
 
 
 @contextmanager
@@ -64,64 +50,52 @@ def _absolute_directory(path: Path, *, create: bool = False) -> Iterator[int]:
     absolute = path.absolute()
     descriptor = os.open(absolute.anchor, _DIRECTORY_FLAGS)
     try:
-        with _directory(descriptor, absolute.parts[1:], create=create) as opened:
-            yield opened
+        for part in absolute.parts[1:]:
+            if part in {'', '.', '..'} or '/' in part or '\\' in part:
+                raise ValueError('unsafe diagnostic directory component')
+            if create:
+                with suppress(FileExistsError):
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+            child = _open_diagnostic(descriptor, part, _DIRECTORY_FLAGS)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
     finally:
         os.close(descriptor)
-
-
-def _create_bytes(directory: int, relative: Path, body: bytes) -> None:
-    """Flush and exclusively link one flat file below an anchored directory."""
-    temporary = '.diagnostic-' + uuid.uuid4().hex + '.tmp'
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600, dir_fd=directory)
-    try:
-        with os.fdopen(descriptor, 'wb') as stream:
-            stream.write(body)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.link(temporary, relative.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        os.fsync(directory)
-    finally:
-        with suppress(OSError):
-            os.unlink(temporary, dir_fd=directory)
 
 
 def publish_diagnostic_bytes(path: Path, body: bytes) -> None:
     """Publish one host diagnostic without following ancestry or replacing bytes."""
     with _absolute_directory(path.parent, create=True) as directory:
-        _create_bytes(directory, Path(path.name), body)
-
-
-def _read_bytes(directory: int, relative: Path, limit: int) -> bytes:
-    """Read only a regular file through no-follow descriptor-relative parents."""
-    try:
-        descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                             dir_fd=directory)
-    except OSError as exc:
+        temporary = '.diagnostic-' + uuid.uuid4().hex + '.tmp'
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
         try:
-            symbolic = stat.S_ISLNK(os.stat(relative.name, dir_fd=directory, follow_symlinks=False).st_mode)
-        except OSError:
-            symbolic = False
-        if symbolic:
-            raise ValueError('diagnostic symlink rejected') from exc
-        raise
-    with os.fdopen(descriptor, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError('diagnostic file must be regular')
-        if info.st_size > limit:
-            raise ValueError('diagnostic file exceeds read limit')
-        body = stream.read(limit + 1)
-        if len(body) > limit:
-            raise ValueError('diagnostic file exceeds read limit')
-        return body
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            os.fsync(directory)
+        finally:
+            with suppress(OSError):
+                os.unlink(temporary, dir_fd=directory)
 
 
 def read_diagnostic_bytes(path: Path, limit: int = 65536) -> bytes:
     """Read bounded regular diagnostic bytes through no-follow anchored parents."""
     with _absolute_directory(path.parent) as directory:
-        return _read_bytes(directory, Path(path.name), limit)
+        descriptor = _open_diagnostic(directory, path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError('diagnostic file must be regular')
+            if info.st_size > limit:
+                raise ValueError('diagnostic file exceeds read limit')
+            body = stream.read(limit + 1)
+            if len(body) > limit:
+                raise ValueError('diagnostic file exceeds read limit')
+            return body
 
 
 def _enable_subreaper() -> bool:
@@ -145,137 +119,46 @@ def cancellation_marker(logs: Path, invocation: str) -> Path:
 
 def _requested_interruption(environment: dict[str, str], invocation: str) -> str | None:
     evidence = Path(environment.get('DAYDREAM_RB_EVIDENCE', '/logs/agent/daydream'))
-    try:
+    with suppress(OSError, ValueError):
         marker = json.loads(read_diagnostic_bytes(cancellation_marker(evidence.parent, invocation), limit=1024))
         for reason in STOP_REASONS:
             if marker == {'invocation_id': invocation, 'interruption': reason}:
                 return reason
-    except (OSError, ValueError):
-        pass
     return None
 
 
-def _reap_adopted(owned: dict[int, str], reviewer_pid: int) -> None:
-    for pid in owned:
-        if pid == reviewer_pid:
-            continue  # asyncio owns the direct reviewer's exit/reap.
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            pass
-
-def _process_table() -> dict[int, tuple[int, str]]:
-    """Read parentage and start identity; no executable-name matching or killing."""
-    if Path('/proc/self/stat').is_file():
-        result: dict[int, tuple[int, str]] = {}
-        for path in Path('/proc').iterdir():
-            if not path.name.isdecimal():
-                continue
-            try:
-                fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
-                result[int(path.name)] = int(fields[1]), fields[19]
-            except (OSError, ValueError, IndexError):
-                continue
-        return result
-    if sys.platform == 'darwin':
-        return _darwin_process_table()
-    raise OSError('reviewer process ownership unavailable on this platform')
-
-
-class _DarwinProcessInfo(ctypes.Structure):
-    # macOS SDK sys/proc_info.h proc_bsdinfo (PROC_PIDTBSDINFO). Keep the
-    # declared layout so start identities retain microsecond precision.
-    _fields_ = [
-        ('flags', ctypes.c_uint32), ('status', ctypes.c_uint32), ('exit_status', ctypes.c_uint32),
-        ('pid', ctypes.c_uint32), ('ppid', ctypes.c_uint32), ('uid', ctypes.c_uint32),
-        ('gid', ctypes.c_uint32), ('real_uid', ctypes.c_uint32), ('real_gid', ctypes.c_uint32),
-        ('saved_uid', ctypes.c_uint32), ('saved_gid', ctypes.c_uint32), ('reserved', ctypes.c_uint32),
-        ('command', ctypes.c_char * 16), ('name', ctypes.c_char * 32),
-        ('file_count', ctypes.c_uint32), ('process_group', ctypes.c_uint32),
-        ('job_control', ctypes.c_uint32), ('terminal_device', ctypes.c_uint32),
-        ('terminal_group', ctypes.c_uint32), ('nice', ctypes.c_int32),
-        ('started_seconds', ctypes.c_uint64), ('started_microseconds', ctypes.c_uint64),
-    ]
-
-
-def _darwin_process_table() -> dict[int, tuple[int, str]]:
-    """Read kernel ownership directly, without a subprocess deadline under load."""
-    library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    library.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    library.proc_listallpids.restype = ctypes.c_int
-    library.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-    library.proc_pidinfo.restype = ctypes.c_int
-    count = library.proc_listallpids(None, 0)
-    if count <= 0:
-        raise OSError(ctypes.get_errno(), 'reviewer process enumeration unavailable')
-    # Kernel process counts can grow between sizing and reading. A bounded
-    # retry avoids silently accepting a truncated ownership table.
-    for _ in range(2):
-        capacity = count + 128
-        processes = (ctypes.c_int * capacity)()
-        copied = library.proc_listallpids(processes, ctypes.sizeof(processes))
-        if 0 < copied < capacity:
-            break
-        count = capacity * 2
-    else:
-        raise OSError('reviewer process enumeration did not settle')
-    result: dict[int, tuple[int, str]] = {}
-    for pid in processes[:copied]:
-        if pid <= 0:
+def _descendants(parent: psutil.Process, reviewer_pid: int) -> dict[int, psutil.Process]:
+    """Admit current descendants independently of the process enumeration snapshot."""
+    owned = {}
+    for process in parent.children(recursive=True):
+        if process.pid == reviewer_pid:
             continue
-        information = _DarwinProcessInfo()
-        size = ctypes.sizeof(information)
-        if library.proc_pidinfo(pid, 3, 0, ctypes.byref(information), size) != size:
-            continue  # A process can exit between enumeration and its query.
-        if int(information.pid) != pid:
-            raise OSError('reviewer process identity differs')
-        result[pid] = (int(information.ppid),
-            f'{int(information.started_seconds)}:{int(information.started_microseconds)}')
-    if os.getpid() not in result:
-        raise OSError('reviewer process identity unavailable')
-    return result
+        with suppress(psutil.NoSuchProcess):
+            if parent in process.parents():
+                owned[process.pid] = process
+    return owned
 
 
-def _descendants(pid: int, table: dict[int, tuple[int, str]]) -> dict[int, str]:
-    owned: dict[int, str] = {}
-    parents = {pid}
-    while True:
-        found = {child for child, (parent, _) in table.items() if parent in parents and child not in owned}
-        if not found:
-            return owned
-        owned.update((child, table[child][1]) for child in found)
-        parents = found
-
-
-def _signal_owned(owned: dict[int, str], signum: int) -> None:
-    table = _process_table()
-    for pid, identity in owned.items():
-        if table.get(pid, (None, None))[1] != identity:
-            continue
-        try:
-            os.kill(pid, signum)
-        except ProcessLookupError:
-            pass
+def _signal_owned(owned: dict[int, psutil.Process], signum: int) -> None:
+    for process in owned.values():
+        with suppress(psutil.NoSuchProcess):
+            process.send_signal(signum)
 
 
 async def _join_owned_processes(
-    child: asyncio.subprocess.Process, owned: dict[int, str], *, subreaper: bool,
+    child: asyncio.subprocess.Process, owned: dict[int, psutil.Process], parent: psutil.Process, *, subreaper: bool,
 ) -> None:
     """Discover pipe-holding descendants before joining the reviewer's exit."""
-    parent = os.getpid() if subreaper else child.pid
     while True:
-        table = _process_table()
-        owned.update(_descendants(parent, table))
-        owned.pop(child.pid, None)
+        owned.update(_descendants(parent, child.pid))
         _signal_owned(owned, signal.SIGKILL)
         if subreaper:
-            _reap_adopted(owned, child.pid)
-        after_reap = _process_table()
-        owned.update(_descendants(parent, after_reap))
-        owned.pop(child.pid, None)
-        remaining = {pid: identity for pid, identity in owned.items()
-                     if after_reap.get(pid, (None, None))[1] == identity}
-        if child.returncode is not None and not remaining:
+            for process in owned.values():
+                if process.is_running():
+                    with suppress(ChildProcessError):
+                        os.waitpid(process.pid, os.WNOHANG)
+        owned.update(_descendants(parent, child.pid))
+        if child.returncode is not None and not any(process.is_running() for process in owned.values()):
             # A wait registered before exit can depend on inherited pipe EOF.
             # Observe exit and clean late adoptions before registering that wait.
             await child.wait()
@@ -339,7 +222,8 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
     """Own the exact child, stop inference on cancellation, bound export and reap."""
     cancellation_marker(Path("/"), invocation)  # Validate before starting a reviewer.
     subreaper = _enable_subreaper()
-    _process_table()  # Refuse startup if exact descendant ownership is unavailable.
+    parent = psutil.Process()
+    parent.children(recursive=True)  # Refuse startup if descendant ownership is unavailable.
     started = time.monotonic()
     output, stderr = bytearray(), bytearray()
     output_flags: dict[str, bool] = {}
@@ -365,15 +249,13 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
     assert child.stdout is not None and child.stderr is not None
     readers = [asyncio.create_task(_capture(child.stdout, output, output_flags)),
                asyncio.create_task(_capture(child.stderr, stderr, stderr_flags))]
-    owned: dict[int, str] = {}
+    owned: dict[int, psutil.Process] = {}
     cancellation_at: float | None = None
     force_at: float | None = None
-    signalled: dict[int, str] = {}
+    signalled: dict[int, psutil.Process] = {}
     try:
         while child.returncode is None:
-            table = _process_table()
-            owned.update(_descendants(os.getpid() if subreaper else child.pid, table))
-            owned.pop(child.pid, None)
+            owned.update(_descendants(parent, child.pid))
             reason = _requested_interruption(environment, invocation)
             if reason is not None and cancellation_at is None:
                 cancellation_at = time.monotonic()
@@ -385,7 +267,7 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
                 _signal_owned(owned, signal.SIGTERM)
                 signalled.update(owned)
             if cancellation_at is not None:
-                newly_owned = {pid: identity for pid, identity in owned.items() if signalled.get(pid) != identity}
+                newly_owned = {pid: process for pid, process in owned.items() if signalled.get(pid) != process}
                 _signal_owned(newly_owned, signal.SIGTERM)
                 signalled.update(newly_owned)
             if cancellation_at is not None and time.monotonic() - cancellation_at >= SHUTDOWN_GRACE_SECONDS:
@@ -396,7 +278,7 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
                 break
             await asyncio.sleep(0.05)
         async with asyncio.timeout(FORCE_REAP_SECONDS):
-            await _join_owned_processes(child, owned, subreaper=subreaper)
+            await _join_owned_processes(child, owned, parent, subreaper=subreaper)
             receipt['owned_descendants_cleanup'] = 'joined' if subreaper else 'observed_exits'
             await asyncio.gather(*readers)
         if cancellation_at is not None and force_at is None:
@@ -409,7 +291,7 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
         try:
             async with asyncio.timeout(FORCE_REAP_SECONDS):
                 try:
-                    await _join_owned_processes(child, owned, subreaper=subreaper)
+                    await _join_owned_processes(child, owned, parent, subreaper=subreaper)
                 except Exception:
                     receipt['owned_descendants_cleanup'] = 'unavailable_process_table'
                     await child.wait()

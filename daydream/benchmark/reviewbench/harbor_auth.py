@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +42,9 @@ def _read(path: Path) -> dict[str, Any]:
             time.sleep(0.01)
 
 
-def _text(value: Any) -> str:
+def _require_text(value: Any) -> None:
     if not isinstance(value, str) or not value:
         raise SubscriptionAuthError("subscription OAuth credentials are incomplete")
-    return value
 
 
 def validate_subscription_home(home: Path) -> None:
@@ -57,7 +56,7 @@ def validate_subscription_home(home: Path) -> None:
     if not isinstance(tokens, dict):
         raise SubscriptionAuthError("subscription OAuth credentials are incomplete")
     for key in ("access_token", "refresh_token", "account_id", "id_token"):
-        _text(tokens.get(key))
+        _require_text(tokens.get(key))
     try:
         payload = tokens["access_token"].split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
@@ -75,7 +74,7 @@ def validate_judge_home(home: Path) -> None:
     if set(value) != {"openai-codex"} or not isinstance(credential, dict) or credential.get("type") != "oauth":
         raise SubscriptionAuthError("judge requires a dedicated Pi openai-codex OAuth login")
     for key in ("access", "refresh", "accountId"):
-        _text(credential.get(key))
+        _require_text(credential.get(key))
     if type(credential.get("expires")) not in (int, float):
         raise SubscriptionAuthError("judge subscription access token has no usable expiry")
 
@@ -88,7 +87,7 @@ def validate_pi_reviewer_home(home: Path, provider: str | None) -> None:
     credential = value.get(provider)
     if set(value) != {provider} or not isinstance(credential, dict) or credential.get('type') != 'api_key':
         raise SubscriptionAuthError('selected native Pi provider credential is unavailable')
-    _text(credential.get('key'))
+    _require_text(credential.get('key'))
 
 
 def validate_credential_stores(reviewer: Path, judge: Path, *,
@@ -169,20 +168,14 @@ def _run_judge(command: Sequence[str], environment: Mapping[str, str]) -> int:
                 return process.wait()
             finally:
                 if process.poll() is None:
-                    try:
+                    with suppress(subprocess.TimeoutExpired, ProcessLookupError):
                         os.killpg(process.pid, signal.SIGTERM)
                         process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    except ProcessLookupError:
-                        pass
                 # A leader can exit while a tool descendant ignores SIGTERM.
                 # Terminate the remaining group before disposing of its state,
                 # including descendants left behind after an ordinary exit.
-                try:
+                with suppress(ProcessLookupError):
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 process.wait()
     finally:
         signal.signal(signal.SIGTERM, previous)
