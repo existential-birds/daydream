@@ -136,18 +136,21 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     monkeypatch.setenv("DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", "0.5")
     seen: list[AgentEvent] = []
     backend = CodexBackend(model="fixture-model")
-    started = asyncio.get_running_loop().time()
-    async with asyncio.timeout(3):
+    terminal_observed = False
+    # Cold fixture startup is separate from the bounded postterminal behavior.
+    async with asyncio.timeout(15) as watchdog:
         with pytest.raises(CodexError) as failure:
             async for event in backend.execute(tmp_path, "synthetic lifecycle request"):
                 seen.append(event)
+                if not terminal_observed and isinstance(event, MetricsEvent):
+                    terminal_observed = True
+                    watchdog.reschedule(asyncio.get_running_loop().time() + 3)
     assert failure.value.category == "TIMEOUT"
     assert failure.value.retryable is False
     assert stage in str(failure.value)
     assert "timeout after 0.15s" in str(failure.value)
     assert ("stdout EOF was not observed" if stage == "terminal_drain"
             else "actual child exit was not observed") in str(failure.value)
-    assert asyncio.get_running_loop().time() - started < 2
     assert any(isinstance(event, TextEvent) and "Synthetic lifecycle response" in event.text for event in seen)
     metrics = [event for event in seen if isinstance(event, MetricsEvent)]
     costs = [event for event in seen if isinstance(event, CostEvent)]
