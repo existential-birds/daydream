@@ -413,7 +413,6 @@ class AttemptObserver:
         self.text: list[str] = []
         self.structured: Any = None
         self.tools: dict[str, trace.Span] = {}
-        self.tool_names: dict[str, str] = {}
         self.message_usage: dict[str, dict[str, int | float]] = {}
         self.usage_metadata: dict[str, dict[str, Any]] = {}
         self.invocation_usage: dict[str, int | float] = {}
@@ -607,7 +606,6 @@ class AttemptObserver:
             context=trace.set_span_in_context(self.scope.span) if self.scope.span else None,
         )
         self.tools[event.id] = span
-        self.tool_names[event.id] = event.name
         for key, value in {
             **_scope_attributes.get(),
             "daydream.span.kind": "tool",

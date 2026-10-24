@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from daydream.git_ops import process
 from daydream.git_ops.models import BranchNotFoundError, GitError, GitTimeoutError, NotAWorktreeError, PathAbsentError
@@ -572,7 +570,6 @@ def grep_fixed_matches(
         return []
 
     tmp = tempfile.NamedTemporaryFile(delete=False)
-    proc: subprocess.CompletedProcess[Any] | None = None
     try:
         with tmp:
             tmp.write(b"\n".join(os.fsencode(p) for p in normalized))
@@ -589,8 +586,6 @@ def grep_fixed_matches(
         except OSError:
             pass
 
-    if proc is None:  # pragma: no cover - _run_git returns or raises
-        raise GitError("git grep -F -o -z -f failed")
     if proc.returncode == 1:
         return []
     if proc.returncode != 0:

@@ -6,13 +6,12 @@ import json
 import logging
 import os
 import re
-import string
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_to_bytes, urlsplit
 
 from daydream.redaction import redact_structured_text, redact_value
 
@@ -31,8 +30,6 @@ _FLAG_VALUE_TOKENS = frozenset(
 #: every key-shaped name such as ``unicode.key``.
 _RESOURCE_SECRET_KEY = re.compile(r"api[_-]?key|auth|token|secret|passw(or)?d|credential|bearer|private[_-]?key", re.I)
 
-_HEX_DIGITS = frozenset(string.hexdigits)
-
 #: Fixed diagnostic for a rejected operator resource variable. It never echoes
 #: a pair, key, or value fragment.
 RESOURCE_DIAGNOSTIC = (
@@ -47,21 +44,10 @@ class ResourceParseError(ValueError):
 
 def _percent_decode(text: str) -> str:
     """Decode OTel-style percent escapes strictly as UTF-8; no lenient fallback."""
-    raw = bytearray()
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "%":
-            escape = text[index + 1 : index + 3]
-            if len(escape) != 2 or any(item not in _HEX_DIGITS for item in escape):
-                raise ResourceParseError()
-            raw.append(int(escape, 16))
-            index += 3
-        else:
-            raw.extend(char.encode("utf-8"))
-            index += 1
+    if re.search(r"%(?![0-9A-Fa-f]{2})", text):
+        raise ResourceParseError()
     try:
-        return raw.decode("utf-8")
+        return unquote_to_bytes(text).decode("utf-8")
     except UnicodeDecodeError:
         raise ResourceParseError() from None
 
