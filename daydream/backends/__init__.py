@@ -14,7 +14,6 @@ import math
 import os
 import re
 import unicodedata
-import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, fields
 from functools import partial
@@ -425,21 +424,6 @@ def _admit_json_value(value: Any, depth: int = 0) -> tuple[Any, EvidenceDiagnost
     return None, EvidenceDiagnostic(_DIAG_JSON_VALUE, "json_type")
 
 
-class _AdmissionBase:
-    """Reject malformed controls at construction using the built-in field declarations.
-
-    Adapters instead omit unsafe runtime evidence and emit fixed diagnostics.
-    """
-
-    def __post_init__(self) -> None:
-        self._validate()
-
-    def _validate(self) -> None:
-        checks = next(_CONFIG_CHECKS[base] for base in type(self).__mro__ if base in _CONFIG_CHECKS)
-        for name, check in checks:
-            check(getattr(self, name), name)
-
-
 def _require_bool(value: Any, field: str) -> None:
     """Reject a non-``bool`` value at construction."""
     if value is None or type(value) is bool:
@@ -475,10 +459,11 @@ def _require_literal(value: Any, field: str, *, allowed: tuple[str, ...]) -> Non
 
 
 @dataclass(frozen=True)
-class EffectiveRequestConfig(_AdmissionBase):
+class EffectiveRequestConfig:
     """Effective request controls: None means absent, never an inferred default.
 
-    Construction rejects invalid types/ranges/modes; adapters omit unsafe evidence.
+    Construction rejects malformed controls using the built-in field declarations;
+    adapters instead omit unsafe runtime evidence and emit fixed diagnostics.
     """
 
     finalization: bool | None = field(default=None, kw_only=True)
@@ -488,6 +473,11 @@ class EffectiveRequestConfig(_AdmissionBase):
     persist_session: bool | None = None
     continuation_mode: Literal["fresh", "resume", "fork"] | None = None
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
+
+    def __post_init__(self) -> None:
+        checks = next(_CONFIG_CHECKS[base] for base in type(self).__mro__ if base in _CONFIG_CHECKS)
+        for name, check in checks:
+            check(getattr(self, name), name)
 
 
 @dataclass(frozen=True)
@@ -776,11 +766,6 @@ class TurnEndEvent:
 # these events. Correlation is host invocation-local: a generation ID never
 # claims provider identity, and a late native response ID attaches to the
 # matching end without ever replacing the correlator.
-
-
-def _new_generation_id() -> str:
-    """Mint one bounded host invocation-local generation correlation ID."""
-    return str(uuid.uuid4())
 
 
 @dataclass(frozen=True)
