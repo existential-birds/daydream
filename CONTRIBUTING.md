@@ -185,8 +185,8 @@ checklist item is N/A.
 
 ## Pull request requirements
 
-Before creating **any PR, including a draft**, run
-[daydream-deadcode-sweep](.agents/skills/daydream-deadcode-sweep/SKILL.md) on the
+Before creating **any PR, including a draft**, run the local
+`daydream-deadcode-sweep` skill (`.agents/skills/daydream-deadcode-sweep/SKILL.md`) on the
 contribution branch after implementation and before final validation and publication.
 Complete the skill's full repository-wide discovery, candidate selection,
 simplification/refactoring, and verification workflow. A completed sweep may find

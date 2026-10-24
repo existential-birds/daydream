@@ -10,6 +10,7 @@ import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.commands.review import _parse_args
+from tests.harness.git_helpers import git
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +32,9 @@ def test_benchmark_objective_aggregate_parse() -> None:
 
 def test_agent_document_reference_paths_exist() -> None:
     # Relocated contracts must remain reachable from the guidance and skill entrypoints.
+    # Local ignored tooling must not hide a broken link in a clean checkout.
+    tracked = {ROOT / name for name in git(ROOT, "ls-files", "-z").split("\0") if name}
+    shipped = tracked | {parent for path in tracked for parent in path.parents if parent.is_relative_to(ROOT)}
     paths = [ROOT / name for name in (
         "README.md", "AGENTS.md", "CONTRIBUTING.md", ".github/workflows/README.md",
         ".agents/skills/test-audit/SKILL.md", "daydream/templates/workflows/README.md",
@@ -41,7 +45,10 @@ def test_agent_document_reference_paths_exist() -> None:
         links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", path.read_text())
         for target in links:
             if "://" not in target:
-                assert (path.parent / target).exists(), f"broken reference {target!r} in {path.relative_to(ROOT)}"
+                destination = (path.parent / target).resolve()
+                assert destination in shipped and destination.exists(), (
+                    f"broken reference {target!r} in {path.relative_to(ROOT)}"
+                )
 
 def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
     for flag in ("--help", "--help-all"):
