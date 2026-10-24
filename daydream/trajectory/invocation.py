@@ -233,8 +233,8 @@ class Invocation:
     # UNENDED until finish() resolves the billing owner; terminal/cancel/error
     # paths drain every draft exactly once at its sealed historical end.
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
-    _backend_lifecycle: BackendLifecycleSnapshot | None = None
-    _active_backend_lifecycle: BackendLifecycleCollector | None = field(default=None, repr=False)
+    _backend_lifecycle_snapshot: BackendLifecycleSnapshot | None = None
+    _backend_lifecycle_collector: BackendLifecycleCollector | None = field(default=None, repr=False)
     _host_dispatch: dict[str, int | str] | None = None
     _requests: list[dict[str, Any]] = field(default_factory=list)
 
@@ -250,8 +250,11 @@ class Invocation:
         }
         if not partial and self._generation_ledger.has_drafts():
             summary["generation_lifecycle"] = self._generation_ledger.to_dict()
-        lifecycle = (self._active_backend_lifecycle.snapshot()
-                     if partial and self._active_backend_lifecycle is not None else self._backend_lifecycle)
+        lifecycle = (
+            self._backend_lifecycle_collector.snapshot()
+            if partial and self._backend_lifecycle_collector is not None
+            else self._backend_lifecycle_snapshot
+        )
         if lifecycle is not None:
             summary["backend_lifecycle"] = lifecycle.to_dict()
         if self._host_dispatch is not None:
@@ -288,12 +291,12 @@ class Invocation:
 
     def observe_backend_lifecycle(self, collector: BackendLifecycleCollector) -> None:
         """Bind only this host-owned attempt for immutable in-flight lifecycle observations."""
-        self._active_backend_lifecycle = collector
+        self._backend_lifecycle_collector = collector
 
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
         """Retain finalized attempt observations without completing or billing generations."""
-        self._backend_lifecycle = snapshot
-        self._active_backend_lifecycle = None
+        self._backend_lifecycle_snapshot = snapshot
+        self._backend_lifecycle_collector = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append an initial user Step without ATIF agent-only fields."""
