@@ -27,7 +27,6 @@ from daydream.benchmark.reviewbench.harbor_seccomp import seccomp_profile
 
 CODEX_MODEL = 'gpt-6.1-sol'
 JUDGE_HOME = '/run/reviewbench-pi'
-PROFILE_PATH = '/work/pr/daydream-profile.json'
 
 
 def _compose(platform: str, *, reviewer: bool, backend: str = 'codex') -> str:
@@ -48,30 +47,6 @@ def _compose(platform: str, *, reviewer: bool, backend: str = 'codex') -> str:
 '''
 
 
-def package_digest(directory: Path) -> str:
-    """Match Harbor's sorted POSIX path/content digest protocol."""
-    entries = []
-    for path in sorted(directory.rglob('*'), key=lambda item: item.relative_to(directory).as_posix()):
-        if path.is_symlink():
-            raise ValueError('Public task assets must not contain symlinks')
-        if path.is_file():
-            entries.append(f'{path.relative_to(directory).as_posix()}\0{hashlib.sha256(path.read_bytes()).hexdigest()}\n')
-    return hashlib.sha256(''.join(entries).encode()).hexdigest()
-
-
-def codex_models() -> dict[str, Any]:
-    """Pi model metadata; costs are API-equivalent and maxTokens is unenforced."""
-    return {'providers': {'openai-codex': {
-        'api': 'openai-codex-responses',
-        'baseUrl': 'https://chatgpt.com/backend-api',
-        'models': [{
-            'id': CODEX_MODEL, 'name': CODEX_MODEL, 'reasoning': True, 'input': ['text', 'image'],
-            'contextWindow': 1050000, 'maxTokens': 8192,
-            'cost': {'input': 2, 'output': 10, 'cacheRead': 0.1, 'cacheWrite': 2.5},
-        }],
-    }}}
-
-
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n', encoding='utf-8')
@@ -89,12 +64,11 @@ def selected_reviewer_policy(reviewer: Mapping[str, Any], *,
     env = os.environ if environment is None else environment
     agent_dir = Path(env.get('PI_CODING_AGENT_DIR') or Path(env.get('HOME', str(Path.home()))) / '.pi/agent').resolve()
     try:
-        providers = json.loads((agent_dir / 'models.json').read_text())['providers']
-        provider = providers['nous']
+        provider = json.loads((agent_dir / 'models.json').read_text())['providers']['nous']
         required = {policy['model'], *policy.get('phase_models', {}).values()}
         catalog = {item['id']: item for item in provider['models']}
         models = [catalog[name] for name in sorted(required)]
-    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+    except (OSError, ValueError, KeyError, TypeError):
         raise ValueError('Selected native Pi nous model definition is unavailable') from None
     if set(provider) - {'apiKey', 'baseUrl', 'models', 'api'}:
         raise ValueError('Selected Pi provider has unsupported routing or authentication extensions')
@@ -126,6 +100,7 @@ def export_harbor_profile(
 ) -> dict[str, Any]:
     """Freeze the supplied wheel and all 219 supplied tasks into a new local profile."""
     from harbor.models.dataset.manifest import DatasetFileRef, DatasetInfo, DatasetManifest, DatasetTaskRef
+    from harbor.publisher.packager import Packager
 
     source = source.resolve()
     output = output.absolute()
@@ -144,7 +119,16 @@ def export_harbor_profile(
     )
     source_identity = verify_source(source)
     cases = load_cases(source, 'full')
-    models = codex_models()
+    # Pi model metadata; costs are API-equivalent and maxTokens is unenforced.
+    models: dict[str, Any] = {'providers': {'openai-codex': {
+        'api': 'openai-codex-responses',
+        'baseUrl': 'https://chatgpt.com/backend-api',
+        'models': [{
+            'id': CODEX_MODEL, 'name': CODEX_MODEL, 'reasoning': True, 'input': ['text', 'image'],
+            'contextWindow': 1050000, 'maxTokens': 8192,
+            'cost': {'input': 2, 'output': 10, 'cacheRead': 0.1, 'cacheWrite': 2.5},
+        }],
+    }}}
     seccomp_asset, seccomp_provenance_asset = seccomp_profile()
     seccomp_provenance = json.loads(seccomp_provenance_asset)
     seccomp_sha = hashlib.sha256(seccomp_asset).hexdigest()
@@ -236,8 +220,11 @@ def export_harbor_profile(
             toml = toml_path.read_text()
             toml = toml.replace('[metadata]\n', f'[metadata]\ndaydream_policy_sha256 = "{policy_sha}"\n')
             toml_path.write_text(toml, encoding='utf-8')
+            if any(path.is_symlink() for path in task_dir.rglob('*')):
+                raise ValueError('Public task assets must not contain symlinks')
+            digest, _ = Packager.compute_content_hash(task_dir)
             references.append(DatasetTaskRef(name=f'daydream-local/{case.key}',
-                                             digest=f'sha256:{package_digest(task_dir)}'))
+                                             digest=f'sha256:{digest}'))
         metric = (source / 'scripts/harbor/metric.py').read_text().replace(
             'EXPECTED_TASKS = {}', 'EXPECTED_TASKS = ' + json.dumps(expected, sort_keys=True),
         )
