@@ -38,27 +38,17 @@ async def _spawn_holder() -> asyncio.subprocess.Process:
     assert await stdout.readline() == b"UP\n"
     return proc
 
-async def test_terminate_process_kills_whole_group() -> None:
-    """Grandchildren cannot outlive the CLI: the whole group dies on terminate."""
+async def test_terminate_process_reaps_group_releases_fds_and_is_idempotent() -> None:
+    """Grandchildren and held pipes are released before repeated cancel/finally cleanup."""
+    base = fd_count()
     proc = await _spawn_holder()
     pgid = os.getpgid(proc.pid)
     assert pgid == proc.pid  # session leader => pid is the group id
 
     await terminate_process(proc)
     await wait_for_process_group_gone(pgid)
-
-async def test_terminate_process_releases_fds() -> None:
-    """No fd growth after an aborted run, even with a grandchild holding the pipe."""
-    base = fd_count()
-    proc = await _spawn_holder()
-    await terminate_process(proc)
     await wait_for_fd_baseline(base)
-
-async def test_terminate_process_is_idempotent() -> None:
-    """Calling terminate twice (cancel + finally both fire) is a no-op."""
-    proc = await _spawn_holder()
-    await terminate_process(proc)
-    await terminate_process(proc)  # must not raise
+    await terminate_process(proc)  # repeated cleanup must not raise
 
 
 async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None:

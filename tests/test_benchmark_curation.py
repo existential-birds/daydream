@@ -749,6 +749,9 @@ def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_pat
     with pytest.raises(cu.StaleStateError):
         cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)   # stale attestation SHA
     assert path.read_bytes() == before                    # a rejected mutation writes nothing
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
 
 def test_curation_ready_requires_task_spec_sha256() -> None:
     base: dict[str, Any] = dict(state="ready", snapshot_attested=True, gold_status="findings",
@@ -800,15 +803,6 @@ def test_mark_ready_derives_task_spec_digest_when_omitted(tmp_path: Path, fake_g
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
     assert cur["task_spec_sha256"] == expected
 
-def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    cu.accept_candidate(ws, case_id, next(
-        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
-    with pytest.raises(cu.StaleStateError):                 # wrong SHA is a no-op
-        cu.mark_ready(ws, case_id, head_sha="f" * 40, task_spec_sha256="d" * 64)
-    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
-    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
-    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
 
 def test_mutation_invalidates_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)

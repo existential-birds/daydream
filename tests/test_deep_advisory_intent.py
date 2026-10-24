@@ -12,6 +12,7 @@ from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.review_profile import ResolvedProfile, build_default_profile
+from daydream.run_config import FrozenAuthorDescription
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import review_coverage
@@ -115,3 +116,28 @@ async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     assert calls == []
     assert ctx.data["intent_authoritative"] is False
     assert "STALE AUTHOR BODY" not in ctx.data["intent_summary"]
+
+
+@pytest.mark.parametrize('matching_head', [True, False])
+async def test_frozen_author_context_is_revision_bound_without_network_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, matching_head: bool,
+) -> None:
+    ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
+    assert ctx.work.head_sha is not None
+    ctx.config.frozen_author_description = FrozenAuthorDescription(
+        ctx.work.head_sha if matching_head else 'f' * 40, 'SUPPLIED FROZEN AUTHOR CONTEXT')
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('frozen author context caused live GitHub lookup')
+
+    monkeypatch.setattr('daydream.git_ops.gh_pr_view', forbidden)
+    if not matching_head:
+        with pytest.raises(ValueError, match='does not match analyzed HEAD'):
+            await _step_intent(ctx)
+        assert calls == []
+        assert not (ctx.data['dd'] / 'intent.md').exists()
+    else:
+        await _step_intent(ctx)
+        assert calls == []  # Existing modest Pi advisory policy stays in effect.
+        assert 'SUPPLIED FROZEN AUTHOR CONTEXT' in ctx.data['intent_summary']
+        assert ctx.data['intent_authoritative'] is True

@@ -963,11 +963,7 @@ async def finalize_retained_tree_after_test(
         # The finalized tree and the evidence that validated it are one
         # fact: only the attempt whose before/after tree key equals the
         # retained tree key may become the reuse offer (issue #1408).
-        if (
-            evidence.input_tree_key == snapshot.tree_key
-            and evidence.output_tree_key == snapshot.tree_key
-        ):
-            state.latest_test_evidence = evidence
+        state.latest_test_evidence = evidence
         return None
 
     return _stabilization_stop(

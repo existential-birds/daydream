@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
 
 type BackendCache = dict[tuple[str, str | None, str | None, Path | None], Backend]
-type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspace | None], Backend]
+
+
+type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspace | None, str | None], Backend]
 
 
 @dataclass
@@ -43,7 +45,7 @@ class FlowContext:
     Unresolved or partial review profiles use packaged strategy/pipeline defaults.
     Direct callers may omit run_context to inherit the bound runtime or standalone
     policy. Backend instances share this context's cache; a runner-bound factory
-    receives config, cache, workspace, and audit boundary.
+    receives config, cache, workspace, audit boundary and optional group effort.
 
     GitHub execution is an explicit capability excluded from repr/serialization;
     standalone callers inherit ambient credentials. Never copy it into data or
@@ -75,7 +77,7 @@ class FlowContext:
         """Resolve ``phase``'s backend, honoring a runner-bound factory seam."""
         if self._backend_factory is not None:
             return self._backend_factory(
-                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
+                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace, effort,
             )
 
         from daydream.runner import _resolve_backend

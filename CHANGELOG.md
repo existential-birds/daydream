@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add public ReviewBench reviewers through Harbor ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
 ### Changed
+
+- Replace unreleased benchmark commands with `harbor-export`/`harbor-run` and
+  wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
+- Simplify ReviewBench source provenance and manifest loading; allow unrelated
+  untracked files while rejecting source changes and extra scripts.
 
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
@@ -19,11 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Redact native API-key and OAuth credentials in quoted log prose with embedded payloads; preserve native
+  budgets/scoring, cancellation, and final evidence export without separate session archives or readout machinery.
+- Honor ReviewBench's declared Harbor timeout plus cleanup/output collection time, including budgets over one hour;
+  leave the execution transport uncapped when the declared timeout is unavailable.
+- Discover and reap late pipe-holding reviewer descendants during forced and fallback cleanup within the existing
+  shutdown and reap allowances.
+- Freeze reviewer retry, idle, and Codex terminal-drain, reap, and cleanup controls in exported profiles and restore
+  them for native execution. Regenerate earlier schema-4 exports without these controls.
+
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain
   oversized-input regression coverage with a bounded case ID and unchanged
   payload and assertions.
+
+### Removed
+
+- Remove public ReviewBench's periodic interruption checkpoints and `daydream/benchmark/reviewbench/diagnostics.py`.
+  Ordinary timeout export remains; forced termination can leave detailed review evidence unavailable.
+  Remove `RunnerExecutionInput.on_trajectory_snapshot`; embedded callers must stop passing this argument.
 
 ## [0.30.0] - 2026-10-19
 

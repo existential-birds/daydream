@@ -64,9 +64,7 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
 
 def _module_candidates(base: Path, dotted: str) -> list[Path]:
     """Resolve a dotted module name under `base` to .py and package candidates."""
-    target = base
-    for part in dotted.split("."):
-        target = target / part
+    target = base.joinpath(*dotted.split("."))
     return [target.with_suffix(".py"), target / "__init__.py"]
 
 

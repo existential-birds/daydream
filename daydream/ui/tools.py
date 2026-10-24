@@ -13,6 +13,7 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.text import Text
 
+from daydream.redaction import redact_native_auth_value
 from daydream.ui.colorize import _colorize_line, _detect_shell_syntax
 from daydream.ui.console import _get_gradient_color, _interpolate_color
 from daydream.ui.theme import (
@@ -174,6 +175,8 @@ def format_callback_progress(
 
     Task tools lead with a human label and demote ids; mechanical flags are hidden.
     Other tools use the same primary argument and role colors as panel headers."""
+    args = redact_native_auth_value(args)
+    label = redact_native_auth_value(label)
     line = Text("    ")
     icon = _CALLBACK_TOOL_ICONS.get(name)
     if icon:

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from daydream.backends import Backend
     from daydream.github_app import GitHubIdentity
     from daydream.outage_circuit import OutageCircuit
+    from daydream.review_result import FinalizedReview
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,16 +50,19 @@ _T = TypeVar("_T")
 class RunContext:
     """Own the immutable policy, active backends, and outage circuit for one run."""
 
-    __slots__ = ("_policy", "_run_token", "github_identity", "_outage_circuit", "_circuit_lock", "_used_backends")
+    __slots__ = ("_policy", "_run_token", "github_identity", "review_result_handler",
+                 "_outage_circuit", "_circuit_lock", "_used_backends")
 
     def __init__(
         self, policy: InteractionPolicy, *, github_identity: GitHubIdentity | None = None,
+        review_result_handler: Callable[[FinalizedReview], None] | None = None,
     ) -> None:
         from daydream.github_app import GitHubIdentity
 
         self._policy = policy
         self._run_token = object()
         self.github_identity = github_identity if github_identity is not None else GitHubIdentity("unknown")
+        self.review_result_handler = review_result_handler
         self._outage_circuit: OutageCircuit | None = None
         self._circuit_lock = RLock()
         self._used_backends: list[Backend] = []

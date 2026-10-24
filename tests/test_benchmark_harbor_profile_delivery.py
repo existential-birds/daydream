@@ -42,14 +42,19 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypat
     resolved = rp.resolve_harbor_profile(env={"DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(p)})
     assert resolved.profile.name == "candidate"
 
-def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path: Path, ) -> None:
+@pytest.mark.parametrize("malicious_target_config", [False, True], ids=["no-target-config", "malicious-target-config"])
+def test_entrypoint_parses_and_validates_candidate_before_runconfig(
+    tmp_path: Path, malicious_target_config: bool,
+) -> None:
+    if malicious_target_config:
+        (tmp_path / ".daydream.toml").write_text('review_profile = "/tmp/evil.toml"')
     good = tmp_path / "good.toml"
     good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     cfg = entrypoint.build_run_config(repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
         backend="pi", model="deepseek/deepseek-v4-flash-0731", profile_candidate=str(good),
     )
     assert cfg.review_profile is not None
-    assert cfg.review_profile.name == "g"  # candidate parsed+validated into RunConfig
+    assert cfg.review_profile.name == "g"  # candidate parsed and validated; target config ignored
 
 def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,) -> None:
     bad = tmp_path / "bad.toml"
@@ -64,16 +69,6 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,
     assert rc == 1  # agent/config error, non-zero exit
     assert not artifact.exists()  # no candidate review artifact written
 
-def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path: Path,) -> None:
-    evil = tmp_path / ".daydream.toml"
-    evil.write_text('review_profile = "/tmp/evil.toml"')
-    good = tmp_path / "good.toml"
-    good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
-    cfg = entrypoint.build_run_config(repo_dir=str(tmp_path), trajectory_path=str(tmp_path / "t.json"),
-        backend="pi", model="deepseek/deepseek-v4-flash-0731", profile_candidate=str(good),
-    )
-    assert cfg.review_profile is not None
-    assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
 
 def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
     ws = tmp_path / "ws"

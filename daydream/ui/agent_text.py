@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.style import Style
 from rich.text import Text
 
+from daydream.redaction import redact_structured_text
 from daydream.ui.colorize import render_segments
 from daydream.ui.console import _interpolate_color
 from daydream.ui.panels import CrazySpinner
@@ -100,7 +101,7 @@ class AgentTextRenderer:
 
     def _render_panel(self, show_spinner: bool = True) -> Panel:
         """Render buffered text with a gradient, optional spinner, and nonitalic Markdown."""
-        full_text = "".join(self._buffer)
+        full_text = redact_structured_text("".join(self._buffer))
         lines = full_text.split("\n")
 
         use_italic = not _has_markdown_headers(full_text)

@@ -47,8 +47,6 @@ from daydream.backends import (
 from daydream.backends._subprocess import DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S, StreamStalledError, stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
     raise_for_exit,
     reap,
@@ -847,9 +845,7 @@ class CodexBackend:
             transport = CliTransport(
                 "codex",
                 args,
-                stdin_mode=StdinMode.PIPE,
                 stdin_data=prompt.encode(),
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(execution_cwd) if execution_cwd != cwd else None,

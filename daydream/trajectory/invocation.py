@@ -12,19 +12,29 @@ from daydream import timeutil, ui
 from daydream.atif import Metrics, Observation, ObservationResult, Step, ToolCall
 from daydream.backends import (
     AgentEvent,
+    ClaudeRequestConfig,
+    CodexRequestConfig,
     CostEvent,
     DiagnosticEvent,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
+    OspreyRequestConfig,
+    PiRequestConfig,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    request_config_controls,
 )
-from daydream.backends.lifecycle import BackendLifecycleSnapshot, current_backend_lifecycle
+from daydream.backends.lifecycle import (
+    BackendLifecycleCollector,
+    BackendLifecycleSnapshot,
+    current_backend_lifecycle,
+)
 from daydream.redaction import redact_value as redact_value
 from daydream.trajectory.generation import _GenerationLedger
 from daydream.trajectory.types import DaydreamPhase as DaydreamPhase
@@ -223,8 +233,10 @@ class Invocation:
     # UNENDED until finish() resolves the billing owner; terminal/cancel/error
     # paths drain every draft exactly once at its sealed historical end.
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
-    _backend_lifecycle: BackendLifecycleSnapshot | None = None
+    _backend_lifecycle_snapshot: BackendLifecycleSnapshot | None = None
+    _backend_lifecycle_collector: BackendLifecycleCollector | None = field(default=None, repr=False)
     _host_dispatch: dict[str, int | str] | None = None
+    _requests: list[dict[str, Any]] = field(default_factory=list)
 
     def summary(self, *, partial: bool = False) -> dict[str, Any]:
         """Project invocation identity/timing; generation billing appears only after completion."""
@@ -238,10 +250,17 @@ class Invocation:
         }
         if not partial and self._generation_ledger.has_drafts():
             summary["generation_lifecycle"] = self._generation_ledger.to_dict()
-        if self._backend_lifecycle is not None:
-            summary["backend_lifecycle"] = self._backend_lifecycle.to_dict()
+        lifecycle = (
+            self._backend_lifecycle_collector.snapshot()
+            if partial and self._backend_lifecycle_collector is not None
+            else self._backend_lifecycle_snapshot
+        )
+        if lifecycle is not None:
+            summary["backend_lifecycle"] = lifecycle.to_dict()
         if self._host_dispatch is not None:
             summary["host_dispatch"] = dict(self._host_dispatch)
+        if self._requests:
+            summary["requests"] = redact_value(self._requests)
         return summary
 
     def record_host_dispatch(
@@ -270,9 +289,14 @@ class Invocation:
         except Exception as exc:  # noqa: BLE001 - measurement must never interrupt agent work
             ui.print_warning(_console, f"Trajectory dispatch measurement failed: {type(exc).__name__}")
 
+    def observe_backend_lifecycle(self, collector: BackendLifecycleCollector) -> None:
+        """Bind only this host-owned attempt for immutable in-flight lifecycle observations."""
+        self._backend_lifecycle_collector = collector
+
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
         """Retain finalized attempt observations without completing or billing generations."""
-        self._backend_lifecycle = snapshot
+        self._backend_lifecycle_snapshot = snapshot
+        self._backend_lifecycle_collector = None
 
     def observe_user_step(self, prompt: str) -> None:
         """Append an initial user Step without ATIF agent-only fields."""
@@ -386,9 +410,9 @@ class Invocation:
         # CostEvent-only backend (no MetricsEvents at all) still totals by the
         # full delta.
         self.recorder._accumulate_metrics(
-            prompt_tokens=delta.prompt,
-            completion_tokens=delta.completion,
-            cached_tokens=delta.cached,
+            prompt_tokens=None if event.input_tokens is None else delta.prompt,
+            completion_tokens=None if event.output_tokens is None else delta.completion,
+            cached_tokens=None if event.cached_tokens is None else delta.cached,
             cost_usd=None if event.cost_usd is None else delta.cost,
         )
 
@@ -429,6 +453,15 @@ class Invocation:
             host["open_dict"]["_observation_results"].append(result)
         else:
             self._amend_closed_step_observation(closed_index=host["closed_index"], result=result)
+
+    @_dispatch.register
+    def _observe_request(self, event: RequestEvent) -> None:
+        # No prompt, environment, credential or native settings file contents.
+        backend = {PiRequestConfig: 'pi', CodexRequestConfig: 'codex', ClaudeRequestConfig: 'claude',
+                   OspreyRequestConfig: 'osprey'}.get(type(event.config))
+        self._requests.append({"backend": backend,
+            "model": event.model_name, "provider": event.provider_name, "reasoning_effort": event.reasoning_effort,
+            "controls": request_config_controls(event.config)})
 
     @_dispatch.register
     def _observe_metrics(self, event: MetricsEvent) -> None:

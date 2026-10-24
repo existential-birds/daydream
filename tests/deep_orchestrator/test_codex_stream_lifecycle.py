@@ -49,7 +49,9 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
     # Allow a healthy child's EOF to be scheduled under parallel suite load;
     # the stalled fixture modes hold stdout open until the host tears them down.
     monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "1")
-    monkeypatch.setenv("DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", "0.2")
+    # Real Git/artifact work in sibling fixers can delay exit observation. Keep
+    # headroom for the latest-turn guard; adapter tests own subsecond reap bounds.
+    monkeypatch.setenv("DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", "1")
     monkeypatch.setenv("DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", "1")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "0")
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)

@@ -1250,12 +1250,17 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     assert calls[0][0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
 
 @pytest.mark.asyncio
-async def test_claude_cli_timeout_kills_child_every_attempt(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("post_eof", [False, True], ids=["blocked-read", "post-eof-wait"])
+async def test_claude_cli_timeout_kills_child_every_attempt(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch, post_eof: bool,
+) -> None:
+    """Both a blocked read and a child hanging after stdout EOF must be killed and retried."""
     sr = sr_module
     kills: list[int] = []
     monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
+    chunks = [json.dumps(_OK_ENVELOPE).encode("utf-8")] if post_eof else _hang_read
     client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
-        lambda: _ScriptedChild(_hang_read, wait=_hang, on_kill=lambda: kills.append(1))))
+        lambda: _ScriptedChild(chunks, wait=_hang, on_kill=lambda: kills.append(1))))
     with _http_backoff(sr, monkeypatch) as delays:
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
@@ -1339,24 +1344,6 @@ async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
     assert len(settled) == 1
 
-@pytest.mark.asyncio
-async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child that hangs after stdout EOF is killed at the deadline and retried."""
-    sr = sr_module
-    killed: list[int] = []
-    monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
-        lambda: _ScriptedChild([json.dumps(_OK_ENVELOPE).encode("utf-8")], wait=_hang,
-            on_kill=lambda: killed.append(1))))
-    with _http_backoff(sr, monkeypatch) as delays:
-        with pytest.raises(sr.VerifierError) as e:
-            await client.complete_json(user="u")
-        assert "timeout" in str(e.value)
-    assert delays == [1, 2]
-    # Killed in _claude_cli_stdout's wait() deadline path and again by the
-    # caller's backstop on each of the _MAX_RETRIES attempts -- mirrors the
-    # hanging-read timeout test.
-    assert len(killed) == sr._MAX_RETRIES * 2
 
 @pytest.mark.asyncio
 async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:

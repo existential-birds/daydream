@@ -7,15 +7,10 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 from daydream import cli
-from daydream.backends import AgentEvent
-from daydream.backends.codex import CodexBackend
 from tests.contract._loaders import _build_codex_jsonl
-from tests.harness.codex_replay import make_mock_process
 
 
 def cli_main(argv: list[str]) -> int:
@@ -58,15 +53,3 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
-
-
-async def drive_codex(lines: list[str], output_schema: dict[str, Any] | None = None) -> list[AgentEvent]:
-    """Collect real CodexBackend events over mocked process stdout, forwarding
-    the extraction schema and propagating parser failures."""
-    mock_proc = make_mock_process(lines)
-    backend = CodexBackend(model="codex-test-model")
-    events: list[AgentEvent] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc,):
-        async for event in backend.execute(Path("/tmp"), "go", output_schema=output_schema):
-            events.append(event)
-    return events

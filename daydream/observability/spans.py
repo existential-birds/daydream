@@ -24,16 +24,11 @@ from daydream.backends import (
     _MAX_PROVIDER_NAME_CHARS,
     AgentEvent,
     AssistantChoicePart,
-    ClaudeRequestConfig,
-    CodexRequestConfig,
     CostEvent,
     DiagnosticEvent,
-    EffectiveRequestConfig,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
-    OspreyRequestConfig,
-    PiRequestConfig,
     ReasoningChoicePart,
     RequestEvent,
     ResultEvent,
@@ -44,6 +39,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     _admit_identity_label,
+    request_config_controls,
     unix_ms_to_ns,
 )
 from daydream.backends.lifecycle import BackendLifecycleSnapshot
@@ -417,7 +413,6 @@ class AttemptObserver:
         self.text: list[str] = []
         self.structured: Any = None
         self.tools: dict[str, trace.Span] = {}
-        self.tool_names: dict[str, str] = {}
         self.message_usage: dict[str, dict[str, int | float]] = {}
         self.usage_metadata: dict[str, dict[str, Any]] = {}
         self.invocation_usage: dict[str, int | float] = {}
@@ -492,18 +487,11 @@ class AttemptObserver:
 
     @_observe.register
     def _observe_request(self, event: RequestEvent, policy: PrivacyPolicy) -> None:
-        # Only the closed, validated native config types are admitted.
-        # Custom subclasses may carry arbitrary data, so do not serialize
-        # them or any raw SDK options/environment into telemetry.
-        if type(event.config) in (
-            EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig,
-            PiRequestConfig, OspreyRequestConfig,
-        ):
-            self.scope.attrs({
-                f"daydream.request.config.{key}": value
-                for key, value in asdict(event.config).items()
-                if value is not None
-            })
+        self.scope.attrs({
+            f"daydream.request.config.{key}": value
+            for key, value in request_config_controls(event.config).items()
+            if value is not None
+        })
         self.scope.attrs(
             {
                 "gen_ai.request.model": event.model_name,
@@ -618,7 +606,6 @@ class AttemptObserver:
             context=trace.set_span_in_context(self.scope.span) if self.scope.span else None,
         )
         self.tools[event.id] = span
-        self.tool_names[event.id] = event.name
         for key, value in {
             **_scope_attributes.get(),
             "daydream.span.kind": "tool",

@@ -751,7 +751,7 @@ async def test_operator_resource_attributes_merge_with_authoritative_precedence(
     sdk_version = version("opentelemetry-sdk")
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES",
         "deployment.environment.name=offline-audit,custom.zone=zone%2Done,"
-        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,"
+        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,plus.value=a+b,raw.unicode=café,"
         "service.name=false-operator,service.version=0.0.0-operator,"
         "telemetry.sdk.name=not-otel,telemetry.sdk.language=rust,telemetry.sdk.version=9.9.9,"
         "daydream.observability.contract.version=0.0.0-operator,"
@@ -772,6 +772,8 @@ async def test_operator_resource_attributes_merge_with_authoritative_precedence(
     assert resource["deployment.environment.name"] == "offline-audit"
     assert resource["custom.zone"] == "zone-one"
     assert resource["unicode.key"] == "café"
+    assert resource["plus.value"] == "a+b"
+    assert resource["raw.unicode"] == "café"
     assert resource["comma.key"] == "a,b=c"
     assert resource["empty.value"] == ""
     assert resource["zero.value"] == "0"
@@ -796,7 +798,8 @@ async def test_operator_service_instance_id_generated_per_run_when_absent(monkey
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("raw",
-    ["not-a-pair", "key=%zz", "=value", "ke%Gy=value", "dup.key=one,dup.key=two", "dup.key=a%2Bone,dup.k%65y=two",
+    ["not-a-pair", "key=%zz", "key=%", "key=%0", "key=%FF", "=value", "ke%Gy=value",
+        "dup.key=one,dup.key=two", "dup.key=a%2Bone,dup.k%65y=two",
         "bad\x01key=value",
         "key=bad\x02value",
         "key=val\nue",

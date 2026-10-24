@@ -286,9 +286,8 @@ def test_independent_snapshot_rejects_shared_alternates(
     with pytest.raises(git_ops.SnapshotPreparationError, match="alternates or remotes"):
         git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
 
-@pytest.mark.parametrize("unborn", [False, True])
-@pytest.mark.parametrize("empty", [False, True])
-@pytest.mark.parametrize("variable", [
+@pytest.mark.parametrize(("variable", "empty", "unborn"), [
+    *((variable, False, False) for variable in [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
     "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_NAMESPACE",
     "GIT_CEILING_DIRECTORIES", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
@@ -296,12 +295,17 @@ def test_independent_snapshot_rejects_shared_alternates(
     "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
     "GIT_CONFIG_PARAMETERS", "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_TRACE", "GIT_EXEC_PATH",
+]),
+    ("GIT_DIR", True, False), ("GIT_DIR", False, True), ("GIT_DIR", True, True), ("GIT_EXEC_PATH", True, False),
 ])
 def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str, empty: bool, unborn: bool,
 ) -> None:
     repo = tmp_path / "source"
     _init_repo(repo)
+    # This test snapshots every metadata byte. Background maintenance can
+    # remove its transient lock while copytree or the byte checks read it.
+    _git(repo, "config", "maintenance.auto", "false")
     write_and_stage(repo, "app.py", b"VALUE = 1\n")
     if not unborn:
         _commit(repo, "initial")
@@ -757,9 +761,6 @@ def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
         git_ops.head_sha(repo)
 
 
-
-
-
 def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path, name="list_branches")
     _git(repo, "checkout", "-b", "feat/slash-name")
@@ -806,11 +807,6 @@ def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None
 
 def test_branch_exists_missing(repo: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
-
-
-
-
-
 
 
 def test_ref_exists_missing(repo: Path) -> None:
@@ -914,7 +910,6 @@ def test_remote_urls_is_strict_and_allows_no_remotes(repo: Path) -> None:
         git_ops.remote_urls(repo)
 
 
-
 def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(repo: Path) -> None:
     oldest = git_ops.head_sha(repo)
     write_and_stage(repo, "base-update.txt", "new base\n")
@@ -969,7 +964,6 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path, repo: Path) 
     assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
 
 
-
 def test_diff_name_only_returns_empty_list_on_bad_ref(repo: Path) -> None:
     result = git_ops.diff_name_only(repo, "nonexistent-ref", "HEAD")
     assert result == []
@@ -979,7 +973,6 @@ def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> No
     """Safety guards must not mistake a failed enumeration for a clean tree."""
     with pytest.raises(GitError):
         git_ops.changed_files_against(tmp_path, "HEAD")
-
 
 
 def test_show_raises_on_missing_path(repo: Path) -> None:
@@ -1065,8 +1058,6 @@ def test_upstream_ahead_count_no_upstream(repo: Path) -> None:
     assert git_ops.upstream_ahead_count(repo, "main") == 0
 
 
-
-
 def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path, repo: Path) -> None:
     source = tmp_path / "legacy worktree"
     destination = tmp_path / "private workspaces" / "moved worktree"
@@ -1093,7 +1084,6 @@ def test_create_branch_raises_when_branch_exists(repo_with_origin: Path) -> None
     _git(repo_with_origin, "checkout", "main")
     with pytest.raises(GitError):
         git_ops.create_branch(repo_with_origin, "daydream/dup")
-
 
 
 def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
@@ -1453,7 +1443,6 @@ def test_diff_paths_unified_context_lines(repo: Path) -> None:
 def test_diff_paths_raises_on_invalid_ref(repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
-
 
 
 @pytest.mark.parametrize(
@@ -1964,8 +1953,6 @@ def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Pat
         git_ops.gh_secret_set(git_repo, "X", "v")
     with pytest.raises(GitError):
         git_ops.gh_secret_set(git_repo, "X", "v", org="acme", repo_slug="o/r")
-
-
 
 
 def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) -> None:

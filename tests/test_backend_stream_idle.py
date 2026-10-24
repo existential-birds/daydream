@@ -20,7 +20,7 @@ import anyio
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
@@ -100,19 +100,24 @@ async def drain(backend: Any, cwd: Path) -> list[Any]:
     ("cli", "backend_cls", "lines", "expected_timeout"),
     [
         pytest.param("pi", PiBackend, PI_LINES[:2], float(TINY_WINDOW), id="pi"),
-        pytest.param("codex", CodexBackend, CODEX_LINES[:2], None, id="codex"),
+        pytest.param("codex", CodexBackend, CODEX_LINES[:3], None, id="codex"),
     ],
 )
 async def test_silent_stream_trips_idle_timeout_and_reaps_subprocess(
     cli: str, backend_cls: Any, lines: list[str], expected_timeout: float | None, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A CLI that emits two lines then goes silent forever ends the turn. The pi case also proves the env override
+    """A CLI that emits initial events then goes silent forever ends the turn. The pi case also proves the env override
     reaches the armed window: the raised error carries the exact configured value."""
     spawner = install_fake_cli_process(monkeypatch, cli, lines=lines, hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
+    seen: list[AgentEvent] = []
     with pytest.raises(StreamStalledError) as excinfo:
-        await drain(backend_cls(model="test-model"), tmp_path)
+        async for event in backend_cls(model="test-model").execute(tmp_path, "do the thing"):
+            seen.append(event)
+    assert not any(isinstance(event, (ResultEvent, MetricsEvent)) for event in seen)
+    if cli == "codex":
+        assert any(isinstance(event, TextEvent) and event.text == "slow but alive" for event in seen)
     assert excinfo.value.cli == cli
     if expected_timeout is not None:
         assert excinfo.value.timeout_s == expected_timeout

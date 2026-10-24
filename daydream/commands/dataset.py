@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 
 from daydream.commands import common
@@ -51,18 +52,6 @@ def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
         return 1
 
 
-def _handle_publish(argv: list[str]) -> int:
-    return _handle_dataset_operation(argv, operation="publish")
-
-
-def _handle_status(argv: list[str]) -> int:
-    return _handle_dataset_operation(argv, operation="status")
-
-
-def _handle_download(argv: list[str]) -> int:
-    return _handle_dataset_operation(argv, operation="download")
-
-
 def _handle_snapshot(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="daydream corpus dataset snapshot")
     parser.add_argument("--store", type=Path, default=Path.home() / ".daydream" / "dataset")
@@ -82,7 +71,9 @@ def _handle_snapshot(argv: list[str]) -> int:
 
 def handle_dataset(argv: list[str]) -> int:
     return common._dispatch_namespace(argv, {
-        "publish": _handle_publish, "status": _handle_status, "download": _handle_download,
+        "publish": partial(_handle_dataset_operation, operation="publish"),
+        "status": partial(_handle_dataset_operation, operation="status"),
+        "download": partial(_handle_dataset_operation, operation="download"),
         "snapshot": _handle_snapshot,
     }, "usage: daydream corpus dataset {publish,status,download,snapshot} ...\n"
        "\nPublish the local queue, inspect status, download an exact private Hub commit, or freeze local membership.")
