@@ -80,7 +80,6 @@ include = [
     "daydream/benchmark/reviewbench/pi-reviewer/*.json",
     "daydream/benchmark/reviewbench/harbor-runtime.in",
     "daydream/benchmark/reviewbench/harbor-runtime.lock",
-    "daydream/benchmark/reviewbench/reviewer-runtime.lock",
 ]
 
 [tool.mypy]

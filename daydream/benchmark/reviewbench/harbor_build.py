@@ -38,7 +38,9 @@ def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64',
         required = 'daydream/benchmark/reviewbench/harbor_entrypoint.py'
         if required not in archive.namelist():
             raise ValueError('Reviewer wheel lacks the public Harbor runtime')
-    requirements = Path(__file__).with_name('reviewer-runtime.lock').read_bytes()
+    from daydream.benchmark.harbor.package import lock_text
+
+    requirements = lock_text().encode('utf-8')
     host_requirements = Path(__file__).with_name('harbor-runtime.lock').read_bytes()
     assets = {wheel.name: wheel_bytes, 'reviewer-runtime.lock': requirements}
     if backend not in {'codex', 'pi'}:

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from daydream import config
+from daydream.benchmark.harbor import package as harbor_package
 from daydream.benchmark.reviewbench import harbor_build
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,9 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
     The editable-install tests above exercise importlib.resources against the source tree; they would pass even if
     the [tool.hatch.build.targets.wheel] include glob were missing or mis-typed. This test catches that gap: it
     builds an actual wheel in a temp directory and inspects the zip archive to verify each template lands at the
-    expected path inside the distribution."""
+    expected path inside the distribution. Installed exports must deliver the canonical reviewer lock, rather than
+    a stale duplicate, for each backend/platform. The replacement fault also protects the admitted wheel bytes
+    across the subsequent resource read; source-tree resource checks cannot establish these shipped contracts."""
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["uv", "build", "--wheel", "--out-dir", tmp], cwd=_REPO_ROOT, check=True, capture_output=True,)
         wheels = list(Path(tmp).glob("*.whl"))
@@ -44,8 +47,10 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
         expected_paths.add('daydream/backends/pi_structured_output.ts')
+        expected_paths.add('daydream/benchmark/harbor/runtime-requirements.lock')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
+            assert 'daydream/benchmark/reviewbench/reviewer-runtime.lock' not in names_in_wheel
             # Seccomp assets are generated at export, not shipped as copied JSON.
             assert not any(name.endswith(('harbor-seccomp.json', 'harbor-seccomp-provenance.json'))
                            for name in names_in_wheel)
@@ -57,17 +62,22 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )
         # Execute installed resources outside the source checkout.
-        script = """from itertools import product
+        script = """from importlib.resources import files
+from itertools import product
 from pathlib import Path
+import hashlib
 import sys
 from daydream.benchmark.reviewbench.harbor_build import reviewer_build
 from daydream.benchmark.reviewbench import harbor_auth
 
+canonical_lock = files('daydream.benchmark.harbor').joinpath('runtime-requirements.lock').read_bytes()
 for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')):
     suffix, assets, identity = reviewer_build(Path(sys.argv[1]), backend=backend, platform=platform)
     assert identity['platform'] == platform
     assert identity[backend + '_cli'] == ('1.3.0' if backend == 'pi' else '0.163.0')
     assert 'reviewer-runtime.lock' in assets and 'runtime.lock' not in assets
+    assert assets['reviewer-runtime.lock'] == canonical_lock
+    assert identity['reviewer_runtime_lock_sha256'] == hashlib.sha256(canonical_lock).hexdigest()
     assert identity['reviewer_runtime_lock_sha256'] != identity['host_runtime_lock_sha256']
     if backend == 'pi':
         names = ('package.json', 'package-lock.json', 'daydream-auth.mjs')
@@ -88,15 +98,16 @@ for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')
         replacement = Path(tmp) / 'replacement.whl'
         replacement_bytes = b'competing unvalidated wheel bytes'
         replacement.write_bytes(replacement_bytes)
-        runtime_lock = Path(harbor_build.__file__).with_name('reviewer-runtime.lock')
-        read_bytes = Path.read_bytes
+        runtime_lock = Path(harbor_package.__file__).with_name('runtime-requirements.lock')
+        read_text = Path.read_text
 
-        def replace_after_validation(path: Path) -> bytes:
+        def replace_after_validation(path: Path, encoding: str | None = None, errors: str | None = None,
+                                     newline: str | None = None) -> str:
             if path == runtime_lock:
                 os.replace(replacement, wheel)
-            return read_bytes(path)
+            return read_text(path, encoding=encoding, errors=errors, newline=newline)
 
-        monkeypatch.setattr(Path, 'read_bytes', replace_after_validation)
+        monkeypatch.setattr(Path, 'read_text', replace_after_validation)
         _, assets, identity = harbor_build.reviewer_build(wheel)
         assert wheel.read_bytes() == replacement_bytes
         assert identity['wheel_sha256'] == hashlib.sha256(admitted).hexdigest()
