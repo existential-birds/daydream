@@ -20,7 +20,6 @@ from daydream.pr_run_info import (
     LiveRunInfoSource,
     render_live_run_info,
 )
-from daydream.pricing import ModelPrice
 from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
@@ -159,27 +158,23 @@ def test_malformed_sibling_and_duplicate_ids_return_unavailable(tmp_path: Path) 
     assert malformed_result.diagnostic == "run info: trajectory document invalid"
     assert duplicate_result.diagnostic == "run info: trajectory identity invalid"
 
-def test_pricing_or_render_failure_returns_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
+@pytest.mark.parametrize(("operation", "message"), [
+    ("render_run_info", "secret renderer failure"),
+    ("load_user_prices", "private prices path"),
+])
+def test_pricing_or_render_failure_returns_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, message: str,
+) -> None:
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(message)
 
-    def fail(_trajectories: Any, *, prices: dict[str, ModelPrice] | None = None,) -> str:
-        raise RuntimeError("secret renderer failure")
-    monkeypatch.setattr(provider, "render_run_info", fail)
+    monkeypatch.setattr(provider, operation, fail)
     source = _source_with_snapshots(tmp_path)
     result = render_live_run_info(source)
 
     assert result.diagnostic == "run info: rendering unavailable"
     assert FALLBACK_NOTE in result.markdown
 
-def test_price_lookup_failure_returns_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
-
-    def fail() -> dict[str, Any]:
-        raise RuntimeError("private prices path")
-    monkeypatch.setattr(provider, "load_user_prices", fail)
-    source = _source_with_snapshots(tmp_path)
-    result = render_live_run_info(source)
-
-    assert result.diagnostic == "run info: rendering unavailable"
-    assert FALLBACK_NOTE in result.markdown
 
 def test_live_provider_honors_user_price_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
     custom_model = "custom-live-model"
