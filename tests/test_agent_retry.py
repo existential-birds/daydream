@@ -26,7 +26,7 @@ from tests.harness.trajectory import make_recorder
 # Pi transport by the timing proof below.
 _ERROR_MESSAGE = (
     '429: {"message":"Temporary admission failure","code":429,'
-    '"metadata":{"headers":{"Retry-After":"10"}}}'
+    '"metadata":{"headers":{"Retry-After":"-5"," RETRY-AFTER ":10.5}}} retry-after: 99'
 )
 _ERROR_LINES = (
     '{"type":"session","sessionId":"pi_ses_429"}',
@@ -409,9 +409,9 @@ async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None
     ("second_lines", "allowance_s", "retries", "expected_sleep"),
     [
         # The next attempt begins no earlier than the advertised delay, even when the configured
-        # jitter maximum (4s) is smaller than the hint (10s).
-        pytest.param(list(_HEALTHY_LINES), 300.0, True, [pytest.approx(10.0)], id="hint-fits-waits-in-full"),
-        # An unfittable hint (10 > 5): exactly one attempt, one stop reason, no second spawn.
+        # jitter maximum (4s) is smaller than the hint (10.5s).
+        pytest.param(list(_HEALTHY_LINES), 300.0, True, [pytest.approx(10.5)], id="hint-fits-waits-in-full"),
+        # An unfittable hint (10.5 > 5): exactly one attempt, one stop reason, no second spawn.
         pytest.param(list(_ERROR_LINES), 5.0, False, [], id="hint-exceeds-budget-stops"),
     ],
 )
@@ -446,13 +446,13 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
         with pytest.raises(PiError) as failure:
             await run_agent(
                 cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-                wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10 > 5
+                wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10.5 > 5
                 progress_callback=lambda text: notices.append(text.plain.strip()),
             )
         assert len(spawned) == 1  # no further attempt dispatched after the stop
-        assert failure.value.retry_after == 10.0
+        assert failure.value.retry_after == 10.5
         assert failure.value.category == "RATE_LIMIT" and failure.value.retryable is True
     assert slept == expected_sleep  # the full hint, or no shortened wait in its place
     assert [notice for notice in notices if notice.startswith("[retry]")] == ([
-        "[retry] Backend error (PiError), retrying attempt 2/2 after 10.0s (server-advertised wait)...",
+        "[retry] Backend error (PiError), retrying attempt 2/2 after 10.5s (server-advertised wait)...",
     ] if retries else [])

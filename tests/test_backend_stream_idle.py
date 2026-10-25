@@ -15,6 +15,7 @@ import sys
 import textwrap
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 import anyio
 import pytest
@@ -84,9 +85,12 @@ async def run_pi_wall_budget(
 ) -> FakeCliProcess:
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True, ignore_sigterm=ignore_sigterm)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "3600")
-    output, _, budget_reason = await run_agent(
-        PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=1.0,
-    )
+    backend = PiBackend(model="test-model")
+    with patch.object(backend, "cancel", wraps=backend.cancel) as cancel:
+        output, _, budget_reason = await run_agent(
+            backend, tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=1.0,
+        )
+    assert cancel.call_count == 0
     assert budget_reason == "wall_budget_exceeded"
     assert output == ""
     return assert_stalled_and_reaped(spawner)
@@ -261,7 +265,14 @@ async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
 
     Only the wall timer can fire: the stream stays silent and idle timeout is much longer.
     """
-    proc = await run_pi_wall_budget(tmp_path, monkeypatch)
+    recorder = make_recorder(tmp_path)
+    with anyio.fail_after(5):
+        async with recorder:
+            proc = await run_pi_wall_budget(tmp_path, monkeypatch)
+    trajectory = json.loads(recorder.path.read_text(encoding="utf-8"))
+    stopped = [step for step in trajectory["steps"] if step.get("extra", {}).get("stop_reason")]
+    assert len(stopped) == 1 and stopped[0]["source"] == "agent"
+    assert stopped[0]["extra"]["stop_reason"] == "wall_budget_exceeded"
     assert proc.returncode == SIGTERM_RC, "a cooperative child needs no SIGKILL"
 
 async def test_cancelled_teardown_still_escalates_to_sigkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

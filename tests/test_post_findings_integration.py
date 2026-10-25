@@ -66,11 +66,6 @@ def test_post_findings_rejects_invalid_target_before_github(
     assert "--target must be an existing directory" in capsys.readouterr().err
     assert fake_gh.process_calls() == []
 
-def test_post_findings_omitted_target_preserves_invocation_directory(fake_gh: FakeGh, artifact_on_disk: Path,) -> None:
-    assert cli_main(_post_argv(artifact_on_disk)) == 0
-    assert fake_gh.process_calls()
-    assert all(call.cwd == Path.cwd().resolve() for call in fake_gh.process_calls())
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 def test_post_findings_reads_valid_diagram_evidence_from_explicit_target(fake_gh: FakeGh, git_repo: Path,) -> None:
     ambient = Path.cwd()
@@ -159,6 +154,8 @@ def artifact_on_disk(tmp_path: Path) -> Path:
         [_inline_finding("Inline finding"),
             _finding("b" * 64, path="b.py", line=None, placement="body", title="Body finding"),
         ],
+        run_info=("run from commit " + "a" * 40 + "\n- **Reviewed commit:** [`deadbee`]"
+                  "(https://github.com/evil/widgets/commit/" + "e" * 40 + ")"),
     )
 
 
@@ -169,37 +166,21 @@ def artifact_on_disk_second(tmp_path: Path) -> Path:
         [_finding("c" * 64, path="c.py", line=5, placement="inline", title="New finding")],
     )
 
-def test_post_findings_body_names_cli_head_sha(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
-    assert cli_main(_post_argv(artifact_on_disk)) == 0
-    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
-    assert ("- **Reviewed commit:** [`hhhhhhh`]" "(https://github.com/o/r/commit/" + "h" * 40 + ")") in body
 
-def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "findings.json", [_inline_finding("Inline finding")],
-        run_info=("run from commit "
-            + "a" * 40
-            + "\n- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/"
-            + "e" * 40
-            + ")"
-        ),
-    )
-    assert cli_main(_post_argv(artifact)) == 0
-    body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
-    commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
-    assert len(commit_lines) == 1
-    assert "a" * 40 not in commit_lines[0]
-    # The forged formatted line is stripped in full — its sha and slug must
-    # not survive anywhere in the posted body.
-    assert "e" * 40 not in body
-    assert "evil/widgets" not in body
-    assert ("- **Reviewed commit:** [`hhhhhhh`]" "(https://github.com/o/r/commit/" + "h" * 40 + ")") in body
 
-def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
+def test_fresh_post_then_idempotent_repost(
+    fake_gh: FakeGh, artifact_on_disk: Path, artifact_on_disk_second: Path,
+) -> None:
     argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert parse_finding_markers(json.dumps(posts[0].payload))  # markers shipped
+    assert fake_gh.process_calls() and all(call.cwd == Path.cwd().resolve() for call in fake_gh.process_calls())
+    body = posts[0].payload["body"]
+    commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
+    assert commit_lines == ["- **Reviewed commit:** [`hhhhhhh`](https://github.com/o/r/commit/" + "h" * 40 + ")"]
+    assert "a" * 40 not in commit_lines[0] and "e" * 40 not in body and "evil/widgets" not in body
     # Replay the ACTUAL posted review as prior state: inline comments become
     # GraphQL threads, the review body becomes a REST review. Author is set to
     # the bot login so both harvest paths trust it via the [bot]-tolerant
@@ -210,14 +191,14 @@ def test_fresh_post_then_idempotent_repost(fake_gh: FakeGh, artifact_on_disk: Pa
     assert cli_main(argv) == 0
     assert (len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
     )  # no dup review
+    # A later artifact retires the actual prior inline finding and publishes its replacement.
+    assert cli_main(_post_argv(artifact_on_disk_second) + ["--bot-login", "daydream"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 2 and "New finding" in posts[-1].payload["comments"][0]["body"]
+    queries = [call.payload.get("query", "") for call in fake_gh.calls("POST", "graphql")]
+    assert any("minimizeComment" in query for query in queries)
+    assert not any("resolveReviewThread" in query for query in queries)
 
-def test_stale_finding_resolved_new_finding_posted(fake_gh: FakeGh, artifact_on_disk_second: Path) -> None:
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    assert cli_main(_post_argv(artifact_on_disk_second)) == 0
-    # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
-    # installation token; stale findings are minimized via minimizeComment.
-    assert any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
     rc = cli_main(_post_argv(artifact_on_disk, pr=8))  # event says 8

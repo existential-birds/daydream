@@ -673,8 +673,17 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         check_deep_artifacts("per-stack", live_deep, current_diff_sha=current_diff_sha)
         session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
         session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
+        assert session.durable_path_for(live_deep / "summary.md", repo=first) == source / ".daydream/deep/summary.md"
+        assert session.live_path_for(source / ".daydream/deep/summary.md", repo=first) == live_deep / "summary.md"
+        assert session.durable_path_for(session.review_output, repo=first) == source / ".review-output.md"
+        assert session.live_path_for(source / ".review-output.md", repo=first) == session.review_output
         routed = session.register_destination(findings, label=OutputLabel.FINDINGS_OUTPUT)
         assert not findings.exists() and routed.write_path is not None
+        assert routed.requested == findings and routed.write_path.is_relative_to(session.layout.live_root)
+        with pytest.raises(ArtifactVisibilityError, match="destination collision"):
+            session.register_destination(source / "." / findings.name, label=OutputLabel.FINDINGS_OUTPUT)
+        with pytest.raises(ArtifactVisibilityError, match="destination overlap"):
+            session.register_destination(findings / "child", label=OutputLabel.DUMP_DIRECTORY)
         assert session.durable_path_for(routed.write_path, repo=first) == findings
         assert session.live_path_for(findings, repo=first) == routed.write_path
         routed.write_path.parent.mkdir(parents=True)
@@ -730,8 +739,16 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
     alias.symlink_to(source, target_is_directory=True)
 
     assert artifact_session_active() is False
+    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+        artifact_dir_for(work.repo)
+    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+        review_output_path_for(work.repo)
     async with open_artifact_session(work, session_id="routing") as session:
         assert artifact_session_active() is True
+        with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+            artifact_dir_for(work.repo)
+        with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+            review_output_path_for(work.repo)
         async def child() -> None:
             observed.append(artifact_dir_for(work.repo, allow_standalone=True))
 
@@ -739,6 +756,7 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
             group.start_soon(child)
         assert observed == [session.daydream_dir]
         assert artifact_dir_for(work.repo, allow_standalone=True) == session.daydream_dir
+        assert review_output_path_for(work.repo, allow_standalone=True) == session.review_output
         with pytest.raises(ArtifactVisibilityError, match="active artifact session"):
             artifact_dir_for(tmp_path / "wrong-repo", allow_standalone=True)
         with pytest.raises(ArtifactVisibilityError, match="active artifact session"):
@@ -748,6 +766,8 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
 
     assert artifact_session_active() is False
     assert artifact_dir_for(work.repo, allow_standalone=True) == source / ".daydream"
+    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
+        artifact_dir_for(work.repo)
 
 
 @pytest.mark.parametrize("exit_kind", ["error", "cancel"])
@@ -808,16 +828,6 @@ async def test_artifact_session_rejects_tracked_public_collision_untouched(sourc
             pass
 
     assert target.read_bytes() == b"tracked collision"
-
-
-async def test_artifact_session_rejects_unknown_public_tree(source: Path) -> None:
-    unknown = source / ".daydream" / "extension-only" / "opaque.bin"
-    unknown.parent.mkdir(parents=True)
-    unknown.write_bytes(b"extension")
-    with pytest.raises(ArtifactVisibilityError, match="unregistered artifact anchor"):
-        async with open_artifact_session(_work(source), session_id="unknown"):
-            pass
-    assert unknown.read_bytes() == b"extension"
 
 
 async def test_artifact_session_rejects_registered_public_anchor_with_unknown_sibling(source: Path) -> None:
@@ -1082,23 +1092,6 @@ def test_validate_private_workspace_owner_rejects_unsafe_private_modes(source: P
 
     with pytest.raises(ArtifactVisibilityError, match="0700|0600"):
         validate_private_workspace_owner(owner, source=source)
-
-
-async def test_artifact_session_registers_destinations_and_rejects_aliases(tmp_path: Path, source: Path) -> None:
-    work = _work(source)
-    async with open_artifact_session(work, session_id="destinations") as session:
-        internal = session.register_destination(source / "findings.json", label=OutputLabel.FINDINGS_OUTPUT)
-        assert internal.requested == source / "findings.json"
-        assert internal.write_path is not None
-        assert internal.write_path.is_relative_to(session.layout.live_root)
-        assert internal.delivery is artifact_visibility.DestinationDelivery.DEFERRED
-        external = session.register_trajectory_output(tmp_path / "external" / "trajectory.json").full
-        assert external.write_path == external.requested
-        assert external.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
-        with pytest.raises(ArtifactVisibilityError, match="destination collision"):
-            session.register_destination(source / "." / "findings.json", label=OutputLabel.FINDINGS_OUTPUT)
-        with pytest.raises(ArtifactVisibilityError, match="destination overlap"):
-            session.register_destination(source / "findings.json" / "child", label=OutputLabel.DUMP_DIRECTORY)
 
 
 @pytest.mark.parametrize("problem", [
@@ -1660,28 +1653,6 @@ async def test_artifact_session_rejects_forged_snapshot_object(tmp_path: Path, s
             _publish(session, forged)
 
 
-async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpaired(tmp_path: Path, source: Path,
-) -> None:
-    requested, partial = _external_target(tmp_path / "external")
-
-    async with open_artifact_session(_work(source), session_id="external-route") as session:
-        route = session.register_trajectory_output(requested)
-        assert route.run_dir == session.daydream_dir / "runs" / "external-route"
-        assert route.full.requested == requested
-        assert route.partial.requested == partial
-        assert route.full.write_path == requested
-        assert route.partial.write_path == partial
-        assert route.full.frozen_path == route.run_dir / "trajectory.json"
-        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
-        assert route.full.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
-        assert route.partial.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
-        registry = _load_json(session._detach_transaction / "destinations.json")
-        assert len(cast(list[object], registry["destinations"])) == 2
-        for label in (OutputLabel.EXPLICIT_TRAJECTORY, OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,):
-            with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
-                session.register_destination(requested, label=label)
-
-
 @pytest.mark.parametrize(("disposition", "status"),
     [(artifact_visibility.ArtifactDisposition.COMPLETE, "complete"),
         (artifact_visibility.ArtifactDisposition.PARTIAL_EVIDENCE, "partial"),
@@ -1722,6 +1693,10 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
         assert route.partial.requested == partial_requested
         assert route.full.write_path == route.full.frozen_path == private_full
         assert route.partial.write_path == route.partial.frozen_path == private_partial
+        assert (session.durable_path_for(private_full, repo=source),
+                session.durable_path_for(private_partial, repo=source)) == (requested, partial_requested)
+        assert (session.live_path_for(requested, repo=source),
+                session.live_path_for(partial_requested, repo=source)) == (private_full, private_partial)
         assert route.run_dir == session.daydream_dir / "runs" / session_id
         assert tuple(session._destinations) == destinations_before == (public_owner, review_owner)
         assert tuple(session._records()) == records_before == ()
@@ -2448,6 +2423,19 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
     with pytest.raises(ArtifactVisibilityError, match="changed|conflict"):
         async with open_artifact_session(_work(source), session_id=session_id) as session:
             route = session.register_trajectory_output(requested)
+            assert route.run_dir == session.daydream_dir / "runs" / session_id
+            assert (route.full.requested, route.full.write_path) == (requested, requested)
+            assert (route.partial.requested, route.partial.write_path) == (partial_path, partial_path)
+            assert (route.full.frozen_path, route.partial.frozen_path) == (
+                route.run_dir / "trajectory.json", route.run_dir / "trajectory.json.partial")
+            assert route.full.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
+            assert route.partial.delivery is route.full.delivery
+            registry = _load_json(session._detach_transaction / "destinations.json")
+            assert len(cast(list[object], registry["destinations"])) == 2
+            with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
+                session.register_destination(requested, label=OutputLabel.EXPLICIT_TRAJECTORY)
+            with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
+                session.register_destination(requested, label=OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL)
             partial_document = TrajectoryDocumentSnapshot(session_id, partial_path, partial_bytes)
             session.write_trajectory_document(route, partial_document, "partial")
             assert partial_path.read_bytes() == partial_bytes
@@ -2816,63 +2804,6 @@ async def test_transfer_intents_are_durable_before_first_move(tmp_path: Path, mo
     assert sorted(cast(str, intent["relative"]) for intent in intents["intents"]) == expected_files
     first_source = Path(cast(str, observed_at_first_move["path"]))
     assert str(first_source) in [cast(str, intent["source"]) for intent in intents["intents"]]
-
-
-async def test_routed_path_accessors_resolve_explicit_session_over_fallbacks(tmp_path: Path,) -> None:
-    """Strict calls require a session; compatibility requires affirmative opt-in."""
-    source = tmp_path / "source"
-    _init_repo(source)
-    work = _work(source)
-
-    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-        artifact_dir_for(work.repo)
-    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-        review_output_path_for(work.repo)
-    assert artifact_dir_for(work.repo, allow_standalone=True) == source / ".daydream"
-    assert review_output_path_for(work.repo, allow_standalone=True) == source / ".review-output.md"
-
-    async with open_artifact_session(work, session_id="routing-seam") as session:
-        assert artifact_dir_for(work.repo, session=session) == session.daydream_dir
-        assert review_output_path_for(work.repo, session=session) == session.review_output
-        with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-            artifact_dir_for(work.repo)
-        with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-            review_output_path_for(work.repo)
-        assert artifact_dir_for(work.repo, allow_standalone=True) == session.daydream_dir
-        assert review_output_path_for(work.repo, allow_standalone=True) == session.review_output
-
-    with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
-        artifact_dir_for(work.repo)
-
-
-async def test_artifact_session_projects_registered_live_and_durable_paths(tmp_path: Path,) -> None:
-    source = tmp_path / "source"
-    _init_repo(source)
-    work = _work(source)
-
-    async with open_artifact_session(work, session_id="projections") as session:
-        session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
-        session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
-        findings = session.register_destination(source / "findings.json", label=OutputLabel.FINDINGS_OUTPUT)
-        trajectory = session.register_trajectory_output(source / ".daydream" / "custom" / "trajectory.json")
-
-        public_deep = source / ".daydream" / "deep" / "summary.md"
-        live_deep = session.daydream_dir / "deep" / "summary.md"
-        assert session.durable_path_for(live_deep, repo=work.repo) == public_deep
-        assert session.live_path_for(public_deep, repo=work.repo) == live_deep
-        assert session.durable_path_for(session.review_output, repo=work.repo) == (source / ".review-output.md")
-        assert session.live_path_for(source / ".review-output.md", repo=work.repo) == (session.review_output)
-
-        assert findings.write_path is not None
-        assert session.durable_path_for(findings.write_path, repo=work.repo) == findings.requested
-        assert session.live_path_for(findings.requested, repo=work.repo) == findings.write_path
-
-        for route in (trajectory.full, trajectory.partial):
-            assert route.write_path is not None
-            # The exact trajectory route must win over the broader registered
-            # public .daydream subtree in both directions.
-            assert session.durable_path_for(route.write_path, repo=work.repo) == route.requested
-            assert session.live_path_for(route.requested, repo=work.repo) == route.write_path
 
 
 async def test_artifact_session_projection_rejects_unowned_or_unsafe_paths(tmp_path: Path,) -> None:

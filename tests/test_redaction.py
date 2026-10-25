@@ -114,28 +114,8 @@ def test_redactor_preserves_short_eyj_non_jwt() -> None:
     assert "eyJhbG" in out.message
 
 
-@pytest.mark.parametrize(("text", "absent", "present", "preserved_tail"),
-    [("path=/Users/ka/github/proj/app.py", "/Users/ka", "/Users/[REDACTED_USER]", "github/proj/app.py"),
-        ("path=/home/alice/foo/bar", "/home/alice", "/home/[REDACTED_USER]", "foo/bar"),
-        ("path=C:\\Users\\bob\\repo", "Users\\bob", "[REDACTED_USER]", None),
-    ], ids=["macos", "linux", "windows"],
-)
-def test_redactor_scrubs_username_path(text: str, absent: str, present: str, preserved_tail: str | None) -> None:
-    """REDA-02: /Users//home//C:\\Users\\ <name> → [REDACTED_USER], project-relative tail preserved."""
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert absent not in out.message
-    assert present in out.message
-    if preserved_tail is not None:
-        assert preserved_tail in out.message
 
 
-def test_redactor_applies_to_reasoning_content() -> None:
-    step = _agent_step(reasoning_content="thought: sk-test-secret123abc")
-    out = Redactor().redact_step(step)
-    assert out.reasoning_content is not None
-    assert "sk-test-secret123abc" not in out.reasoning_content
-    assert "[REDACTED_API_KEY]" in out.reasoning_content
 
 
 def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -257,40 +237,88 @@ _DSA_PEM = (
     "-----END DSA PRIVATE KEY-----"
 )
 
-# Shared by the block and env-assignment redaction tests — one spec for the six
-# PEM variants so the parametrize lists cannot drift out of sync.
-_PEM_KEY_CASES: list[tuple[str, str]] = [
-    (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
-    (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"), (_OPENSSH_PEM, "OPENSSHKEYBODY"), (_EC_PEM, "ECKEYBODY"),
-    (_DSA_PEM, "DSAKEYBODY"),
-]
-_PEM_KEY_IDS = ["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"]
-
-
-@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS,)
-def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
-    """PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA) replaced with [REDACTED_PEM_KEY]."""
-    out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
-    assert isinstance(out.message, str)
-    assert body not in out.message
-    assert "[REDACTED_PEM_KEY]" in out.message
-
-
-@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS)
-def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> None:
-    """VAR=<PEM> redacts fully — PEM rule must run before the env-var rule, no base64 body survives."""
-    out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
-    assert isinstance(out.message, str)
-    assert body not in out.message
-    assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
-
-
-def test_redactor_preserves_certificate_block() -> None:
-    cert = ("-----BEGIN CERTIFICATE-----\n" "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkq\n" "-----END CERTIFICATE-----")
-    out = Redactor().redact_step(_user_step(f"cert: {cert}"))
-    assert isinstance(out.message, str)
-    assert "[REDACTED_PEM_KEY]" not in out.message
-    assert "BEGIN CERTIFICATE" in out.message
+def test_credential_rotation_diagnostic_redacts_independent_documents_and_preserves_siblings() -> None:
+    """One native record retains its certificate, paths and config structure while removing every credential family."""
+    certificate = "-----BEGIN CERTIFICATE-----\nMIIDdzCCAl+gAwIBAgIEAgAAuTANBgkq\n-----END CERTIFICATE-----"
+    out = Redactor().redact_step(
+        _agent_step(
+            message=(
+                f"RSA: {_PKCS1_PEM}\nPKCS8: {_PKCS8_PEM}\nEncrypted: {_ENCRYPTED_PEM}\n"
+                f"SSH: {_OPENSSH_PEM}\nEC: {_EC_PEM}\nDSA: {_DSA_PEM}\nCertificate: {certificate}\n"
+                "path=/Users/ka/github/proj/app.py\npath=/home/alice/foo/bar\npath=C:\\Users\\bob\\repo"
+            ),
+            reasoning_content=(
+                f"thought: sk-test-secret123abc\nRSA_PRIVATE_KEY={_PKCS1_PEM}\nPKCS8_PRIVATE_KEY={_PKCS8_PEM}\n"
+                f"ENCRYPTED_PRIVATE_KEY={_ENCRYPTED_PEM}\nSSH_PRIVATE_KEY={_OPENSSH_PEM}\n"
+                f"EC_PRIVATE_KEY={_EC_PEM}\nDSA_PRIVATE_KEY={_DSA_PEM}"
+            ),
+            observation=Observation(
+                results=[
+                    ObservationResult(
+                        source_call_id="json-config",
+                        content=(
+                            '{"credentials": {"apiKey": "opaque-test-only-sentinel"}, "profiles": ['
+                            '{"apiKey": {"nested": "opaque-test-only-sentinel"}},\n'
+                            '{"apiKey": {\n  "nested": "opaque-test-only-sentinel"\n}}], "enabled": true}'
+                        ),
+                    ),
+                    ObservationResult(
+                        source_call_id="python-config", content="{'client_secret': 'opaque-test-only-sentinel'}"
+                    ),
+                    ObservationResult(
+                        source_call_id="yaml-config",
+                        content=(
+                            "1apiKey:\n  nested: opaque-test-only-sentinel\n"
+                            "defauthorization:\n  nested: opaque-test-only-sentinel\n"
+                            "nullpasswd:\n  nested: opaque-test-only-sentinel\nplain: 1\n"
+                            "apiKey:\n  nested: opaque-test-only-sentinel"
+                        ),
+                    ),
+                    ObservationResult(
+                        source_call_id="rotation-log",
+                        content=(
+                            "apiKey: opaque-test-only-sentinel\nclient-secret = opaque-test-only-sentinel\n"
+                            '1AUTHORIZATION = opaque-test-only-sentinel\n1apiKey: "opaque-test-only-sentinel"\n'
+                            'defauthorization: "opaque-test-only-sentinel"\nnullpasswd=1\n'
+                            "superclient_secret = opaque-test-only-sentinel"
+                        ),
+                    ),
+                ]
+            ),
+        )
+    )
+    assert out.message == (
+        "RSA: [REDACTED_PEM_KEY]\nPKCS8: [REDACTED_PEM_KEY]\nEncrypted: [REDACTED_PEM_KEY]\n"
+        "SSH: [REDACTED_PEM_KEY]\nEC: [REDACTED_PEM_KEY]\nDSA: [REDACTED_PEM_KEY]\n"
+        f"Certificate: {certificate}\npath=/Users/[REDACTED_USER]/github/proj/app.py\n"
+        "path=/home/[REDACTED_USER]/foo/bar\npath=C:\\Users\\[REDACTED_USER]\\repo"
+    )
+    assert out.reasoning_content == (
+        "thought: [REDACTED_API_KEY]\nRSA_PRIVATE_KEY=[REDACTED_ENV_VAR]\nPKCS8_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
+        "ENCRYPTED_PRIVATE_KEY=[REDACTED_ENV_VAR]\nSSH_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
+        "EC_PRIVATE_KEY=[REDACTED_ENV_VAR]\nDSA_PRIVATE_KEY=[REDACTED_ENV_VAR]"
+    )
+    assert out.observation is not None
+    assert [(result.source_call_id, result.content) for result in out.observation.results] == [
+        (
+            "json-config",
+            '{"credentials": "[REDACTED_CREDENTIAL]", "profiles": ['
+            '{"apiKey": "[REDACTED_CREDENTIAL]"},\n{"apiKey": "[REDACTED_CREDENTIAL]"}], "enabled": true}',
+        ),
+        ("python-config", "{'client_secret': '[REDACTED_CREDENTIAL]'}"),
+        (
+            "yaml-config",
+            '1apiKey:"[REDACTED_CREDENTIAL]"\ndefauthorization:"[REDACTED_CREDENTIAL]"\n'
+            'nullpasswd:"[REDACTED_CREDENTIAL]"\nplain: 1\napiKey:"[REDACTED_CREDENTIAL]"',
+        ),
+        (
+            "rotation-log",
+            'apiKey: "[REDACTED_CREDENTIAL]"\nclient-secret = "[REDACTED_CREDENTIAL]"\n'
+            '1AUTHORIZATION = "[REDACTED_CREDENTIAL]"\n1apiKey: "[REDACTED_CREDENTIAL]"\n'
+            'defauthorization: "[REDACTED_CREDENTIAL]"\nnullpasswd="[REDACTED_CREDENTIAL]"\n'
+            'superclient_secret = "[REDACTED_CREDENTIAL]"',
+        ),
+    ]
 
 
 @pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "<redacted>"])
@@ -324,29 +352,8 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     )
 
 
-@pytest.mark.parametrize("text", [
-    '{"credentials": {"apiKey": "opaque-test-only-sentinel"}}', "{'client_secret': 'opaque-test-only-sentinel'}",
-    "apiKey: opaque-test-only-sentinel", "client-secret = opaque-test-only-sentinel",
-])
-def test_redactor_scrubs_sensitive_key_value_text_formats(text: str) -> None:
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert "opaque-test-only-sentinel" not in out.message
-    assert "[REDACTED_CREDENTIAL]" in out.message
 
 
-@pytest.mark.parametrize("text", [
-    "apiKey:\n  nested: opaque-test-only-sentinel",
-    '{\n  "apiKey": {\n    "nested": "opaque-test-only-sentinel"\n  }\n}',
-    '{"apiKey": {"nested": "opaque-test-only-sentinel"}}',
-    "1AUTHORIZATION = opaque-test-only-sentinel",
-    '1apiKey: "opaque-test-only-sentinel"',
-    "1apiKey:\n  nested: opaque-test-only-sentinel\n",
-])
-def test_redactor_scrubs_sensitive_key_shapes(text: str) -> None:
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
 
 
 def test_redactor_preserves_structural_separator_after_bare_value() -> None:
@@ -469,18 +476,6 @@ def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
     assert out3.startswith("foo" + seps + "x")
 
 
-@pytest.mark.parametrize("text", [
-    'defauthorization: "opaque-test-only-sentinel"',
-    "nullpasswd=1",
-    "superclient_secret = opaque-test-only-sentinel",
-    "defauthorization:\n  nested: opaque-test-only-sentinel\n",
-    "nullpasswd:\n  nested: opaque-test-only-sentinel\n",
-])
-def test_redactor_scrubs_sensitive_suffix_in_non_sensitive_key(text: str) -> None:
-    out = redact_structured_text(text)
-    assert "opaque-test-only-sentinel" not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-    assert str(text).split(":", 1)[0].split("=", 1)[0] in out
 
 
 def test_redactor_gap_mechanics_compose() -> None:

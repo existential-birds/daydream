@@ -790,17 +790,28 @@ def test_base_tip_api_read_rejects_advanced_pr(
     assert calls == [f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"]
 
 
-@pytest.mark.parametrize("path", ["é.py", "spaced name.py", 'quoted"name.py'])
-def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path, path: str) -> None:
+def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path) -> None:
     from tests.harness.git_helpers import git
     base = git_ops.head_sha(git_repo)
-    (git_repo / path).write_text("defect = True\n")
-    git(git_repo, "add", path)
-    git(git_repo, "commit", "-m", "add quoted path")
+    paths = [" leading and trailing ", "line\nbreak", "café.py", "é.py", "spaced name.py", 'quoted"name.py']
+    for path in paths:
+        (git_repo / path).write_text("defect = True\n")
+    git(git_repo, "add", *paths)
+    git(git_repo, "commit", "-m", "add unusual paths")
     head = git_ops.head_sha(git_repo)
     pr = PRInfo(7, head, base, "main", "feature", "o", "r", "https://github.com/o/r/pull/7")
     diff = git_ops.diff_paths(git_repo, base, head, ["."])
-    issue = ParsedIssue(path=path, line=1, title="Defect", body="defect")
-    placed = classify(git_repo, pr, [issue], snapshot_diff=diff)
-    assert [(finding.path, finding.line) for finding in placed.inline] == [(path, 1)]
-    assert placed.body_only == []
+    placed = classify(git_repo, pr, [
+        ParsedIssue(path=" leading and trailing ", line=1, title="Whitespace path", body="defect"),
+        ParsedIssue(path="line\nbreak", line=1, title="Newline path", body="defect"),
+        ParsedIssue(path="café.py", line=1, title="Unicode basename", body="defect"),
+        ParsedIssue(path="é.py", line=1, title="Unicode path", body="defect"),
+        ParsedIssue(path="spaced name.py", line=1, title="Internal space", body="defect"),
+        ParsedIssue(path='quoted"name.py', line=1, title="Quoted path", body="defect"),
+    ], snapshot_diff=diff)
+    assert [(finding.path, finding.line) for finding in placed.inline] == [
+        (" leading and trailing ", 1), ("line\nbreak", 1), ("café.py", 1), ("é.py", 1),
+        ("spaced name.py", 1), ('quoted"name.py', 1),
+    ]
+    assert placed.file_level == placed.body_only == []
+    assert git_ops.diff_name_only_strict(git_repo, head, head) == []

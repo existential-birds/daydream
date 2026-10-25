@@ -483,16 +483,6 @@ def test_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path,) ->
 # validation at the entry boundary, and legacy "Z" rows preserved at bootstrap.
 
 
-def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
-    upsert_run(tmp_path, Manifest())
-    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-        conn.row_factory = sqlite3.Row
-        row = dict(conn.execute("SELECT * FROM runs").fetchone())
-    assert row["pipeline_status"] == "unknown"
-    assert row["archive_status"] == "complete"
-    assert row["daydream_version"] is None
-
-
 def _write_deep(target: Path, name: str, data: Any) -> None:
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)

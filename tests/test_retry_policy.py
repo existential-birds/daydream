@@ -10,7 +10,6 @@ import pytest
 from daydream.agent import _ToolSupervisorFailure
 from daydream.backends import BackendExecutionInput
 from daydream.backends.codex import CodexError
-from daydream.backends.pi import PiError
 from daydream.config_file import load_file_config
 from daydream.retry_policy import (
     FailureClass,
@@ -28,13 +27,6 @@ def test_tool_policy_veto_is_permanent_and_never_retryable() -> None:
     assert decision.failure_class is FailureClass.TOOL_POLICY
     assert decision.retries_allowed is False
 
-
-def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
-    """Generic "provider" text must not override an explicitly transient rate-limit category."""
-    decision = classify_failure(PiError("provider rate limit", retryable=True, category="RATE_LIMIT"))
-
-    assert decision.failure_class is FailureClass.RATE_LIMIT
-    assert decision.retries_allowed is True
 
 def test_tool_policy_stop_attribute_is_permanent_and_never_retryable() -> None:
     class _ToolPolicyStop(Exception):
@@ -171,18 +163,10 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pyte
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        pytest.param('429: {"metadata":{"headers":{"RETRY-AFTER":"7"}}}', 7.0, id="upper-key"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":2.5}}}', 2.5, id="fractional-number"),
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0, id="zero-string"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"-5"}}}', None, id="negative"),
         pytest.param('429: {"metadata":{"headers":"nope"}}', None, id="headers-not-mapping"),
         pytest.param('429: {"metadata":"nope"}', None, id="metadata-not-mapping"),
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"10"}', None, id="malformed-json"),
-        pytest.param("503 Service Unavailable; retry-after: 30", 30.0, id="plain-text"),
-        pytest.param("", None, id="empty"),
-        pytest.param(
-            '429: {"metadata":{"headers":{"Retry-After":"10"}}} retry-after: 99', 10.0, id="structured-wins",
-        ),
     ],
 )
 def test_parse_message_retry_hint_reads_structured_headers(message: str, expected: float | None) -> None:

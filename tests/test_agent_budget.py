@@ -33,22 +33,6 @@ from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fi
 from tests.harness.trajectory import make_recorder
 
 
-def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:
-    """Stream tool starts without a result; positive sleep allows wall-clock expiry."""
-    if not sleep_s:
-        events: list[AgentEvent] = [
-            ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"}) for i in range(count)
-        ]
-        return ScriptedBackend(events=events, model="mock-model", fanout_concurrency=4)
-    async def responder(*args: Any, **kwargs: Any) -> Any:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            for i in range(count):
-                await anyio.sleep(sleep_s)
-                yield ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"})
-        return _gen()
-    return ScriptedBackend(responder=responder, model="mock-model", fanout_concurrency=4)
-
-
 class _RetryableBackendError(RuntimeError):
     """A retryable transport failure for the deadline-retry tests."""
 
@@ -136,21 +120,6 @@ async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
     # The received over-limit start is retained as evidence even though it is not displayed or executed further.
     assert [call["tool_call_id"] for call in step["tool_calls"]] == [f"tool-{index}" for index in range(6)]
     assert trajectory["extra"]["partial"] is True
-
-
-async def test_run_agent_wall_budget(tmp_path: Path) -> None:
-    backend = _burst_backend(count=200, sleep_s=0.05)
-    recorder = make_recorder(tmp_path)
-    with anyio.fail_after(5):
-        async with recorder:
-            result, _, _ = await run_agent(
-                backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=0.2, tool_call_budget=None,
-            )
-    assert isinstance(result, str)
-    assert backend.cancel_calls == 0
-    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
-    step = _agent_step_with_stop_reason(traj)
-    assert step["extra"]["stop_reason"] == "wall_budget_exceeded"
 
 
 async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
@@ -513,6 +482,7 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     assert sum(b.call_count for b in backends) <= 3 + 1  # threshold + the one probe
     assert len(slept) <= 3
     assert run_context.outage_circuit.state() in {"open", "half_open"}
+    assert RunContext(InteractionPolicy(interactive=False)).outage_circuit.state() == "closed"
 
 
 async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_probe(
@@ -558,13 +528,6 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     _sibling_traj, sibling_meta = _budget_stop(sibling_recorder)
     assert sibling_meta["retry_stop_reason"] == "circuit_open"
     assert sibling.call_count == 1  # suppressed before its own probe could dispatch
-
-
-async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
-    assert (
-        RunContext(InteractionPolicy(interactive=False)).outage_circuit.state()
-        == "closed"
-    )
 
 
 @pytest.mark.parametrize("bounded", [True, False], ids=["staged-deadline", "unbounded"])

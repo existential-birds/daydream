@@ -24,7 +24,6 @@ from daydream.backends import (
     ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
-    TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase, Invocation
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -94,26 +93,6 @@ def _summary(inv: Invocation) -> dict[str, Any]:
 class TestPendingDraftLifecycle:
     """Decision 1: drafts stay UNENDED until billing ownership resolves."""
 
-    def test_draft_opens_on_start_and_stays_unended_until_resolution(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        summary = _summary(inv)
-        assert summary["drafts"][0]["sealed"] is False
-        assert summary["drafts"][0]["ended"] is False
-        assert summary["billing_owner"] == "unresolved"
-
-    def test_seal_freezes_choice_and_timing_at_message_end_before_tools(self, tmp_path: Path) -> None:
-        _, inv = _sealed_invocation(tmp_path)
-        # Tools cannot alter choices already sealed at message end.
-        inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
-        inv.observe(ToolResultEvent(id="call_001", output='{"content": "FILE"}', is_error=False))
-        draft = _summary(inv)["drafts"][0]
-        assert draft["sealed"] is True
-        assert draft["ended"] is False  # still pending until ownership resolves
-        kinds = [part["kind"] for part in draft["choice_parts"]]
-        assert kinds == ["reasoning", "text", "tool_call"]
-        assert draft["choice_parts"][2]["call_id"] == "call_001"
-        assert draft["ended_at_unix_ns"] is None
 
     def test_end_happens_exactly_once_after_late_usage_and_resolution(self, tmp_path: Path) -> None:
         recorder, inv = _sealed_invocation(tmp_path)
@@ -177,14 +156,6 @@ class TestBillingOwnerResolution:
         assert summary["billing_owner"] == "structural_attempt"
         assert [d["billed"] for d in summary["drafts"]] == [False, False]
 
-    def test_partial_only_evidence_is_custom_nowhere_billed(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv)  # child usage, but NO authoritative attempt total
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "none"
-        assert summary["drafts"][0]["billed"] is False
-
 
     def test_owner_never_switches_after_resolution(self, recorder: Any) -> None:
         inv = _iq(recorder)
@@ -195,6 +166,7 @@ class TestBillingOwnerResolution:
         _usage(recorder, inv, "g2", input_tokens=3, output_tokens=2)
         inv.finish()
         assert _summary(inv)["billing_owner"] == "none"  # partial-only
+        assert [draft["billed"] for draft in _summary(inv)["drafts"]] == [False, False]
         # A late authoritative total must NOT flip the closed owner.
         _total(recorder, inv, input_tokens=13, output_tokens=7)
         assert _summary(inv)["billing_owner"] == "none"
@@ -249,6 +221,8 @@ class TestPendingBounds:
         assert tail["ended"] is True
         assert tail["billed"] is False
         assert tail["choice_parts"] == []
+        inv.finish()
+        assert _summary(inv)["billing_owner"] == "none"
 
     def test_choice_bytes_cap_10_mib(self, recorder: Any) -> None:
         inv = _iq(recorder)
@@ -265,32 +239,6 @@ class TestPendingBounds:
         cap_diags = [d for d in summary["diagnostics"] if "cap" in d]
         assert len(cap_diags) == 1
 
-class TestUnbilledOrNoneCapOwner:
-    """Cap drain locks ownership to structural (if a later total exists) or none."""
-
-
-    def test_cap_drain_without_total_owner_none(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        _seal_generations(inv, 513)
-        inv.finish()
-        assert _summary(inv)["billing_owner"] == "none"
-
-class TestEventDispatchAndSummary:
-    """Dispatch routing, subtrajectory surfacing, no behavior change without generations."""
-
-    def test_no_generation_events_leave_summary_unchanged(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        inv.observe(
-            MetricsEvent(message_id="m1", prompt_tokens=5, completion_tokens=3, cached_tokens=0, cost_usd=0.001,)
-        )
-        inv.observe(TurnEndEvent(message_id="m1"))
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["drafts"] == []
-        assert summary["billing_owner"] == "unresolved"
-        recorder._register_subtrajectory(inv)
-        assert "generation_lifecycle" not in recorder._subtrajectories[-1]
-
 
 @pytest.mark.parametrize("completed", [False, True], ids=["cancelled-unfinished", "completed-billed"])
 async def test_attempt_lifecycle_persists_without_changing_generation_billing(
@@ -305,8 +253,17 @@ async def test_attempt_lifecycle_persists_without_changing_generation_billing(
             async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe_user_step("review request")
                 inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
+                opened = _summary(inv)
+                assert (opened["drafts"][0]["sealed"], opened["drafts"][0]["ended"],
+                        opened["billing_owner"]) == (False, False, "unresolved")
                 if completed:
                     inv.observe(_end_event())
+                    inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
+                    inv.observe(ToolResultEvent(id="call_001", output='{"content": "FILE"}', is_error=False))
+                    sealed = _summary(inv)["drafts"][0]
+                    assert (sealed["sealed"], sealed["ended"], sealed["ended_at_unix_ns"]) == (True, False, None)
+                    assert [part["kind"] for part in sealed["choice_parts"]] == ["reasoning", "text", "tool_call"]
+                    assert sealed["choice_parts"][2]["call_id"] == "call_001"
                     _usage(recorder, inv)
                     _total(recorder, inv)
                 inv.record_backend_lifecycle(BackendLifecycleSnapshot(

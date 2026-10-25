@@ -577,14 +577,6 @@ def test_clone_no_local_requests_independent_objects(tmp_path: Path, monkeypatch
     assert calls == [["git", "clone", "--no-local", "source", str(tmp_path / "snapshot")]]
 
 
-@pytest.mark.parametrize("name", [" leading and trailing ", "line\nbreak", "café.py"])
-def test_diff_name_only_strict_preserves_exact_git_paths(repo: Path, name: str) -> None:
-    write_and_stage(repo, name, b"content\n")
-    _commit(repo, "unusual path")
-    assert git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD") == [name]
-    assert git_ops.diff_name_only_strict(repo, "HEAD", "HEAD") == []
-
-
 def test_assert_is_worktree_rejects_missing_path(tmp_path: Path) -> None:
     with pytest.raises(NotAWorktreeError):
         git_ops.assert_is_worktree(tmp_path / "does-not-exist")
@@ -864,16 +856,30 @@ def test_show_raises_a_plain_error_when_the_object_store_is_damaged(repo: Path) 
     assert not isinstance(excinfo.value, git_ops.PathAbsentError)
 
 
-def test_grep_fixed_matches_returns_path_pattern_pairs(repo: Path) -> None:
+def test_grep_fixed_matches_returns_path_pattern_pairs(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (repo / "widget_user.py").write_text("import widget\n")
     (repo / "gadget_user.ts").write_text("gadget\n")
     (repo / "partial.py").write_text("widget_factory\n")
     (repo / "notes.md").write_text("widget gadget\n")
     _git(repo, "add", "widget_user.py", "gadget_user.ts", "partial.py", "notes.md")
     _commit(repo, "add files")
-    matches = git_ops.grep_fixed_matches(repo, ("widget", "gadget"), word=True, pathspecs=("*.py", "*.ts"))
+    patterns_files: list[bytes] = []
+    real_run = subprocess.run
+    def recording_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        argv = args[0]
+        if "-f" in argv:
+            patterns_files.append(Path(argv[argv.index("-f") + 1]).read_bytes())
+        return real_run(*args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", recording_run)
+    matches = git_ops.grep_fixed_matches(
+        repo, ("widget", "widget", "", "gadget", "bad\x00pattern", "bad\rpattern", "bad\npattern"),
+        word=True, pathspecs=("*.py", "*.ts"),
+    )
+    assert patterns_files == [b"widget\ngadget"]
     assert len(matches) == 2
     assert set(matches) == {("widget_user.py", "widget"), ("gadget_user.ts", "gadget")}
+    assert git_ops.grep_fixed_matches(repo, ("absent_pattern",)) == []
+    assert git_ops.grep_fixed_matches(repo, ("widget",), pathspecs=("partial.py",)) == [("partial.py", "widget")]
 
 
 def test_grep_fixed_matches_raises_on_nonzero_exit(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -893,35 +899,6 @@ def test_grep_fixed_matches_raises_on_malformed_record(repo: Path, monkeypatch: 
         git_ops.grep_fixed_matches(repo, ("widget",))
 
 
-def test_grep_fixed_matches_empty_when_no_matches(repo: Path) -> None:
-    """Exit code 1 ("no matches") is treated as success: an empty list."""
-    write_and_stage(repo, "widget.py", "widget\n")
-    _commit(repo, "add widget")
-    assert git_ops.grep_fixed_matches(repo, ("absent_pattern",)) == []
-
-
-def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
-    repo: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    write_and_stage(repo, "widget.py", "widget\n")
-    _commit(repo, "add widget")
-    patterns_files: list[bytes] = []
-    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        argv = args[0] if args else []
-        for index, arg in enumerate(argv):
-            if arg == "-f" and index + 1 < len(argv):
-                patterns_files.append(Path(argv[index + 1]).read_bytes())
-        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    matches = git_ops.grep_fixed_matches(
-        repo,
-        ("widget", "widget", "", "gadget", "bad\x00pattern", "bad\rpattern", "bad\npattern"),
-        word=True,
-    )
-    assert matches == []
-    assert patterns_files == [b"widget\ngadget"]
-
-
 def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
@@ -929,12 +906,6 @@ def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(repo: Path, monke
         raise AssertionError("git must not run when every pattern is unsuitable")
     monkeypatch.setattr(subprocess, "run", no_git)
     assert git_ops.grep_fixed_matches(repo, ("", "a\x00b", "a\rb", "a\nb")) == []
-
-
-def test_grep_fixed_matches_default_word_false_matches_substrings(repo: Path) -> None:
-    write_and_stage(repo, "app.py", "application\n")
-    _commit(repo, "add app")
-    assert git_ops.grep_fixed_matches(repo, ("app",)) == [("app.py", "app")]
 
 
 def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path, repo: Path) -> None:

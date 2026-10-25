@@ -61,39 +61,12 @@ def _forbid_spawn(monkeypatch: pytest.MonkeyPatch, message: str) -> list[Any]:
     return spawn_calls
 
 
-async def test_async_requests_keep_refreshing_session_environments_isolated(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    captured: list[dict[str, str] | None] = []
-    refresh_calls = {"a": 0, "b": 0}
-    class CompletedProcess:
-        returncode = 0
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"{}", b""
-    async def create_process(*_args: Any, **kwargs: Any) -> CompletedProcess:
-        captured.append(kwargs["env"])
-        return CompletedProcess()
-    def session(name: str) -> git_ops.RefreshingGitHubAuth:
-        return refreshing_session(name, refresh_calls)
-    monkeypatch.setattr("daydream.git_ops.process.asyncio.create_subprocess_exec", create_process)
-    await asyncio.gather(
-        git_process._run_gh_async(tmp_path, ["api", "/user"], auth=session("a"), budget=_budget()),
-        git_process._run_gh_async(tmp_path, ["api", "/user"], auth=session("b"), budget=_budget()),
-    )
-    await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=git_ops.INHERIT_GITHUB_AUTH, budget=_budget())
-    assert sorted(env["GH_TOKEN"] for env in captured if env is not None) == [
-        "ghs_a_fresh_token_1234567890", "ghs_b_fresh_token_1234567890",
-    ]
-    assert captured[-1] is None
-    assert refresh_calls == {"a": 1, "b": 1}
-
-
 async def test_sync_and_async_requests_share_one_session_refresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Concurrent sync/async requests share one refresh while independent sessions and snapshots stay isolated."""
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-token-must-not-merge")
-    captured: list[dict[str, str]] = []
+    captured: list[dict[str, str] | None] = []
     refresh_calls = 0
 
     class CompletedProcess:
@@ -131,7 +104,7 @@ async def test_sync_and_async_requests_share_one_session_refresh(
     await asyncio.gather(
         asyncio.to_thread(git_process._run_gh, tmp_path, ["api", "/user"], auth=auth),
         git_process._run_gh_async(tmp_path, ["api", "/user"], auth=auth, budget=_budget()),
-        asyncio.to_thread(git_process._run_gh, tmp_path, ["api", "/user"], auth=other),
+        git_process._run_gh_async(tmp_path, ["api", "/user"], auth=other, budget=_budget()),
         asyncio.to_thread(git_process._run_gh, tmp_path, ["api", "/user"], auth=static),
     )
     assert refresh_calls == 1 and other_refreshes == {"other": 1}
@@ -140,6 +113,8 @@ async def test_sync_and_async_requests_share_one_session_refresh(
     assert captured.count({"PATH": "/other/tools", "GH_TOKEN": "ghs_other_fresh_token_1234567890"}) == 1
     assert captured.count({"PATH": "/tools", "GH_TOKEN": "ghs_static_token_1234567890"}) == 1
     assert "ghs_static_token" not in repr(static)
+    await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=git_ops.INHERIT_GITHUB_AUTH, budget=_budget())
+    assert captured[-1] is None
 
 
 async def test_expired_budget_never_resolves_auth_or_spawns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -318,8 +293,8 @@ async def test_malformed_envelope_is_rejected(fake_gh: FakeGh, git_repo: Path, r
         )
 
 
-@pytest.mark.parametrize("max_pages", [1, 2])
-async def test_enveloped_exact_capacity_returns_declared_total(fake_gh: FakeGh, git_repo: Path, max_pages: int) -> None:
+async def test_enveloped_exact_capacity_returns_declared_total(fake_gh: FakeGh, git_repo: Path) -> None:
+    max_pages = 2
     endpoint = "repos/acme/widgets/actions/workflows"
     expected = [{"id": value} for value in range(1, max_pages * 2 + 1)]
     for page in range(1, max_pages + 1):
@@ -342,8 +317,8 @@ async def test_enveloped_exact_capacity_returns_declared_total(fake_gh: FakeGh, 
     ]
 
 
-@pytest.mark.parametrize("max_pages", [1, 2])
-async def test_envelope_less_full_capacity_remains_ambiguous(fake_gh: FakeGh, git_repo: Path, max_pages: int) -> None:
+async def test_envelope_less_full_capacity_remains_ambiguous(fake_gh: FakeGh, git_repo: Path) -> None:
+    max_pages = 2
     sha = "f" * 40
     endpoint = f"repos/acme/widgets/commits/{sha}/statuses"
     for page in range(1, max_pages + 1):

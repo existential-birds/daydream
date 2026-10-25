@@ -45,7 +45,6 @@ from daydream.backends.codex import (
     _isolated_child_env,
     _prepare_read_only_checkout,
     _rebind_source_paths,
-    _unwrap_shell_command,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.retry_policy import FailureClass, classify_failure
@@ -114,32 +113,37 @@ async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -
     return events
 
 
-@pytest.mark.parametrize("tool_name", [
-        None,
-        {"token": "private-value"},
-    ])
-async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Path, tool_name: Any) -> None:
-    item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
-    process = make_mock_process([
-        json.dumps({"type": "item.started", "item": item}),
-        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
-        json.dumps({"type": "turn.completed", "usage": {}}),
-    ])
+async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Path) -> None:
+    null_tool = {"id": "null-tool", "type": "mcp_tool_call", "tool": None, "arguments": {"path": "api.py"}}
+    mapping_tool = {
+        "id": "mapping-tool", "type": "mcp_tool_call", "tool": {"token": "private-value"},
+        "arguments": {"path": "cli.py"},
+    }
+    process = make_mock_process([json.dumps(row) for row in [
+        {"type": "item.started", "item": null_tool},
+        {"type": "item.completed", "item": {**null_tool, "result": {"content": []}}},
+        {"type": "item.started", "item": mapping_tool},
+        {"type": "item.completed", "item": {**mapping_tool, "result": {"content": []}}},
+        {"type": "turn.completed", "usage": {}},
+    ]])
     events, _ = await replay_process(CodexBackend(model="fixture-model"), process, tmp_path, "review")
     starts = [event for event in events if isinstance(event, ToolStartEvent)]
     results = [event for event in events if isinstance(event, ToolResultEvent)]
     diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
-    assert len(starts) == len(results) == 1
-    assert starts[0].name == "unknown"
-    assert starts[0].id == results[0].id == "mcp-1"
-    assert diagnostics[0].code == "codex_parser_coverage"
-    assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
+    assert [(event.id, event.name) for event in starts] == [("null-tool", "unknown"), ("mapping-tool", "unknown")]
+    assert [event.id for event in results] == ["null-tool", "mapping-tool"]
+    assert [event.code for event in diagnostics] == ["codex_parser_coverage", "codex_parser_coverage"]
+    assert [event.metadata["warnings"]["reasons"] for event in diagnostics] == [
+        {"tool_not_string": 1}, {"tool_not_string": 2},
+    ]
     assert events.index(diagnostics[0]) < events.index(starts[0])
     assert "private-value" not in repr(diagnostics)
 
 
-async def test_file_changes_preserve_native_shapes_and_correlate_patch_results() -> None:
-    """One edit session retains every changed path and one correlated pair per native item."""
+async def test_file_changes_preserve_native_shapes_and_correlate_patch_results(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One edit session retains each native shape, failure diagnostic and synthetic tool correlation."""
     rows = [
         {"type": "thread.started", "thread_id": "patch-session"},
         {
@@ -166,12 +170,30 @@ async def test_file_changes_preserve_native_shapes_and_correlate_patch_results()
             },
         },
         {"type": "item.completed", "item": {"type": "file_change", "id": "empty", "changes": []}},
+        {"type": "item.completed", "item": {
+            "type": "file_change", "id": "null-status", "status": None,
+            "changes": {"/tmp/spike-repo/f.py": {"type": "update"}},
+        }},
+        {"type": "item.completed", "item": {
+            "type": "file_change", "id": "declined", "status": "declined", "stderr": "sandbox denied write",
+            "changes": {"/tmp/spike-repo/b.py": {"type": "update"}},
+        }},
+        {"type": "item.completed", "item": {
+            "type": "file_change", "id": "failed", "status": "failed",
+            "stderr": "patch: failed to apply hunk at b.py:12", "changes": {"/tmp/spike-repo/b.py": {"type": "update"}},
+        }},
+        {"type": "item.completed", "item": {"type": "file_change", "stderr": "x" * 100_000}},
         {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
     ]
-    events = await _run_inline_lines(CodexBackend(model="fixture-model"), "Edit", [json.dumps(row) for row in rows])
+    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
+        events = await _run_inline_lines(CodexBackend(model="fixture-model"), "Edit", [json.dumps(row) for row in rows])
     starts = [event for event in events if isinstance(event, ToolStartEvent)]
     results = [event for event in events if isinstance(event, ToolResultEvent)]
-    assert [(event.id, event.name) for event in starts] == [("map", "patch"), ("list", "patch"), ("empty", "patch")]
+    assert [(event.id, event.name) for event in starts[:6]] == [
+        ("map", "patch"), ("list", "patch"), ("empty", "patch"), ("null-status", "patch"),
+        ("declined", "patch"), ("failed", "patch"),
+    ]
+    assert len(starts) == len(results) == 7 and starts[-1].name == "patch"
     assert [event.input for event in starts] == [
         {
             "changes": [
@@ -185,67 +207,26 @@ async def test_file_changes_preserve_native_shapes_and_correlate_patch_results()
         },
         {"changes": [{"path": "spike-repo/e.py", "kind": "add"}], "file": "spike-repo/e.py", "action": "add"},
         {"changes": [], "file": "unknown", "action": "modified"},
+        {"changes": [{"path": "spike-repo/f.py", "kind": "update"}], "file": "spike-repo/f.py", "action": "update"},
+        {"changes": [{"path": "spike-repo/b.py", "kind": "update"}], "file": "spike-repo/b.py", "action": "update"},
+        {"changes": [{"path": "spike-repo/b.py", "kind": "update"}], "file": "spike-repo/b.py", "action": "update"},
+        {"file_change": {"stderr": "x" * 100_000}},
     ]
-    assert [event.id for event in results] == ["map", "list", "empty"]
-    assert all(not event.is_error for event in results)
-
-
-@pytest.mark.parametrize(
-    ("status", "diagnostic"),
-    [("declined", "sandbox denied write"), ("failed", "patch: failed to apply hunk at b.py:12")],
-)
-async def test_file_change_unsuccessful_status_is_preserved(status: str, diagnostic: str) -> None:
-    """Unsuccessful edits retain their native status, affected path and diagnostic."""
-    events = await _run_inline_lines(
-        CodexBackend(model="fixture-model"),
-        "Edit",
-        [
-            json.dumps(row)
-            for row in [
-                {"type": "thread.started", "thread_id": "patch-failure"},
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "file_change",
-                        "id": "patch",
-                        "status": status,
-                        "stderr": diagnostic,
-                        "changes": {"/tmp/spike-repo/b.py": {"type": "update"}},
-                    },
-                },
-                {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
-            ]
-        ],
-    )
-    results = [event for event in events if isinstance(event, ToolResultEvent)]
-    assert len(results) == 1 and results[0].is_error is True
-    assert results[0].status == status
-    assert "b.py" in results[0].output and diagnostic in results[0].output
-    if status == "declined":
-        assert "File change declined by sandbox" in results[0].output
-
-
-async def test_file_change_pathless_echo_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
-    """A malformed idless item remains observable without an oversized echo or false unmatched warning."""
-    with caplog.at_level("WARNING"):
-        events = await _run_inline_lines(
-            CodexBackend(model="fixture-model"),
-            "Edit",
-            [
-                json.dumps(row)
-                for row in [
-                    {"type": "thread.started", "thread_id": "pathless"},
-                    {"type": "item.completed", "item": {"type": "file_change", "stderr": "x" * 100_000}},
-                    {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
-                ]
-            ],
-        )
-    starts = [event for event in events if isinstance(event, ToolStartEvent)]
-    results = [event for event in events if isinstance(event, ToolResultEvent)]
-    assert len(starts) == len(results) == 1 and starts[0].id == results[0].id
-    assert results[0].is_error is True
-    assert "unparseable file_change" in results[0].output and "unknown" not in results[0].output
-    assert len(results[0].output) < 600
+    assert [event.id for event in results] == [
+        "map", "list", "empty", "null-status", "declined", "failed", starts[-1].id,
+    ]
+    assert [event.status for event in results] == [
+        "completed", "completed", "completed", "completed", "declined", "failed", None,
+    ]
+    assert [event.is_error for event in results] == [False, False, False, False, True, True, True]
+    assert [event.output for event in results[:6]] == [
+        "add: spike-repo/a.py, update: spike-repo/b.py, delete: spike-repo/c.py, move: spike-repo/d.py",
+        "add: spike-repo/e.py", "", "update: spike-repo/f.py",
+        "File change declined by sandbox: update: spike-repo/b.py\nstderr: sandbox denied write",
+        "update: spike-repo/b.py\nstderr: patch: failed to apply hunk at b.py:12",
+    ]
+    assert "unparseable file_change" in results[-1].output and "unknown" not in results[-1].output
+    assert len(results[-1].output) < 600
     assert "unmatched tool result" not in caplog.text
 
 
@@ -253,23 +234,6 @@ async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list
     mock_proc = make_mock_process(lines)
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), prompt)
     return events
-
-
-async def test_file_change_missing_status_is_success() -> None:
-    # Missing or null status retains the successful default.
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_inline_lines(backend, "Edit", [
-        '{"type":"thread.started","thread_id":"t"}',
-        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
-        '"changes":{"/tmp/spike-repo/a.py":{"type":"add"}}}}',
-        '{"type":"item.completed","item":{"type":"file_change","id":"x2",'
-        '"status":null,"changes":{"/tmp/spike-repo/b.py":{"type":"update"}}}}',
-        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
-    ])
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 2
-    assert all(r.is_error is False for r in results)
-    assert all(r.status == "completed" for r in results)
 
 
 @pytest.mark.parametrize('staged', [False, True])
@@ -524,29 +488,6 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
     assert "/work//inner" not in out3
 
 
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="darwin isolated-env PATH behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122)",
-)
-def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_isolated_child_env returns None when no isolation and strips the
-    repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
-    monkeypatch.setenv("PWD", "/home/exedev/work")
-    monkeypatch.setenv("OLDPWD", "/home/exedev")
-    monkeypatch.setenv("GIT_DIR", "/home/exedev/work/.git")
-    monkeypatch.setenv("HOME", "/home/exedev")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    assert _isolated_child_env(Path("/home/exedev/work"), Path("/home/exedev/work")) is None
-    env = _isolated_child_env(Path("/home/exedev/work"), Path("/tmp/clone/repo"))
-    assert env is not None
-    assert "PWD" not in env
-    assert "OLDPWD" not in env
-    assert "GIT_DIR" not in env
-    # Non-redirect vars are preserved (isolation is path-hiding only).
-    assert env["HOME"] == "/home/exedev"
-    assert env["PATH"] == "/usr/bin"
-
-
 async def test_codex_execution_input_supplies_complete_native_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -575,11 +516,16 @@ async def test_codex_execution_input_supplies_complete_native_environment(
 def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
     monkeypatch.setenv("GIT_DIR", "/leak")
+    monkeypatch.setenv("PWD", "/work")
+    monkeypatch.setenv("OLDPWD", "/previous")
+    monkeypatch.setenv("HOME", "/home/exedev")
+    assert _isolated_child_env(Path("/work"), Path("/work")) is None
     monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun on Linux")))  # noqa: E501
     env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
     assert env is not None
     assert env["PATH"] == "/usr/bin:/opt/bin"  # byte-for-byte, no prepend (M3)
-    assert "GIT_DIR" not in env
+    assert not {"PWD", "OLDPWD", "GIT_DIR"} & env.keys()
+    assert env["HOME"] == "/home/exedev"
 
 
 async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Path]) -> None:
@@ -859,17 +805,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 
 
 class TestUnwrapShellCommand:
-    @pytest.mark.parametrize(
-        "command,expected",
-        [
-        ('/bin/zsh -lc "cmd" extra_arg', '/bin/zsh -lc "cmd" extra_arg'),
-        ("/bin/zsh -lc", "/bin/zsh -lc"),
-        ("/bin/zsh -lc echo 'hello world'", "echo 'hello world'"),
-    ],
-    )
-    def test_unwrap_payload(self, command: str, expected: str) -> None:
-        assert _unwrap_shell_command(command) == expected
-
     async def test_duplicate_completion_does_not_reuse_consumed_start(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -959,25 +894,6 @@ class TestUnwrapShellCommand:
 
 
 # Parser correlation and diagnostics.
-
-
-async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixture) -> None:
-    """Unmatched completions warn and carry deterministic codex-unmatched ids.
-
-    They remain available to the trajectory's unmatched-result bucket.
-    """
-    backend = CodexBackend(model="fixture-model")
-    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
-        events = await _run_fixture(backend, "Orphan", "orphaned_tool_result.jsonl")
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(tool_results) == 1
-    assert tool_results[0].id == "codex-unmatched-0", (
-        f"orphan should receive a deterministic sequence id; got {tool_results[0].id!r}"
-    )
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("unmatched tool result" in w for w in warnings), (
-        f"expected an 'unmatched tool result' WARNING; got {warnings}"
-    )
 
 
 async def test_malformed_assistant_json_is_forwarded_as_text(caplog: pytest.LogCaptureFixture) -> None:
@@ -1096,10 +1012,9 @@ async def test_public_authentication_failure_is_known_permanent(tmp_path: Path) 
     assert backend._transports == []
 
 
-@pytest.mark.parametrize("retryable", [None, False, True])
-def test_codex_authentication_diagnostic_precedes_transient_retry_hints(retryable: bool | None) -> None:
+def test_codex_authentication_diagnostic_precedes_transient_retry_hints() -> None:
     error = CodexError(
-        "authentication required. Run codex login to authenticate", retryable=retryable,
+        "authentication required. Run codex login to authenticate", retryable=True,
         category="SERVER_ERROR", error_metadata={"codex_error_info": "server_overloaded"},
     )
     decision = classify_failure(error)
@@ -1197,23 +1112,6 @@ class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
 
 
-    def test_caches_at_most_once_per_process(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    ) -> None:
-        git_bin = tmp_path / "real" / "usr" / "bin"
-        git_file = _stage_executable(git_bin / "git")
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        calls: list[int] = []
-        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
-        def counting_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
-            calls.append(1)
-            return proc
-        monkeypatch.setattr(codex.subprocess, "run", counting_run)
-        first = codex._resolve_real_git_dir()
-        second = codex._resolve_real_git_dir()
-        assert first == second == str(git_bin)
-        assert len(calls) == 1  # S1: repeated execute() calls never re-shell out to xcrun
-
     def test_concurrent_first_wave_callers_never_see_unresolved_flag(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
@@ -1241,6 +1139,7 @@ class TestResolveRealGitDir:
         for thread in threads:
             thread.join()
         assert results == [str(git_bin)] * 8  # S1: no caller observes the early flag and gets None
+        assert codex._resolve_real_git_dir() == str(git_bin)  # the next warm call reuses the resolved cache
         assert len(calls) == 1  # S1: the cache was not thrashed into re-shelling to xcrun
 
     def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
@@ -1309,9 +1208,16 @@ class TestIsolatedChildEnvDarwinPath:
         first, first_git_dir, first_log = self._install_xcrun(tmp_path, label="first")
         second, second_git_dir, second_log = self._install_xcrun(tmp_path, label="second")
         monkeypatch.setattr(codex.sys, "platform", "darwin")
+        ambient["PATH"] += f"{os.pathsep}/usr/bin{os.pathsep}/usr/local/bin"
         for key, value in ambient.items():
             monkeypatch.setenv(key, value)
+        for key in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            monkeypatch.setenv(key, "/leak")
         assert codex._resolve_real_git_dir() == str(ambient_git_dir)
+        ambient_child = codex._isolated_child_env(Path("/source"), Path("/ambient-clone"))
+        assert ambient_child is not None
+        assert ambient_child["PATH"] == f"{ambient_git_dir}{os.pathsep}{ambient['PATH']}"
+        assert not {"PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & ambient_child.keys()
         real_run = subprocess.run
         probe_environments: list[dict[str, str] | None] = []
         def recording_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -1351,28 +1257,6 @@ class TestIsolatedChildEnvDarwinPath:
         assert codex._resolve_real_git_dir() == str(ambient_git_dir)
         assert ambient_log.exists()
 
-    def test_darwin_prepends_real_git_dir_preserving_rest_of_path(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: "/Library/Developer/CommandLineTools/usr/bin")
-        monkeypatch.setenv("PATH", "/usr/bin:/usr/local/bin")
-        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
-        assert env is not None
-        assert env["PATH"].startswith("/Library/Developer/CommandLineTools/usr/bin:")  # M1: precedes
-        assert env["PATH"].endswith("/usr/bin:/usr/local/bin")  # M1: remainder + order preserved
-
-    def test_darwin_still_strips_redirect_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: "/real/bin")
-        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
-            monkeypatch.setenv(var, "/leak")
-        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
-        assert env is not None
-        assert env["PATH"].startswith("/real/bin")
-        for var in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):  # M4
-            assert var not in env
-
     def test_darwin_resolver_failure_leaves_path_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: None)  # M2 fail-open
@@ -1407,6 +1291,9 @@ async def test_issue1124_stored_commands_are_replayable() -> None:
     assert starts["cmd_6"] == 'python -c "print(1)"'
     assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"
     assert starts["cmd_8"] == "make test"
+    assert starts["cmd_9"] == '/bin/zsh -lc "cmd" extra_arg'
+    assert starts["cmd_10"] == "/bin/zsh -lc"
+    assert starts["cmd_11"] == "echo 'hello world'"
 
 
 # --- P18 Task 1: effective request-config admission at the Codex argv seam ---

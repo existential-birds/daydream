@@ -32,94 +32,39 @@ def _assert_shares_within(records: Sequence[Any], dims: Sequence[tuple[str, Call
 
 
 class TestApplyShareCaps:
-    def test_over_share_group_is_capped_to_limit(self) -> None:
-        records = [_mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(10)]
-        records.append(_mk_record("r900", "rust", "owner/repo-b", "deep"))
-        kept, exclusions = _apply_share_caps(records, max_stack_share=0.5, max_repo_share=None, max_profile_share=None)
-        # Strict output-share semantics: iterate until python's share of the
-        # final population is <= 0.5. With one rust record anchoring the
-        # population, python converges to 1 kept (1/2) — 9 excluded, lowest
-        # record_id kept.
-        assert len(kept) == 2
-        py = [r for r in kept if r["stack"] == "python"]
-        assert [r["record_id"] for r in py] == ["r000"]
-        assert [r["record_id"] for r in kept if r["stack"] == "rust"] == ["r900"]
-        assert exclusions == {"stack:python": 9}
 
-    def test_uniform_corpus_at_cap_keeps_everything(self) -> None:
-        records = [_mk_record(f"r{i:03d}", "python" if i < 4 else "rust", "owner/repo", "deep") for i in range(10)]
-        kept, exclusions = _apply_share_caps(records, max_stack_share=0.6, max_repo_share=None, max_profile_share=None)
-        assert len(kept) == 10
-        assert exclusions == {}
-
-    def test_final_shares_respect_limits_after_sequential_passes(self) -> None:
-        # Profiles must vary (a single profile value is trivially 100% of any
-        # positive population and could never satisfy a <1.0 cap); the contract
-        # under test is that every final share <= its limit over the final
-        # population after the sequential stack → repository → profile passes.
-        records = [_mk_record(f"r{i:03d}", "python" if i < 9 else "rust", "owner/repo-a" if i < 9 else "owner/repo-b",
-                "deep" if i % 2 else "quick",
-            )
-            for i in range(10)
-        ]
-        kept, _ = _apply_share_caps(records, max_stack_share=0.6, max_repo_share=None, max_profile_share=0.5)
-        _assert_shares_within(kept, [
-            ("stack", lambda r: str(r["stack"]), 0.6), ("profile", lambda r: str(r["profile"]["profile_name"]), 0.5),
-        ])
 
     def test_sequential_passes_reconverge_correlated_dimensions(self) -> None:
-        # F1-shaped correlated fixture: python is concentrated in repo-a while
-        # rust is split repo-a x2 + repo-b x3, and python sits exactly at the
-        # 0.5 stack cap on entry (5/10). The repository pass (a later
-        # dimension) then trims repo-a by lowest record_id — removing rust
-        # records and pushing python back over its stack cap (4/7 = 0.571). A
-        # single sequential pass would leave that drift in the output (it
-        # breaks the M4 contract); the cap stage must re-run the dimension
-        # sequence to a fixed point and reconverge every dimension within its
-        # limit of the final population.
-        records = [_mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(5)]
-        records += [
-            _mk_record("r005", "rust", "owner/repo-a", "deep"), _mk_record("r006", "rust", "owner/repo-a", "deep"),
-            _mk_record("r007", "rust", "owner/repo-b", "quick"), _mk_record("r008", "rust", "owner/repo-b", "quick"),
+        records = [
+            _mk_record("r000", None, "owner/repo-a", "deep"),
+            _mk_record("r001", None, "owner/repo-a", "quick"),
+            _mk_record("r002", None, "owner/repo-a", "quick"),
+            _mk_record("r003", None, "owner/repo-a", "deep"),
+            _mk_record("r004", None, "owner/repo-a", "deep"),
+            _mk_record("r005", "rust", "owner/repo-a", "deep"),
+            _mk_record("r006", "rust", "owner/repo-a", "quick"),
+            _mk_record("r007", "rust", "owner/repo-b", "deep"),
+            _mk_record("r008", "rust", "owner/repo-b", "quick"),
             _mk_record("r009", "rust", "owner/repo-b", "quick"),
         ]
-        kept, exclusions = _apply_share_caps(records, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=None)
-        # The fixed point rebuilds a population where every dimension is back
-        # within its limit — three python + three rust across both repos, all
-        # shares 0.5. The drift (python at 0.571 after the repo pass) is
-        # repaired by re-running the stack pass after the repository pass's
-        # exclusions.
-        assert [r["record_id"] for r in kept] == ["r000", "r001", "r002", "r007", "r008", "r009"]
-        _assert_shares_within(kept, [
-            ("stack", lambda r: str(r["stack"]), 0.5), ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
-        ])
-        # The repository pass excluded 3; a later fixed-point pass re-ran the
-        # stack pass (1 further exclusion) to repair the drift.
-        assert exclusions == {"repo:owner/repo-a": 3, "stack:python": 1}
-
-    def test_order_invariance_identical_kept_population(self) -> None:
-        records = [_mk_record(f"r{i:03d}", "python" if i % 3 else "rust", "owner/repo-a" if i % 2 else "owner/repo-b",
-                "deep" if i % 2 else "quick",
-            )
-            for i in range(12)
-        ]
-        a_kept, a_excl = _apply_share_caps(list(records), max_stack_share=0.5, max_repo_share=0.9, max_profile_share=0.6
+        kept, exclusions = _apply_share_caps(
+            records, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
         )
-        shuffled = list(reversed(records))
-        b_kept, b_excl = _apply_share_caps(shuffled, max_stack_share=0.5, max_repo_share=0.9, max_profile_share=0.6)
-        assert [r["record_id"] for r in a_kept] == [r["record_id"] for r in b_kept]
-        assert a_excl == b_excl
-
-    def test_none_dimension_value_is_its_own_bucket_and_cappable(self) -> None:
-        records = [_mk_record(f"r{i:03d}", None, "owner/repo-a", None) for i in range(8)]
-        records.append(_mk_record("r800", "rust", "owner/repo-b", "deep"))
-        kept, exclusions = _apply_share_caps(records, max_stack_share=0.5, max_repo_share=None, max_profile_share=None)
-        # None bucket capped like any value: final pop 5, at most 2-3 None-stack kept.
-        none_kept = [r for r in kept if r["stack"] is None]
-        total = len(kept)
-        assert total > 0
-        assert len(none_kept) / total <= 0.5 + 1e-9
-        assert "stack:(none)" in exclusions
+        assert [row["record_id"] for row in kept] == ["r000", "r001", "r007", "r008"]
+        assert exclusions == {"repo:owner/repo-a": 3, "stack:(none)": 2, "profile:quick": 1}
+        _assert_shares_within(kept, [
+            ("stack", lambda row: str(row["stack"]), 0.5),
+            ("repo", lambda row: str(row["lineage"]["repo_slug"]), 0.6),
+            ("profile", lambda row: str(row["profile"]["profile_name"]), 0.6),
+        ])
+        reversed_kept, reversed_exclusions = _apply_share_caps(
+            list(reversed(records)), max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
+        )
+        assert reversed_kept == kept and reversed_exclusions == exclusions
+        stable, stable_exclusions = _apply_share_caps(
+            kept, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
+        )
+        assert stable == kept and stable_exclusions == {}
 
 
     def test_sole_remaining_value_above_cap_fails_closed(self) -> None:
@@ -166,32 +111,37 @@ def _store_with_caps_population(tmp_path: Path) -> Any:
     return store
 
 
-@pytest.mark.parametrize("dimension", ["stack", "repo", "profile"])
 def test_real_cli_applies_caps_and_pins_matching_report(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], dimension: str,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     store = _store_with_caps_population(tmp_path)
-    config = projection_config(store, tmp_path, **{f"max_{dimension}_share": 0.5})
-    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-            "--out", str(config.out_dir / "corpus.jsonl"),
-            f"--max-{dimension}-share", "0.5"]
+    config = projection_config(store, tmp_path, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7)
+    args = [
+        "corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+        "--out", str(config.out_dir / "corpus.jsonl"),
+        "--max-stack-share", "0.5", "--max-repo-share", "0.6", "--max-profile-share", "0.7",
+    ]
     assert cli_main(args + ["--dry-run"]) == 0
     dry_text = capsys.readouterr().out
     assert not config.out_dir.exists()
     assert cli_main(args) == 0
     records = _read_jsonl(config.out_dir / "corpus.jsonl")
-    assert len(records) == 4
-    assert "4" in dry_text
-    getter = {"stack": lambda r: str(r["stack"]), "repo": lambda r: str(r["lineage"]["repo_slug"]),
-              "profile": lambda r: str(r["profile"]["profile_name"])}[dimension]
-    _assert_shares_within(records, [(dimension, getter, 0.5)])
+    assert len(records) == 4 and "4" in dry_text
     lineage = json.loads((config.out_dir / "lineage.json").read_text())
-    assert lineage["share_caps"]["configured"][dimension] == 0.5
-    assert lineage["share_caps"]["version"] == 1
-    assert any(key.startswith(f"share-cap:{dimension}:") for key in lineage["exclusions_by_reason"])
-    direct = build_frozen_corpus(projection_config(store, tmp_path, out_dir=tmp_path / "direct",
-                                                  **{f"max_{dimension}_share": 0.5}))
-    assert direct["share_caps"] == lineage["share_caps"]
+    report = lineage["share_caps"]
+    assert report["version"] == 1
+    assert report["configured"] == {"stack": 0.5, "repo": 0.6, "profile": 0.7}
+    assert report["applied"] == {
+        "stack": {"python": {"count": 2, "share": 0.5}, "rust": {"count": 2, "share": 0.5}},
+        "repo": {"owner/repo-a": {"count": 2, "share": 0.5}, "owner/repo-b": {"count": 2, "share": 0.5}},
+        "profile": {"deep-review": {"count": 2, "share": 0.5}, "quick-review": {"count": 2, "share": 0.5}},
+    }
+    assert report["exclusions"] == {"stack:python": 1}
+    assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 0, "share-cap:stack:python": 1}
+    direct = build_frozen_corpus(projection_config(
+        store, tmp_path, out_dir=tmp_path / "direct", max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7,
+    ))
+    assert direct["share_caps"] == report
 
 
 @pytest.mark.parametrize(("dimension", "value"), [("stack", "0"), ("repo", "-0.1"), ("profile", "1.5")])

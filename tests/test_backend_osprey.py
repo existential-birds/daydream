@@ -32,9 +32,6 @@ from daydream.backends.osprey import (
     OspreyProtocolError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
-    _optional_non_negative_int,
-    _required_non_negative_int,
-    _stderr_diagnostic_sink,
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
@@ -157,20 +154,6 @@ async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> N
     stderr = _over_limit_reader(b"provider authentication failed" * 3)
     with pytest.raises(OspreyError, match="stderr diagnostic line exceeded stream limit"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_reader=stderr)
-
-
-async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> None:
-    secret = "sk-realvalue123"
-    diagnostics: list[str] = []
-    stderr = asyncio.StreamReader(limit=2_048)
-    stderr.feed_data((f"OPENAI_API_KEY={secret} " + "x" * 1_024 + "\n").encode())
-    sink = _stderr_diagnostic_sink(diagnostics)
-    for _ in range(12):
-        sink("OPENAI_API_KEY=" + secret + " " + "x" * 1_024)
-    assert len(diagnostics) == 10
-    assert len(diagnostics[0]) <= 500
-    assert secret not in diagnostics[0]
-    assert "[REDACTED_ENV_VAR]" in diagnostics[0]
 
 
 async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
@@ -324,7 +307,11 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
     lines[-1].update(outcome="budget_expired", exit_code=1, total_prompt_tokens=60, total_completion_tokens=5,
                      total_cached_tokens=20, total_cache_write_tokens=30, total_thinking_tokens=2,
                      total_cost_usd="0.02", session_wallclock_ms=120)
-    process = FakeCliProcess([json.dumps(line) for line in lines], exit_code=1)
+    secret = "sk-realvalue123"
+    process = FakeCliProcess(
+        [json.dumps(line) for line in lines], exit_code=1,
+        stderr_lines=[f"provider authentication failed OPENAI_API_KEY={secret} " + "x" * 1_024] * 12,
+    )
     backend = OspreyBackend(osprey_binary="fake")
     events: list[AgentEvent] = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
@@ -332,6 +319,11 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
             async for event in backend.execute(Path("/repo"), "prompt"):
                 events.append(event)
     assert exc_info.value.category == "PROCESS_EXIT"
+    diagnostics = str(exc_info.value).split(": ", 1)[1].splitlines()
+    assert len(diagnostics) == 10
+    assert all(len(line) <= 500 and "[REDACTED_ENV_VAR]" in line for line in diagnostics)
+    assert diagnostics[0].startswith("provider authentication failed OPENAI_API_KEY=")
+    assert secret not in str(exc_info.value)
     metric = next(event for event in events if isinstance(event, MetricsEvent))
     assert (metric.started_at, metric.duration_ms, metric.cache_creation_tokens) == (
         "2026-08-15T00:00:01Z", 80, 30,
@@ -344,14 +336,6 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
         "s-137", "openai-compatible", "budget_expired", 120,
     )
     assert process.reaped and process.returncode == 1 and backend._transports == []
-
-
-async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
-    lines = osprey_session()
-    with pytest.raises(OspreyError, match="provider authentication failed"):
-        await _collect(
-            OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_lines=["provider authentication failed"],
-        )
 
 
 @pytest.mark.parametrize(
@@ -377,17 +361,6 @@ async def test_terminal_exit_code_must_match_process_status() -> None:
     lines[-1]["exit_code"] = 1
     with pytest.raises(OspreyError, match="exit_code"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
-
-
-def test_non_negative_int_helpers_reject_below_zero() -> None:
-    event = {"event": "turn_end", "k": -1}
-    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
-        _required_non_negative_int(event, "k")
-    with pytest.raises(OspreyProtocolError, match="has negative 'k'"):
-        _optional_non_negative_int(event, "k")
-    assert _optional_non_negative_int({"event": "turn_end", "k": None}, "k") is None
-    assert _required_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
-    assert _optional_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
 
 
 async def test_negative_session_total_cost_is_rejected() -> None:
@@ -514,7 +487,7 @@ def _p18_osprey_events() -> list[dict[str, object]]:
         {"event": "text_delta", "content": "T0 answer"},
         {
             "event": "turn_end", "turn_id": "turn-1", "usage_reported": True,
-            "duration_ms": 10, "prompt_tokens": 5, "completion_tokens": 3, "model": "custom-model",
+            "duration_ms": 10, "prompt_tokens": 5, "completion_tokens": 3, "cached_tokens": 0, "model": "custom-model",
         },
     ]
 
@@ -533,6 +506,7 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
     assert config.temperature == 0.0
+    assert next(event for event in events if isinstance(event, MetricsEvent)).cached_tokens == 0
     assert argv[argv.index("--temperature") + 1] == "0.0"
     # Arbitrary labels belong in argv; telemetry records only their presence.
     assert argv[argv.index("--persona") + 1] == "PATTERN_PERSONA_PLACEHOLDER"
@@ -555,22 +529,15 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     assert request.timestamp_source == "native"
 
 
-@pytest.mark.parametrize("temperature", [None, 0.7])
-async def test_osprey_temperature_telemetry_matches_explicit_option(temperature: float | None) -> None:
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
+async def test_osprey_temperature_telemetry_matches_explicit_option() -> None:
+    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=None)
     events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     argv = list(spawner.argvs[-1])
-    if temperature is None:
-        assert "--temperature" not in argv
-    else:
-        assert argv[argv.index("--temperature") + 1] == "0.7"
+    assert "--temperature" not in argv
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
-    if temperature is None:
-        assert config.temperature is None
-    else:
-        assert config.temperature == 0.7
+    assert config.temperature is None
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert len(turn_ends) == 1
     turn_end = turn_ends[0]

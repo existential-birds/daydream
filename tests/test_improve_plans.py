@@ -158,26 +158,6 @@ def _recon_commands() -> list[dict[str, Any]]:
     ]
 
 
-def test_recon_working_directory_accepts_confined_absolute_and_rejects_outside(repo: Path, tmp_path: Path) -> None:
-    abs_under = (repo / "apps" / "catalog").as_posix()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    abs_outside = outside.as_posix()
-    # Reuse the module's already-valid recon record (valid evidence, Makefile
-    # line 2 anchor) and only override working_directory.
-    base = deepcopy(_recon_commands()[0])
-    under = deepcopy(base)
-    under["working_directory"] = abs_under
-    accepted, errors = validate_recon_commands({"commands": [under]}, repo=repo)
-    assert errors == []
-    assert [c["id"] for c in accepted] == ["test-suite"]
-    rejected = deepcopy(base)
-    rejected["working_directory"] = abs_outside
-    accepted, errors = validate_recon_commands({"commands": [rejected]}, repo=repo)
-    assert accepted == []
-    assert errors == ["RECON_WORKING_DIRECTORY_INVALID@/commands/0/working_directory"]
-
-
 def _contract_applicability(*paths: str, preconditions: list[str] | None = None,) -> dict[str, Any]:
     scope: dict[str, Any]
     if paths:
@@ -189,115 +169,46 @@ def _contract_applicability(*paths: str, preconditions: list[str] | None = None,
     }
 
 
-def _contract_recon_command(*, command_id: str, command: str, evidence: dict[str, Any], working_directory: str = ".",
-    paths: tuple[str, ...] = (),
-) -> dict[str, Any]:
-    return {"id": command_id, "purpose": f"Run the repository command {command_id}", "command": command,
-        "working_directory": working_directory,
-        "expected_success": {
-            "exit_code": 0, "observable_result": "exit 0 and the declared command completes successfully",
-        }, "applicability": _contract_applicability(*paths), "evidence": evidence,
-    }
-
-
-def test_host_enumeration_excludes_mutating_make_targets_and_package_scripts(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
+def test_host_command_population_keeps_per_package_invocations_ids_and_confinement(tmp_path: Path) -> None:
+    repo, outside = tmp_path / "repo", tmp_path / "outside"
     repo.mkdir()
+    outside.mkdir()
+    outside_bytes = b"outside-test:\n\tcat /etc/passwd\n"
+    (outside / "Makefile").write_bytes(outside_bytes)
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
     (repo / "Makefile").write_text(
         "test:\n\tpytest\ninstall:\n\tpip install -r requirements.txt\n"
-        "install-hooks:\n\tpre-commit install\ngenerate-report:\n\ttool report\n",
-        encoding="utf-8",
+        "install-hooks:\n\tpre-commit install\ngenerate-report:\n\ttool report\n", encoding="utf-8",
     )
     (repo / "package.json").write_text(json.dumps({"scripts": {
-                    "test": "vitest run", "install": "npm install", "prepare": "husky install",
-                    "generate:report": "tool report",
-                }
-            }
-        ), encoding="utf-8",
+        "ci && rm -rf /": "true", "test": "vitest run", "install": "npm install",
+        "prepare": "husky install", "generate:report": "tool report",
+    }}, indent=2), encoding="utf-8")
+    for directory, lock in (("yarn", "yarn.lock"), ("bun", "bun.lockb"), ("npm", "package-lock.json")):
+        package = repo / directory
+        package.mkdir()
+        (package / "package.json").write_text('{"scripts": {"test": "vitest run"}}\n', encoding="utf-8")
+        (package / lock).write_text("{}\n", encoding="utf-8")
+    (repo / "broken").mkdir()
+    (repo / "broken/package.json").write_text("{not json", encoding="utf-8")
+
+    candidates = enumerate_repository_commands(repo,
+        directories=(".", "yarn", "bun", "npm", "broken", "linked", "../outside"), reserved_ids=["make-test"],
     )
-
-    commands = enumerate_repository_commands(repo)
-
-    assert [item["command"] for item in commands] == ["make test", "npm run test",]
-
-
-@pytest.mark.parametrize(("manager_file", "expected"),
-    [("yarn.lock", "yarn test"), ("bun.lockb", "bun run test"), ("package-lock.json", "npm run test"),
-        (None, "npm run test"),
-    ],
-)
-def test_host_derives_the_invocation_for_each_package_manager(tmp_path: Path, manager_file: str | None, expected: str,
-) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "package.json").write_text(
-        json.dumps({"name": "web", "scripts": {"test": "vitest run"}}) + "\n",
-        encoding="utf-8",
-    )
-    if manager_file is not None:
-        (repo / manager_file).write_text("{}\n", encoding="utf-8")
-    commands = enumerate_repository_commands(repo)
-    assert [item["command"] for item in commands] == [expected]
-
-
-def test_host_enumeration_skips_malformed_package_manifest(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "package.json").write_text("{not json", encoding="utf-8")
-    assert enumerate_repository_commands(repo) == []
-
-
-def test_host_ids_never_shadow_a_model_supplied_id(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "Makefile").write_text("test:\n\tpytest\n", encoding="utf-8")
-    commands = enumerate_repository_commands(repo, reserved_ids=["make-test"])
-    assert [item["id"] for item in commands] == ["make-test-2"]
-    assert commands[0]["command"] == "make test"
-
-
-def test_host_enumeration_never_reads_outside_the_repository(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    (repo / "vendor").mkdir(parents=True)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "Makefile").write_text("leak:\n\tcat /etc/passwd\n", encoding="utf-8")
-    (repo / "linked").symlink_to(outside, target_is_directory=True)
-    assert enumerate_repository_commands(repo, directories=(".", "linked")) == []
-    assert (enumerate_repository_commands(repo, directories=(".", "../outside")) == [])
-
-
-def test_host_command_with_shell_composition_is_rejected(tmp_path: Path) -> None:
-    """A manifest script key is arbitrary text and must clear the same gate."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "package.json").write_text(
-        json.dumps({"name": "web", "scripts": {"ci && rm -rf /": "true", "test": "vitest"}}, indent=2,)
-        + "\n",
-        encoding="utf-8",
-    )
-    candidates = enumerate_repository_commands(repo)
+    assert [(item["working_directory"], item["id"], item["command"]) for item in candidates] == [
+        (".", "make-test-2", "make test"), (".", "npm-ci-rm-rf", "npm run ci && rm -rf /"),
+        (".", "npm-test", "npm run test"), ("yarn", "yarn-test", "yarn test"),
+        ("bun", "bun-test", "bun run test"), ("npm", "npm-test-2", "npm run test"),
+    ]
     accepted, errors = validate_host_commands(candidates, repo=repo)
-    assert [item["command"] for item in candidates] == ["npm run ci && rm -rf /", "npm run test",]
-    assert [item["command"] for item in accepted] == ["npm run test"]
-    assert errors == ["RECON_MALFORMED_COMMAND@/host_commands/0/command"]
-    assert accepted[0]["evidence"]["kind"] == "host-derived"
-
-
-@pytest.mark.parametrize(
-    "scope", ["../frontend", "/frontend", "frontend/../../outside", "frontend/${PACKAGE}", "frontend/*",],
-)
-def test_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, scope: str,) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    command = _contract_recon_command(command_id="make-test", command="make test", paths=(scope,),
-        evidence={"kind": "literal-command", "source_path": "Makefile", "line_anchor": {"start_line": 1, "end_line": 1},
-            "verbatim_excerpt": "make test",
-        },
-    )
-    accepted, errors = validate_recon_commands({"commands": [command]}, repo=repo,)
-    assert accepted == []
-    assert errors == ["RECON_APPLICABILITY_INVALID@/commands/0/applicability/scope/paths/0"]
+    assert [(item["working_directory"], item["id"], item["command"]) for item in accepted] == [
+        (".", "make-test-2", "make test"), (".", "npm-test", "npm run test"),
+        ("yarn", "yarn-test", "yarn test"), ("bun", "bun-test", "bun run test"),
+        ("npm", "npm-test-2", "npm run test"),
+    ]
+    assert errors == ["RECON_MALFORMED_COMMAND@/host_commands/1/command"]
+    assert {item["evidence"]["kind"] for item in accepted} == {"host-derived"}
+    assert (outside / "Makefile").read_bytes() == outside_bytes
 
 
 def _criterion(kind: str, description: str, verification: Any = None) -> dict[str, Any]:
@@ -485,7 +396,7 @@ MALFORMED_FIRST_RUN_COMMANDS = (
 )
 
 
-def test_recon_batch_keeps_literal_commands_and_locates_unsafe_siblings(repo: Path) -> None:
+def test_recon_batch_keeps_literal_commands_and_locates_unsafe_siblings(repo: Path, tmp_path: Path) -> None:
     valid = ["go build ./...", "rg 'foo(bar)' src", 'grep -E "foo\\(bar\\)" src/app.py']
     unsafe = [
         *MALFORMED_FIRST_RUN_COMMANDS,
@@ -514,6 +425,8 @@ def test_recon_batch_keeps_literal_commands_and_locates_unsafe_siblings(repo: Pa
         }
         for index, literal in enumerate(literals)
     ]
+    outside = tmp_path / "outside"
+    outside.mkdir()
     records.extend([
         {**records[0], "id": "invalid-anchor", "evidence": {**records[0]["evidence"],
             "line_anchor": {**records[0]["evidence"]["line_anchor"], "end_line": 20}}},
@@ -521,18 +434,32 @@ def test_recon_batch_keeps_literal_commands_and_locates_unsafe_siblings(repo: Pa
             "scope": {"kind": "whole-repository", "paths": ["frontend"]}}},
         {**records[0], "id": "scoped-without-paths", "applicability": {**records[0]["applicability"],
             "scope": {"kind": "in-scope-paths", "paths": []}}},
+        {**records[0], "id": "confined-absolute", "working_directory": str(repo / "apps/catalog")},
+        {**records[0], "id": "outside-absolute", "working_directory": str(outside)},
+        {**records[0], "id": "traversal-scope", "applicability": _contract_applicability("../frontend")},
+        {**records[0], "id": "absolute-scope", "applicability": _contract_applicability("/frontend")},
+        {**records[0], "id": "nested-traversal", "applicability": _contract_applicability("frontend/../../outside")},
+        {**records[0], "id": "variable-scope", "applicability": _contract_applicability("frontend/${PACKAGE}")},
+        {**records[0], "id": "glob-scope", "applicability": _contract_applicability("frontend/*")},
     ])
     admitted, errors = validate_recon_commands({"commands": records}, repo=repo)
     assert [(item["id"], item["command"]) for item in admitted] == [
         ("command-0", valid[0]),
         ("command-1", valid[1]),
         ("command-2", valid[2]),
+        ("confined-absolute", "go build ./..."),
     ]
     assert errors == [
         *[f"RECON_MALFORMED_COMMAND@/commands/{index}/command" for index in range(3, len(literals))],
         "RECON_EVIDENCE_MISMATCH@/commands/16/evidence",
         "RECON_APPLICABILITY_INVALID@/commands/17/applicability/scope/kind",
         "RECON_APPLICABILITY_INVALID@/commands/18/applicability/scope/kind",
+        "RECON_WORKING_DIRECTORY_INVALID@/commands/20/working_directory",
+        "RECON_APPLICABILITY_INVALID@/commands/21/applicability/scope/paths/0",
+        "RECON_APPLICABILITY_INVALID@/commands/22/applicability/scope/paths/0",
+        "RECON_APPLICABILITY_INVALID@/commands/23/applicability/scope/paths/0",
+        "RECON_APPLICABILITY_INVALID@/commands/24/applicability/scope/paths/0",
+        "RECON_APPLICABILITY_INVALID@/commands/25/applicability/scope/paths/0",
     ]
 
 
@@ -611,6 +538,7 @@ def test_all_authored_fields_reject_distinct_symlink_crossings(repo: Path, tmp_p
     plan["test_plan"]["cases"][0]["test_file"] = "linkedtest/secret.py"
     plan["test_plan"]["exemplars"][0]["path"] = "linkedexemplar/secret.py"
     plan["false_assumption"]["related_paths"][0] = "linkedstop/secret.py"
+    original_scope = deepcopy(plan["scope"])
     issues = _issues(repo, plan)
     assert {issue.pointer for issue in issues if issue.code == "PATH_OUTSIDE_REPOSITORY"} == {
         "/scope/existing_paths/0/path",
@@ -624,6 +552,7 @@ def test_all_authored_fields_reject_distinct_symlink_crossings(repo: Path, tmp_p
         "/test_plan/exemplars/0/path",
         "/false_assumption/related_paths/0",
     }
+    assert plan["scope"] == original_scope
     assert (outside / "secret.py").read_bytes() == b"outside evidence must stay private\n"
     assert git(repo, "status", "--porcelain") == before
 
@@ -648,9 +577,11 @@ def test_one_plan_locates_unsafe_path_grammar_and_never_publishes_it(repo: Path,
     plan["steps"][0]["changes"][0]["path"] = path
     plan["test_plan"]["cases"][0]["test_file"] = "docs/catalog|tee.md"
     plan["test_plan"]["exemplars"][0]["path"] = "src/$(whoami).py"
-    plan["false_assumption"]["related_paths"][0] = "../outside.py"
+    plan["steps"][0]["changes"].append({**plan["steps"][0]["changes"][0], "path": "../outside/pwn.py"})
+    plan["false_assumption"]["related_paths"] = ["../outside.py", "src/$(whoami).py"]
+    original_scope = deepcopy(plan["scope"])
     issues = _issues(repo, plan)
-    assert {issue.pointer for issue in issues if issue.code == "AUTHOR_SCHEMA_INVALID"} == {
+    unsafe_pointers = {
         "/scope/existing_paths/0/path",
         "/scope/new_paths/0/path",
         "/scope/out_of_scope_paths/0/path",
@@ -659,7 +590,12 @@ def test_one_plan_locates_unsafe_path_grammar_and_never_publishes_it(repo: Path,
         "/test_plan/cases/0/test_file",
         "/test_plan/exemplars/0/path",
         "/false_assumption/related_paths/0",
+        "/false_assumption/related_paths/1",
+        "/steps/0/changes/2/path",
     }
+    assert {issue.pointer for issue in issues if issue.code == "AUTHOR_SCHEMA_INVALID"} == unsafe_pointers
+    assert {issue.pointer for issue in issues if issue.code == "MALFORMED_PATH"} == unsafe_pointers
+    assert plan["scope"] == original_scope
     result = _write_plans(repo / "daydream_plans", [_authoring_failure_selection(issues)], planned_at=head_sha,)
     assert result["written"] == []
     assert "AUTHOR_SCHEMA_INVALID" in (repo / "daydream_plans/README.md").read_text()
@@ -1212,106 +1148,104 @@ def test_load_rejections_returns_empty_for_absent_or_malformed_file(tmp_path: Pa
     assert load_rejections(plans_dir) == {}
 
 
+
 def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(repo: Path) -> None:
     plan = _authored_plan()
     plan["title"] = "Too short"
     plan["steps"][0]["verification"]["recon_command_id"] = "make-tests"
     plan["steps"][0]["changes"][0]["operation"] = "create"
+    (repo / "tests/occupied").mkdir()
+    plan["scope"]["new_paths"] = [{"path": "tests/occupied", "role": "A directory cannot become a new file."}]
+    _add_readme_change(plan)
+    case = plan["test_plan"]["cases"][0]
+    plan["test_plan"]["cases"].extend([
+        {**case, "name": "Catalog loading preserves item order"}, {**case, "name": "Catalog loading accepts no items"},
+    ])
     issues = _issues(repo, plan)
-    by_code = {issue.code: issue for issue in issues}
-    assert len(issues) == 3
-    assert by_code["AUTHOR_SCHEMA_INVALID"].pointer == "/title"
-    assert by_code["AUTHOR_SCHEMA_INVALID"].detail == "minLength=12;actual=9"
-    assert by_code["CREATE_PATH_NOT_NEW"].pointer == "/steps/0/changes/0/path"
-    unknown = by_code["RECON_COMMAND_UNKNOWN"]
-    assert unknown.pointer == "/steps/0/verification/recon_command_id"
+    by_location = {(issue.code, issue.pointer): issue for issue in issues}
+    assert len(issues) == len(by_location) == 7
+    assert set(by_location) == {
+        ("AUTHOR_SCHEMA_INVALID", "/title"), ("AUTHOR_SCHEMA_INVALID", "/scope/out_of_scope_paths"),
+        ("CREATE_PATH_NOT_NEW", "/steps/0/changes/0/path"),
+        ("RECON_COMMAND_UNKNOWN", "/steps/0/verification/recon_command_id"),
+        ("NEW_PATH_ALREADY_EXISTS", "/scope/new_paths/0/path"),
+        ("DUPLICATE_TEST_SYMBOL", "/test_plan/cases/1/test_symbol"),
+        ("DUPLICATE_TEST_SYMBOL", "/test_plan/cases/2/test_symbol"),
+    }
+    assert by_location["AUTHOR_SCHEMA_INVALID", "/title"].detail == "minLength=12;actual=9"
+    assert by_location["AUTHOR_SCHEMA_INVALID", "/scope/out_of_scope_paths"].detail == "minItems=1;actual=0"
+    unknown = by_location["RECON_COMMAND_UNKNOWN", "/steps/0/verification/recon_command_id"]
     assert unknown.hint == "valid recon command ids: test-suite, git-diff"
+    assert all("parameterized test" in (issue.hint or "")
+        for (code, _), issue in by_location.items() if code == "DUPLICATE_TEST_SYMBOL")
 
 
-def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(repo: Path, head_sha: str,) -> None:
+
+def test_plan_normalization_reconciles_one_heterogeneous_scope_before_rendering(repo: Path, head_sha: str) -> None:
     plan = _authored_new_file_plan()
-    collision = plan["scope"]["new_paths"][0]["path"]
-    (repo / collision).write_text(
-        "def test_placeholder():\n    assert True\n",
-        encoding="utf-8",
-    )
-    plan["context_excerpts"].append({
-        "path": collision, "start_line": 2, "end_line": 2,
-        "file_role": "Preserve the authored assertion anchor while relocating scope.",
-    })
-
-    assembled = _assembled(repo, plan)
-    scope = assembled["scope"]
-    assert scope["new_paths"] == []
-    assert [entry["path"] for entry in scope["existing_paths"]] == [
-        "apps/catalog/api.py", "tests/test_catalog.py", collision,
-    ]
-    assert [change["operation"] for step in assembled["steps"] for change in step["changes"]] == ["modify", "modify"]
-    quoted = [excerpt for excerpt in assembled["current_state_excerpts"] if excerpt["path"] == collision]
-    assert quoted == [{
-        "path": collision, "line_anchor": {"start_line": 2, "end_line": 2},
-        "file_role": "Preserve the authored assertion anchor while relocating scope.",
-        "verbatim_excerpt": "    assert True",
-    }]
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert (f"git add apps/catalog/api.py tests/test_catalog.py {collision}" in rendered)
-    assert f"- `{collision}` (existing) —" in rendered
-    assert f"- `{collision}` (create) —" not in rendered
-
-
-def test_a_host_synthesized_anchor_is_redacted_like_an_authored_one(repo: Path) -> None:
-    """Relocation repair splices bytes the model never quoted; that route must redact too."""
-    plan = _authored_new_file_plan()
-    relocated = plan["scope"]["new_paths"][0]["path"]
-    (repo / relocated).write_text(
-        'api_key = "b4dc0ffeeplaintext"\ndef test_placeholder():\n',
-        encoding="utf-8",
-    )
-    assembled = _assembled(repo, plan)
-    quoted = next(excerpt for excerpt in assembled["current_state_excerpts"] if excerpt["path"] == relocated)
-    assert quoted["verbatim_excerpt"] == (
-        "api_key = <redacted>\ndef test_placeholder():"
-    )
-    assert "b4dc0ffeeplaintext" not in json.dumps(assembled)
-
-
-def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(repo: Path) -> None:
-    plan = _authored_new_file_plan()
-    (repo / plan["scope"]["new_paths"][0]["path"]).mkdir(parents=True)
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == ["NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"]
-
-
-def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_sha: str) -> None:
-    """Cover authored, relocated new-path, and undeclared step-path anchors in the drift condition."""
-    plan = _authored_new_file_plan()
-    relocated = plan["scope"]["new_paths"][0]["path"]
-    (repo / relocated).write_text(
-        "def test_placeholder():\n    assert True\n",
-        encoding="utf-8",
+    collision, fresh, deleted = "tests/test_catalog_batching.py", "tests/test_fresh.py", "apps/catalog/legacy_loader.py"
+    (repo / collision).write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+    (repo / "README.md").write_text('api_key = "b4dc0ffeeplaintext"\n# Catalog service\n', encoding="utf-8")
+    plan["scope"]["existing_paths"].extend([
+        dict(plan["scope"]["existing_paths"][0]), {"path": fresh, "role": "An absent path must stay new."},
+    ])
+    plan["scope"]["new_paths"].extend([
+        dict(plan["scope"]["new_paths"][0]),
+        {"path": "apps/catalog/api.py", "role": "An existing implementation cannot remain new."},
+        {"path": fresh, "role": "Add a separate catalog regression."},
+    ])
+    plan["scope"]["out_of_scope_paths"].append(
+        {"path": "apps/catalog/api.py", "reason": "An in-scope path cannot remain excluded."}
     )
     _declare_makefile_out_of_scope(plan)
     _add_readme_change(plan)
+    plan["context_excerpts"][0]["end_line"] = 200
+    plan["context_excerpts"].append({"path": collision, "start_line": 2, "end_line": 2,
+        "file_role": "Preserve the authored assertion anchor while relocating scope."})
+    plan["false_assumption"].update(related_paths=[deleted], related_step_numbers=[1, 7])
 
     assembled = _assembled(repo, plan)
-    drift = next(condition for condition in assembled["stop_conditions"] if condition["kind"] == "drift")
-    quoted = {excerpt["path"] for excerpt in assembled["current_state_excerpts"]}
-    assert set(drift["related_paths"]) == quoted
-    assert quoted == {"apps/catalog/api.py", "tests/test_catalog.py", relocated, "README.md",}
-    rendered = _render_assembled_plan(assembled, head_sha)
-    for path in drift["related_paths"]:
-        assert f"- `{path}:1-" in rendered
-    assert "# Catalog service" in rendered
-
-
-def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> None:
-    """In-scope wins deduplication, leaving an empty out-of-scope list for schema repair."""
-    plan = _authored_plan()
-    _add_readme_change(plan)
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == [
-        "AUTHOR_SCHEMA_INVALID@/scope/out_of_scope_paths#minItems=1;actual=0"
+    scope = assembled["scope"]
+    assert [entry["path"] for entry in scope["existing_paths"]] == [
+        "apps/catalog/api.py", "tests/test_catalog.py", "tests/test_catalog_batching.py", "README.md",
     ]
+    assert [entry["path"] for entry in scope["new_paths"]] == ["tests/test_fresh.py"]
+    assert [entry["path"] for entry in scope["out_of_scope_paths"]] == ["Makefile", "apps/catalog/legacy_loader.py"]
+    assert [change["operation"] for step in assembled["steps"] for change in step["changes"]] == [
+        "modify", "modify", "modify",
+    ]
+    excerpts = {excerpt["path"]: excerpt for excerpt in assembled["current_state_excerpts"]}
+    assert excerpts[collision] == {
+        "path": collision, "line_anchor": {"start_line": 2, "end_line": 2},
+        "file_role": "Preserve the authored assertion anchor while relocating scope.",
+        "verbatim_excerpt": "    assert True",
+    }
+    assert excerpts["README.md"] == {
+        "path": "README.md", "line_anchor": {"start_line": 1, "end_line": 2},
+        "file_role": ("Named by a plan step but left out of the authored scope lists; the host "
+            "declared it in scope so the executor is allowed to change it."),
+        "verbatim_excerpt": "api_key = <redacted>\n# Catalog service",
+    }
+    assert excerpts["apps/catalog/api.py"] == {
+        "path": "apps/catalog/api.py", "line_anchor": {"start_line": 1, "end_line": 2},
+        "file_role": "Implement batched catalog loading.",
+        "verbatim_excerpt": "def list_catalog():\n    return [load_item(item_id) for item_id in item_ids]",
+    }
+    assert "b4dc0ffeeplaintext" not in json.dumps(assembled)
+    drift = assembled["stop_conditions"][0]
+    assert set(drift["related_paths"]) == set(excerpts) == {
+        "apps/catalog/api.py", "tests/test_catalog.py", "tests/test_catalog_batching.py", "README.md",
+    }
+    assert assembled["stop_conditions"][3]["related_paths"] == [deleted]
+    assert assembled["stop_conditions"][3]["related_step_ids"] == ["step-1"]
+    rendered = _render_assembled_plan(assembled, head_sha)
+    assert ("git add apps/catalog/api.py tests/test_catalog.py tests/test_catalog_batching.py README.md "
+        "tests/test_fresh.py" in rendered)
+    assert f"- `{collision}` (existing) —" in rendered and f"- `{collision}` (create) —" not in rendered
+    assert "- `tests/test_fresh.py` (create) —" in rendered
+    assert (f"- `{deleted}` — Referenced by a stop condition for context only; "
+        "do not create, modify, or depend on this path." in rendered)
+    assert "step-7" not in rendered and not (repo / deleted).exists() and not (repo / fresh).exists()
 
 
 def _scoped_recon_command(command_id: str, *, command: str, paths: list[str],) -> dict[str, Any]:
@@ -1368,20 +1302,6 @@ def test_scope_mismatched_ref_with_appended_args_keeps_its_command(repo: Path, h
     )
 
 
-def test_duplicate_test_symbols_require_parametrization_or_meaningful_names(repo: Path,) -> None:
-    plan = _authored_plan()
-    duplicate = deepcopy(plan["test_plan"]["cases"][0])
-    duplicate["name"] = "Catalog loading preserves item order"
-    third = deepcopy(duplicate)
-    third["name"] = "Catalog loading tolerates an empty catalog"
-    plan["test_plan"]["cases"].extend([duplicate, third])
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == [
-        "DUPLICATE_TEST_SYMBOL@/test_plan/cases/1/test_symbol", "DUPLICATE_TEST_SYMBOL@/test_plan/cases/2/test_symbol",
-    ]
-    assert all(issue.hint is not None and "parameterized test" in issue.hint for issue in issues)
-
-
 def _use_existing_catalog_coverage(plan: dict[str, Any]) -> None:
     plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
     plan["context_excerpts"] = [plan["context_excerpts"][0]]
@@ -1394,21 +1314,6 @@ def _use_existing_catalog_coverage(plan: dict[str, Any]) -> None:
             }
         ], "exemplars": [], "cases": [],
     }
-
-
-def test_existing_coverage_mode_keeps_test_evidence_read_only(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    _use_existing_catalog_coverage(plan)
-    assembled = _assembled(repo, plan)
-    assert [entry["path"] for entry in assembled["scope"]["existing_paths"]] == ["apps/catalog/api.py"]
-    assert assembled["done_criteria"][-2]["description"] == (
-        "The cited existing coverage passes: test_list_catalog_returns_items."
-    )
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert "**Mode**: `existing-coverage`" in rendered
-    assert "### Existing coverage" in rendered
-    assert "`tests/test_catalog.py::test_list_catalog_returns_items`" in rendered
-    assert "### Named cases" not in rendered
 
 
 def test_existing_coverage_command_is_scoped_to_read_only_test_evidence(repo: Path, head_sha: str,) -> None:
@@ -1429,39 +1334,38 @@ def test_existing_coverage_command_is_scoped_to_read_only_test_evidence(repo: Pa
     rendered = _render_assembled_plan(assembled, head_sha)
     assert "`uv run pytest tests/test_catalog.py`" in rendered
     assert "Retargeted by the host" not in rendered.partition("### Existing coverage")[2]
+    criterion = assembled["done_criteria"][-2]
+    assert criterion["description"] == "The cited existing coverage passes: test_list_catalog_returns_items."
+    assert "**Mode**: `existing-coverage`" in rendered and "### Existing coverage" in rendered
+    assert "`tests/test_catalog.py::test_list_catalog_returns_items`" in rendered
+    assert "### Named cases" not in rendered
 
 
-@pytest.mark.parametrize("replacement",
-    [
-        "def test_list_catalog_returns_items_extra():\n    assert list_catalog()\n",
-        "# def test_list_catalog_returns_items():\nVALUE = 1\n",
-        'DESCRIPTION = "def test_list_catalog_returns_items():"\n',
-    ], ids=("longer-symbol", "comment", "string"),
-)
-def test_existing_coverage_requires_an_exact_test_declaration(repo: Path, replacement: str,) -> None:
-    (repo / "tests/test_catalog.py").write_text(replacement, encoding="utf-8")
+
+def test_existing_coverage_population_requires_exact_test_declarations(repo: Path) -> None:
+    (repo / "tests/test_mentions.py").write_text(
+        "def test_longer_extra():\n    assert True\n"
+        "# def test_comment():\n"
+        'DESCRIPTION = "def test_string():"\n'
+        "def catalog_helper():\n    return []\n", encoding="utf-8",
+    )
     plan = _authored_plan()
     _use_existing_catalog_coverage(plan)
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
-
-
-@pytest.mark.parametrize(("path", "symbol", "source"),
-    [("apps/catalog/api.py", "list_catalog",
-            "def list_catalog():\n    return []\n",
-        ),
-        ("tests/test_catalog.py", "catalog_helper",
-            "def catalog_helper():\n    return []\n",
-        ),
-    ], ids=("source-function", "test-helper"),
-)
-def test_existing_coverage_rejects_non_test_python_functions(repo: Path, path: str, symbol: str, source: str,) -> None:
-    (repo / path).write_text(source, encoding="utf-8")
-    plan = _authored_plan()
-    _use_existing_catalog_coverage(plan)
-    plan["test_plan"]["existing_coverage"][0].update(path=path, symbol=symbol)
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
+    coverage = plan["test_plan"]["existing_coverage"]
+    coverage.extend([
+        {**coverage[0], "path": "tests/test_mentions.py", "symbol": "test_longer"},
+        {**coverage[0], "path": "tests/test_mentions.py", "symbol": "test_comment"},
+        {**coverage[0], "path": "tests/test_mentions.py", "symbol": "test_string"},
+        {**coverage[0], "path": "tests/test_mentions.py", "symbol": "catalog_helper"},
+        {**coverage[0], "path": "apps/catalog/api.py", "symbol": "list_catalog"},
+    ])
+    assert [render_issue(issue) for issue in _issues(repo, plan)] == [
+        "EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/1",
+        "EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/2",
+        "EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/3",
+        "EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/4",
+        "EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/5",
+    ]
 
 
 def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(repo: Path, head_sha: str,) -> None:
@@ -1600,128 +1504,13 @@ def test_plan_must_cover_every_expected_aggregate_fingerprint(repo: Path, head_s
     assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`, `fp-repeated-tests`" in rendered
 
 
-@pytest.mark.parametrize(
-    ("location", "pointer"), [("step", "/steps/0/changes/0/path"), ("test", "/test_plan/cases/0/test_file"),],
-)
-def test_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
-    repo: Path, location: str, pointer: str, tmp_path: Path,
-) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "pwn.py").write_text("SECRET = 1\n", encoding="utf-8")
-    (repo / "escape").symlink_to(outside, target_is_directory=True)
-    escaping = "escape/pwn.py"
+def test_excerpt_start_beyond_eof_blocks(repo: Path) -> None:
     plan = _authored_plan()
-    if location == "step":
-        plan["steps"][0]["changes"][0]["path"] = escaping
-    else:
-        plan["test_plan"]["cases"][0]["test_file"] = escaping
-
+    plan["context_excerpts"][0].update(start_line=50, end_line=60)
     issues = _issues(repo, plan)
-
-    # Reported at the authored pointer, never at a /scope pointer: a laundered
-    # path would have been re-reported from the scope list the host wrote it to.
-    assert f"PATH_OUTSIDE_REPOSITORY@{pointer}" in {render_issue(issue) for issue in issues}
-    assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
-
-
-def test_undeclared_malformed_step_path_is_blocked_and_never_declared_in_scope(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["steps"][0]["changes"][0]["path"] = "../outside/pwn.py"
-    issues = _issues(repo, plan)
-    assert "MALFORMED_PATH@/steps/0/changes/0/path" in {render_issue(issue) for issue in issues}
-    assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
-
-
-def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    plan["false_assumption"]["related_step_numbers"] = [1, 7]
-    assembled = _assembled(repo, plan)
-    false_assumption = assembled["stop_conditions"][3]
-    assert false_assumption["related_step_ids"] == ["step-1"]
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert "step-7" not in rendered
-
-
-def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(repo: Path) -> None:
-    clamped = _authored_plan()
-    clamped["context_excerpts"][0]["end_line"] = 200
-
-    assembled = _assembled(repo, clamped)
-    anchor = assembled["current_state_excerpts"][0]["line_anchor"]
-    assert anchor == {"start_line": 1, "end_line": 2}
-    assert assembled["current_state_excerpts"][0]["verbatim_excerpt"] == (
-        "def list_catalog():\n"
-        "    return [load_item(item_id) for item_id in item_ids]"
-    )
-
-    beyond = _authored_plan()
-    beyond["context_excerpts"][0].update(start_line=50, end_line=60)
-    issues = _issues(repo, beyond)
     assert [(issue.code, issue.pointer, issue.detail)
-        for issue in issues
-        if issue.code == "EXCERPT_ANCHOR_INVALID"
+        for issue in issues if issue.code == "EXCERPT_ANCHOR_INVALID"
     ] == [("EXCERPT_ANCHOR_INVALID", "/context_excerpts/0", "lines=2")]
-
-
-def test_assemble_dedups_scope_lists_by_disk_truth(repo: Path) -> None:
-    plan = _authored_new_file_plan()
-    plan["scope"]["existing_paths"].append(dict(plan["scope"]["existing_paths"][0]))
-    plan["scope"]["new_paths"].append(
-        {"path": "apps/catalog/api.py", "role": "Wrongly re-declared as new although it exists on disk.",}
-    )
-    plan["scope"]["new_paths"].append(
-        {"path": "tests/test_catalog_batching.py", "role": "Duplicate new-path entry that must collapse to one.",}
-    )
-    plan["scope"]["out_of_scope_paths"].append(
-        {"path": "apps/catalog/api.py", "reason": "Conflicts with the in-scope declaration and is dropped.",}
-    )
-    assembled = _assembled(repo, plan)
-    scope = assembled["scope"]
-    assert [entry["path"] for entry in scope["existing_paths"]] == ["apps/catalog/api.py", "tests/test_catalog.py",]
-    assert [entry["path"] for entry in scope["new_paths"]] == ["tests/test_catalog_batching.py"]
-    assert [entry["path"] for entry in scope["out_of_scope_paths"]] == ["README.md"]
-
-
-def _injected_out_of_scope(assembled: dict[str, Any], path: str) -> dict[str, Any]:
-    entries = [entry for entry in assembled["scope"]["out_of_scope_paths"] if entry["path"] == path]
-    assert len(entries) == 1
-    return cast(dict[str, Any], entries[0])
-
-
-def test_deleted_stop_path_is_declared_out_of_scope_without_touching_disk(repo: Path) -> None:
-    deleted = "apps/catalog/legacy_loader.py"
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = [deleted]
-    assembled = _assembled(repo, plan)
-    assert _injected_out_of_scope(assembled, deleted)["path"] == deleted
-    assert not (repo / deleted).exists()
-    assert assembled["stop_conditions"][3]["related_paths"] == [deleted]
-
-
-@pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py"])
-def test_malformed_stop_path_stays_blocked_and_is_never_declared(repo: Path, path: str) -> None:
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = [path]
-    issues = _issues(repo, plan)
-    assert "MALFORMED_PATH" in {issue.code for issue in issues}
-    assert plan["scope"]["out_of_scope_paths"] == [
-        {"path": "README.md", "reason": "Catalog batching does not change user documentation.",}
-    ]
-
-
-def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(repo: Path, tmp_path: Path,) -> None:
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (repo / "escape").symlink_to(outside, target_is_directory=True)
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = ["escape/pwn.py"]
-    issues = _issues(repo, plan)
-    assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
-    assert [issue.pointer
-        for issue in issues
-        if issue.code == "PATH_OUTSIDE_REPOSITORY"
-    ] == ["/false_assumption/related_paths/0"]
 
 
 def test_repair_prompt_drops_malformed_detail_segment() -> None:

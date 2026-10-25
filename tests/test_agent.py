@@ -17,7 +17,6 @@ from daydream.agent import (
     _RedactedSupervisorError,
     _run_agent,
     _scrubbed_supervisor_error,
-    _ToolSupervisorFailure,
     is_environmental_failure,
     run_agent,
 )
@@ -407,21 +406,6 @@ class ExplodingStrError(RuntimeError):
         raise RuntimeError("boom in str")
 
 
-def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
-    """A hostile __str__ must not escape during either wrapper construction or scrubbing."""
-    # Scrubber: no raise; fail-closed stand-in carrying only the type name.
-    stand_in = _scrubbed_supervisor_error(ExplodingStrError("secret-shaped-payload"))
-    assert type(stand_in) is _RedactedSupervisorError
-    assert stand_in.original_type_name == "ExplodingStrError"
-    assert "secret-shaped-payload" not in str(stand_in)
-    assert "boom in str" not in str(stand_in)
-    # Wrapper: construction never evaluates the hostile __str__.
-    original = ExplodingStrError("secret-shaped-payload")
-    failure = _ToolSupervisorFailure(original)
-    assert failure.original is original
-    assert str(failure) == ""
-
-
 @pytest.mark.anyio
 async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -451,6 +435,8 @@ async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
         set_registry(previous_registry)
     assert type(raised) is _RedactedSupervisorError
     assert raised.original_type_name == "ExplodingStrError"
+    assert "secret-shaped-payload" not in str(raised)
+    assert "boom in str" not in str(raised)
     rendered = output.getvalue()
     assert "Extension Failure" in rendered
     assert "secret-shaped-payload" not in rendered

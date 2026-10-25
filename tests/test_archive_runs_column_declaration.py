@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.archive import index
+from daydream.archive.manifest import Manifest
 from tests.harness.trajectory import make_manifest
 
 
@@ -111,7 +112,10 @@ def test_local_diagnostic_writes_preserve_unrelated_history(tmp_path: Path) -> N
         connection.execute("UPDATE runs SET retired_metric = 0.75")
         connection.execute("CREATE TABLE historical_notes (note TEXT)")
         connection.execute("INSERT INTO historical_notes VALUES ('keep me')")
-    index.upsert_run(tmp_path, make_manifest(session_id="new"))
+    index.upsert_run(tmp_path, Manifest())
     with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute(
+            "SELECT pipeline_status, archive_status, daydream_version FROM runs WHERE session_id=''"
+        ).fetchone() == ("unknown", "complete", None)
         assert connection.execute("SELECT note FROM historical_notes").fetchone()[0] == "keep me"
         assert connection.execute("SELECT retired_metric FROM runs WHERE session_id='historical'").fetchone()[0] == 0.75

@@ -317,11 +317,8 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
 
-@pytest.mark.parametrize("schema", [
-    {"type": "object", "properties": {"issues": {"type": "array"}}},
-    {"type": "object", "properties": {"x": {"type": "string"}}},
-])
-async def test_structured_output(schema: dict[str, Any]) -> None:
+async def test_structured_output() -> None:
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     events, mock_exec = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
@@ -667,20 +664,16 @@ async def test_explicit_model_overrides_pi_settings(pi_workspace: Path, monkeypa
 # Migration guards: GLM-pin and provider/model mismatch warnings
 
 
-@pytest.mark.parametrize("provider", [None, "zai"])
 async def test_glm_pin_warning_requires_implicit_provider(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, provider: str | None,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    if provider is None:
-        monkeypatch.delenv("PI_PROVIDER", raising=False)
-    else:
-        monkeypatch.setenv("PI_PROVIDER", provider)
+    monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
     with caplog.at_level("WARNING"):
         flat_args, _ = await _run_and_capture_args(PiBackend(model="glm-5.2"))
-    assert any("z.ai-hosted GLM" in record.getMessage() for record in caplog.records) is (provider is None)
+    assert not any("z.ai-hosted GLM" in record.getMessage() for record in caplog.records)
     assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
-    assert flat_args[flat_args.index("--provider") + 1] == (provider or "nous")
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
 
 
 async def test_glm_pin_warning_fires_once_across_executes(
@@ -690,8 +683,10 @@ async def test_glm_pin_warning_fires_once_across_executes(
     monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
     backend = PiBackend(model="glm-5.2")
     with caplog.at_level("WARNING"):
+        first_args, _ = await _run_and_capture_args(backend)
         await _run_and_capture_args(backend)
-        await _run_and_capture_args(backend)
+    assert first_args[first_args.index("--model") + 1] == "glm-5.2"
+    assert first_args[first_args.index("--provider") + 1] == "nous"
     glm_warnings = [r for r in caplog.records if "z.ai-hosted GLM" in r.getMessage()]
     assert len(glm_warnings) == 1
 
