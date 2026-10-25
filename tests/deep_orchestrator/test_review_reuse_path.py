@@ -785,6 +785,8 @@ async def test_aggregate_cached_attribution_regains_all_frozen_references_within
     make_config: MakeConfig,
 ) -> None:
     """The shared publication budget remains independent of entry-local corruption."""
+    run_limit = 256 * 1024
+    monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', run_limit)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
@@ -821,7 +823,7 @@ async def test_aggregate_cached_attribution_regains_all_frozen_references_within
     def size(value: dict[str, Any]) -> int:
         return len(json.dumps({"terminal_result": value}, indent=2, ensure_ascii=False).encode())
 
-    assert size(coverage) - size(core) <= 256 * 1024
+    assert size(coverage) - size(core) <= run_limit
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",
@@ -833,6 +835,8 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
 
+    if damage == 'aggregate-attribution':
+        monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', 256 * 1024)
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     initial = tmp_path / "initial-review.json"

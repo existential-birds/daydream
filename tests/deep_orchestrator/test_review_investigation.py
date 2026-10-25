@@ -1091,13 +1091,14 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert timer.monotonic() >= dispatch_deadlines[0]
 
 
-@pytest.mark.parametrize(('local_s', 'pipeline_s', 'reason', 'bound'), [
-    (480, 2000, 'host_wall_budget_exhaustion', 'local'),
-    (900, 2000, None, 'local'),
-    (900, 600, 'host_pipeline_budget_exhaustion', 'pipeline'),
+@pytest.mark.parametrize(('local_s', 'pipeline_s', 'stage_s', 'reason', 'bound'), [
+    (480, 2000, 300, 'host_wall_budget_exhaustion', 'local'),
+    (900, 2000, 300, None, 'local'),
+    (900, 600, 300, 'host_pipeline_budget_exhaustion', 'pipeline'),
+    (5000, 10000, 2000, None, 'local'),
 ])
 async def test_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_s: int, pipeline_s: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_s: int, pipeline_s: int, stage_s: int,
     reason: str | None, bound: str,
 ) -> None:
     """The same two-stage work distinguishes local configuration from the shared pipeline cap."""
@@ -1119,7 +1120,7 @@ async def test_configured_investigation_time_changes_completion_without_renewing
             assert stage['closed_decisions'][0]['conclusion'].startswith('Grounded defect: ')
             assert stage['remaining_tool_calls'] < 48
         yield from read_events(review.repo, stage['assigned_files'][0], event_id=f'read-{len(deadlines)}')
-        timer.advance(300)
+        timer.advance(stage_s)
         yield TextEvent(text='Assigned source investigation completed.')
 
     assert await review.run(review_profile=_profile_with_pipeline(
@@ -1169,8 +1170,9 @@ async def test_zero_configured_investigation_time_dispatches_no_review_and_repor
     assert 'Review incomplete' in (investigation.repo / '.review-output.md').read_text()
 
 
+@pytest.mark.parametrize('caller_bound', ['wall', 'absolute'])
 async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, caller_bound: str,
 ) -> None:
     """An extension's preparation time spends the same invocation cap as dispatched investigation."""
     review = many_file_review(tmp_path, monkeypatch, count=5)
@@ -1179,6 +1181,17 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     elapsed.write_text('0')
     timer = FakeClock(monotonic_value=clock.monotonic())
     monkeypatch.setattr(clock, 'monotonic', lambda: timer.monotonic() + float(elapsed.read_text()))
+    from daydream.review_investigation import ReviewInvestigation
+
+    real_run = ReviewInvestigation.run
+
+    async def explicitly_bounded(self: ReviewInvestigation, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop('wall_budget_s', None)
+        kwargs['wall_budget_s' if caller_bound == 'wall' else 'deadline'] = (
+            3600 if caller_bound == 'wall' else clock.monotonic() + 3600)
+        return await real_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReviewInvestigation, 'run', explicitly_bounded)
     ext_dir.write_module(
         "from pathlib import Path\n"
         "from daydream.deep.prompts import build_per_stack_prompt\n"
@@ -1206,7 +1219,8 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     for event in events:
         assert event['metadata']['investigation_effective_allowance_s'] == pytest.approx(3600, rel=0, abs=0.01)
-        assert event['metadata']['investigation_limit'] == 'invocation_wall_budget'
+        assert event['metadata']['investigation_limit'] == (
+            'invocation_wall_budget' if caller_bound == 'wall' else 'caller_deadline')
     assert events[-1]['metadata']['retained_findings'] == 1
     assert scopes(data)['python']['partial_evidence'] is True
     saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())

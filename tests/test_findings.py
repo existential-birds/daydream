@@ -26,6 +26,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import test_execution_identity as execution_identity
 from tests.harness.git_helpers import commit, git
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
+from tests.test_review_result import attribution_bytes, large_attributed_terminal
 
 
 def _load(path: Path, *, head_sha: str = "h" * 40, **options: Any) -> Any:
@@ -79,24 +80,76 @@ def test_build_write_load_preserves_target_finding_and_diagram_contract(
 
 def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:
     path = tmp_path / "reused.json"
-    artifact = findings_artifact()
+    artifact = findings_artifact(terminal_result=large_attributed_terminal())
     write_findings_artifact(path, artifact)
     loaded = _load(path, expected_run_id="run-1")
     assert loaded.kind == "review" and loaded.diagrams is None and loaded.analysis_complete
+    assert MAX_ARTIFACT_BYTES < path.stat().st_size < 9 * MAX_ARTIFACT_BYTES
+    assert loaded.terminal_result == artifact['terminal_result']
     with pytest.raises(FindingsValidationError, match="run_id"):
         _load(path, expected_run_id="current-run")
     with pytest.raises(FindingsValidationError):
         _load(tmp_path / "fresh-current-run.json")
+    damaged = copy.deepcopy(artifact)
+    damaged['terminal_result']['stack_outcomes'][-1]['target_decisions'][-1]['evidence_refs'][0][
+        'revision'] = 'x' * 40
+    path.write_text(json.dumps(damaged))
+    with pytest.raises(FindingsValidationError, match='revision differs'):
+        _load(path)
 
 
 @pytest.mark.parametrize("raw", [None, '{"schema_version": 2', '[' * 2000 + '0' + ']' * 2000,
-                                 pytest.param('[' + ' ' * MAX_ARTIFACT_BYTES, id="oversized-input")])
-def test_missing_truncated_nested_and_oversized_input_is_never_clean(tmp_path: Path, raw: str | None) -> None:
+                                 pytest.param('[' + ' ' * (9 * MAX_ARTIFACT_BYTES), id="oversized-input")])
+def test_missing_truncated_nested_and_oversized_input_is_never_clean(
+    tmp_path: Path, raw: str | None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = tmp_path / "invalid.json"
     if raw is not None:
         path.write_text(raw)
-    with pytest.raises(FindingsValidationError, match="size" if raw and len(raw) > MAX_ARTIFACT_BYTES else None):
+    oversized = raw is not None and len(raw) > 9 * MAX_ARTIFACT_BYTES
+    if oversized:
+        def forbidden_parse(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError('Oversized raw input reached JSON parsing')
+        monkeypatch.setattr(json, 'loads', forbidden_parse)
+    with pytest.raises(FindingsValidationError, match="size" if oversized else None):
         _load(path)
+    if oversized:
+        path.write_text('{}')
+        real_stat = Path.stat
+        real_open = Path.open
+        observations = []
+        read_sizes: list[int] = []
+
+        def grow_after_stat(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            metadata = real_stat(self, *args, **kwargs)
+            if self == path:
+                observations.append(metadata.st_size)
+                self.write_bytes(b'x' * (9 * MAX_ARTIFACT_BYTES + 1))
+            return metadata
+
+        def observed_open(self: Path, mode: str = 'r', *args: Any, **kwargs: Any) -> Any:
+            stream: Any = real_open(self, mode, *args, **kwargs)
+            if self == path and mode == 'rb':
+                real_read = stream.read
+
+                def observed_read(size: int = -1) -> bytes:
+                    read_sizes.append(size)
+                    captured: bytes = real_read(size)
+                    return captured
+
+                stream.read = observed_read
+            return stream
+
+        with monkeypatch.context() as growing:
+            growing.setattr(Path, 'stat', grow_after_stat)
+            growing.setattr(Path, 'open', observed_open)
+            with pytest.raises(FindingsValidationError, match='size'):
+                _load(path)
+        assert observations == [2], 'The actual file must grow after a successful small-file stat'
+        assert read_sizes == [9 * MAX_ARTIFACT_BYTES + 1], 'Bound the actual read before decode or parsing'
+        path.write_bytes(b'\xff')
+        with pytest.raises(FindingsValidationError, match='read failed'):
+            _load(path)
 
 
 @pytest.mark.parametrize("mutate", [
@@ -122,7 +175,8 @@ def test_failed_write_preserves_prior_bytes_and_leaves_no_staging_file(
     path = tmp_path / "atomic.json"
     if prior:
         path.write_bytes(b"prior current result")
-    artifact = findings_artifact()
+    artifact = findings_artifact(terminal_result=large_attributed_terminal()) if fault == 'replace' else (
+        findings_artifact())
     def fail(*args: Any, **kwargs: Any) -> Any:
         raise OSError("rename unavailable") if fault == "replace" else ValueError("cannot serialize")
     if fault in {"replace", "serializer"}:
@@ -136,7 +190,9 @@ def test_failed_write_preserves_prior_bytes_and_leaves_no_staging_file(
         payload = _diagram_payload()
         payload["results"]["sequence"]["spec_final"]["messages"] = [{"label": "x" * 512} for _ in range(4000)]
         artifact = findings_artifact(kind="diagram", diagrams=payload)
-    with pytest.raises(FindingsValidationError, match="size" if fault in {"utf8", "diagram-size"} else None):
+    expected = 'rename unavailable' if fault == 'replace' else (
+        'size' if fault in {'utf8', 'diagram-size'} else None)
+    with pytest.raises(FindingsValidationError, match=expected):
         write_findings_artifact(path, artifact)
     assert path.read_bytes() == b"prior current result" if prior else not path.exists()
     assert not list(tmp_path.glob("*.tmp"))
@@ -157,10 +213,12 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
 ) -> None:
     """Optional prose cannot block a valid canonical handoff or weaken its existing byte cap."""
     artifact = valid_artifact
+    artifact['terminal_result'] = large_attributed_terminal()
     artifact['findings'][0]['body'] = 'Canonical finding. ' * 47000 if capacity == 'trim' else 'B'
     if capacity != 'trim':
         artifact['run_info'] = ''
-        size = len((json.dumps(artifact, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+        size = (len((json.dumps(artifact, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+                - attribution_bytes(artifact))
         artifact['run_info'] = 'x' * (MAX_ARTIFACT_BYTES - size + (capacity == 'core-oversized'))
     core = copy.deepcopy(artifact)
     identity = execution_identity(head_sha=artifact['head_sha'])
@@ -184,11 +242,15 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
             write_findings_artifact(path, artifact)
         assert path.read_bytes() == b'prior canonical bytes'
         assert not list(tmp_path.glob('*.tmp'))
+        path.write_text(json.dumps(core))
+        with pytest.raises(FindingsValidationError, match='size'):
+            _load(path)
         return
     write_findings_artifact(path, core)
     write_findings_artifact(path, artifact)
-    assert path.stat().st_size <= MAX_ARTIFACT_BYTES
+    assert MAX_ARTIFACT_BYTES < path.stat().st_size <= 9 * MAX_ARTIFACT_BYTES
     loaded = json.loads(path.read_text())
+    assert path.stat().st_size - attribution_bytes(loaded) <= MAX_ARTIFACT_BYTES
     assert {key: loaded[key] for key in core} == core
     assert _load(path).analysis_complete
     assert artifact['review_context'] == original_context
@@ -198,16 +260,22 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
         assert context['scopes'] == [] and context['scopes_omitted'] == 1
         assert context['verification']['value']['test-verdict.json'] == verdict
     else:
-        assert 'review_context' not in loaded and path.stat().st_size == MAX_ARTIFACT_BYTES
+        assert 'review_context' not in loaded
+        assert path.stat().st_size - attribution_bytes(loaded) == MAX_ARTIFACT_BYTES
 
 
-def test_parser_resource_failure_is_controlled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('failure', ['parser-recursion', 'escaped-surrogate'])
+def test_parser_resource_failure_is_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
     path = tmp_path / "parse-resource.json"
-    path.write_text("{}")
-    def fail_parse(*args: Any, **kwargs: Any) -> Any:
-        raise RecursionError("nested input")
-    monkeypatch.setattr(json, "loads", fail_parse)
-    with pytest.raises(FindingsValidationError, match="parse failed"):
+    path.write_text('{}' if failure == 'parser-recursion' else json.dumps(findings_artifact(run_info='\ud800')))
+    if failure == 'parser-recursion':
+        def fail_parse(*args: Any, **kwargs: Any) -> Any:
+            raise RecursionError("nested input")
+        monkeypatch.setattr(json, "loads", fail_parse)
+    with pytest.raises(FindingsValidationError,
+                       match='parse failed' if failure == 'parser-recursion' else 'encoding failed'):
         _load(path)
 
 

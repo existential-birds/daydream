@@ -23,6 +23,15 @@ failure reasons. Incomplete/failed results can post COMMENT notices but cannot
 approve or resolve stale threads. Cache/resume must validate the same identities
 and current typed target attribution; missing/damaged proofs restart review.
 
+Retained source attribution has an 8 MiB run allocation, with the existing
+512-decision/256 KiB per-scope and four-reference/8192-byte per-decision bounds.
+Admission, restore, and terminal validation enforce the same allocation atomically.
+Findings exports reserve a separate 1 MiB for all other fields and reject raw inputs
+over 9 MiB before parsing. Writer, loader, and optional-context trimming use the
+same published UTF-8 field accounting; trimming preserves every retained decision.
+Producer and poster versions must support this policy together. Larger plans can
+still exhaust these fixed bounds and retain truthful incomplete coverage.
+
 Commit-bound exports require a clean checkout and an independently trusted
 publication target. A moved PR head fails before export. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID

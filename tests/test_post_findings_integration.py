@@ -21,6 +21,7 @@ from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.review_result import findings_artifact, terminal_result
 from tests.harness.scripts import cli_main
+from tests.test_review_result import large_attributed_terminal
 
 
 def _post_argv(artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,) -> list[str]:
@@ -172,6 +173,10 @@ def artifact_on_disk_second(tmp_path: Path) -> Path:
 def test_fresh_post_then_idempotent_repost(
     fake_gh: FakeGh, artifact_on_disk: Path, artifact_on_disk_second: Path,
 ) -> None:
+    artifact = json.loads(artifact_on_disk.read_text())
+    artifact['terminal_result'] = large_attributed_terminal()
+    write_findings_artifact(artifact_on_disk, artifact)
+    assert 1024 * 1024 < artifact_on_disk.stat().st_size < 9 * 1024 * 1024
     argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")

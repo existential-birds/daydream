@@ -78,6 +78,16 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     return contents['diff'], index
 
 
+def part_identity(parts: list[dict[str, Any]]) -> str:
+    """Pin every original assignment field while normalizing freshly created Git revisions."""
+    normalized = copy.deepcopy(parts)
+    for part in normalized:
+        for reference in part['source_refs']:
+            reference['revision'] = reference['side']
+    return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':')).encode()).hexdigest()
+
+
 @pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted', 'navigation'])
 async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str, ext_dir: ExtDir,
@@ -353,8 +363,6 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool, native: bool,
 ) -> None:
-    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-
     unicode = payload in {'unicode-line', 'unicode-separators'}
     medium = payload == 'medium-file'
     required = ("VALUE = '" + '界' * 11_000 + "'\n" if unicode else 'VALUE = 1\n' + ''.join(
@@ -388,7 +396,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
             rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
-            assert len(rendered.encode()) <= SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+            assert len(rendered.encode()) <= 64 * 1024
             assert str(repo / '.daydream') not in prompt
             assert 'Sanctioned phase inputs (read only these exact files):' not in prompt
         diff, index = capture(review, stage)
@@ -456,6 +464,18 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         assert len(assignments) > 1
     assert [part['part_index'] for part in assignments] == list(range(1, len(assignments) + 1))
     assert b''.join(fragments) == expected_body
+    identities = {
+        ('medium-file', False): 'c3cb237aa7d541ca2ba90f11a24b431b59aa9e206a0b3604ac7f700bf622d0ef',
+        ('medium-file', True): '8c08383148792020a99f0cca9bb8864f17dfa03d92709732d3594e54370801c1',
+        ('oversized-hunk', False): 'ca39014e9198a8b6f4cfc4988b5e40262181d89c91aa470bb77b70e1b88f9796',
+        ('oversized-hunk', True): 'ce7a626e36f3ab5b13b1f536d3e8b82c4b4833715a6063c83a23fe731dcedfbf',
+        ('unicode-line', False): '059e5e7459c7cf1dd2402609c78678ea16bb5a3a0fe6eaa4752efa6a5f0b6c1d',
+        ('unicode-separators', True): '3fc0493b93126e84667c65ef6fa19a12d250094cd7ff53ed18ea10b43b84f902',
+    }
+    assert part_identity(assignments) == identities[payload, sandbox]
+    if sandbox:
+        old_calls = {'medium-file': 2, 'oversized-hunk': 8, 'unicode-separators': 4}
+        assert len(stage_ends(review, 'python')) < old_calls[payload]
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
     if unicode:
         assert len(assignments) >= 3 and assignments[-1]['segment_count'] == len(assignments)
@@ -677,8 +697,8 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
 
     review = staged_review(tmp_path, monkeypatch, files=2)
-    shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 600
-    assert 40_000 < len(shared_intent.encode()) < 48_000
+    shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 1000
+    assert 64 * 1024 < len(shared_intent.encode()) < 72_000
 
     review.backend.responder = lambda prompt: (
         [TextEvent(text=shared_intent), ResultEvent(structured_output=None, continuation=None)]
@@ -1279,6 +1299,7 @@ async def test_parallel_scope_attribution_overflow_retains_findings_and_admitted
     """Individually valid scopes cannot crowd accepted findings out of the bounded handoff."""
     from daydream.findings import MAX_ARTIFACT_BYTES
 
+    monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', 256 * 1024)
     review = staged_review(tmp_path, monkeypatch, files=20)
     review.config = replace(review.config, deep_shard_enabled=True, deep_shard_max_files=1,
                             deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32)

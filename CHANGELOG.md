@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **pi:** retain accepted findings across later native failures, reject mixed or
   incomplete terminal generations before admission, and preserve cumulative
   allowances during correction and safe preacceptance retry.
+- Honor configured staged-review deadlines and retain bounded large-review source
+  attribution through export and posting; pack original inline assignments into
+  bounded dispatches without changing their frozen identities
+  ([#1701](https://github.com/existential-birds/daydream/issues/1701)).
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

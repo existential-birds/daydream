@@ -16,6 +16,37 @@ from daydream.review_result import (
 from tests.harness.review_result import review_coverage
 
 
+def large_attributed_terminal() -> dict[str, Any]:
+    """A valid storage input with 680 distinct frozen-range assertions across 17 scopes."""
+    coverage = review_coverage(scope_ids=('python', *(f'python#{i:02}' for i in range(1, 17))),
+                               files=('a.py', 'b.py'))
+    for scope_id in coverage.scopes:
+        coverage.record_scope(scope_id, 'complete')
+    coverage.record_phase('merge', 'complete', noop=True)
+    terminal = coverage.finalize('completed')
+    for scope_index, scope in enumerate(terminal['stack_outcomes']):
+        scope['target_decisions'] = [{
+            'target_id': f'part:{index:06}', 'status': 'reviewed', 'reason': 'r' * 1024,
+            'evidence_refs': [{
+                'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
+                'revision': coverage.revision.head_sha, 'path': 'a.py' if index % 2 else 'b.py', 'side': 'new',
+                'source_range': {'start': scope_index * 40 + index + 1, 'end': scope_index * 40 + index + 1},
+                'fragment': None, 'basis': 'supplied_diff', 'role': 'assigned',
+            }],
+        } for index in range(40)]
+    return terminal
+
+
+def attribution_bytes(artifact: dict[str, Any]) -> int:
+    """Independent exact published-size difference after removing only attribution fields."""
+    core = copy.deepcopy(artifact)
+    for scope in core.get('terminal_result', {}).get('stack_outcomes', []):
+        scope.pop('target_decisions', None)
+    def size(value: dict[str, Any]) -> int:
+        return len((json.dumps(value, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+    return size(artifact) - size(core)
+
+
 @pytest.mark.parametrize('case,expected', [
     ("dynamic", "incomplete"),
     ("cancelled", "incomplete"),
@@ -137,11 +168,27 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
         setattr(restored, "is_finalized", False)
     with pytest.raises(ValueError, match="frozen"):
         restored.record_scope("python", "failed", reasons=["backend_failure"])
+    large = large_attributed_terminal()
+    admitted = review_coverage(scope_ids=[scope['scope_id'] for scope in large['planned_scopes']],
+                               files=('a.py', 'b.py'))
+    for scope in large['stack_outcomes']:
+        admitted.record_scope(scope['scope_id'], 'complete', target_decisions=scope['target_decisions'])
+    admitted.record_phase('merge', 'complete', noop=True)
+    restored_large = ReviewCoverage.from_dict(admitted.to_dict())
+    assert restored_large.finalize('completed') == large
+    assert 1024 * 1024 < attribution_bytes({'terminal_result': large}) < 8 * 1024 * 1024
+    assert RUN_TARGET_DECISIONS_MAX_BYTES == 8 * 1024 * 1024
 
 
 @pytest.mark.parametrize('bound', ['references-bytes', 'target-count', 'scope-bytes', 'run-bytes'])
-def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bound: str) -> None:
+def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(
+    bound: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Storage limits must reject overflow without losing already admitted decisions."""
+    # Keep a reachable exact aggregate boundary while each scope stays independently valid.
+    run_limit = 256 * 1024
+    if bound == 'run-bytes':
+        monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', run_limit)
     c = review_coverage()
     reference: dict[str, Any] = {
         'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
@@ -183,13 +230,18 @@ def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bou
         def published_size(value: dict[str, Any]) -> int:
             return len(json.dumps({'terminal_result': value}, indent=2, ensure_ascii=False).encode('utf-8'))
         contribution = published_size(before) - published_size(without_decisions)
-        invalid[0]['reason'] += 'x' * (RUN_TARGET_DECISIONS_MAX_BYTES - contribution + 1)
+        invalid[0]['reason'] += 'x' * (run_limit - contribution + 1)
         assert sum(len(json.dumps(decisions, ensure_ascii=False).encode()) for decisions in [valid, invalid]) < (
-            RUN_TARGET_DECISIONS_MAX_BYTES), 'compact JSON misses the nested whitespace overflow'
+            run_limit), 'compact JSON misses the nested whitespace overflow'
         corrupt = copy.deepcopy(before)
         corrupt_scope = next(scope for scope in corrupt['stack_outcomes'] if scope['scope_id'] == 'python')
         corrupt_scope['target_decisions'] = invalid
-        assert published_size(corrupt) - published_size(without_decisions) == RUN_TARGET_DECISIONS_MAX_BYTES + 1
+        assert published_size(corrupt) - published_size(without_decisions) == run_limit + 1
+        terminal = ReviewCoverage.from_dict(before).finalize('completed')
+        next(scope for scope in terminal['stack_outcomes'] if scope['scope_id'] == 'python')[
+            'target_decisions'] = invalid
+        with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
+            validate_terminal_result(terminal)
         with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
             ReviewCoverage.from_dict(corrupt)
         expected = 'run source attribution exceeds retained byte limit'
