@@ -24,16 +24,6 @@ from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
 
 REPO = Path(__file__).resolve().parents[1]
-FROZEN_MODEL_FACING = ["high", "medium", "low"]
-_SCHEMAS = [
-    ("supervise", SUPERVISE_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"]),
-    ("vet", VET_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"]),
-]
-
-
-@pytest.mark.parametrize("site,fragment", _SCHEMAS)
-def test_site_emits_the_frozen_model_facing_order(site: str, fragment: dict[str, Any]) -> None:
-    assert fragment == {"anyOf": [{"type": "string", "enum": FROZEN_MODEL_FACING}, {"type": "null"}]}, site
 
 
 @pytest.fixture(scope="module")
@@ -55,12 +45,16 @@ print(json.dumps({
     return rebuilt
 
 
-@pytest.mark.parametrize("site,fragment", _SCHEMAS)
-def test_site_follows_the_declaration_when_the_declaration_moves(
-    site: str, fragment: dict[str, Any], rebuilt_under_patched_declaration: dict[str, dict[str, Any]],
+def test_sites_follow_the_declaration_when_the_declaration_moves(
+    rebuilt_under_patched_declaration: dict[str, dict[str, Any]],
 ) -> None:
-    assert fragment["anyOf"][0]["enum"] == FROZEN_MODEL_FACING
-    assert rebuilt_under_patched_declaration[site] == {
+    assert SUPERVISE_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"] == {
+        "anyOf": [{"type": "string", "enum": ["high", "medium", "low"]}, {"type": "null"}]}
+    assert VET_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"] == {
+        "anyOf": [{"type": "string", "enum": ["high", "medium", "low"]}, {"type": "null"}]}
+    assert rebuilt_under_patched_declaration["supervise"] == {
+        "anyOf": [{"type": "string", "enum": ["critical", "low", "medium", "high"]}, {"type": "null"}]}
+    assert rebuilt_under_patched_declaration["vet"] == {
         "anyOf": [{"type": "string", "enum": ["critical", "low", "medium", "high"]}, {"type": "null"}]}
 
 
