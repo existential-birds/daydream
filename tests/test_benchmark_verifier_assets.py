@@ -75,6 +75,7 @@ def test_public_content_parser_preserves_valid_values(locationless: bool) -> Non
         {"start_line": True},
         {"start_line": 0},
         {"start_line": "3"},
+        {"end_line": "5"},
         {"end_line": 2},
         {"path": None},
     ],

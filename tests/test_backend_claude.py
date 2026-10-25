@@ -695,6 +695,17 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
 
 
+async def test_partial_terminal_usage_preserves_unknown_output(patch_sdk: Any, tmp_path: Path) -> None:
+    patch_sdk(scripted_client([
+        MockAssistantMessage(content=[MockTextBlock("Partial")], usage={"input_tokens": 100}),
+        MockResultMessage(total_cost_usd=0.001, usage={"input_tokens": 100}),
+    ]))
+    events = [event async for event in ClaudeBackend(model="opus").execute(tmp_path, "Review")]
+    assert not any(isinstance(event, MetricsEvent) for event in events)
+    cost = next(event for event in events if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cost_usd) == (100, None, 0.001)
+
+
 async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
