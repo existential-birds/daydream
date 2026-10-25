@@ -75,6 +75,7 @@ def _prose_only_backend(message: str) -> ScriptedBackend:
 # the old prompt asked for) followed by the real answer, an empty issues array.
 PROSE_WITH_INCIDENTAL_JSON = (
     'The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
+    'Incidental object: {"a": [1,2,3,4,5,6,7,8], "note": "incidental"}. '
     'No defects established. {"issues": []}'
 )
 

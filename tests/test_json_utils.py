@@ -24,11 +24,6 @@ class TestExtractJson:
         pytest.param("", None, id="empty-string"),
         pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
         pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
-        pytest.param("This is just prose with no JSON whatsoever.", None, id="no-json-at-all",),
-        pytest.param('note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
-                {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
-                id="largest-object-wins-over-smaller-earlier-object",
-            ),
     ],
     )
     def test_extract_json(self, text: str, expected: Any) -> None:
@@ -43,6 +38,7 @@ class TestExtractJson:
         # must instead return the substantial `{"findings": [...]}` object.
         text = ("**Finding 2 (arb_id=2):** Confirmed. Line 503 does "
             '`integration.metadata["sender"]["login"]` with direct subscripting.\n\n'
+            'note {"k": 1}\n'
             "```json\n"
             '{"findings": [{"arb_id": 1, "keep": true}, {"arb_id": 2, "keep": true}]}\n'
             "```"
@@ -50,15 +46,11 @@ class TestExtractJson:
         result = extract_json(text)
         assert isinstance(result, dict)
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
+        assert result == {"findings": [{"arb_id": 1, "keep": True}, {"arb_id": 2, "keep": True}]}
 
 
 class TestExtractJsonBySchema:
     """Selection is driven by the boundary's acceptance predicate, never span size."""
-
-    def test_larger_incidental_object_does_not_win(self) -> None:
-        text = 'prefix {"a": [1,2,3,4,5,6,7,8]} trailing {"issues": []}'
-        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
-        assert sel.value == {"issues": []}
 
     def test_whole_text_that_parses_but_fails_schema_does_not_win(self) -> None:
         sel = extract_json_by_schema('{"issues": [], "extra": 1}',
@@ -123,22 +115,17 @@ def test_staged_decoder_consumes_outer_spans_and_bounds_packaging(
 
 
 class TestAtomicWritePrimitives:
-    def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:
-        target = tmp_path / "nested" / "data.bin"
-        atomic_write_bytes(target, b"first")
-        assert target.read_bytes() == b"first"
-        atomic_write_bytes(target, b"second")
-        assert target.read_bytes() == b"second"
-
     def test_mode_knob_is_umask_immune_and_survives_replacement(self, tmp_path: Path) -> None:
-        target = tmp_path / "private.json"
+        target = tmp_path / "nested" / "private.json"
         umask = os.umask(0o077)
         try:
             atomic_write_bytes(target, b"{}", mode=0o600)
         finally:
             os.umask(umask)
+        assert target.read_bytes() == b"{}"
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
         atomic_write_bytes(target, b"[1]", mode=0o640)
+        assert target.read_bytes() == b"[1]"
         assert stat.S_IMODE(target.stat().st_mode) == 0o640
 
     def test_no_mode_keeps_default_permissions(self, tmp_path: Path) -> None:
@@ -151,6 +138,7 @@ class TestAtomicWritePrimitives:
             atomic_write_bytes(target, b"x")
         finally:
             os.umask(umask)
+        assert target.read_bytes() == b"x"
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     def test_json_knob_byte_format_is_stable(self, tmp_path: Path) -> None:
