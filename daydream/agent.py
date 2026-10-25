@@ -39,6 +39,7 @@ from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecy
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
+from daydream.host_tools import HostToolBinding
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -222,6 +223,7 @@ async def run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
@@ -244,6 +246,7 @@ async def run_agent(
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
     review_stage_scope_id: str | None = None,
+    host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -252,6 +255,12 @@ async def run_agent(
     Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
     tool_call_start_floor prevents fresh attempts whose allocation cannot fit the stage's minimum work.
     """
+    if host_tools is not None:
+        if not getattr(backend, "supports_host_tools", False):
+            raise NotImplementedError(f"{type(backend).__name__} does not support host tools")
+        if tools_disabled or continuation is not None or review_limits is not None:
+            raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
+        deadline = min(deadline, host_tools.deadline) if deadline is not None else host_tools.deadline
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
@@ -340,7 +349,8 @@ async def run_agent(
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
         try:
             result = await _run_agent(
-                backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
+                backend, cwd, prompt, phase=phase, output_schema=output_schema, result_schema=result_schema,
+                progress_callback=progress_callback,
                 continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
                 persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
                 tool_call_budget=tool_call_budget,
@@ -355,6 +365,7 @@ async def run_agent(
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
                 review_stage_scope_id=review_stage_scope_id,
+                host_tools=host_tools,
             )
         except Exception as exc:
             from daydream.review_result import ReasonCode, reason_for_exception
@@ -422,6 +433,7 @@ async def _run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
@@ -444,6 +456,7 @@ async def _run_agent(
     finalization: bool = False,
     tools_disabled: bool = False,
     review_stage_scope_id: str | None = None,
+    host_tools: HostToolBinding | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Execute attempts under one deadline, retry allowance, and tool budget.
 
@@ -487,6 +500,8 @@ async def _run_agent(
                     effective_deadline = wall_deadline
                     limit_expired = "invocation_wall_budget"
             recovery = RetryRecoveryBudget(resolved_allowance)
+            if host_tools is not None:
+                host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its
@@ -554,7 +569,7 @@ async def _run_agent(
                 structured_result = None
                 native_output = False
                 result_continuation = None
-                if investigation_budget is None:
+                if investigation_budget is None and host_tools is None:
                     tool_calls = 0
                 remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
                 if review_evidence is not None:
@@ -606,6 +621,8 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if host_tools is not None:
+                        execute_kwargs["host_tools"] = host_tools
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
@@ -826,6 +843,10 @@ async def _run_agent(
                     exception_max_retries = min(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
+                    if host_tools is not None and (host_tools.possibly_accepted or host_tools.fatal_error is not None):
+                        # A terminal host failure cannot be corrected by replay; a
+                        # callback may also have installed state before settlement failed.
+                        exception_max_retries = 0
                     if attempt < exception_max_retries and classification.retries_allowed:
                         # Activate the cumulative retry-recovery allowance on the
                         # first retryable failure, clamped once to whatever the
@@ -1029,7 +1050,8 @@ async def _run_agent(
             review_evidence.checkpoint = None
     output = resolve_output(
         structured_result, raw, native_output=native_output, text_overflow=text_overflow,
-        output_schema=(review_evidence.schema if investigation_budget is not None and review_evidence is not None
+        output_schema=(result_schema if result_schema is not None else
+                       review_evidence.schema if investigation_budget is not None and review_evidence is not None
                        else output_schema), validate_structured_output=validate_structured_output,
         require_full_schema=require_full_schema, staged=investigation_budget is not None,
         schema_rejection_guard=schema_rejection_guard,

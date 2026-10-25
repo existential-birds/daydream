@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **pi:** admit review submissions inside the native terminal tool, with
+  correctable source selectors and host-built canonical references while keeping
+  stock reads, search and pagination
+  ([#1620](https://github.com/existential-birds/daydream/issues/1620)). Requires
+  Pi 1.4.0; extension API 8 remains compatible. Private stage/cache contract 13
+  invalidates prior stage caches.
+
 ### Changed
 
 - Reduce the README to agent setup, code review, and research entry points; remove
@@ -19,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pi:** explain rejected source selectors and review submissions with concrete
+  corrections, and stop native continuation/retry when frozen inputs, host
+  authority, cumulative capacity or valid closed-judgment contradictions make
+  correction impossible. Preserve terminal
+  host diagnostics, prior accepted work and incomplete coverage
+  ([#1620](https://github.com/existential-birds/daydream/issues/1620)).
+- **pi:** retain accepted findings across later native failures, reject mixed or
+  incomplete terminal generations before admission, and preserve cumulative
+  allowances during correction and safe preacceptance retry.
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

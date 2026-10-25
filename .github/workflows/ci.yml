@@ -137,7 +137,7 @@ jobs:
           package-manager-cache: false
       - name: Install Pi for native output contract tests
         run: |
-          npm install --global @earendil-works/pi-coding-agent@1.0.4
+          npm install --global @earendil-works/pi-coding-agent@1.4.0
           node --version
           pi --version
       - name: Verify uv.lock is in sync
@@ -234,7 +234,7 @@ jobs:
 
       - name: Install Pi for native output contract tests
         run: |
-          npm install --global @earendil-works/pi-coding-agent@1.0.4
+          npm install --global @earendil-works/pi-coding-agent@1.4.0
           node --version
           pi --version
 

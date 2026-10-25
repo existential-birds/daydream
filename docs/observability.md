@@ -44,6 +44,23 @@ external compatibility. Vendor attributes are added to copies of shared spans.
 Transport activity, model progress, tool execution, and semantic coverage remain
 distinct. Never infer provider root causes or missing tools from absent telemetry.
 
+## Pi host-tool lifecycle evidence
+
+Host requests/rejections retain native IDs, roles and generation history;
+admission creates no synthetic tool events or billing. Lifecycle observations
+separately record authority closure, native settlement and aggregate cleanup of
+callbacks, native process and endpoint, after cleanup on every exit path. Domain
+acceptance retains canonical findings independently of later native failure;
+rejected selector payloads remain raw evidence without entering semantic handoffs.
+A terminal host-admission diagnostic retains the typed failure code, mutation
+certainty, safe condition/input context and available native call/generation
+correlation. The binding's failure and underlying cause remain host evidence;
+native details alone cannot establish acceptance, safe rejection or retryability.
+Observed usage remains billable even when the host failure stops the invocation.
+A successful callback cannot establish native settlement; suppressing a late
+result cannot prove cleanup. See
+[the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
+
 ## Codex lifecycle evidence
 
 Success requires the latest public turn's completion, stdout EOF, and an

@@ -381,6 +381,8 @@ _BACKEND_LIFECYCLE_FIELDS = frozenset({
     "generation_started_s", "last_progress_s", "last_progress_age_s", "raw_line_count",
     "native_event_count", "generation_count", "text_delta_count", "thinking_delta_count",
     "toolcall_delta_count", "tool_progress_count", "active_tool_count", "generation_open",
+    "host_authority_closed", "host_native_settled", "host_cleanup_complete",
+    "host_tool_call_count", "host_tool_rejection_count",
     "read_observation", "stream_idle_timeout_s", "terminal_drain_timeout_s", "process_reap_timeout_s",
     "cleanup_timeout_s", "last_raw_line_s", "last_native_event_s", "last_native_event_kind",
     "terminal_received_s", "stdout_eof_s", "process_exit_s", "process_returncode", "teardown_started_s",

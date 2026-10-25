@@ -33,9 +33,14 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
 
 
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    offered = stage.get('source_refs', {})
+    host_selectors = stage.get('source_attribution') == 'host_selectors'
+    offered = stage.get('source_options' if host_selectors else 'source_refs', {})
+    def references(target: str) -> list[dict[str, Any]]:
+        values = copy.deepcopy(offered.get(target, [])[:1])
+        return [{'source_id': value['source_id'], 'basis': 'supplied_diff', 'source_range': None}
+                for value in values] if host_selectors else values
     return {"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
-                    | {'evidence_refs': copy.deepcopy(offered.get(target, [])[:1])}
+                    | {'evidence_refs': references(target)}
                     for target in stage["assigned_target_ids"]],
         "notes": "Assigned changed behavior reviewed", "supporting_files": [],
         "candidates": candidates or [], "contradictions": []}

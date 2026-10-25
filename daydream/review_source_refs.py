@@ -4,14 +4,17 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from daydream.git_ops.models import GitError
-from daydream.git_ops.source import frozen_source
+from daydream.git_ops.models import GitError, PathAbsentError
+from daydream.git_ops.source import FrozenSourceRejected, frozen_source
+from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.hunk_index import _HUNK_HEADER
 from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
+from daydream.redaction import redact_text
 from daydream.repository_paths import git_observed_path_is_confined
 
 SOURCE_REFS_MAX_BYTES = 8192
@@ -37,10 +40,147 @@ SOURCE_REF_SCHEMA = strict_object({
     'role': {'enum': ['assigned', 'supporting']},
 })
 SOURCE_REFS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': SOURCE_REF_SCHEMA}
+_BASIS = {'enum': ['supplied_diff', 'source_inspection', 'executed_check']}
+SOURCE_SELECTORS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': {'anyOf': [
+    strict_object({
+        'source_id': {'type': 'string', 'pattern': '^source:[0-9a-f]{64}$'},
+        'basis': _BASIS, 'source_range': {'anyOf': [_RANGE, {'type': 'null'}]},
+    }),
+    strict_object({
+        'path': {'type': 'string', 'minLength': 1, 'maxLength': 4096},
+        'side': {'enum': ['old', 'new']}, 'source_range': _RANGE,
+        'basis': {'enum': ['source_inspection', 'executed_check']},
+    }),
+]}}
 
 
 def _sha(body: str | bytes) -> str:
     return hashlib.sha256(body.encode('utf-8') if isinstance(body, str) else body).hexdigest()
+
+
+def source_id(reference: dict[str, Any]) -> str:
+    """Name one exact host-assigned identity independently of the model's basis claim."""
+    identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
+    return 'source:' + _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(',', ':')))
+
+
+def source_options(references: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe every supplied source without asking a model to reproduce its mechanics."""
+    return [{'source_id': source_id(reference),
+             **{key: deepcopy(reference[key]) for key in ('path', 'side', 'source_range')},
+             'basis': 'supplied_diff'} for reference in references]
+
+
+def canonicalize_source_selectors(
+    selectors: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
+    source_root: Path, require_assigned: bool = True,
+) -> list[dict[str, Any]]:
+    """Resolve a complete selection atomically against frozen assignment/Git identities.
+
+    A null assigned range retains the original range, including exact continuation
+    fragments. Supporting selections cannot provide hashes or satisfy assigned work.
+    No selected source is evidence that a model read or understood its contents.
+    """
+    if not validates_schema(selectors, SOURCE_SELECTORS_SCHEMA):
+        raise HostToolRejected(
+            'evidence_refs: supply at most four selectors with either source_id, basis, source_range '
+            'or path, side, source_range, basis; remove hashes and other fields and use the supplied schema.')
+    field = 'evidence_refs'
+    try:
+        if len(json.dumps(selectors, ensure_ascii=False).encode('utf-8')) > SOURCE_REFS_MAX_BYTES:
+            raise HostToolRejected(
+                f'evidence_refs: the whole selector array exceeds {SOURCE_REFS_MAX_BYTES} UTF-8 bytes; '
+                'remove optional supporting selectors or choose shorter assigned source_id selectors.')
+        requested = {selector['source_id'] for selector in selectors if 'source_id' in selector}
+        assigned: dict[str, dict[str, Any]] = {}
+        for expected in expected_refs:
+            identifier = source_id(expected)
+            if identifier in requested:
+                assigned[identifier] = expected
+            if requested <= assigned.keys():
+                break
+        if requested != assigned.keys():
+            unknown = next(selector['source_id'] for selector in selectors
+                           if 'source_id' in selector and selector['source_id'] not in assigned)
+            raise HostToolRejected(
+                f'evidence_refs source_id {unknown}: outside this target\'s assigned inventory; '
+                'choose a source_id from this target\'s source_options, including its assigned deferred parts.')
+        resolved: list[dict[str, Any]] = []
+        for index, selector in enumerate(selectors):
+            field = f'evidence_refs[{index}]'
+            if 'source_id' in selector:
+                reference = deepcopy(assigned[selector['source_id']])
+                bounds = selector['source_range']
+                original = reference['source_range']
+                if bounds is not None:
+                    if (not isinstance(original, dict)
+                            or not original['start'] <= bounds['start'] <= bounds['end'] <= original['end']):
+                        allowed = (f'{original["start"]}..{original["end"]}' if isinstance(original, dict)
+                                   else 'no line range (this is an exact fragment)')
+                        raise HostToolRejected(
+                            f'{field}.source_range for {selector["source_id"]}: '
+                            f'allowed {allowed}; use null to retain the exact assigned identity '
+                            'or choose a contained range with start <= end.')
+                    reference['source_range'] = deepcopy(bounds)
+                reference.update(basis=selector['basis'], role='assigned')
+            else:
+                path, side, bounds = selector['path'], selector['side'], selector['source_range']
+                field += f' supporting path {redact_text(path)[:160]!r} ({side})'
+                if not git_observed_path_is_confined(source_root, path):
+                    raise HostToolRejected(
+                        f'{field}: path must remain inside the repository; choose a confined repository path '
+                        'or remove this optional supporting selector.')
+                pinned_revision = revision['merge_base_sha' if side == 'old' else 'head_sha']
+                try:
+                    _, contents = frozen_source(source_root, pinned_revision, path)
+                except (FrozenSourceRejected, PathAbsentError) as exc:
+                    raise HostToolRejected(
+                        f'{field}: no available regular blob at the pinned revision; choose a regular file '
+                        f'on this side within {_SUPPORTING_SOURCE_MAX_BYTES} whole-blob bytes, '
+                        'use an assigned source_id, or remove this optional supporting selector.') from exc
+                if len(contents) > _SUPPORTING_SOURCE_MAX_BYTES:
+                    raise HostToolRejected(
+                        f'{field}: the whole pinned blob is {len(contents)} bytes, above '
+                        f'{_SUPPORTING_SOURCE_MAX_BYTES}; narrowing source_range cannot reduce this whole-blob '
+                        'limit. Use an assigned source_id or remove this optional supporting selector.')
+                try:
+                    contents.decode('utf-8')
+                except UnicodeDecodeError as exc:
+                    raise HostToolRejected(
+                        f'{field}: the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
+                        'or remove this optional supporting selector.') from exc
+                line_count = contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n'))
+                if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
+                    raise HostToolRejected(
+                        f'{field}.source_range: allowed 1..{line_count} with start <= end; '
+                        'choose a contained range or remove this optional supporting selector.')
+                reference = {
+                    'artifact_sha256': _sha(contents), 'part_sha256': None, 'revision': pinned_revision,
+                    'path': path, 'side': side, 'source_range': deepcopy(bounds), 'fragment': None,
+                    'basis': selector['basis'], 'role': 'supporting',
+                }
+            resolved.append(reference)
+        if require_assigned and not any(reference['role'] == 'assigned' for reference in resolved):
+            raise HostToolRejected(
+                'evidence_refs: a reviewed target requires at least one assigned source_id from its '
+                'source_options; supply that selector. Supporting paths alone cannot identify assigned work.')
+        # Canonical evidence has its own retained bounds and contract, independent
+        # of the smaller model-facing selector schema.
+        if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,
+                                    require_assigned=require_assigned, raise_unavailable=True):
+            raise HostToolRejected(
+                f'evidence_refs: canonical references must fit four items and {SOURCE_REFS_MAX_BYTES} UTF-8 '
+                'bytes in total; remove optional supporting selectors or use fewer assigned selectors.')
+    except (GitError, OSError) as exc:
+        raise HostToolFatal(
+            f'{field}: pinned supporting source storage is unavailable during source validation. '
+            'The host cannot resolve its captured revision; this review invocation must stop.',
+            code='input_unavailable') from exc
+    except UnicodeError as exc:
+        raise HostToolRejected(
+            'evidence_refs: the selected supporting source cannot be resolved; choose an assigned source_id '
+            'or remove the optional supporting selector.') from exc
+    return resolved
 
 
 def lf_lines(text: str) -> list[str]:
@@ -134,12 +274,13 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
         refs.append({**identity, 'revision': revision['head_sha'], 'path': assignment['file'], 'side': 'diff',
                      'source_range': None, 'fragment': {'offset': offset,
                      'bytes': len(metadata), 'sha256': _sha(metadata)}})
-    return {'source_refs': refs, 'source_summary': summaries,
+    return {'source_refs': refs, 'source_options': source_options(refs), 'source_summary': summaries,
             'fragment_offset_basis': 'UTF-8 bytes in the original diff hunk body; never a source line number'}
 
 
 def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
-                         source_root: Path | None = None, require_assigned: bool = True) -> bool:
+                         source_root: Path | None = None, require_assigned: bool = True,
+                         raise_unavailable: bool = False) -> bool:
     """Validate all references before admission; labels assert basis, not execution."""
     if not validates_schema(refs, SOURCE_REFS_SCHEMA):
         return False
@@ -182,7 +323,12 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
             return False
         try:
             _, contents = frozen_source(source_root, expected_revision, ref['path'])
-        except (GitError, OSError, UnicodeError, ValueError):
+        except (GitError, OSError, UnicodeError, ValueError) as exc:
+            if raise_unavailable:
+                raise HostToolFatal(
+                    f'evidence_refs[{index}] supporting path {redact_text(ref["path"])[:160]!r} '
+                    f'({ref["side"]}): pinned supporting source storage became unavailable during '
+                    'source validation; this review invocation must stop.', code='input_unavailable') from exc
             return False
         bounds = ref['source_range']
         line_count = contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n'))

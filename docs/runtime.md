@@ -28,6 +28,68 @@ publication target. A moved PR head fails before export. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
 because a failed replacement may preserve an older complete artifact.
 
+## Pi host-tool lifetime and limits
+
+Pi keeps its stock read/search tools, offsets and pagination. Existing private
+artifact/sanctioned-input owners furnish frozen diff parts and source context.
+Models select assigned source IDs or supporting path/side/LF ranges; the host
+constructs canonical `evidence_refs` from the full assignment inventory and pinned
+regular Git blobs. Exact continuation fragments retain their null source ranges.
+Supporting attribution cannot satisfy assigned coverage. Correspondence is never
+proof of a read, understanding or an executed check.
+
+The existing `structured_output` terminal tool calls one invocation-local host
+callback. Only a sole terminal call in a completed native generation may enter
+admission. The host validates required judgments, original captured inputs, source
+selectors and shared retention limits before installing the entire stage. A
+correctable payload rejection returns a correlated native error naming the
+field/selector, violated constraint and concrete correction. It changes no
+findings, decisions, notes or retention capacity. Correction uses the same
+conversation and cumulative wall/tool allowance. A rejected real tool start
+still consumes that allowance; exhausted capacity cannot invite another call.
+Successful acceptance installs state once, returns canonical output and permits
+native termination; duplicate accepted callbacks cannot admit or charge retention
+again. Unbound structured calls retain their ordinary serializer behavior.
+
+Recheck open authority and the original deadline immediately before synchronous
+installation, with no await or detached thread between that check and mutation.
+Closure-first denies mutation; acceptance-first retains admitted work even when
+native settlement later fails. A possibly accepted callback cannot be replayed.
+Confirmed host/input/lifecycle failures are terminal: retain the failed condition
+and underlying cause, close affected authority, and explain that changing the
+submission cannot repair it. Native continuation and before-settle submission
+recovery stop, and backend/agent retry preserves the nonretryable host failure
+instead of relabeling it as stream truncation. Frozen-input validation never
+recaptures changed bytes under earlier judgments. Unknown callback failures are
+indeterminate, even when raised as `ValueError`; never infer safe replay from a
+native error flag or missing receipt.
+
+A valid contradiction of a previously closed reviewer judgment is terminal
+`evidence_incomplete`. Preserve prior findings and decisions, stop native
+continuation and retry, and never invite removing the contradiction to obtain
+complete coverage. Foreign or duplicate contradiction IDs remain correctable
+payload faults.
+
+Ordinary transient preacceptance retries use existing cumulative policy. The
+binding owns the first terminal failure and cannot reopen after it. `/admit` and
+`/submit` enforce readiness, correlation, authority, deadline and cumulative
+capacity with the same recovery semantics. Frames, arguments, results,
+items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
+Every real native tool start counts, including failed submissions, with no separate
+eight-call ceiling or hidden nested tool execution.
+
+Close authority before shutdown and join/isolate callback transports and evidence
+writers before freezing. Native reads use the existing process cleanup. Acceptance,
+native settlement/EOF/zero exit and cleanup are separate outcomes; acceptance or a
+receipt alone cannot establish successful execution. Preserve admitted findings,
+usage and truthful incomplete coverage; see
+[lifecycle evidence](observability.md#pi-host-tool-lifecycle-evidence).
+
+Endpoint credentials stay outside persisted configuration/public evidence.
+Bindings and resources belong to one invocation; sibling shutdown is isolated.
+Enforcement works without recording or tracing. See
+[supported capabilities](extensions.md#invocation-scoped-pi-host-tools).
+
 ## Validation and repair
 
 The host admits one canonical test recipe before an accepted actionable fix run.

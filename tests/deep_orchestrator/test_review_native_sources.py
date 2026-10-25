@@ -10,15 +10,16 @@ from typing import Any
 
 import pytest
 
+from daydream import git_ops
+from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
+from daydream.host_tools import HostToolFatal, HostToolRejected
+from daydream.review_source_refs import canonicalize_source_selectors, source_id
 from tests.deep_orchestrator.test_review_completion import record, scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, candidate
+from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate
+from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
-
-
-class PiBackend(StagedBackend):
-    """File-only transport name activates the runner's ordinary before-side input path."""
 
 
 async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
@@ -40,7 +41,7 @@ async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
         tracemalloc.stop()
     assert peak < 1024 * 1024
     review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend = PiBackend(repo)
+    review.backend = NativeStageBackend(repo)
     omitted = False
 
     @review.backend.script('python')
@@ -81,7 +82,7 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     git(repo, 'commit', '-m', 'remove old greeting path')
     before = tracked_source_state(repo)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend = PiBackend(repo)
+    review.backend = NativeStageBackend(repo)
     title = ('Renamed greeting no longer satisfies the consumer contract' if renamed else
              'Retained consumer imports a deleted greeting module')
     submitted: dict[str, list[dict[str, Any]]] = {}
@@ -98,7 +99,16 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
         for target in output['targets']:
             offered = stage['source_refs'][target['target_id']]
             if any(ref['path'] in {old_path, 'modern.py'} for ref in offered):
-                target['evidence_refs'] = copy.deepcopy(offered)
+                # A supported Pi subclass needs the same frozen before context.
+                # Submit only IDs; production callback admission must retain the
+                # rename, absent-side and metadata identities asserted below.
+                part = next(part for part in stage['assignment_parts'] if part['target_id'] == target['target_id'])
+                options = part['source_options']
+                assert len(options) == len(offered)
+                assert all(option['basis'] == 'supplied_diff' for option in options)
+                target['evidence_refs'] = [
+                    {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
+                    for option in options]
                 submitted[target['target_id']] = copy.deepcopy(offered)
         if broken:
             finding = dict(record(1), file='consumer.py', description=title,
@@ -142,3 +152,113 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     assert not (repo / old_path).exists()
     assert (repo / 'modern.py').is_file() is renamed
     assert tracked_source_state(repo) == before
+
+
+@pytest.mark.parametrize('fault', [None, 'contained-range', 'foreign-id', 'assigned-range', 'supporting-range',
+                                  'supporting-only', 'forged-hash', 'missing', 'traversal', 'binary', 'oversized',
+                                  'symlink', 'storage-reread'])
+def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
+) -> None:
+    """Canonical references miss selector feedback; vague errors cannot guide a valid bounded correction."""
+    repo = tmp_path / 'pinned_selectors'
+    supported = 'FIRST = "界"\u2028STILL_FIRST = True\nSECOND = True\n'
+    before = 'UNCHANGED = True\nVALUE = 0\nTRAILING = True\n'
+    seed_feature_branch(repo, base={'api.py': before, 'support.py': supported},
+                        feature={'api.py': before.replace('VALUE = 0', 'VALUE = 1'), 'support.py': supported})
+    # Frozen regular-blob validation must own binary and large supporting inputs;
+    # the model can choose a path/range, never supply replacement metadata.
+    # NUL makes Git retain a binary diff header while the invalid UTF-8 byte
+    # still reaches the supporting-source decoder at selector resolution.
+    (repo / 'binary.dat').write_bytes(b'\xff\0\n')
+    (repo / 'oversized.py').write_text('#' * (64 * 1024 + 1))
+    (repo / 'symlink.py').symlink_to('support.py')
+    git(repo, 'add', 'binary.dat', 'oversized.py', 'symlink.py')
+    git(repo, 'commit', '-m', 'add bounded source boundary cases')
+    (repo / 'symlink.py').unlink()
+    revision = {'head_sha': git(repo, 'rev-parse', 'HEAD'), 'merge_base_sha': git(repo, 'rev-parse', 'main')}
+    part = git(repo, 'diff', 'main', '--', 'api.py') + '\n'
+    assigned = {'artifact_sha256': hashlib.sha256(git_ops.diff(repo, 'main').encode()).hexdigest(),
+                'part_sha256': hashlib.sha256(part.encode()).hexdigest(), 'revision': revision['head_sha'],
+                'path': 'api.py', 'side': 'new', 'source_range': {'start': 1, 'end': 3}, 'fragment': None,
+                'basis': 'supplied_diff', 'role': 'assigned'}
+    choices: list[dict[str, Any]] = [
+        {'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None},
+        {'path': 'support.py', 'side': 'new', 'source_range': {'start': 1, 'end': 2}, 'basis': 'source_inspection'},
+    ]
+    # The worktree disagrees after capture. Its bytes must never become the
+    # canonical supporting digest or LF range authority.
+    (repo / 'support.py').write_text('MUTABLE_WORKTREE_CONTENT\n')
+    if fault == 'contained-range':
+        choices[0]['source_range'] = {'start': 2, 'end': 2}
+    elif fault == 'foreign-id':
+        choices[0]['source_id'] = 'source:' + '0' * 64
+    elif fault == 'assigned-range':
+        choices[0]['source_range'] = {'start': 1, 'end': 4}
+    elif fault == 'supporting-range':
+        choices[1]['source_range'] = {'start': 2, 'end': 1}
+    elif fault == 'supporting-only':
+        choices.pop(0)
+    elif fault == 'forged-hash':
+        choices[1]['artifact_sha256'] = '0' * 64
+    elif fault in {'missing', 'traversal', 'binary', 'oversized', 'symlink'}:
+        choices[1]['path'] = {'missing': 'missing.py', 'traversal': '../support.py',
+                              'binary': 'binary.dat', 'oversized': 'oversized.py', 'symlink': 'symlink.py'}[fault]
+        # Keep the range valid for each blob so a missing size/UTF-8/regular-file
+        # guard cannot pass this regression at an unrelated range check.
+        choices[1]['source_range'] = {'start': 1, 'end': 1}
+    if fault == 'storage-reread':
+        # A later assigned selector makes the last processed field differ from
+        # the supporting reference whose real Git reread loses storage. Other
+        # selector cases cover admission, but miss this diagnostic attribution.
+        choices.append({'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None})
+        real_show = queries.show
+        unavailable = repo / '.git-unavailable'
+
+        def lose_storage(source_repo: Path, ref: str, path: str) -> bytes:
+            contents = real_show(source_repo, ref, path)
+            if source_repo == repo and path == 'support.py':
+                (repo / '.git').rename(unavailable)
+            return contents
+
+        monkeypatch.setattr(queries, 'show', lose_storage)
+        try:
+            with pytest.raises(HostToolFatal) as fatal:
+                canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+        finally:
+            if unavailable.exists():
+                unavailable.rename(repo / '.git')
+        assert fatal.value.code == 'input_unavailable' and fatal.value.preacceptance
+        assert isinstance(fatal.value.__cause__, GitError)
+        diagnostic = str(fatal.value)
+        assert 'evidence_refs[1]' in diagnostic and 'support.py' in diagnostic and '(new)' in diagnostic
+        assert 'evidence_refs[2]' not in diagnostic
+        assert 'Changing the submission cannot resolve' in diagnostic and str(repo) not in diagnostic
+        return
+    if fault not in {None, 'contained-range'}:
+        with pytest.raises(HostToolRejected) as rejected:
+            canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+        message = str(rejected.value)
+        assert 'evidence_refs' in message
+        assert any(word in message.lower() for word in ('choose', 'use', 'remove', 'supply'))
+        if fault == 'foreign-id':
+            assert choices[0]['source_id'] in message and 'assigned' in message
+        elif fault == 'assigned-range':
+            assert '1..3' in message and 'null' in message
+        elif fault == 'supporting-range':
+            assert '1..2' in message and 'start <= end' in message
+        elif fault == 'oversized':
+            assert 'whole pinned blob' in message and '65536' in message
+            assert 'narrowing source_range cannot' in message
+        elif fault == 'supporting-only':
+            assert 'reviewed' in message and 'source_id' in message
+        return
+    canonical = canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+    expected_assigned = {**assigned, 'source_range': {'start': 2, 'end': 2}} if fault == 'contained-range' else assigned
+    assert canonical == [expected_assigned, {
+        'artifact_sha256': hashlib.sha256(supported.encode()).hexdigest(), 'part_sha256': None,
+        'revision': revision['head_sha'], 'path': 'support.py', 'side': 'new',
+        'source_range': {'start': 1, 'end': 2}, 'fragment': None,
+        'basis': 'source_inspection', 'role': 'supporting',
+    }]
+    assert (repo / 'support.py').read_text() == 'MUTABLE_WORKTREE_CONTENT\n'

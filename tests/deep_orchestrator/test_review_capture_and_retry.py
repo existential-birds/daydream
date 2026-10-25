@@ -5,13 +5,14 @@ import copy
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     PiRequestConfig,
@@ -22,7 +23,6 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends.pi import PiBackend
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
@@ -33,6 +33,7 @@ from tests.deep_orchestrator.test_review_investigation import (
     read_events,
     stage_ends,
 )
+from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import seed_feature_branch
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
@@ -117,17 +118,7 @@ async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
         git(repo, 'commit', '-m', 'retire and rename context sources')
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     if limit != 'files':
-        native = PiBackend(model=review.backend.model)
-
-        async def execute(self: PiBackend, cwd: Path, prompt: str, *args: Any,
-                          **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            kwargs.pop('wall_budget_s', None)
-            kwargs.pop('tool_call_budget', None)
-            async for event in review.backend.execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-        monkeypatch.setattr(PiBackend, 'execute', execute)
-        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
+        review.backend = NativeStageBackend(repo)
     if limit == 'all-omitted':
         @review.backend.script('python')
         def unfinished_language(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -209,18 +200,22 @@ async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
     assert data['findings'] == []
 
 
-@pytest.mark.parametrize('invalid_digest', [False, True], ids=['later-part', 'forged-later-part'])
+@pytest.mark.parametrize('invalid_source', [False, True], ids=['later-part', 'invalid-later-part'])
 @pytest.mark.parametrize('sandbox', [False, True], ids=['catalog', 'inline'])
+@pytest.mark.parametrize('native', [False, True], ids=['canonical-backend', 'native-pi'])
 async def test_structure_can_attribute_a_later_assigned_part(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_digest: bool, sandbox: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_source: bool, sandbox: bool, native: bool,
 ) -> None:
-    """Bounded examples must not exclude genuine later Structure work from admission."""
+    """Native callbacks must resolve later work beyond the bounded prompt examples."""
     review = staged_review(tmp_path, monkeypatch)
+    if native:
+        review.backend = NativeStageBackend(review.repo)
     review.backend.sandbox = sandbox
+    canonical_digest = hashlib.sha256(git_ops.diff(review.repo, 'main').encode()).hexdigest()
     submitted: list[dict[str, Any]] = []
 
     @review.backend.script('structure')
-    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         offered = stage['source_refs']['integration:structure']
         assert len(offered) <= 4
         assert all(ref['path'] != 'module_06.py' for ref in offered)
@@ -239,22 +234,51 @@ async def test_structure_can_attribute_a_later_assigned_part(
                 parts.extend(node.get('parts', []))
             part = next(part for part in parts if part['file'] == 'module_06.py')
             source = Path(part['path']).read_bytes()
-        reference = next(copy.deepcopy(ref) for ref in part['source_refs'] if ref['side'] == 'new')
-        assert reference['path'] == 'module_06.py'
-        assert reference['revision'] == stage['analyzed_revision']['head_sha']
-        assert reference['part_sha256'] == hashlib.sha256(source).hexdigest()
-        assert reference['source_range'] == {'start': 1, 'end': 1} and reference['fragment'] is None
-        if invalid_digest:
-            reference['part_sha256'] = '0' * 64
-        output['targets'][0]['evidence_refs'] = [reference]
-        submitted.extend(copy.deepcopy(output['targets']))
+        reference = {
+            'artifact_sha256': canonical_digest, 'part_sha256': hashlib.sha256(source).hexdigest(),
+            'revision': review.pr.head_sha, 'path': 'module_06.py', 'side': 'new',
+            'source_range': {'start': 1, 'end': 1}, 'fragment': None, 'basis': 'supplied_diff', 'role': 'assigned',
+        }
+        assert next(ref for ref in part['source_refs'] if ref['side'] == 'new') == reference
+        assert len(part['source_options']) == len(part['source_refs'])
+        option = next(option for option in part['source_options'] if option['side'] == 'new')
+        assert option['basis'] == 'supplied_diff'
+        expected_targets = [{**target, 'evidence_refs': [reference]} for target in output['targets']]
+        submitted.extend(copy.deepcopy(expected_targets))
+        if native:
+            # The provider sends only a source selector. Production admission
+            # must resolve it from the complete assignment inventory itself.
+            selector = {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
+            output['targets'][0]['evidence_refs'] = [selector]
+            binding = review.backend.calls[-1]['host_tools']
+            if invalid_source:
+                rejected = copy.deepcopy(output)
+                rejected['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
+                rejected['notes'] = 'REJECTED_LATER_PART_NOTE'
+                yield ToolStartEvent(id='foreign-later-part', name='structured_output', input=rejected)
+                yield ToolResultEvent(id='foreign-later-part', output='Receipt.', is_error=False)
+                assert binding.accepted is False and binding.possibly_accepted is False
+            yield ToolStartEvent(id='later-part', name='structured_output', input=output)
+            yield ToolResultEvent(id='later-part', output='Receipt.', is_error=False)
+            assert binding.accepted_result['targets'] == expected_targets
+        else:
+            output['targets'][0]['evidence_refs'] = [copy.deepcopy(reference)]
+            if invalid_source:
+                output['targets'][0]['evidence_refs'][0]['part_sha256'] = '0' * 64
 
-    data = await review.finish('structure', reason='evidence_incomplete' if invalid_digest else None)
+    rejected = invalid_source and not native
+    data = await review.finish('structure', reason='evidence_incomplete' if rejected else None)
     scope = scopes(data)['structure']
-    assert scope['target_decisions'] == ([] if invalid_digest else submitted)
+    assert scope['target_decisions'] == ([] if rejected else submitted)
     event, = stage_ends(review, 'structure')
-    assert event['metadata']['admitted'] is not invalid_digest
-    assert event['metadata']['failure_class'] == ('source_attribution' if invalid_digest else None)
+    assert event['metadata']['admitted'] is not rejected
+    assert event['metadata']['failure_class'] == ('source_attribution' if rejected else None)
+    if native:
+        assert event['metadata']['successful_submissions'] == 1
+        assert event['metadata']['failed_submissions'] == int(invalid_source)
+        assert event['metadata']['submission_starts'] == 1 + int(invalid_source)
+        assert 'REJECTED_LATER_PART_NOTE' not in str(data)
+        assert all('source_id' not in str(decision) for decision in scope['target_decisions'])
 
 
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
@@ -320,11 +344,13 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-@pytest.mark.parametrize(('payload', 'omit_final'), [('medium-file', False), ('oversized-hunk', False),
-    ('oversized-hunk', True), ('unicode-line', False), ('unicode-separators', False)])
+@pytest.mark.parametrize(('payload', 'omit_final', 'native'), [
+    ('medium-file', False, False), ('oversized-hunk', False, False), ('oversized-hunk', True, False),
+    ('unicode-line', False, False), ('unicode-separators', False, False), ('unicode-line', False, True),
+])
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool) -> None:
-    from daydream import git_ops
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool, native: bool,
+) -> None:
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
     unicode = payload in {'unicode-line', 'unicode-separators'}
@@ -343,6 +369,8 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     repo = tmp_path / payload
     seed_feature_branch(repo, base={'api.py': before}, feature={'api.py': required})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
+    if native:
+        review.backend = NativeStageBackend(repo)
     review.backend.sandbox = sandbox
     canonical = git_ops.diff(repo, 'main')
     expected_body = canonical.split('\n@@', 1)[1].split('\n', 1)[1].encode()
@@ -375,8 +403,30 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
                     1, 1, 1, 1 if unicode else 541)
             assignments.append(part)
             assert target['target_id'] == part['target_id']
-            assert target['evidence_refs'] == part['source_refs'][:1]
             body = part_diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
+            first = not fragments
+            source_side = 'old' if first else 'new'
+            reference = {
+                'artifact_sha256': hashlib.sha256(canonical.encode()).hexdigest(),
+                'part_sha256': hashlib.sha256(part_diff.encode()).hexdigest(),
+                'revision': review.pr.base_sha if first else review.pr.head_sha,
+                'path': 'api.py', 'side': source_side,
+                'source_range': {'start': 1, 'end': before.count('\n')} if part['kind'] == 'file' else None,
+                'fragment': None if part['kind'] == 'file' else {
+                    'offset': sum(map(len, fragments)), 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(),
+                },
+                'basis': 'supplied_diff', 'role': 'assigned',
+            }
+            assert part['source_refs'][:1] == [reference]
+            if native:
+                # Native stage output contains no canonical metadata. The callback
+                # must preserve this exact UTF-8 fragment and its null LF range.
+                assert target['evidence_refs'] == [{
+                    'source_id': part['source_options'][0]['source_id'],
+                    'basis': 'supplied_diff', 'source_range': None,
+                }]
+            else:
+                assert target['evidence_refs'] == [reference]
             if medium and not sandbox:
                 assert part_diff == canonical
                 assert '<sanctioned-input label="intent">' in prompt
@@ -385,7 +435,6 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             else:
                 assert part['fragment_offset'] == sum(map(len, fragments))
                 assert part['fragment_bytes'] == len(body)
-                reference, = target['evidence_refs']
                 assert reference['source_range'] is None
                 assert reference['fragment'] == {'offset': part['fragment_offset'], 'bytes': len(body),
                                                  'sha256': hashlib.sha256(body).hexdigest()}
@@ -393,7 +442,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             fragments.append(body)
             if omit_final and part['part_index'] == part['part_count']:
                 target.update(status='not_reviewed', reason='Final continuation remains unexamined.')
-        decisions.extend(copy.deepcopy(output['targets']))
+            decisions.append({**copy.deepcopy(target), 'evidence_refs': [reference]})
 
     data = await review.finish('python', reason='evidence_incomplete' if omit_final else None,
                                findings=('Grounded defect',) if medium and not sandbox else ())
@@ -568,6 +617,7 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A real canonical read failure must isolate its scope without hiding the successful sibling's evidence."""
     review = InvestigationRun(multi_stack_target, tmp_path, monkeypatch)
     real_read = Path.read_text
     canonical_reads = 0
@@ -597,21 +647,28 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
 
 async def test_changed_prepared_input_identity_blocks_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
+    """Malformed payload coverage missed an otherwise valid native submission after its prepared file changed."""
     review = staged_review(tmp_path, monkeypatch, files=1)
+    review.backend = NativeStageBackend(review.repo)
+    bindings: list[Any] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
         diff = pointers['review-assignment'] if 'review-assignment' in pointers else pointers['diff']
         diff.write_text('Changed after the prepared exact-path input was read.\n')
-        output['targets'][0]['unknown_duplicate_id'] = None
+        bindings.append(review.backend.calls[-1]['host_tools'])
 
-    await review.finish('python', reason='evidence_incomplete')
+    await review.finish('python', reason='evidence_incomplete', statuses=('failed',))
+    assert len(bindings) == 1
+    fatal = bindings[0].fatal_error
+    assert fatal is not None and fatal.code == 'input_unavailable' and fatal.preacceptance
+    assert type(fatal.__cause__).__name__ == 'SanctionedInputUnavailable'
+    assert 'review-assignment' in str(fatal) and 'Changing the submission cannot resolve' in str(fatal)
     event, = stage_ends(review, 'python')
     assert event['metadata']['failure_class'] == 'admission_failure'
     assert event['metadata']['admitted'] is False and event['metadata']['attempt'] == 1
-    assert event['metadata']['observed_tool_starts'] == 0
+    assert event['metadata']['observed_tool_starts'] == 1
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])
