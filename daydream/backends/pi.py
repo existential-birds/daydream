@@ -19,17 +19,13 @@ import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 from functools import partial
-from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
-import anyio
-
-from daydream import clock
+from daydream import clock, host_tools as host_policy
 from daydream.backends import (
     AgentEvent,
     BackendExecutionInput,
@@ -84,42 +80,6 @@ _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _PI_FINAL_PAYLOAD_MAX_BYTES = 128 * 1024
 _PI_ERROR_MESSAGE_MAX_CHARS = 4096
 _PI_RAW_STOP_REASON_MAX_CHARS = 256
-
-
-class _HostToolServer(Protocol):
-    """Typed boundary to the explicitly installed optional native host feature."""
-
-    initialized: bool
-    listed: bool
-
-    async def start(self) -> None: ...
-
-    async def close(self) -> None: ...
-
-    def packet(self) -> dict[str, Any]: ...
-
-
-def _create_host_tool_server(binding: HostToolBinding) -> _HostToolServer:
-    """Load bundled FastMCP only for requested bindings, never ordinary Pi use.
-
-    Other Daydream consumers can require MCP 2, which removed bundled FastMCP.
-    Keep that independent environment usable without weakening this feature's
-    verified SDK contract or replacing the official SDK with another framework.
-    """
-    guidance = "Pi host tools require daydream[host-tools] with official mcp==1.30.0 and its bundled FastMCP"
-    try:
-        sdk_version = version("mcp")
-    except PackageNotFoundError:
-        raise PiError(guidance + "; install the host-tools extra before using this binding",
-                      category="HOST_TOOLS") from None
-    if sdk_version != "1.30.0":
-        raise PiError(guidance + "; use an environment compatible with that extra", category="HOST_TOOLS")
-    try:
-        module = import_module("daydream.host_tools_server")
-    except ImportError:
-        raise PiError(guidance + "; install the complete host-tools extra", category="HOST_TOOLS") from None
-    server: _HostToolServer = module.PiHostToolServer(binding)
-    return server
 
 
 def _pi_diagnostic_text(value: str, limit: int) -> tuple[str, bool]:
@@ -573,7 +533,7 @@ def _stage_supplies_schema(prompt: str, schema: dict[str, Any]) -> bool:
     return isinstance(contract, dict) and contract.get('schema') == schema
 
 
-def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
+def _write_prompt_attachment(text: str, attachments: ExitStack | AsyncExitStack) -> Path:
     """Create a closed private UTF-8 file owned by the invocation's cleanup scope."""
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="daydream-pi-prompt-", suffix=".txt", delete=False,
@@ -646,9 +606,10 @@ class PiBackend:
                              stderr_policy=StderrPolicy.DRAIN_TASK)
         self._transports.append(probe)
         try:
-            allowance = min(binding.limits.setup_timeout_s, binding.deadline - clock.monotonic())
+            allowance = min(host_policy._SETUP_TIMEOUT_S, binding.deadline - clock.monotonic())
             async with asyncio.timeout(max(0.0, allowance)):
-                await self._start_host_transport(probe, binding)
+                await binding.start(probe.start(), lambda _: teardown(
+                    probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S))
                 lines = []
                 async for line in probe.lines(lambda: allowance):
                     lines.append(line)
@@ -660,36 +621,7 @@ class PiBackend:
         except (TimeoutError, OSError, ValueError):
             raise PiError("Could not verify required Pi 1.4.0 host-tool capabilities", category="HOST_TOOLS") from None
         finally:
-            await teardown(probe, self._transports, cleanup_timeout_s=binding.limits.cleanup_timeout_s)
-
-    async def _start_host_transport(self, transport: CliTransport, binding: HostToolBinding) -> None:
-        """Own process creation even when cancellation races the returned handle."""
-        start = asyncio.create_task(transport.start())
-        try:
-            await asyncio.shield(start)
-        except BaseException:
-            binding.close_authority()
-            with anyio.CancelScope(shield=True):
-                try:
-                    await asyncio.wait_for(asyncio.shield(start), binding.limits.cleanup_timeout_s)
-                except TimeoutError:
-                    # A native child receives no open authority if startup returns
-                    # late. Its private extension must handle input without model
-                    # work; the transport owner still terminates/reaps its handle.
-                    binding.mark_cleanup_failed()
-
-                    def finish_start(completed: asyncio.Task[None]) -> None:
-                        if not completed.cancelled() and completed.exception() is None:
-                            binding.track_cleanup(teardown(transport, self._transports,
-                                                          cleanup_timeout_s=binding.limits.cleanup_timeout_s))
-
-                    start.add_done_callback(finish_start)
-                except Exception:
-                    pass  # Original startup failure owns the error.
-                else:
-                    await teardown(transport, self._transports,
-                                   cleanup_timeout_s=binding.limits.cleanup_timeout_s)
-            raise
+            await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)
 
     async def execute(
         self,
@@ -743,8 +675,8 @@ class PiBackend:
                           category="HOST_TOOLS", retryable=False)
         if host_tools is not None:
             host_tools.validate_platform()
-            tool_call_budget = min(tool_call_budget, host_tools.limits.max_calls) if tool_call_budget is not None else (
-                host_tools.limits.max_calls)
+            tool_call_budget = min(tool_call_budget, host_policy._MAX_CALLS) if tool_call_budget is not None else (
+                host_policy._MAX_CALLS)
             host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
                                 tool_call_budget=tool_call_budget)
 
@@ -919,7 +851,7 @@ class PiBackend:
         seen_host_starts: dict[str, tuple[str | None, str]] = {}
         seen_host_results: dict[str, tuple[str | None, str]] = {}
         ambiguous_host_identity = False
-        host_server: _HostToolServer | None = None
+        host_server = None
 
         transport: CliTransport | None = None
 
@@ -1022,12 +954,11 @@ class PiBackend:
             session_source="host_generated" if resume_id is None else "configured",
         )
 
-        attachments = ExitStack()
+        attachments = AsyncExitStack()
         try:
             if host_tools is not None:
-                host_server = _create_host_tool_server(host_tools)
+                host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(cwd, child_env, host_tools)
-                await host_server.start()
                 host_packet = _write_prompt_attachment(json.dumps(host_server.packet()), attachments)
                 child_env["DAYDREAM_PI_HOST_PACKET"] = str(host_packet)
                 host_extension = attachments.enter_context(
@@ -1079,13 +1010,14 @@ class PiBackend:
             )
             self._transports.append(transport)
             if host_tools is not None:
-                await self._start_host_transport(transport, host_tools)
+                await host_tools.start(transport.start(), lambda _: teardown(
+                    transport, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S))
             else:
                 await transport.start()
 
             active_tool_calls = 0
             is_first_line = True
-            setup_deadline = clock.monotonic() + host_tools.limits.setup_timeout_s + 2 if host_tools else None
+            setup_deadline = clock.monotonic() + host_policy._SETUP_TIMEOUT_S + 2 if host_tools else None
 
             def line_timeout() -> float | None:
                 ordinary = tool_idle_timeout_s if active_tool_calls > 0 else response_idle_timeout_s
@@ -1129,7 +1061,7 @@ class PiBackend:
 
                 event_type = event.get("type", "")
                 if event_type == "daydream_host_tools_ready":
-                    if host_server is None or not (host_server.initialized and host_server.listed):
+                    if host_server is None or not host_server.listed:
                         raise PiError("Native host readiness was not established", category="HOST_TOOLS")
                     host_ready = True
                     continue
@@ -1465,7 +1397,7 @@ class PiBackend:
             # Reap the child, then yield its terminal events before the shared
             # exit check formats the backend-specific message from the code and
             # captured stderr lines (the events must stay between the two).
-            returncode = await reap(transport, timeout_s=host_tools.limits.cleanup_timeout_s if host_tools else None)
+            returncode = await reap(transport, timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
 
             native_unsettled = (native_output or host_tools is not None) and (
                 active_tool_calls != 0 or open_generation_id is not None
@@ -1477,7 +1409,7 @@ class PiBackend:
                 or ambiguous_host_identity
             )
             if host_server is not None and host_tools is not None:
-                await host_server.close()
+                await attachments.aclose()
                 if not host_tools.cleanup_complete:
                     native_unsettled = True
                 yield DiagnosticEvent(code="pi_host_tools_lifecycle", message="Invocation host-tool outcomes",
@@ -1516,19 +1448,15 @@ class PiBackend:
             try:
                 if transport is not None:
                     await teardown(transport, self._transports,
-                                   cleanup_timeout_s=host_tools.limits.cleanup_timeout_s if host_tools else None)
+                                   cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
             finally:
                 try:
-                    if host_server is not None:
-                        await host_server.close()
-                    elif host_tools is not None:
-                        await host_tools.close()
+                    await attachments.aclose()
                 finally:
                     if host_tools is not None and lifecycle is not None:
                         lifecycle.host_tools_closed(native_settled=host_tools.native_settled,
                                                     cleanup_complete=host_tools.cleanup_complete,
                                                     calls=host_tools.calls, rejections=host_tools.rejections)
-                    attachments.close()
 
     async def cancel(self) -> None:
         """Terminate and reap every active Pi transport."""

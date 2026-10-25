@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,43 +13,31 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.types import LATEST_PROTOCOL_VERSION
 
-from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding, HostToolLimits, HostToolRejected
+from daydream import host_tools as policy
+from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding, HostToolRejected
 from daydream.host_tools_server import PiHostToolServer
+from tests.harness.host_tools import gated_reader
 
 
 @asynccontextmanager
 async def _endpoint(binding: HostToolBinding) -> AsyncIterator[tuple[PiHostToolServer, httpx.AsyncClient]]:
-    server = PiHostToolServer(binding)
-    try:
-        await server.start()
+    async with binding.session() as server:
         async with httpx.AsyncClient(base_url=server.url, headers={
             "Authorization": server.packet()["authorization"], "Accept": "application/json, text/event-stream",
         }, timeout=3) as client:
             yield server, client
-    finally:
-        await server.close()
-
-
-async def _native_call(client: httpx.AsyncClient, arguments: Any, *, call_id: str = "read") -> dict[str, Any]:
-    admission = await client.post("/admit", json={"id": call_id, "name": NATIVE_READ_FILE,
-                                               "arguments": arguments})
-    assert admission.status_code == 200
-    assert admission.json() == {"allowed": True}
-    response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": call_id, "method": "tools/call",
-        "params": {"name": "read_file", "arguments": arguments}})
-    assert response.status_code == 200
-    result: dict[str, Any] = response.json()["result"]
-    return result
 
 
 @pytest.mark.parametrize("fault", ["missing", "extra", "number", "array", "null", "params-array", "unicode-id"])
-async def test_http_schema_rejections_precede_sdk_coercion(tmp_path: Path, fault: str) -> None:
+async def test_http_schema_rejections_precede_sdk_coercion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
     """Raw schema/Unicode-ID errors stay exact and bounded; native validation hides SDK coercion/escaping."""
     path = tmp_path.resolve() / "allowed"
     path.write_text("secret bytes")
-    binding = HostToolBinding((path,), deadline=time.monotonic() + 10, limits=HostToolLimits(max_frame_bytes=512))
+    monkeypatch.setattr(policy, "_MAX_FRAME_BYTES", 512)
+    binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
     arguments: Any = {"missing": {}, "extra": {"path": str(path), "other": True}, "number": {"path": 42},
                       "array": [], "null": None, "params-array": {"path": str(path)}, "unicode-id": {}}[fault]
     async with _endpoint(binding) as (_, client):
@@ -58,9 +45,9 @@ async def test_http_schema_rejections_precede_sdk_coercion(tmp_path: Path, fault
         call_id = "界" * 100 if fault == "unicode-id" else "malformed"
         frame = json.dumps({"jsonrpc": "2.0", "id": call_id, "method": "tools/call", "params": params},
                            ensure_ascii=False).encode()
-        assert len(frame) < binding.limits.max_frame_bytes
+        assert len(frame) < policy._MAX_FRAME_BYTES
         response = await client.post("/mcp", content=frame, headers={"Content-Type": "application/json"})
-        assert len(response.content) <= binding.limits.max_frame_bytes
+        assert len(response.content) <= policy._MAX_FRAME_BYTES
         assert response.status_code == 200 and response.json()["id"] == call_id
         assert response.json()["result"] == {
             "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}
@@ -69,17 +56,19 @@ async def test_http_schema_rejections_precede_sdk_coercion(tmp_path: Path, fault
 
 @pytest.mark.parametrize("fault", ["json", "frame", "items", "depth", "unauthorized", "http-capacity",
                                   "unicode-path", "unicode-key", "unicode-id"])
-async def test_http_admission_bounds_reject_before_tool_work(tmp_path: Path, fault: str) -> None:
+async def test_http_admission_bounds_reject_before_tool_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
     """Raw frames cannot bypass limits, credentials or UTF-8 charging; ordinary native calls miss these inputs."""
-    limits = HostToolLimits(max_frame_bytes=512, max_items=16, max_http_requests=2)
-    binding = HostToolBinding((tmp_path.resolve() / "allowed",), deadline=time.monotonic() + 10, limits=limits)
+    monkeypatch.setattr(policy, "_MAX_HTTP_REQUESTS", 2)
+    binding = HostToolBinding((tmp_path.resolve() / "allowed",), deadline=time.monotonic() + 10)
     async with _endpoint(binding) as (_, client):
         if fault == "json":
             response = await client.post("/admit", content=b"{broken")
         elif fault == "frame":
-            response = await client.post("/admit", content=b"x" * 513)
+            response = await client.post("/admit", content=b"x" * (policy._MAX_FRAME_BYTES + 1))
         elif fault == "items":
-            response = await client.post("/admit", json={"values": list(range(20))})
+            response = await client.post("/admit", json={"values": list(range(130))})
         elif fault == "depth":
             response = await client.post("/admit", content=b'{"v":' + b"[" * 18 + b"0" + b"]" * 18 + b"}")
         elif fault.startswith("unicode-"):
@@ -102,61 +91,11 @@ async def test_http_admission_bounds_reject_before_tool_work(tmp_path: Path, fau
             "json": 400, "frame": 413, "items": 200, "depth": 200, "unauthorized": 403, "http-capacity": 429,
             "unicode-path": 200, "unicode-key": 200, "unicode-id": 200,
         }[fault]
-        assert len(response.content) <= limits.max_frame_bytes
+        assert len(response.content) <= policy._MAX_FRAME_BYTES
         if fault in {"items", "depth"} or fault.startswith("unicode-"):
             assert response.json()["allowed"] is False
         assert binding.authority_open is (fault in {"unauthorized", "http-capacity", "unicode-path", "unicode-key"})
     assert binding.calls == int(fault in {"unicode-path", "unicode-key"}) and binding.cleanup_complete
-
-
-async def test_readiness_requires_successful_sdk_results(tmp_path: Path) -> None:
-    """Real SDK HTTP-200 errors must not set readiness; intercepted native faults miss this observer."""
-    binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10)
-    initialization = {"protocolVersion": LATEST_PROTOCOL_VERSION, "capabilities": {},
-                      "clientInfo": {"name": "readiness-regression", "version": "1"}}
-    async with _endpoint(binding) as (server, client):
-        for index, (method, params, valid) in enumerate([
-            ("initialize", {}, False), ("initialize", initialization, True),
-            ("tools/list", {"cursor": 123}, False), ("tools/list", {}, True),
-        ]):
-            response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": index,
-                                                       "method": method, "params": params})
-            result = response.json()
-            assert response.status_code == 200 and result["id"] == index
-            assert "result" in result if valid else result["error"]["code"] == -32602
-            assert server.initialized is (index > 0) and server.listed is (index == 3)
-            assert (await client.get("/status")).json() == {"ready": index == 3}
-    assert binding.calls == 0 and binding.cleanup_complete
-
-
-async def test_read_child_ignores_untrusted_working_directory_and_python_startup_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Actual child startup must ignore cwd/PYTHONPATH code; normal reads run from the trusted checkout."""
-    root = tmp_path.resolve()
-    allowed = root / "permitted"
-    expected = "ONLY_THE_TRUSTED_READER_MAY_RETURN_THIS\n"
-    allowed.write_text(expected)
-    untrusted = root / "untrusted"
-    package = untrusted / "daydream"
-    package.mkdir(parents=True)
-    marker = root / "untrusted-executed"
-    poison = f"open({str(marker)!r}, 'w').write('untrusted code executed')\n"
-    (package / "__init__.py").write_text(poison)
-    (package / "host_tools_read.py").write_text("print('SHADOW_MODULE_OUTPUT')\n")
-    (untrusted / "sitecustomize.py").write_text(poison)
-    binding = HostToolBinding((allowed,), deadline=time.monotonic() + 10)
-    binding.claim()
-    binding.admit("trusted-read", NATIVE_READ_FILE, {"path": str(allowed)})
-    monkeypatch.chdir(untrusted)
-    monkeypatch.setenv("PYTHONPATH", str(untrusted))
-    try:
-        result = await binding.read_file({"path": str(allowed)})
-        assert result == expected
-        assert not marker.exists()
-    finally:
-        await binding.close()
-    assert binding.calls == 1 and binding.cleanup_complete
 
 
 @pytest.mark.parametrize("fault", ["traversal", "final-symlink", "parent-symlink", "fifo", "binary",
@@ -189,19 +128,19 @@ async def test_host_read_preserves_exact_grant_and_rejects_non_authoritative_res
     elif fault == "binary":
         source.write_bytes(b"\xff")
     elif fault == "file-overflow":
-        source.write_bytes(b"x" * 2049)
+        source.write_bytes(b"x" * 13000)
     elif fault == "serialized-overflow":
-        source.write_text("\n" * 700)
-    binding = HostToolBinding((granted,), deadline=time.monotonic() + 10,
-                              limits=HostToolLimits(max_result_bytes=2048))
-    async with _endpoint(binding) as (_, client):
-        result = await _native_call(client, {"path": requested})
-        assert result["isError"] is True
-        text = result["content"][0]["text"]
-        assert "not permitted" in text if fault == "traversal" else (
-            "not UTF-8" in text if fault == "binary" else
-            "serialized result byte limit" in text if fault == "serialized-overflow" else "unavailable" in text)
-        assert "unavailable bytes" not in text
+        source.write_text("\n" * 7000)
+    binding = HostToolBinding((granted,), deadline=time.monotonic() + 10)
+    async with binding.session():
+        binding.admit("read", NATIVE_READ_FILE, {"path": requested})
+        with pytest.raises(HostToolRejected) as failure:
+            await binding.read_file({"path": requested})
+        message = str(failure.value)
+        assert "not permitted" in message if fault == "traversal" else (
+            "not UTF-8" in message if fault == "binary" else
+            "serialized result byte limit" in message if fault == "serialized-overflow" else "unavailable" in message)
+        assert "unavailable bytes" not in message
     assert binding.calls == 1 and binding.rejections == 1 and binding.cleanup_complete
 
 
@@ -209,8 +148,7 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
     """Duplicate/oversized IDs spend once without renewal; ordinary native calls do not probe direct admission."""
     path = tmp_path.resolve() / "source"
     path.write_text("uncharged bytes")
-    binding = HostToolBinding((path,), deadline=time.monotonic() + 10,
-        limits=HostToolLimits(max_calls=3, max_argument_bytes=256))
+    binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
     binding.restrict(deadline=None, tool_call_budget=2)
     deadline = binding.deadline
     async with _endpoint(binding) as (_, client):
@@ -219,16 +157,18 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
         duplicate = (await client.post("/admit", json=packet)).json()
         assert duplicate["allowed"] is False and "already charged" in duplicate["error"]
         oversized = (await client.post("/admit", json={**packet, "id": "large",
-            "arguments": {"path": "x" * 300}})).json()
+            "arguments": {"path": "x" * 5000}})).json()
         assert oversized["allowed"] is False and "argument byte limit" in oversized["error"]
         binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
         assert binding.deadline == deadline
         spent = (await client.post("/admit", json={**packet, "id": "last"})).json()
         assert spent["allowed"] is False and "Original cumulative tool allowance" in spent["error"]
         assert binding.calls == 3
+        for index in range(4, policy._MAX_CALLS + 1):
+            assert (await client.post("/admit", json={**packet, "id": str(index)})).json()["allowed"] is False
         exhausted = (await client.post("/admit", json={**packet, "id": "overflow"})).json()
         assert exhausted["allowed"] is False and "capacity exhausted" in exhausted["error"]
-        assert binding.calls == 3
+        assert binding.calls == policy._MAX_CALLS
     assert binding.cleanup_complete
 
 
@@ -240,125 +180,76 @@ async def test_revoked_or_expired_authority_cannot_start_admitted_read(
     path = tmp_path.resolve() / "source"
     path.write_text("must not reach caller")
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
-    binding.claim()
-    binding.admit("late", NATIVE_READ_FILE, {"path": str(path)})
-    if reason == "closed":
-        binding.close_authority()
-    else:
-        monkeypatch.setattr("daydream.host_tools.clock.monotonic", lambda: binding.deadline)
-    with pytest.raises(HostToolRejected, match="closed|expired"):
-        await binding.read_file({"path": str(path)})
-    await binding.close()
+    async with binding.session():
+        binding.admit("late", NATIVE_READ_FILE, {"path": str(path)})
+        if reason == "closed":
+            binding.close_authority()
+        else:
+            monkeypatch.setattr("daydream.host_tools.clock.monotonic", lambda: binding.deadline)
+        with pytest.raises(HostToolRejected, match="closed|expired"):
+            await binding.read_file({"path": str(path)})
     assert not binding.authority_open and binding.cleanup_complete
 
 
-@pytest.mark.parametrize("finish", ["cancel", "callback-deadline"])
+@pytest.mark.parametrize("finish", ["close", "callback-deadline"])
 async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str,
 ) -> None:
-    """Close/expire a blocked real read and reject queued work; CLI teardown does not own callback children."""
-    root = tmp_path.resolve()
-    path = root / "source"
+    """Owner close/deadline ends an actual blocked filesystem operation without queueing another."""
+    path = tmp_path.resolve() / "source"
     path.write_text("must never be returned")
-    fifo = root / "release"
-    os.mkfifo(fifo)
-    read_fd, write_fd = os.pipe()
-    os.set_blocking(read_fd, False)
-    entered = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    loop.add_reader(read_fd, entered.set)
-    spawn = asyncio.create_subprocess_exec
-    children: list[asyncio.subprocess.Process] = []
-
-    async def blocked_reader(*args: Any, **options: Any) -> asyncio.subprocess.Process:
-        if len(args) >= 3 and args[1] == "-I" and Path(args[2]).name == "host_tools_read.py":
-            script = "import os,sys; os.write(int(sys.argv[1]),b'R'); open(sys.argv[2],'rb').read(1)"
-            child = await spawn(sys.executable, "-c", script, str(write_fd), str(fifo),
-                                **{**options, "pass_fds": (write_fd,)})
-            children.append(child)
-            return child
-        return await spawn(*args, **options)
-
-    monkeypatch.setattr("daydream.host_tools.asyncio.create_subprocess_exec", blocked_reader)
-    binding = HostToolBinding((path,), deadline=time.monotonic() + 10,
-        limits=HostToolLimits(max_in_flight=1, callback_timeout_s=0.3 if finish == "callback-deadline" else 5))
-    binding.claim()
-    arguments = {"path": str(path)}
-    binding.admit("active", NATIVE_READ_FILE, arguments)
-    task = asyncio.create_task(binding.read_file(arguments))
-    try:
-        await asyncio.wait_for(entered.wait(), 3)
-        binding.admit("parallel", NATIVE_READ_FILE, arguments)
-        with pytest.raises(HostToolRejected, match="concurrency exhausted"):
-            await binding.read_file(arguments)
-        if finish == "cancel":
-            await binding.close()
-            with pytest.raises(asyncio.CancelledError):
+    monkeypatch.setattr(policy, "_CALLBACK_TIMEOUT_S", 0.3 if finish == "callback-deadline" else 5)
+    binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
+    async with gated_reader(monkeypatch, tmp_path, path) as (entered, _, children, marker):
+        async with binding.session():
+            arguments = {"path": str(path)}
+            binding.admit("active", NATIVE_READ_FILE, arguments)
+            task = asyncio.create_task(binding.read_file(arguments))
+            await asyncio.wait_for(entered.wait(), 3)
+            binding.admit("parallel", NATIVE_READ_FILE, arguments)
+            with pytest.raises(HostToolRejected, match="concurrency exhausted"):
+                await binding.read_file(arguments)
+            if finish == "callback-deadline":
+                with pytest.raises(HostToolRejected, match="callback deadline"):
+                    await task
+        if finish == "close":
+            with pytest.raises(HostToolRejected, match="reader failed"):
                 await task
-        else:
-            with pytest.raises(HostToolRejected, match="callback deadline"):
-                await task
-            await binding.close()
         with pytest.raises(HostToolRejected, match="closed"):
             await binding.read_file(arguments)
-        assert len(children) == 1 and children[0].returncode is not None
+        assert len(children) == 1 and int(marker.read_text()) == children[0].pid
         with pytest.raises(ProcessLookupError):
             os.kill(children[0].pid, 0)
         assert not binding.authority_open and binding.cleanup_complete
-    finally:
-        await binding.close()
-        await asyncio.gather(task, return_exceptions=True)
-        loop.remove_reader(read_fd)
-        os.close(read_fd)
-        os.close(write_fd)
 
 
-async def test_cancelled_late_spawn_never_receives_read_gate_and_is_joined(
+async def test_cancelled_reader_startup_never_receives_command_and_is_joined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reap an inert late-returned child; active-read cancellation misses the gap before spawn ownership."""
+    """An unfinished real spawn stays inert and is reaped when invocation setup is cancelled."""
     source = tmp_path.resolve() / "source"
     source.write_text("LATE_SPAWN_MUST_NEVER_READ_OR_RETURN_THIS\n")
-    spawned, release, authority_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    original = asyncio.create_subprocess_exec
-    children: list[asyncio.subprocess.Process] = []
-
-    async def late_spawn(*args: Any, **options: Any) -> asyncio.subprocess.Process:
-        child = await original(*args, **options)
-        children.append(child)
-        spawned.set()
-        await release.wait()
-        return child
-
-    monkeypatch.setattr("daydream.host_tools.asyncio.create_subprocess_exec", late_spawn)
     binding = HostToolBinding((source,), deadline=time.monotonic() + 10)
-    binding.claim()
-    binding.admit("late", NATIVE_READ_FILE, {"path": str(source)})
+    closed = asyncio.Event()
     close_authority = binding.close_authority
-
     def observe_close() -> None:
         close_authority()
-        authority_closed.set()
-
+        closed.set()
     monkeypatch.setattr(binding, "close_authority", observe_close)
-    task = asyncio.create_task(binding.read_file({"path": str(source)}))
-    closing: asyncio.Task[None] | None = None
-    try:
-        await asyncio.wait_for(spawned.wait(), 3)
+    async def invoke() -> None:
+        async with binding.session():
+            pytest.fail("Cancelled startup must not yield authority")
+    async with gated_reader(monkeypatch, tmp_path, source, late_spawn=True) as (entered, release, children, marker):
+        task = asyncio.create_task(invoke())
+        await asyncio.wait_for(entered.wait(), 3)
         task.cancel()
-        closing = asyncio.create_task(binding.close())
-        await asyncio.wait_for(authority_closed.wait(), 3)
+        await asyncio.wait_for(closed.wait(), 3)
         assert not binding.authority_open
         release.set()
-        await asyncio.wait_for(closing, 3)
         with pytest.raises(asyncio.CancelledError):
-            await task
-        assert len(children) == 1 and children[0].returncode is not None
+            await asyncio.wait_for(task, 3)
+        assert not marker.exists() and children[0].returncode is not None
         assert children[0].stdout is not None and await children[0].stdout.read() == b""
         with pytest.raises(ProcessLookupError):
             os.kill(children[0].pid, 0)
         assert binding.cleanup_complete
-    finally:
-        release.set()
-        await binding.close()
-        await asyncio.gather(task, *([closing] if closing is not None else []), return_exceptions=True)

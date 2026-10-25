@@ -1,8 +1,8 @@
-"""One explicitly granted host read, with invocation-local authority and bounds.
+"""One exact-file capability and its invocation-local lifetime.
 
-Definitions carry no live state. A binding is single-use and cannot be placed in
-configuration: its paths, deadline, admissions and child processes are private to
-one invocation. This seam does not grant snapshot isolation or review admission.
+The fixed operation has fixed protocol bounds. Live authority, admissions and the
+isolated reader belong to one session; this does not grant snapshot isolation.
+The official MCP SDK is loaded only when a session is explicitly requested.
 """
 
 from __future__ import annotations
@@ -12,65 +12,36 @@ import json
 import math
 import os
 import sys
-from collections.abc import Coroutine
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from daydream import clock
 
+if TYPE_CHECKING:
+    from daydream.host_tools_server import PiHostToolServer
 
-@dataclass(frozen=True)
-class HostToolDefinition:
-    name: str
-    description: str
-    schema_json: str
-
-    def schema(self) -> dict[str, Any]:
-        """Return a fresh schema; callers cannot mutate the shared definition."""
-        value: dict[str, Any] = json.loads(self.schema_json)
-        return value
-
-
-READ_FILE = HostToolDefinition(
-    "read_file", "Read the exact UTF-8 contents of an explicitly permitted absolute file path.",
-    '{"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":2048}},'
-    '"required":["path"],"additionalProperties":false}',
-)
+_MAX_CALLS = 8
+_MAX_FRAME_BYTES = 16384
+_MAX_ARGUMENT_BYTES = 4096
+_MAX_RESULT_BYTES = 12288
+_MAX_ITEMS = 128
+_MAX_HTTP_REQUESTS = 128
+_CALLBACK_TIMEOUT_S = 3.0
+_SETUP_TIMEOUT_S = 5.0
+_CLEANUP_TIMEOUT_S = 2.0
 NATIVE_READ_FILE = "mcp__daydream_host__read_file"
+_READ_DESCRIPTION = "Read the exact UTF-8 contents of an explicitly permitted absolute file path."
 
 
-@dataclass(frozen=True)
-class HostToolLimits:
-    max_calls: int = 8
-    max_frame_bytes: int = 16384
-    max_argument_bytes: int = 4096
-    max_result_bytes: int = 12288
-    max_items: int = 128
-    max_in_flight: int = 2
-    max_http_requests: int = 128
-    callback_timeout_s: float = 3.0
-    setup_timeout_s: float = 5.0
-    cleanup_timeout_s: float = 2.0
-
-    def __post_init__(self) -> None:
-        for name, maximum in {
-            "max_calls": 256, "max_frame_bytes": 65536, "max_argument_bytes": 8192,
-            "max_result_bytes": 16384, "max_items": 1024, "max_in_flight": 8, "max_http_requests": 2048,
-        }.items():
-            value = getattr(self, name)
-            if type(value) is not int or not 1 <= value <= maximum:
-                raise ValueError(f"invalid host-tool limit: {name}")
-        if self.max_frame_bytes < 256:
-            raise ValueError("host-tool frames require at least 256 bytes for bounded protocol errors")
-        if self.max_result_bytes < 256:
-            raise ValueError("host-tool results require at least 256 bytes for bounded protocol errors")
-        for name in ("callback_timeout_s", "setup_timeout_s", "cleanup_timeout_s"):
-            value = getattr(self, name)
-            if type(value) not in {int, float} or not math.isfinite(value) or not 0 < value <= 30:
-                raise ValueError(f"invalid host-tool limit: {name}")
+def _read_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 2048}},
+            "required": ["path"], "additionalProperties": False}
 
 
 class HostToolRejected(Exception):
@@ -78,103 +49,72 @@ class HostToolRejected(Exception):
 
 
 class HostToolBinding:
-    """An exact-path read grant and cumulative authority for a single invocation."""
+    """Single-use exact-path authority, intersected with the original caller policy."""
 
-    def __init__(self, permitted_paths: tuple[Path, ...], *, deadline: float,
-                 limits: HostToolLimits = HostToolLimits()) -> None:
+    def __init__(self, permitted_paths: tuple[Path, ...], *, deadline: float) -> None:
         if type(deadline) not in {int, float} or not math.isfinite(deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
-        if not 1 <= len(permitted_paths) <= 128:
-            raise ValueError("host tools require 1..128 exact permitted paths")
         paths = tuple(str(path.absolute()) for path in permitted_paths)
-        if any(len(path.encode()) > 2048 or os.path.normpath(path) != path for path in paths):
-            raise ValueError("host-tool paths must be bounded normalized absolute paths")
-        if len(set(paths)) != len(paths):
-            raise ValueError("duplicate host-tool path")
+        if (not 1 <= len(paths) <= 128 or len(set(paths)) != len(paths)
+                or any(len(path.encode()) > 2048 or os.path.normpath(path) != path for path in paths)):
+            raise ValueError("host tools require 1..128 distinct bounded normalized absolute paths")
         self._paths = frozenset(paths)
         self.deadline = float(deadline)
-        self.limits = limits
-        self.calls = 0
-        self.rejections = 0
-        self.authority_open = False
-        self.native_settled = False
-        self.cleanup_complete = False
-        self._claimed = False
-        self._call_limit = limits.max_calls
+        self.calls = self.rejections = 0
+        self.authority_open = self.native_settled = self.cleanup_complete = False
+        self._claimed = self._cleanup_failed = False
+        self._call_limit = _MAX_CALLS
         self._admitted: set[str] = set()
         self._pending: dict[str, list[str]] = {}
-        self._callbacks: set[asyncio.Task[Any]] = set()
-        self._children: set[asyncio.subprocess.Process] = set()
-        self._spawns: set[asyncio.Task[asyncio.subprocess.Process]] = set()
-        self._cleanup_failed = False
+        self._reading = False
+        self._reader: asyncio.subprocess.Process | None = None
         self._late_cleanup: set[asyncio.Task[None]] = set()
-        self._abandoned_spawns: set[asyncio.Task[asyncio.subprocess.Process]] = set()
 
     def restrict(self, *, deadline: float | None, tool_call_budget: int | None) -> None:
-        """Intersect caller policy; neither retries nor progress can replenish it."""
+        """Intersect caller policy; progress cannot replenish the original allowance."""
         if deadline is not None:
             self.deadline = min(self.deadline, deadline)
         if tool_call_budget is not None:
             self._call_limit = min(self._call_limit, tool_call_budget)
 
-    def claim(self) -> None:
-        self.validate_platform()
-        if self._claimed:
-            raise ValueError("host-tool binding has already been used")
-        self._claimed = True
-        self.authority_open = True
-        self._check_open()
-
     @staticmethod
     def validate_platform() -> None:
-        """Reject missing filesystem guarantees before any model work."""
         if (os.name != "posix" or not all(hasattr(os, name) for name in (
                 "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")) or os.open not in os.supports_dir_fd):
             raise NotImplementedError("Host reads require POSIX O_NOFOLLOW, O_DIRECTORY and dir_fd support")
 
     def _check_open(self) -> None:
-        if not self.authority_open:
-            raise self._reject("Host-tool authority is closed")
-        if clock.monotonic() >= self.deadline:
-            self.authority_open = False
-            raise self._reject("Host-tool absolute deadline expired")
+        if not self.authority_open or clock.monotonic() >= self.deadline:
+            self.close_authority()
+            raise self._reject("Host-tool authority is closed or its absolute deadline expired")
 
     def _reject(self, message: str) -> HostToolRejected:
         self.rejections += 1
         return HostToolRejected(message)
 
-    def admit(self, call_id: Any, name: Any, arguments: Any) -> None:
-        """Charge the native callback once, before the native tool can execute."""
-        self._charge(call_id, name)
-        if name == NATIVE_READ_FILE:
-            key = self._arguments_key(arguments)
-            self._pending.setdefault(key, []).append(call_id)
-
-    def reject_admission(self, call_id: Any, name: Any) -> None:
-        """Charge a bounded identity whose frame cannot grant a callback."""
-        self._charge(call_id, name)
-        raise self._reject("Invalid bounded host frame")
-
-    def _charge(self, call_id: Any, name: Any) -> None:
+    def admit(self, call_id: Any, name: Any, arguments: Any, *, malformed: bool = False) -> None:
+        """Charge before native validation, including bounded malformed admissions."""
         self._check_open()
         try:
-            identity_bytes = len(call_id.encode()) if isinstance(call_id, str) else 0
+            valid_id = isinstance(call_id, str) and 0 < len(call_id.encode()) <= 512
         except UnicodeError:
-            self.close_authority()
-            raise self._reject("Invalid native tool identity") from None
-        if (not isinstance(call_id, str) or not call_id or identity_bytes > 512
-                or not isinstance(name, str) or len(name) > 256):
+            valid_id = False
+        if not valid_id or not isinstance(name, str) or len(name) > 256:
             self.close_authority()
             raise self._reject("Invalid native tool identity")
         if call_id in self._admitted:
             raise self._reject("Native tool identity was already charged")
-        if len(self._admitted) >= self.limits.max_calls:
+        if len(self._admitted) >= _MAX_CALLS:
             self.close_authority()
             raise self._reject("Host-tool call capacity exhausted")
         self.calls += 1
         self._admitted.add(call_id)
         if self.calls > self._call_limit:
             raise self._reject("Original cumulative tool allowance exhausted")
+        if malformed:
+            raise self._reject("Invalid bounded host frame")
+        if name == NATIVE_READ_FILE:
+            self._pending.setdefault(self._arguments_key(arguments), []).append(call_id)
 
     def _arguments_key(self, arguments: Any) -> str:
         try:
@@ -183,15 +123,11 @@ class HostToolBinding:
             byte_count = len(encoded.encode("utf-8", errors="strict"))
         except (TypeError, ValueError, UnicodeError, RecursionError):
             raise self._reject("Invalid host-tool arguments") from None
-        if byte_count > self.limits.max_argument_bytes:
+        if byte_count > _MAX_ARGUMENT_BYTES:
             raise self._reject("Host-tool argument byte limit exceeded")
         return encoded
 
     async def read_file(self, arguments: Any) -> str:
-        """Authorize before spawning an isolated bounded regular-file reader."""
-        task = asyncio.current_task()
-        if task is None:
-            raise RuntimeError("host callback requires an asyncio task")
         self._check_open()
         key = self._arguments_key(arguments)
         pending = self._pending.get(key)
@@ -199,134 +135,156 @@ class HostToolBinding:
             raise self._reject("Host callback has no native admission")
         pending.pop(0)
         if not pending:
-            self._pending.pop(key, None)
+            self._pending.pop(key)
         if (not isinstance(arguments, dict) or set(arguments) != {"path"}
                 or not isinstance(arguments["path"], str) or not 1 <= len(arguments["path"]) <= 2048):
             raise self._reject("Expected exactly one bounded string path")
-        path = arguments["path"]
-        if path not in self._paths:
+        if arguments["path"] not in self._paths:
             raise self._reject("Path is not permitted by this invocation")
-        if len(self._callbacks) >= self.limits.max_in_flight:
+        if self._reading:
             raise self._reject("Host read concurrency exhausted; no callbacks are queued")
-        self._callbacks.add(task)
-        proc: asyncio.subprocess.Process | None = None
-        spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
+        self._reading = True
+        proc = self._reader
+        assert proc is not None and proc.stdin is not None and proc.stdout is not None
         try:
-            self._check_open()
-            timeout = min(self.limits.callback_timeout_s, self.deadline - clock.monotonic())
-            async with asyncio.timeout(timeout):
-                spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                    sys.executable, "-I", str(Path(__file__).resolve().with_name("host_tools_read.py")),
-                    path, str(self.limits.max_result_bytes),
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                    start_new_session=True, limit=self.limits.max_result_bytes + 1024,
-                ))
-                self._spawns.add(spawn)
-                spawn.add_done_callback(self._track_spawn)
-                proc = await asyncio.shield(spawn)
-                self._children.add(proc)
+            async with asyncio.timeout(min(_CALLBACK_TIMEOUT_S, self.deadline - clock.monotonic())):
                 self._check_open()
-                assert proc.stdin is not None
-                proc.stdin.write(b"R")
-                proc.stdin.close()
-                data, _ = await proc.communicate()
-                self._check_open()
-                if proc.returncode != 0:
+                # This command is the read gate. An unreturned startup never gets it.
+                proc.stdin.write(json.dumps(arguments["path"]).encode() + b"\n")
+                await proc.stdin.drain()
+                header = await proc.stdout.readline()
+                if header == b"E\n":
                     raise self._reject("Permitted file unavailable, nonregular, symlinked, or exceeds the byte limit")
+                size = int(header)
+                if not 0 <= size <= _MAX_RESULT_BYTES:
+                    raise ValueError("invalid reader frame")
+                data = await proc.stdout.readexactly(size)
+                self._check_open()
                 try:
                     text = data.decode("utf-8", errors="strict")
                 except UnicodeError:
                     raise self._reject("Permitted file is not UTF-8") from None
-                # Includes the native MCP envelope margin. Never truncate bytes.
-                if len(json.dumps(text, ensure_ascii=False).encode()) + 1024 > self.limits.max_result_bytes:
+                if len(json.dumps(text, ensure_ascii=False).encode()) + 1024 > _MAX_RESULT_BYTES:
                     raise self._reject("Host-tool serialized result byte limit exceeded")
                 return text
-        except TimeoutError:
-            raise self._reject("Host read callback deadline expired") from None
+        except (TimeoutError, OSError, ValueError, asyncio.IncompleteReadError):
+            self.close_authority()
+            self._kill_reader()
+            raise self._reject("Host read callback deadline expired or reader failed") from None
+        except asyncio.CancelledError:
+            self.close_authority()
+            self._kill_reader()
+            raise
         finally:
+            self._reading = False
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[PiHostToolServer]:
+        """Own the optional SDK endpoint and one inert-until-command isolated reader."""
+        from daydream.backends.pi import PiError
+
+        if self._claimed:
+            raise ValueError("host-tool binding has already been used")
+        self._claimed = True
+        server: PiHostToolServer | None = None
+        try:
+            guidance = "Pi host tools require daydream[host-tools] with official mcp==1.30.0 and its bundled FastMCP"
+            try:
+                if version("mcp") != "1.30.0":
+                    raise ImportError("unsupported SDK version")
+                module = import_module("daydream.host_tools_server")
+            except (ImportError, PackageNotFoundError):
+                raise PiError(guidance + "; install a compatible host-tools extra", category="HOST_TOOLS") from None
+            self.validate_platform()
+            server = module.PiHostToolServer(self)
+            async with asyncio.timeout(min(_SETUP_TIMEOUT_S, max(0, self.deadline - clock.monotonic()))):
+                self._reader = await self.start(asyncio.create_subprocess_exec(
+                    sys.executable, "-I", str(Path(__file__).resolve().with_name("host_tools_read.py")),
+                    str(_MAX_RESULT_BYTES), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL, start_new_session=True, limit=_MAX_RESULT_BYTES + 1024),
+                    self._stop_reader)
+                await server.start()
+            self.authority_open = True
+            self._check_open()
+            yield server
+        finally:
+            self.close_authority()
+            self._kill_reader()
+            with anyio.CancelScope(shield=True):
+                try:
+                    try:
+                        async with asyncio.timeout(_CLEANUP_TIMEOUT_S):
+                            if self._reader is not None:
+                                await self._reader.wait()
+                            await asyncio.gather(*self._late_cleanup, return_exceptions=True)
+                    finally:
+                        # Reader EOF releases active callbacks; SDK shutdown must
+                        # still run if reader reap or a late cleanup times out.
+                        if server is not None:
+                            await server.close()
+                except TimeoutError:
+                    self.mark_cleanup_failed()
+            self.cleanup_complete = (not self._cleanup_failed and not self._reading
+                                     and (self._reader is None or self._reader.returncode is not None)
+                                     and not self._late_cleanup)
+
+    async def start[T](self, operation: Coroutine[Any, Any, T],
+                       cleanup: Callable[[T], Coroutine[Any, Any, None]]) -> T:
+        """Keep ownership when native or reader startup returns after cancellation."""
+        task = asyncio.create_task(operation)
+        try:
+            return await asyncio.shield(task)
+        except BaseException:
+            self.close_authority()
+            joined = False
             try:
                 with anyio.CancelScope(shield=True):
-                    try:
-                        async with asyncio.timeout(self.limits.cleanup_timeout_s):
-                            if spawn is not None:
-                                proc = await asyncio.shield(spawn)
-                                self._spawns.discard(spawn)
-                                self._children.add(proc)
-                            if proc is not None:
-                                await self._reap(proc)
-                    except TimeoutError:
-                        self.mark_cleanup_failed()
-                        if spawn is not None:
-                            # An unreturned child has never received the read gate.
-                            # Its eventual transport is killed/reaped by this owner;
-                            # it cannot read or write invocation evidence meanwhile.
-                            self._abandoned_spawns.add(spawn)
+                    async with asyncio.timeout(_CLEANUP_TIMEOUT_S):
+                        await cleanup(await asyncio.shield(task))
+                        joined = True
+            except Exception:
+                pass  # Preserve the original startup failure.
             finally:
-                # Direct repeated Task.cancel() is independent of anyio's
-                # shield. Bookkeeping must survive a second cancellation.
-                self._callbacks.discard(task)
+                if not joined and not task.cancelled() and (not task.done() or task.exception() is None):
+                    self.mark_cleanup_failed()
 
-    def _track_spawn(self, task: asyncio.Task[asyncio.subprocess.Process]) -> None:
-        self._spawns.discard(task)
-        if task.cancelled() or task.exception() is not None:
-            return
-        proc = task.result()
-        self._children.add(proc)
-        if not self.authority_open or task in self._abandoned_spawns:
-            self._kill(proc)
-            self.track_cleanup(self._reap(proc))
+                    def finish(completed: asyncio.Task[T]) -> None:
+                        if not completed.cancelled() and completed.exception() is None:
+                            self.track_cleanup(cleanup(completed.result()))
 
-    def _finish_late_cleanup(self, task: asyncio.Task[None]) -> None:
-        self._late_cleanup.discard(task)
-        if task.cancelled() or task.exception() is not None:
-            self.mark_cleanup_failed()
+                    task.add_done_callback(finish)
+            raise
 
-    def track_cleanup(self, cleanup: Coroutine[Any, Any, None]) -> None:
-        """Own a late isolated transport cleanup without writing frozen evidence."""
+    def _kill_reader(self) -> None:
+        if self._reader is not None:
+            if self._reader.stdin is not None:
+                self._reader.stdin.close()
+            if self._reader.returncode is None:
+                try:
+                    self._reader.kill()
+                except ProcessLookupError:
+                    pass
+
+    async def _stop_reader(self, proc: asyncio.subprocess.Process) -> None:
+        self._reader = proc
+        self._kill_reader()
+        await proc.wait()
+
+    def track_cleanup(self, cleanup: Coroutine[Any, Any, Any]) -> None:
+        """Own late isolated transport cleanup without writing frozen evidence."""
         task = asyncio.create_task(cleanup)
         self._late_cleanup.add(task)
-        task.add_done_callback(self._finish_late_cleanup)
-
-    @staticmethod
-    def _kill(proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+        def finished(completed: asyncio.Task[None]) -> None:
+            self._late_cleanup.discard(completed)
+            if completed.cancelled() or completed.exception() is not None:
+                self.mark_cleanup_failed()
+        task.add_done_callback(finished)
 
     def mark_cleanup_failed(self) -> None:
-        """A failed cleanup observation is sticky across idempotent closes."""
         self._cleanup_failed = True
         self.cleanup_complete = False
-
-    async def _reap(self, proc: asyncio.subprocess.Process) -> None:
-        self._kill(proc)
-        await asyncio.wait_for(proc.wait(), timeout=self.limits.cleanup_timeout_s)
-        self._children.discard(proc)
 
     def close_authority(self) -> None:
         """Synchronous revocation precedes every shutdown await."""
         self.authority_open = False
         self._pending.clear()
-
-    async def close(self) -> None:
-        self.close_authority()
-        with anyio.CancelScope(shield=True):
-            callbacks = [task for task in self._callbacks if task is not asyncio.current_task()]
-            for task in callbacks:
-                task.cancel()
-            for proc in tuple(self._children):
-                self._kill(proc)
-            try:
-                async with asyncio.timeout(self.limits.cleanup_timeout_s):
-                    await asyncio.gather(*callbacks, return_exceptions=True)
-                    await asyncio.gather(*(asyncio.shield(spawn) for spawn in tuple(self._spawns)),
-                                         return_exceptions=True)
-                    await asyncio.gather(*(self._reap(proc) for proc in tuple(self._children)))
-                    await asyncio.gather(*self._late_cleanup, return_exceptions=True)
-            except TimeoutError:
-                self.mark_cleanup_failed()
-        self.cleanup_complete = (not self._cleanup_failed and not self._callbacks and not self._children
-                                 and not self._spawns and not self._late_cleanup)

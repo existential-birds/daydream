@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock, review_budget
+from daydream import clock, host_tools as host_policy, review_budget
 from daydream.agent_capacity import admit_agent
 from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
@@ -260,8 +260,8 @@ async def run_agent(
         if tools_disabled or continuation is not None or review_limits is not None:
             raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
         deadline = min(deadline, host_tools.deadline) if deadline is not None else host_tools.deadline
-        tool_call_budget = min(tool_call_budget, host_tools.limits.max_calls) if tool_call_budget is not None else (
-            host_tools.limits.max_calls)
+        tool_call_budget = min(tool_call_budget, host_policy._MAX_CALLS) if tool_call_budget is not None else (
+            host_policy._MAX_CALLS)
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:

@@ -33,7 +33,7 @@ because a failed replacement may preserve an older complete artifact.
 A binding grants exact file paths and a finite absolute deadline. The host
 checks schema, operation, path, open authority, capacity and deadline before
 reading. Component-wise no-follow opens require regular files; only complete
-UTF-8 contents return. An isolated read process lets cancellation end filesystem
+UTF-8 contents return. One isolated reader per invocation lets cancellation end filesystem
 work before evidence freezes.
 
 Definitions/schemas, frames, arguments, serialized results, items, cumulative

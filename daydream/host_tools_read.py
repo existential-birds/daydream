@@ -1,19 +1,14 @@
-"""Isolated regular-file reader; killed/reaped by the invocation on cancellation."""
+"""Isolated persistent regular-file reader; each parent command is a read gate."""
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
 
 
-def main() -> None:
-    # The parent grants execution only after spawn returns and authority is
-    # checked again. A late/unreturned child can never begin filesystem access.
-    if sys.stdin.buffer.read(1) != b"R":
-        raise SystemExit(1)
-    path, limit_text = sys.argv[1:]
-    limit = int(limit_text)
+def read_file(path: str, limit: int) -> bytes:
     descriptors: list[int] = []
     try:
         directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
@@ -36,12 +31,26 @@ def main() -> None:
             data.extend(chunk)
         if len(data) > limit:
             raise ValueError("oversized file")
-        sys.stdout.buffer.write(data)
-    except (OSError, ValueError):
-        raise SystemExit(1) from None
+        return bytes(data)
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def main() -> None:
+    limit = int(sys.argv[1])
+    while command := sys.stdin.buffer.readline(16385):
+        if len(command) > 16384 or not command.endswith(b"\n"):
+            raise SystemExit(1)
+        try:
+            path = json.loads(command)
+            if not isinstance(path, str):
+                raise ValueError("invalid command")
+            data = read_file(path, limit)
+            sys.stdout.buffer.write(str(len(data)).encode() + b"\n" + data)
+        except (OSError, ValueError):
+            sys.stdout.buffer.write(b"E\n")
+        sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":
