@@ -89,10 +89,16 @@ def _add_one_hop_graph_on_main(multi_stack_target: Path) -> None:
     _git(multi_stack_target, "add", "changed.py")
     _git(multi_stack_target, "commit", "-m", "change one-hop graph root")
 
-async def test_second_run_reuses_exploration(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An exact key match reuses the directory and fires zero specialists."""
+async def test_repository_cache_survives_worktree_changes_then_rebuilds_after_commit(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dirty and clean hits retain bytes; worktree and commit diff changes rebuild the cache."""
     silence(monkeypatch)
     _add_one_hop_graph_on_main(multi_stack_target)
+    api = multi_stack_target / "api.py"
+    committed_api = api.read_bytes()
+    api.write_text("def hello():\n    return 'galaxy'\n")
+    assert _git(multi_stack_target, "diff", "--", "api.py")
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
@@ -131,43 +137,34 @@ async def test_second_run_reuses_exploration(multi_stack_target: Path, monkeypat
     assert "RUN2 SENTINEL" not in dependencies
     assert "No data collected" not in dependencies
 
-async def test_diff_change_invalidates_cache(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A new commit changes head+diff, so the pre-scan re-runs and rewrites."""
-    silence(monkeypatch)
-    stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
+    api.write_bytes(committed_api)
+    assert not _git(multi_stack_target, "diff", "--", "api.py")
+    clean = _install(monkeypatch, multi_stack_target, "CLEAN SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub1) > 0
+    assert _count_specialist_calls(clean) > 0, "restoring the file changes the captured worktree diff"
+    clean_key = (exploration / "cache-key").read_text().strip()
+    assert clean_key != first_key
+    clean_exploration = (exploration / "exploration.json").read_bytes()
+    clean_dependencies = (exploration / "dependencies.md").read_text()
+    assert "CLEAN SENTINEL" in clean_dependencies and "RUN1 SENTINEL" not in clean_dependencies
 
-    exploration = multi_stack_target / ".daydream" / "exploration"
-    key_after_run1 = (exploration / "cache-key").read_text().strip()
-    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    warm = _install(monkeypatch, multi_stack_target, "CLEAN HIT SENTINEL")
+    assert await _run_deep(multi_stack_target) == 0
+    assert _count_specialist_calls(warm) == 0, "an unchanged clean repository must reuse its exact cache key"
+    assert (exploration / "cache-key").read_text().strip() == clean_key
+    assert (exploration / "exploration.json").read_bytes() == clean_exploration
+    assert (exploration / "dependencies.md").read_text() == clean_dependencies
+
+    api.write_text("def hello():\n    return 'galaxy'\n")
     _git(multi_stack_target, "add", "api.py")
     _git(multi_stack_target, "commit", "-m", "change again")
-    stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
+    rebuilt = _install(monkeypatch, multi_stack_target, "REBUILT SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub2) > 0, "changed diff must re-fire specialists"
-    assert (exploration / "cache-key").read_text().strip() != key_after_run1
+    assert _count_specialist_calls(rebuilt) > 0, "changed head and diff must re-fire specialists"
+    assert (exploration / "cache-key").read_text().strip() not in (first_key, clean_key)
     dependencies = (exploration / "dependencies.md").read_text()
-    assert "RUN2 SENTINEL" in dependencies
-    assert "RUN1 SENTINEL" not in dependencies
-
-async def test_uncommitted_edit_reuses_an_exact_cache_key(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An exact key hit remains reusable when the worktree is dirty."""
-    silence(monkeypatch)
-    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-    stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
-    assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub1) > 0
-
-    exploration = multi_stack_target / ".daydream" / "exploration"
-    stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
-    assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub2) == 0, "exact key hit must skip specialists"
-    assert (exploration / "cache-key").exists()
-    dependencies = (exploration / "dependencies.md").read_text()
-    assert "RUN1 SENTINEL" in dependencies
-    assert "RUN2 SENTINEL" not in dependencies
+    assert "REBUILT SENTINEL" in dependencies and "RUN1 SENTINEL" not in dependencies
+    assert "CLEAN SENTINEL" not in dependencies
 
 async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     multi_stack_target: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
@@ -188,6 +185,8 @@ async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
     assert _count_specialist_calls(stub2) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"
     assert (exploration / "cache-key").read_text().strip() != "stale"
+    dependencies = (exploration / "dependencies.md").read_text()
+    assert "RUN2 SENTINEL" in dependencies and "RUN1 SENTINEL" not in dependencies
 
 async def test_cache_version_change_invalidates_cache(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -203,21 +202,6 @@ async def test_cache_version_change_invalidates_cache(multi_stack_target: Path, 
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0, "version change must re-fire specialists"
     assert (exploration / "cache-key").read_text().strip() != first_key
-    assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
-
-async def test_corrupt_key_file_is_a_miss_not_a_crash(
-    multi_stack_target: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A truncated/garbage key file re-runs the pre-scan instead of failing."""
-    silence(monkeypatch)
-    _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
-    assert await _run_deep(multi_stack_target) == 0
-
-    _drift_cached_key_between_runs(artifact_runtime_root, multi_stack_target, content="not-a-real-key")
-    stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
-    assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub2) > 0
-    exploration = multi_stack_target / ".daydream" / "exploration"
     assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
 
 async def test_missing_key_file_is_a_miss(

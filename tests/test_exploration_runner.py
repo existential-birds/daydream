@@ -149,6 +149,10 @@ def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     assert all(call["read_only"] is True for call in backend.calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
+    assert ctx.conventions == []  # The native one-specialist envelope has no pattern-scanner key.
+    prompt = backend.calls[0]["prompt"]
+    assert f"<change_diff>\n{diff_text}\n</change_diff>" in prompt
+    assert "git diff" not in prompt
 
 @pytest.mark.parametrize(("investigation_s", "finalization_s", "completed", "has_dependencies", "calls"),
     [(420, 0, True, True, 1), (901, 60, False, True, 2), (901, 121, False, False, 2)],
@@ -176,25 +180,17 @@ async def test_pre_scan_retains_slow_dependency_mapping_with_bounded_finalizatio
     assert backend.call_count == calls
 
 
-@pytest.mark.parametrize("oversized", [False, True])
-def test_pre_scan_supplies_small_diff_without_requiring_bash(tmp_path: Path, oversized: bool) -> None:
-
-    diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    if oversized:
-        diff_text += "+" + "x" * INLINE_DIFF_BUDGET_BYTES
+def test_pre_scan_supplies_oversized_diff_as_bounded_overview(tmp_path: Path) -> None:
+    diff_text = (FIXTURES / "python_multifile.diff").read_text() + "+" + "x" * INLINE_DIFF_BUDGET_BYTES
     backend = _specialist_backend()
     anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
     prompt = backend.calls[0]["prompt"]
-    if oversized:
-        assert "<change_diff>" not in prompt
-        assert diff_text not in prompt
-        assert "<change_overview>" in prompt
-        overview = prompt.split("<change_overview>")[1].split("</change_overview>")[0]
-        assert len(overview.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
-        assert "omitted" in overview
-    else:
-        assert f"<change_diff>\n{diff_text}\n</change_diff>" in prompt
-        assert "git diff" not in prompt
+    assert "<change_diff>" not in prompt
+    assert diff_text not in prompt
+    assert "<change_overview>" in prompt
+    overview = prompt.split("<change_overview>")[1].split("</change_overview>")[0]
+    assert len(overview.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
+    assert "omitted" in overview
 
 def test_large_diff_overview_preserves_small_edits_after_large_additions() -> None:
 
@@ -294,17 +290,6 @@ def test_static_guidance_is_bounded_and_confined_to_repo(tmp_path: Path) -> None
     assert "truncated" in context.raw_notes
     assert len(context.raw_notes.encode("utf-8")) <= 8192
 
-
-def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    envelope = {"dependency_tracer": {
-            "affected_files": [{"path": "daydream/x.py", "role": "imports", "summary": ""}], "dependencies": [],
-        }
-    }
-    backend = _specialist_backend(results=envelope)
-    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
-    assert any(f.path == "daydream/x.py" for f in ctx.affected_files)
-    assert ctx.conventions == []
 
 def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
     diff_text = _py_ts_diff()
