@@ -1006,6 +1006,43 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
     assert "billing_contradiction" not in payload  # diagnostic stays local
 
 
+class _DuplicateIdempotentBackend(_NoCancelBackend):
+    """A billed child without response identity retains idempotent terminal totals."""
+
+    async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
+        yield RequestEvent(prompt)
+        yield _gen_start("gen-dup")
+        yield _gen_end("gen-dup", "choice")
+        yield MetricsEvent("gen-dup", 60, 15, None, 0.003, generation_id="gen-dup")
+        yield CostEvent(0.003, 60, 15, measurement_source="terminal")
+        yield CostEvent(0.003, 60, 15, measurement_source="terminal")  # exact duplicate
+        yield TextEvent("answer")
+        yield ResultEvent(None, None)
+
+async def test_runner_duplicate_identical_totals_are_idempotent(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A billed native child keeps missing response identity absent on the wire."""
+    collector = await _run_lifecycle_flow(
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _DuplicateIdempotentBackend(),
+    )
+    lifecycle = _read_subtrajectory(feature_branch_repo)
+    assert lifecycle["billing_owner"] == "generation_children"
+    assert lifecycle["diagnostics"] == []
+    attempt = _kind(collector.spans, "attempt")[0]
+    assert attributes(attempt)["gen_ai.usage.input_tokens"] == 60
+    generation, = _kind(collector.spans, "generation")
+    meta = attributes(generation)
+    assert generation["status"]["code"] == "STATUS_CODE_OK"
+    assert meta["daydream.generation.id"] == "gen-dup"
+    assert meta["daydream.generation.billed"] is True
+    assert meta["gen_ai.usage.input_tokens"] == 60
+    assert meta["gen_ai.usage.output_tokens"] == 15
+    assert meta["gen_ai.usage.cost"] == pytest.approx(0.003)
+    assert "gen_ai.response.id" not in meta
+
+
 class _ResidualTotalBackend(_NoCancelBackend):
     """Terminal total above the per-message sum: residual folds to the chain."""
 
