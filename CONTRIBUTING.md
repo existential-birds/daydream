@@ -17,11 +17,18 @@ Verify these prerequisites before running the local gate:
 - **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
+- **Node.js 24.18.1 and official Pi CLI 1.4.0** — required by the installed-native contract tests in every full gate; these match [CI provisioning](.github/workflows/ci.yml)
 
-Backend CLIs are optional and only needed when you work on that backend:
+Pi is an optional runtime backend, but contributors need its pinned native tools
+for `make check` even when changing another subsystem. These tests use an isolated
+loopback provider and temporary configuration; no model credentials or paid calls
+are needed. Missing Pi or Node fails the native proof. `make install` provisions
+Python dependencies, not these CLIs.
+
+Other backend CLIs are needed only when working on their respective features:
 
 - **`gh`** (GitHub CLI) — the `--comment` PR-comment mode and `reconcile.py`
-- **Codex CLI**, **Pi CLI**, **Osprey CLI** — only for their respective backends in `daydream/backends/`
+- **Codex CLI**, **Osprey CLI** — their respective backends in `daydream/backends/`
 
 Docker is optional: `make actionlint` runs the workflow-YAML checks in a
 pinned container, but when no Docker daemon is available that target is
@@ -31,7 +38,22 @@ actionlint, so a workflow error a local run skipped will still fail your PR.
 
 ## Setup
 
-One-time, from the repo root:
+Install the pinned Node/Pi tools with your Node version manager first. For example,
+with [`nvm`](https://github.com/nvm-sh/nvm) available:
+
+```bash
+nvm install 24.18.1
+nvm use 24.18.1
+npm install --global @earendil-works/pi-coding-agent@1.4.0
+node --version
+pi --version
+```
+
+Verify the commands print `v24.18.1` and `1.4.0`, respectively, before running
+the gate. Installing Pi does not require changing provider, authentication or
+settings files for these tests.
+
+Then, one-time from the repo root:
 
 ```bash
 make install

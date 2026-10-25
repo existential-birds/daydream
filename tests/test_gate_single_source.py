@@ -163,8 +163,8 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
         "so the local gate's wider dead-code scope is not restated here"
     ),
     "Install Pi for native output contract tests": (
-        "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
-        "without globally installing or replacing a contributor's optional backend runtimes"
+        "provision the pinned native CLI on the disposable CI runner — the local gate uses contributor-installed "
+        "prerequisites without globally installing or replacing them"
     ),
     "Plan pytest shards": "select supported shard counts for the manual benchmark and normal duration-weighted gate",
     "Run pytest shard": "partition the complete pytest collection and record checkout-bound execution and coverage",

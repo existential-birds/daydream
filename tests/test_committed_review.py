@@ -35,8 +35,13 @@ from tests.harness.trajectory import root_trajectory
 
 @pytest.fixture
 def review_inputs(tmp_path: Path) -> StageInputFactory:
+    """Full three-hunk inventories exceed the bounded citations used by judgments."""
     repo = tmp_path / "subject"
-    base_contents = {"api.py": "VALUE = 1\nOTHER = 1\n", "caller.py": "VALUE = 1\nOTHER = 1\n"}
+    base_contents = {
+        "api.py": "VALUE = 1\nOTHER = 1\n" + "# unchanged context\n" * 12 + "SECOND = 1\n"
+        + "# unchanged context\n" * 12 + "THIRD = 1\n",
+        "caller.py": "VALUE = 1\nOTHER = 1\n",
+    }
     head = seed_feature_branch(
         repo,
         base=base_contents,
@@ -408,6 +413,11 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         return
     result = await run_committed_review(request)
     value = result.to_dict()
+    assert len(value["assignments"][0]["source_refs"]) == 6
+    assert all(
+        len(decision["evidence_refs"]) == 1
+        for scope in value["terminal_result"]["stack_outcomes"] for decision in scope["target_decisions"]
+    )
     assert result.output_installed is (challenge != "output-install")
     assert result.capture_state == "complete"
     if challenge == "output-install":

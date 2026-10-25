@@ -31,7 +31,8 @@ def committed_diff(repo: Path, base_sha: str, head_sha: str) -> str:
     _validate_commit(repo, base_sha)
     _validate_commit(repo, head_sha)
     return process._run_git(
-        repo, ["diff", "--no-ext-diff", "--no-textconv", base_sha, head_sha, "--"],
+        repo, ["diff", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/",
+               base_sha, head_sha, "--"],
         timeout=30, error_context="committed source diff unavailable",
     ).stdout
 

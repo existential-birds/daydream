@@ -16,7 +16,12 @@ import jsonschema
 from daydream.json_utils import canonical_json
 from daydream.output_schema import strict_object
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
-from daydream.review_source_refs import SOURCE_REFS_SCHEMA, SOURCE_SELECTORS_SCHEMA, validate_source_refs
+from daydream.review_source_refs import (
+    SOURCE_REF_SCHEMA,
+    SOURCE_REFS_SCHEMA,
+    SOURCE_SELECTORS_SCHEMA,
+    validate_source_refs,
+)
 
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 4096}
 _ID = {"type": "string", "maxLength": 512}
@@ -112,7 +117,10 @@ COMMITTED_RESULT_SCHEMA = strict_object(
             "items": {
                 "type": "object",
                 "required": ["target_id", "file", "source_refs"],
-                "properties": {"target_id": _ID, "file": _TEXT, "source_refs": SOURCE_REFS_SCHEMA},
+                "properties": {
+                    "target_id": _ID, "file": _TEXT,
+                    "source_refs": {"type": "array", "minItems": 1, "items": SOURCE_REF_SCHEMA},
+                },
             },
         },
         "claims": {"type": "array", "maxItems": 128, "items": _RECORD_SCHEMA},
@@ -172,7 +180,10 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("source reference differs from planned assignment")
 
     for part in assignments:
-        check_refs(part["source_refs"], part["source_refs"])
+        # Inventories retain every planned source; only submitted citations
+        # share the four-reference bound. Validate each inventory identity.
+        for ref in part["source_refs"]:
+            check_refs([ref], [ref])
     for outcome in terminal["stack_outcomes"]:
         decisions = outcome.get("target_decisions", [])
         actual = {decision["target_id"] for decision in decisions}
