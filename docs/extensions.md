@@ -133,8 +133,8 @@ admission remain in #1627; binding lifetime does not own assignment lifetime.
 
 Install `uv tool install --editable '.[host-tools]'` for official `mcp==1.30.0`
 and its bundled FastMCP. Bound calls require exactly Pi 1.4.0, POSIX no-follow
-file opens, and fresh ordinary/read-only invocations. Other backends, disabled
-tools, finalization and continued sessions reject required bindings before model
+file opens, grant paths beginning with exactly one `/`, and fresh ordinary/read-only
+invocations. Other backends, disabled tools, finalization and continued sessions reject required bindings before model
 work. Ordinary calls retain their version behavior and support SDK 2 consumers,
 including RL; an unavailable compatible host runtime rejects explicitly.
 

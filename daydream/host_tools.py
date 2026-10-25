@@ -56,8 +56,9 @@ class HostToolBinding:
             raise ValueError("host tools require a finite absolute monotonic deadline")
         paths = tuple(str(path.absolute()) for path in permitted_paths)
         if (not 1 <= len(paths) <= 128 or len(set(paths)) != len(paths)
-                or any(len(path.encode()) > 2048 or os.path.normpath(path) != path for path in paths)):
-            raise ValueError("host tools require 1..128 distinct bounded normalized absolute paths")
+                or any(path.startswith("//") or len(path.encode()) > 2048
+                       or os.path.normpath(path) != path for path in paths)):
+            raise ValueError("host tools require 1..128 distinct bounded normalized paths starting with exactly one /")
         self._paths = frozenset(paths)
         self.deadline = float(deadline)
         self.calls = self.rejections = 0

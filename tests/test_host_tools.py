@@ -98,6 +98,14 @@ async def test_http_admission_bounds_reject_before_tool_work(
     assert binding.calls == int(fault in {"unicode-path", "unicode-key"}) and binding.cleanup_complete
 
 
+def test_host_grant_rejects_double_root_existing_path(tmp_path: Path) -> None:
+    source = tmp_path.resolve() / "source"
+    source.write_text("existing granted bytes")
+    ambiguous = Path("/" + str(source))
+    with pytest.raises(ValueError, match="exactly one /"):
+        HostToolBinding((ambiguous,), deadline=time.monotonic() + 10)
+
+
 @pytest.mark.parametrize("fault", ["traversal", "final-symlink", "parent-symlink", "fifo", "binary",
                                   "file-overflow", "serialized-overflow"])
 async def test_host_read_preserves_exact_grant_and_rejects_non_authoritative_results(
