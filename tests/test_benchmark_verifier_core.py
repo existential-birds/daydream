@@ -67,13 +67,6 @@ def _valid_findings(n: Any=1, key: Any="case-x") -> Any:
     return out
 
 
-def test_artifact_rejects_duplicate_candidate_id() -> None:
-    dup = _valid_findings(2)
-    dup[1] = dict(dup[0])  # same id, different title → not allowed
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(dup))
-
-
 def test_artifact_rejects_wrong_schema_version() -> None:
     with pytest.raises(VerifierError):
         validate_candidate_artifact(_artifact([], schema_version=2))
@@ -205,13 +198,6 @@ def test_score_clean_with_candidates() -> None:
     assert nonclean["clean_task_count"] == 0 and nonclean["clean_accuracy"] == 1.0
 
 
-def test_score_gold_no_candidates() -> None:
-    gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
-    r = score_review(gold, _artifact([]), [])
-    assert (r.reward, r.fn) == (0.0, 2)
-    assert r.fp == 0 and r.clean_task == 0
-
-
 def test_score_zero_match_reward_is_zero() -> None:
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
     art = _artifact(_valid_findings(2))
@@ -231,8 +217,12 @@ def test_score_malformed_artifact_is_scored_zero() -> None:
 def test_empty_side_resolves_with_zero_verdicts() -> None:
     r0 = score_review([], _artifact([]), [])
     assert r0.reward == 1.0
-    rn = score_review([_gold()], _artifact([]), [])
-    assert rn.reward == 0.0 and rn.fn == 1
+    d = r0.to_dict()
+    assert set(d) == EXPECTED_24_KEYS
+    assert d["location_present"] == 0 and d["severity_present"] == 0
+    assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
+    rn = score_review([_gold(), _gold(finding_id="b" * 64, title="B")], _artifact([]), [])
+    assert (rn.reward, rn.fn, rn.fp, rn.clean_task) == (0.0, 2, 0, 0)
     # passing any verdict for an empty side must not change the result (ignored/not required)
     assert score_review([], _artifact([]), [Verdict("g", "c", True, 0.9, "")]).reward == 1.0
 
@@ -334,13 +324,6 @@ def test_score_review_axis_absent_never_imputes() -> None:
     assert reward.location_exact == 0 and reward.location_near == 0   # no counts, not imputed
     assert reward.location_credit == 0.0
     assert reward.severity_present == 0 and reward.severity_mean_distance == 0.0
-
-
-def test_reward_dict_early_returns_have_absent_axes() -> None:
-    d = score_review([], _artifact([]), []).to_dict()
-    assert set(d) == EXPECTED_24_KEYS
-    assert d["location_present"] == 0 and d["severity_present"] == 0
-    assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
 
 
 def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:

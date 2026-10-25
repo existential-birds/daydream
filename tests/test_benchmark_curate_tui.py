@@ -55,6 +55,14 @@ def test_parse_indices_accepts_commas_and_ranges() -> None:
 def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
+    assert [row["source_id"] for row in view["evidence"]] == [
+        "github:inline_comment:1", "github:inline_comment:2", "github:review:100",
+        "github:review:101", "github:issue_comment:200",
+    ]
+    assert [row["source_id"] for row in view["prioritized_evidence"]["entries"]] == [
+        "github:inline_comment:1", "github:review:101", "github:inline_comment:2",
+        "github:review:100", "github:issue_comment:200",
+    ]
     assert {row["source_id"]: (row["kind"], row["candidate_index"]) for row in view["evidence"]} == {
         "github:inline_comment:1": ("inline_comment", 0), "github:inline_comment:2": ("inline_comment", None),
         "github:review:100": ("review", None), "github:review:101": ("review", 1),
@@ -67,6 +75,18 @@ def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -
     assert "issue_comment" in out and "dave" in out      # conversation comment paged
     assert "reply text" in out and "bob" in out          # inline reply paged
     assert "inline_comment" in out and "please fix" in out  # root candidate still visible
+    assert "-- review_first --" in out and "-- context --" in out
+    assert "-- decided --" not in out and "-- withdrawn --" not in out and "-- likely_actioned --" not in out
+    assert out.index("-- review_first --") < out.index("-- context --")
+    assert "resolved" in out or "reasons:" in out
+    assert "legend:" in out.lower()
+    assert [
+        (line.split(". ", 1)[0].strip(), line.rsplit(" ", 1)[-1])
+        for line in out.splitlines() if line.startswith("  ") and ". [" in line
+    ] == [
+        ("1", "github:inline_comment:1"), ("2", "github:review:101"), ("3", "github:inline_comment:2"),
+        ("4", "github:review:100"), ("5", "github:issue_comment:200"),
+    ]
 
 
 def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -182,20 +202,6 @@ def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, mo
     f = raw["curation"]["findings"][0]
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
 
-def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    _install_editor(tmp_path, monkeypatch,
-        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: From approval\n"
-        "    body: edited wording\n    severity: null\n    location: null\n"
-        "    source_ids: [github:review:100]\nEOF\n"
-    )
-    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
-    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
-    assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
-    assert f["provenance"]["source_ids"] == ["github:review:100"]
-
 def test_edit_author_prefills_selected_evidence_source_ids(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -215,6 +221,7 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
+    assert f["provenance"]["source_ids"] == ["github:review:100"]
     prefill = log.read_text()
     assert "source_ids" in prefill and "- github:review:100" in prefill
     assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
@@ -461,22 +468,6 @@ def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
                        severity="low", location=None, source_ids=[])
 
 
-def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    view = cu.get_case(ws, case_id)
-    out = tui.render_case(view)
-    assert "-- review_first --" in out
-    assert "-- context --" in out
-    assert "-- decided --" not in out
-    assert "-- withdrawn --" not in out
-    assert "-- likely_actioned --" not in out
-    assert out.index("-- review_first --") < out.index("-- context --")
-    assert "resolved" in out or "reasons:" in out
-    assert "legend:" in out.lower()
-    binding = tui._view_binding(view)
-    for n, sid in enumerate(binding, start=1):
-        assert f"  {n}. " in out and sid in out
-
 def test_number_action_resolves_through_captured_binding_not_fresh_order(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -535,16 +526,6 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     assert len(paged) == 2
     cur = load_yaml_strict(path2)["curation"]
     assert len(cur["findings"]) == 2 and not cur.get("exclusions")
-
-def test_accept_non_candidate_and_context_is_rejected_without_write(tmp_path: Path, fake_gh: FakeGh,) -> None:
-    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    view = cu.get_case(ws, case_id)
-    ctx_sid = next(e["source_id"] for e in view["prioritized_evidence"]["entries"] if e["band"] == "context")
-    with pytest.raises(cu.CurationError):
-        cu.accept_candidate(ws, case_id, ctx_sid)
-    assert path.read_bytes() == before
 
 def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Prioritization is advisory: a candidate whose facts/signals sink it to

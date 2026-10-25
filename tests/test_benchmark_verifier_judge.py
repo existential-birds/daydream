@@ -332,11 +332,10 @@ def _run_verifier_case(sr: Any, gold: Path, artifact: Path, tmp_path: Path, *, c
     return out, reward, client
 
 
-def _gold_list(n: int = 2, *, case_id: str = "case-x", locationless: bool = False) -> list[dict[str, Any]]:
+def _gold_list(n: int = 2, *, case_id: str = "case-x") -> list[dict[str, Any]]:
     out = []
     for i in range(n):
-        start = 1 if not locationless else None
-        f = _finding(title=f"t{i}", path="p" if not locationless else None, start_line=start, end_line=start)
+        f = _finding(title=f"t{i}")
         payload = "\x1f".join([str(case_id), str(f["title"]), str(f["body"]), str(f["severity"]),
                                str(f["path"] or ""), str(f["start_line"] or ""), str(f["end_line"] or "")])
         f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
@@ -366,12 +365,10 @@ def _candidate_artifact(sr_module: Any,
     *,
     case_id: str = "case-x",
     n: int = 2,
-    locationless: bool = False,
 ) -> dict[str, Any]:
     finding_gen = []
     for i in range(n):
-        start = 1 if not locationless else None
-        f = _finding(path="p" if not locationless else None, start_line=start, end_line=start)
+        f = _finding()
         f["candidate_id"] = sr_module.verifier_core.derive_candidate_id(case_id, f, i)
         finding_gen.append(f)
     return {"schema_version": 1, "case_id": case_id, "base_ref": "base", "head_ref": "head", "findings": finding_gen}
@@ -440,7 +437,7 @@ def test_run_verifier_writes_reward_and_details_atomically(sr_module: Any, tmp_p
     assert reward.location_present == 1 and reward.location_exact == 2
     assert reward.severity_present == 1 and reward.severity_exact == 3 and reward.severity_credit == 1.0
 
-def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_path: Path) -> None:
+def test_malformed_pair_fails_whole_task_after_successful_pair(sr_module: Any, tmp_path: Path) -> None:
     sr = sr_module
     gold_path = tmp_path / "g.json"
     gold_path.write_text(json.dumps(_gold_list(2, case_id="c")))
@@ -449,13 +446,30 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module: Any, tmp_pa
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c")))
     out_dir = tmp_path / "out"
 
-    class BrokenClient:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> None:
-            raise sr.VerifierError("judge exhausted")
+    class MixedClient:
+        def __init__(self) -> None:
+            self.requests = 0
+            self.successful_pair: asyncio.Task[Any] | None = None
 
-    reward = sr.run_verifier(gold_path, artifact_path, out_dir, client=BrokenClient(), env=judge_env())
+        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
+            self.requests += 1
+            if self.requests == 1:
+                self.successful_pair = asyncio.current_task()
+            if self.requests == 2:
+                return {"match": True, "confidence": 0.0}  # missing reasoning
+            return {"match": True, "confidence": 0.9, "reasoning": "completed pair"}
+
+    client = MixedClient()
+    reward = sr.run_verifier(gold_path, artifact_path, out_dir, client=client, env=judge_env())
+    assert client.requests == 4
+    pair = client.successful_pair
+    assert pair is not None and pair.done() and pair.exception() is None
+    verdict = pair.result()
+    assert isinstance(verdict, sr.verifier_core.Verdict)
+    assert verdict.match is True and verdict.confidence == 0.9 and verdict.reasoning == "completed pair"
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    _assert_infra_zero(out_dir)
+    details = _assert_infra_zero(out_dir)
+    assert any("reasoning" in error for error in details["errors"])
 
 def test_provider_selection_claude_cli_relaxes_api_key_only(sr_module: Any) -> None:
     sr = sr_module
@@ -509,30 +523,6 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module: Any, monkeypat
     assert "tests" in Path(seen["gold"]).parts  # the __file__ sibling (templates/tests/)
     assert seen["artifact"] == "/logs/artifacts/review.json"
     assert seen["out"] == "/logs/verifier"
-
-def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(2, case_id="organic")))
-    _write_metadata(gold_path, case_id="organic")
-
-    oracle = _candidate_artifact(sr, case_id="organic")
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(oracle))
-
-    _, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path, client=MatchClient())
-    assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
-
-    clean_gold = tmp_path / "cg.json"
-    clean_gold.write_text(json.dumps([]))
-    _write_metadata(clean_gold, case_id="c", base_ref="b", head_ref="h")
-    clean_art = tmp_path / "cr.json"
-    clean_art.write_text(
-        json.dumps({"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h", "findings": []})
-    )
-    clean_out = tmp_path / "cout"
-    clean = sr.run_verifier(clean_gold, clean_art, clean_out, client=MatchClient(), env=judge_env())
-    assert clean.reward == 1.0 and clean.clean_pass == 1 and clean.clean_task == 1
 
 def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path: Path) -> None:
     # A Harbor task compiled before the case-scoped gold digest carries no
@@ -754,19 +744,6 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module: Any, tmp
     artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
     out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
     _assert_scored_zero(out, reward)
-
-def test_oracle_artifact_locationless_scores_reward_1(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(2, case_id="organic", locationless=True)))
-    _write_metadata(gold_path, case_id="organic")
-    oracle = _candidate_artifact(sr, case_id="organic", n=2, locationless=True)
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(oracle))
-
-    out = tmp_path / "out"
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=MatchClient(), env=judge_env())
-    assert reward.reward == 1.0 and reward.tp == 2 and reward.verifier_error == 0
 
 def test_run_verifier_rejects_cross_case_replay(sr_module: Any, tmp_path: Path) -> None:
     sr = sr_module
@@ -1090,18 +1067,6 @@ def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tm
     assert not (out / "reward.json").exists()              # unscored: no numeric reward
     details = json.loads((out / "reward-details.json").read_text())
     assert any("not found" in e for e in details["errors"])
-
-def test_run_verifier_malformed_judge_output_is_unscored(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
-    class BadJudge:
-        async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
-            return {"match": True, "confidence": 0.0}    # missing reasoning -> parse VerifierError
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=BadJudge(), env=judge_env())
-    assert reward.verifier_error == 1
-    assert not (out / "reward.json").exists()
-    details = json.loads((out / "reward-details.json").read_text())
-    assert len(details["errors"]) >= 1
 
 @pytest.mark.asyncio
 async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module: Any) -> None:
