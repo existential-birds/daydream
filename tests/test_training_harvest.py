@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -351,27 +352,72 @@ def test_cli_capture_only_enrichment_preserves_semantic_history_and_human_preced
     assert effective["disposition"] == "accepted" and previous["disposition"] == "rejected"
 
 
-@pytest.mark.parametrize("reply_id", [None, "101", 0, True])
 def test_cli_invalid_reply_binding_is_row_isolated_without_fabricating_content(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply_id: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    store = store_run(tmp_path / "records", "one")
-    store_run(store.root, "two", number=2)
-    original = store.read_records()["runs"]
-    first = github(store, ("applied",), run_id="one")
-    second = github(store, ("applied",), run_id="two")
-
+    """One acquired population retains valid siblings without masking each row's rejection reason."""
+    run_ids = [
+        "missing-id", "string-id", "zero-id", "bool-id", "404", "422", "401", "500",
+        "open", "closed", "merged", "reviewer",
+    ]
+    responses: dict[str, Any] = {}
+    for number, run_id in enumerate(run_ids, 1):
+        store = store_run(tmp_path / "records", run_id, number=number)
+        base = f"repos/owner/repo/pulls/{number}"
+        responder = github(store, run_id=run_id)
+        for suffix in ("", "/comments", "/reviews"):
+            responses[base + suffix] = responder("owner/repo", base + suffix)
+    for number, reply_id in enumerate((None, "101", 0, True), 1):
+        endpoint = f"repos/owner/repo/pulls/{number}/comments"
+        responses[endpoint] = github(store, ("applied",), run_id=run_ids[number - 1])("owner/repo", endpoint)
+        responses[endpoint][1]["id"] = reply_id
+    for number, status in ((5, 404), (6, 422), (7, 401), (8, 500)):
+        responses[f"repos/owner/repo/pulls/{number}"] = git_ops.GitError(f"HTTP {status}")
+    for number, state in ((9, "open"), (10, "closed")):
+        responses[f"repos/owner/repo/pulls/{number}"].update(merged=False, state=state)
+    reviewer = "repos/owner/repo/pulls/12"
+    responses[reviewer + "/comments"] = github(store, ("applied",), run_id="reviewer")(
+        "owner/repo", reviewer + "/comments",
+    )
+    responses[reviewer + "/reviews"] = git_ops.GitError("HTTP 503")
     def request(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        result = (first if "/pulls/1" in endpoint else second)(repo, endpoint, **kwargs)
-        if endpoint.endswith("/1/comments"):
-            return [result[0], {**result[1], "id": reply_id}]
+        result = responses[endpoint]
+        if isinstance(result, Exception):
+            raise result
         return result
-
+    original = store.read_records()["runs"]
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("COLUMNS", "240")
     monkeypatch.setattr(git_ops, "gh_api", request)
-    assert harvest_cli(store, tmp_path / "cache") == 1
-    judgments = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "finding-judgment"]
-    assert len(judgments) == 1 and judgments[0]["run_id"] == "two"
-    assert judgments[0]["reply_captures"][0]["source_reply_id"] == "101"
+    assert harvest_cli(store, cache) == 1
+    output = " ".join(capsys.readouterr().out.split())
+    assert str({
+        "considered": 12, "annotated": 6, "would_annotate": 0, "skipped": 0, "errors": 6, "aborted": 0,
+    }) in output
+    invalid = "ValueError: acquired reply has missing or invalid source reply ID"
+    assert {run_id: reason.strip() for run_id, reason in re.findall(
+        r"harvest: session (\S+) failed: ([^│]+)", output,
+    )} == {
+        "missing-id": invalid, "string-id": invalid, "zero-id": invalid, "bool-id": invalid,
+        "401": "GitError: HTTP 401", "500": "GitError: HTTP 500",
+    }
+    history = store.read_records()["observations"]
+    annotations = {o["run_id"]: o["payload"]["annotation"] for o in history
+                   if o["payload"]["type"] == "harvest-annotation"}
+    merge_time, reply_time = "2026-10-04T13:00:00Z", "2026-10-04T11:00:00Z"
+    assert {run_id: (a["labels"], a["pr_state"], a["has_posterior"], a["valid_at"])
+            for run_id, a in annotations.items()} == {
+        "404": ([], None, False, None), "422": ([], None, False, None),
+        "open": ([], "open", False, None), "closed": ([], "closed", False, None),
+        "merged": ([], "merged", False, merge_time), "reviewer": (["accepted"], "merged", True, reply_time),
+    }
+    judgments = {o["run_id"]: o for o in history if o["payload"]["type"] == "finding-judgment"}
+    assert len(history) == 12 and set(judgments) == {"404", "422", "open", "closed", "merged", "reviewer"}
+    assert [(c["source_reply_id"], c["text"]) for c in judgments["reviewer"]["reply_captures"]] == [("101", "applied")]
+    assert {o["valid_at"] for o in history if o["run_id"] == "merged"} == {merge_time}
+    assert sorted(json.loads(line)["session_id"] for line in (cache / "progress.jsonl").read_text().splitlines()) == [
+        "404", "422", "closed", "merged", "open", "reviewer",
+    ]
     assert store.read_records()["runs"] == original
 
 
@@ -407,27 +453,6 @@ def test_cli_interruption_keeps_captured_replies_and_resumes_remaining_rows(
     frozen = store.read_records()
     assert harvest_cli(store, cache) == 0 and store.read_records() == frozen
     assert store.read_records()["runs"] == original
-
-
-@pytest.mark.parametrize("state", ["open", "closed", "merged"])
-def test_pr_state_never_infers_acceptance_from_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
-) -> None:
-    store = store_run(tmp_path / "records")
-    monkeypatch.setattr(git_ops, "gh_api", github(store, state=state))
-    assert harvest_cli(store, tmp_path / "cache") == 0
-    annotations = [
-        o["payload"]["annotation"]
-        for o in store.read_records()["observations"]
-        if o["payload"]["type"] == "harvest-annotation"
-    ]
-    assert len(annotations) == 1
-    annotation = annotations[0]
-    assert annotation["labels"] == [] and annotation["pr_state"] == state
-    assert annotation["valid_at"] == ("2026-10-04T13:00:00Z" if state == "merged" else None)
-    if state == "merged":
-        # With no decisive reply anywhere in this PR, both durable envelopes use merge time.
-        assert {row["valid_at"] for row in store.read_records()["observations"]} == {"2026-10-04T13:00:00Z"}
 
 
 def test_harvest_record_idempotence_policy_bump_and_dry_run(
@@ -660,49 +685,6 @@ def test_cli_orphan_relink_is_enrichment_without_rewriting_capture(
         o["payload"]["annotation"]["labels"] for o in history if o["payload"]["type"] == "harvest-annotation"
     ) == ["accepted"]
     assert store.read_records()["runs"] == original
-
-
-@pytest.mark.parametrize(("status", "expected_exit"), [(404, 0), (422, 0), (401, 1), (500, 1)])
-def test_cli_pr_absence_degrades_unknown_but_auth_and_outage_fail(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, expected_exit: int
-) -> None:
-    store = store_run(tmp_path / "records")
-
-    def request(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        raise git_ops.GitError(f"HTTP {status}")
-
-    monkeypatch.setattr(git_ops, "gh_api", request)
-    assert harvest_cli(store, tmp_path / "cache") == expected_exit
-    annotations = [
-        o["payload"]["annotation"]
-        for o in store.read_records()["observations"]
-        if o["payload"]["type"] == "harvest-annotation"
-    ]
-    if expected_exit:
-        assert annotations == []
-    else:
-        assert len(annotations) == 1 and annotations[0]["labels"] == [] and not annotations[0]["has_posterior"]
-
-
-def test_cli_reviewer_lookup_error_keeps_decisive_reply_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = store_run(tmp_path / "records")
-    responder = github(store, ("applied",))
-
-    def request(repo: str, endpoint: str, **kwargs: Any) -> Any:
-        if endpoint.endswith("/reviews"):
-            raise git_ops.GitError("HTTP 503")
-        return responder(repo, endpoint, **kwargs)
-
-    monkeypatch.setattr(git_ops, "gh_api", request)
-    assert harvest_cli(store, tmp_path / "cache") == 0
-    annotation = next(
-        o["payload"]["annotation"]
-        for o in store.read_records()["observations"]
-        if o["payload"]["type"] == "harvest-annotation"
-    )
-    assert annotation["labels"] == ["accepted"] and annotation["has_posterior"]
 
 
 @pytest.mark.parametrize("landed", [True, False])

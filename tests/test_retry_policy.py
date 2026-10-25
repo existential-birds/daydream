@@ -164,6 +164,8 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pyte
     ("message", "expected"),
     [
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0, id="zero-string"),
+        pytest.param('429: {"metadata":{"headers":{"Other":"5","Retry-After":-1}}}', None,
+                     id="no-admissible-header"),
         pytest.param('429: {"metadata":{"headers":"nope"}}', None, id="headers-not-mapping"),
         pytest.param('429: {"metadata":"nope"}', None, id="metadata-not-mapping"),
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"10"}', None, id="malformed-json"),

@@ -156,6 +156,11 @@ async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> N
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_reader=stderr)
 
 
+async def test_process_failure_without_stderr_reports_absent_diagnostics() -> None:
+    with pytest.raises(OspreyError, match="return code 1: no diagnostic output captured"):
+        await _collect(OspreyBackend(osprey_binary="fake"), osprey_session(), returncode=1)
+
+
 async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
     lines = osprey_session()
     events, _ = await asyncio.wait_for(

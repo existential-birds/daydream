@@ -5,7 +5,7 @@ import math
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import pytest
 
@@ -22,7 +22,6 @@ from daydream.eval.analyzer import (
     analyze_quality,
     analyze_session,
     analyze_shipped_duplication,
-    analyze_training_signals,
 )
 from daydream.eval.quality import _quality_python_parser
 from daydream.git_ops import GitError
@@ -75,57 +74,50 @@ def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
     assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
 
 
-def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
-    result = analyze_training_signals({"main": None, "forked": [{"_source_file": "deep-python.json", "steps": steps}]},
-    )
-    return cast(list[str], result["trajectories"][0]["noise_flags"])
+def test_training_signals_preserve_independent_fork_outcomes_in_archive(tmp_path: Path, archive_dir: Path) -> None:
+    from daydream.run_config import RunConfig
+    from tests.test_archive_integration import _finalize_strict_archive
 
+    call = {"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}
+    step = {"step_id": 1, "tool_calls": [call]}
+    completed = {"source_call_id": "call-1", "content": "output"}
+    population: dict[str, list[dict[str, Any]]] = {
+        "failed": [step | {"observation": {"results": [completed | {"extra": {"is_error": True}}]}}],
+        "interrupted": [step | {"observation": {"results": [completed | {"extra": {"status": "interrupted"}}]}}],
+        "cancelled": [step | {"observation": {"results": [completed | {"extra": {"cancelled": True}}]}}],
+        "unpaired": [step | {"observation": {"results": [{"source_call_id": None, "content": "interrupted",
+            "extra": {"is_error": True, "status": "interrupted"}}]}}],
+        "step-local": [step, {"step_id": 2,
+            "observation": {"results": [completed | {"extra": {"is_error": False}}]}}],
+        "explicit-unmatched": [{"step_id": 1, "extra": {"unmatched_tool_results": ["another"]}}],
+        "legacy-missing": [step | {"observation": {"results": [completed]}}],
+        "legacy-empty": [step | {"observation": {"results": [completed | {"extra": {}}]}}],
+        "legacy-error-string": [step | {"observation": {"results": [completed | {"extra": {"is_error": "true"}}]}}],
+        "legacy-cancel-int": [step | {"observation": {"results": [completed | {"extra": {"cancelled": 1}}]}}],
+        "legacy-list": [step | {"observation": {"results": [completed | {"extra": []}]}}],
+    }
+    target = tmp_path / "workspace"
+    target.mkdir()
+    recorder = make_recorder(target, session_id="training-outcomes")
+    root = _root_trajectory(recorder.session_id)
+    snapshot = _snapshot(root, *(
+        root | {"_source_file": f"{name}.json", "trajectory_id": name, "steps": steps}
+        for name, steps in population.items()
+    ))
+    _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), target)
+    result = json.loads((archive_dir / "runs/training-outcomes/evaluation.json").read_text())["training_signals"]
+    assert {row["trajectory"]: (row["noise_flags"], row["training_quality"]) for row in result["trajectories"]} == {
+        "failed": (["failed_tool_result"], "review"),
+        "interrupted": (["incomplete_tool_call"], "review"),
+        "cancelled": (["incomplete_tool_call"], "review"),
+        "unpaired": (["incomplete_tool_call"], "review"),
+        "step-local": (["incomplete_tool_call", "unmatched_tool_result"], "review"),
+        "explicit-unmatched": (["unmatched_tool_result"], "review"),
+        "legacy-missing": ([], "clean"), "legacy-empty": ([], "clean"), "legacy-error-string": ([], "clean"),
+        "legacy-cancel-int": ([], "clean"), "legacy-list": ([], "clean"),
+    }
+    assert (result["total_trajectories"], result["clean_for_training"], result["needs_review"]) == (11, 5, 6)
 
-@pytest.mark.parametrize(("result_extra", "expected"),
-    [({"is_error": True}, "failed_tool_result"), ({"status": "interrupted"}, "incomplete_tool_call"),
-        ({"cancelled": True}, "incomplete_tool_call"),
-    ],
-)
-def test_training_flags_linked_tool_failures(result_extra: dict[str, Any], expected: str) -> None:
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
-            "observation": {"results": [{"source_call_id": "call-1", "content": "output", "extra": result_extra}]},
-        }
-    ]
-    assert _training_flags(steps) == [expected]
-
-
-def test_training_flags_unpaired_calls_and_null_interrupted_marker_once() -> None:
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
-            "observation": {"results": [{"source_call_id": None, "content": "interrupted",
-                        "extra": {"is_error": True, "status": "interrupted"},
-                    }
-                ]
-            },
-        }
-    ]
-    assert _training_flags(steps) == ["incomplete_tool_call"]
-
-
-def test_training_correlations_are_step_local_and_detect_unmatched_results() -> None:
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "same", "function_name": "Read", "arguments": {}}]},
-        {"step_id": 2,
-            "observation": {"results": [{"source_call_id": "same", "content": "late", "extra": {"is_error": False}}]
-            }, "extra": {"unmatched_tool_results": ["another"]},
-        },
-    ]
-    assert _training_flags(steps) == ["incomplete_tool_call", "unmatched_tool_result"]
-
-
-@pytest.mark.parametrize("legacy_extra", [None, {}, {"is_error": "true"}, {"cancelled": 1}, []])
-def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(legacy_extra: Any,) -> None:
-    result: dict[str, Any] = {"source_call_id": "call-1", "content": "ok"}
-    if legacy_extra is not None:
-        result["extra"] = legacy_extra
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "read", "arguments": {}}],
-            "observation": {"results": [result]},
-        }
-    ]
-    assert _training_flags(steps) == []
 
 
 def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:

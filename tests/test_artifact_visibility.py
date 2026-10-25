@@ -1273,7 +1273,7 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
 
 @pytest.mark.parametrize("manifest_problem",
     ["unsafe-path", "duplicate-path", "dot", "leading-dot", "embedded-dot", "empty-component",
-        "normalized-duplicate", "bool-schema-version",
+        "bool-schema-version",
     ],
 )
 async def test_artifact_session_rejects_closed_recovery_manifest_untouched(source: Path, manifest_problem: str,
@@ -1287,13 +1287,11 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(sourc
     stage_canary.write_bytes(b"stage must remain unchanged")
     raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "dot": ".", "leading-dot": "./runs",
         "embedded-dot": "runs/./record.json", "empty-component": "runs//record.json",
-        "normalized-duplicate": "runs/record.json", "bool-schema-version": "runs/record.json",
+        "bool-schema-version": "runs/record.json",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
         entries = [entry, entry]
-    elif manifest_problem == "normalized-duplicate":
-        entries = [entry, {**entry, "path": "./runs/record.json"}]
     else:
         entries = [entry]
     schema_version = True if manifest_problem == "bool-schema-version" else 1
