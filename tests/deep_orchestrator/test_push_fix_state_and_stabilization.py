@@ -245,7 +245,9 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", _actionable)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _no_test)
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (evidence,)),)
+    test_result = TestAndHealResult(True, 0, True, False, (evidence,))
+    assert test_result.repairs == ()
+    result = await finalize_retained_tree_after_test(ctx, test_result)
 
     if prior_verdict in {"unresolved", "wrong_target"} and final_verdict != "regressed":
         assert result is None

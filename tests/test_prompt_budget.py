@@ -7,17 +7,9 @@ import pytest
 
 from daydream.backends.pi import PiBackend
 from daydream.prompt_budget import (
-    INLINE_DIFF_BUDGET_BYTES,
     SanctionedInputUnavailable,
-    fits_inline_diff_budget,
     prepare_sanctioned_inputs,
 )
-
-
-def test_inline_diff_budget_uses_utf8_bytes() -> None:
-    assert fits_inline_diff_budget("x" * INLINE_DIFF_BUDGET_BYTES)
-    assert not fits_inline_diff_budget("x" * (INLINE_DIFF_BUDGET_BYTES + 1))
-    assert not fits_inline_diff_budget("あ" * (INLINE_DIFF_BUDGET_BYTES // 2))
 
 
 def test_pi_diff_reference_has_separate_admission_and_no_finalization_capture(tmp_path: Path) -> None:

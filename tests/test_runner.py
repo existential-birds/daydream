@@ -1338,7 +1338,10 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     assert all(attempt["kind"] == "host" and not attempt["passed"] for attempt in verdict["attempts"])
     assert len(verdict["repairs"]) == 1
     # The single bounded repair turn ran on the FIX-configured backend, never on TEST.
-    assert "Analyze the failures and fix them" in repair_backend.prompts[0]
+    repair = repair_backend.prompts[0]
+    assert "Analyze the failures and fix them" in repair and "CONCISE MODE" not in repair
+    assert all(value in repair.lower() for value in ("generated", "migration", "package manifests", "lockfile update"))
+    assert repair_backend.read_only_calls == [False]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
 
 @pytest.mark.parametrize(

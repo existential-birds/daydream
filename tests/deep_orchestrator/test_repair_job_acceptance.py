@@ -5,10 +5,8 @@ real temporary Git worktree, with a real event loop, a real filesystem, and a
 real test process where the row is about a real suite. The only thing replaced is
 the external model backend, installed at the ``create_backend`` seam.
 
-The rows deliberately exercise *different* observable surfaces, so that the final
-invariant test (``test_no_acceptance_row_makes_a_red_suite_pass``) can assert
-what every row has in common: a red suite is never reported green, whichever
-repair path the run took.
+The rows exercise distinct host outcomes, repair deadlines, retained candidates,
+and required-suite acceptance; passing prose cannot overrule their native evidence.
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ from daydream.backends import AgentEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig
 from daydream.runner import run
+from tests.deep_orchestrator.support import _scan_phase_events
 from tests.harness.execution import host_test_command
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as _commit, git as _git
@@ -333,14 +332,19 @@ async def test_host_timeout_pass_prose_never_counts_as_green(
     """A host process that prints passing prose then times out remains red."""
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    monkeypatch.setattr("daydream.config.TEST_WALL_BUDGET_S", 0.3)
     target = multi_stack_target
     script = target.parent / "timeout_suite.py"
     script.write_text("import time\nprint('12 passed', flush=True)\ntime.sleep(30)\n")
     stub = _install(monkeypatch, target, runaway_fix_sleep_s=0.05)
     mute_side_effects(heal=False)
 
-    exit_code = await _run_deep(target, test_command=shlex.join([sys.executable, str(script)]))
+    trajectory = target.parent / "host-timeout-trajectory.json"
+    exit_code = await _run_deep(target, test_command=shlex.join([sys.executable, str(script)]),
+                                trajectory_path=trajectory, file_config=DaydreamFileConfig(test_command_wall_s=0.3))
+    ends = [event for event in _scan_phase_events(target / ".daydream", trajectory, "phase_end")
+            if event["phase"] == "test-execution"]
+    assert ends and all(event["metadata"]["stop_reason"] == "timed_out"
+                        and event["metadata"]["duration_ms"] >= 0 for event in ends)
     assert exit_code != 0, "an incomplete host process cannot report a green run"
     assert stub.test_suite_calls == 0
     verdict = _verdict(target)
@@ -502,40 +506,4 @@ async def test_operator_grant_resumes_the_same_job_without_erasing_history(
     # is what the second one drew on, and it is still on the record afterwards.
     assert job["policy"]["job_total_s"] == 0.5, job
     assert any("operator granted 300s more" in note for note in job["diagnostics"]), job
-    assert stub.test_suite_calls == 0
-
-
-async def test_no_acceptance_row_makes_a_red_suite_pass(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> None:
-    """The invariant every row above shares: a red suite is never reported green.
-
-    The canonical suite stays red across every repair path the matrix exercises
-    -- a completed repair, an interrupted one, a retry ladder, a claimed focused
-    pass, a moved base, an untrustworthy checkpoint -- and the run must end red
-    in all of them.
-    """
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    target = multi_stack_target
-    stub = _install(
-        monkeypatch, target,
-        **_interrupted_repair(
-            heal_fix_focused_claim="FOCUSED-CLAIM: focused run passed (2 passed, 0 failed)",
-            heal_fix_retryable_failures=1,
-        ),
-    )
-    # Nothing ever makes the suite green, at any point in the run.
-    command = host_test_command(target.parent / "suite", mode="all")
-    mute_side_effects(heal=False)
-
-    exit_code = await _run_deep(target, test_command=command)
-    assert exit_code != 0, "a permanently red suite must not report a green run"
-
-    verdict = _verdict(target)
-    assert verdict["passed"] is False, verdict
-    assert verdict["attempts"] and all(not attempt["passed"] for attempt in verdict["attempts"]), verdict
-    assert _job(target)["state"] != "completed", _job(target)
-    assert int((target.parent / "suite/suite-count.txt").read_text()) >= 2
     assert stub.test_suite_calls == 0

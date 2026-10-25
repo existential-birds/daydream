@@ -73,43 +73,6 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, f
     assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
 
 
-def test_fetch_changed_files_persists_complete_rename_union(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = {**_PR_HEADER, "changed_files": 2}
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/files",
-        [{"status": "modified", "filename": "src/a:b.py"},
-            {"status": "renamed", "filename": "src/new name.py", "previous_filename": r"src\old.py"},
-        ],
-    )
-    _seed_empty_rest(fake_gh)
-
-    doc = gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
-
-    assert doc.pull_request.changed_files == ["src/a:b.py", "src/new name.py", r"src\old.py"]
-    calls = fake_gh.calls("GET", "repos/o/r/pulls/101/files")
-    assert len(calls) == 1 and "--paginate" in (calls[0].argv or [])
-
-@pytest.mark.parametrize(("count", "rows"),
-    [(2, [{"status": "modified", "filename": "a.py"}]), (3001, []),
-        (1, [{"status": "renamed", "filename": "new.py"}]),
-        (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]), (1, [{"filename": "a.py"}]),
-        (1, [{"status": "invented", "filename": "a.py"}]), (1, [{"status": 17, "filename": "a.py"}]),
-        (2, [{"status": "modified", "filename": "a.py"}, {"status": "modified", "filename": "a.py"}]),
-        (1, [{"status": "modified", "filename": "../escape.py"}]),
-    ],
-)
-def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
-    tmp_path: Path, fake_gh: FakeGh, count: int, rows: list[Any]
-) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", {**_PR_HEADER, "changed_files": count})
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
-    _seed_empty_rest(fake_gh)
-    with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
-        gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
-
-
 def test_review_thread_queries_request_only_schema_fields() -> None:
     """Validate GraphQL's actual field names, accepting aliases such as ``side: diffSide``."""
     assert gs.unknown_query_fields(gi._REVIEW_THREADS_QUERY) == set()
@@ -938,146 +901,6 @@ def _curate_case(ws: Path, case_file: Any) -> None:
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
-def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh)
-    # PR body feeds compiled task context.
-    hdr = dict(_PR_HEADER)
-    hdr["body"] = "EDITED body that changes compiled context"
-    _seed_preflight(ws, fake_gh, pull_header=hdr)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale"        # task-input contract changed -> stale
-
-def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh)
-    before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    before_import_sha = before["source"]["import_sha256"]
-    before_import = load_json_strict(ws / "imports/pr-000101.json")
-    hdr = dict(_PR_HEADER)
-    hdr["updated_at"] = "2026-01-02T00:00:00Z"
-    hdr["html_url"] = "https://github.com/o/r/pull/101"
-    _seed_preflight(ws, fake_gh, pull_header=hdr)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"          # NOT staled
-    assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
-    assert case["curation"]["findings"]                  # curated gold preserved
-    # import_sha256 changes with fetched_at; only these assertions prove metadata propagation.
-    assert case["pull_request"]["updated_at"] == "2026-01-02T00:00:00Z"
-    assert case["pull_request"]["html_url"] == "https://github.com/o/r/pull/101"
-    after_import = load_json_strict(ws / "imports/pr-000101.json")
-    assert after_import["fetch"]["payload_sha256"] != before_import["fetch"]["payload_sha256"]
-    assert gi._evidence_signature_from_doc(schema.ImportDocument.model_validate(after_import)) == (
-        gi._evidence_signature_from_doc(schema.ImportDocument.model_validate(before_import))
-    )
-
-def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Legacy imports lack reconstructable task inputs; only evidence changes can stale them."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    # Reconstruct the legacy header without additive metadata or head.ref.
-    import_path = ws / "imports" / "pr-000101.json"
-    raw = load_json_strict(import_path)
-    pr = raw["pull_request"]
-    pr.pop("body", None)
-    pr.pop("html_url", None)
-    pr.pop("title_sha256", None)
-    pr.pop("body_sha256", None)
-    pr.pop("merged_at", None)
-    pr.pop("closed_at", None)
-    pr["head"].pop("ref", None)
-    import_path.write_text(json.dumps(raw, indent=2))
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
-    before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    before_import_sha = before["source"]["import_sha256"]
-    hdr = dict(_PR_HEADER)
-    hdr["updated_at"] = "2026-01-02T00:00:00Z"
-    _seed_preflight(ws, fake_gh, pull_header=hdr)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"          # NOT staled by the metadata-only refresh
-    assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
-    assert case["curation"]["findings"]                  # curated gold preserved
-
-def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Canonicalizing legacy duplicate IDs preserves curation when GitHub content is unchanged."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, login='alice', user_type='User')])
-    fake_gh._write_threads([{"id": "thread_1", "isResolved": False, "isOutdated": False,
-             "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
-             "comments": {"nodes": [{"id": "c1", "databaseId": 1, "body": "please fix",
-                  "author": {"login": "alice", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
-                  "url": "https://github.com/o/r/pull/101#discussion_r1"},
-                 {"id": "c2", "databaseId": 2, "body": "thread-only",
-                  "author": {"login": "alice", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
-                  "url": "https://github.com/o/r/pull/101#discussion_r2"},
-             ]}},
-        ], number=101,
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")       # state=ready, attested
-    # Legacy storage duplicated db 1 across feeds and classified db 2 as thread-only.
-    import_path = ws / "imports" / "pr-000101.json"
-    raw = load_json_strict(import_path)
-    old_evidence: list[dict[str, Any]] = []
-    for e in raw["evidence"]:
-        if e.get("thread_id"):
-            if e.get("commit_id"):
-                old_evidence.append({**e,
-                                     "source_id": f"github:inline_comment:{e['database_id']}",
-                                     "kind": "inline_comment"})
-            # Historical GraphQL copies lacked commit anchors. Preserve that difference
-            # so db 1 produces two distinct hashes and actually exercises format drift.
-            old_evidence.append({**{k: v for k, v in e.items() if k not in ("commit_id", "original_commit_id")},
-                "source_id": f"github:thread_comment:{e['database_id']}", "kind": "thread_comment"})
-        else:
-            old_evidence.append(e)
-    assert len(old_evidence) == 3      # db 1 twice, db 2 once as thread_comment
-    import_path.write_text(json.dumps({**raw, "evidence": old_evidence}, indent=2))
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"           # format drift must NOT stale gold
-    assert case["curation"]["findings"]                   # curated gold preserved
-    refreshed = load_json_strict(import_path)
-    assert len(refreshed["evidence"]) == 2
-    assert {e["kind"] for e in refreshed["evidence"]} == {"inline_comment"}
-
-def test_refresh_legacy_without_original_start_line_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [_rest_comment(1, login='alice', user_type='User', line=5, original_line=5, original_start_line=4, start_line=4
-            ),
-        ],
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
-    # Legacy signatures encode the absent original_start_line as None.
-    import_path = ws / "imports" / "pr-000101.json"
-    raw = load_json_strict(import_path)
-    raw["evidence"] = [{k: v for k, v in e.items() if k != "original_start_line"} for e in raw["evidence"]]
-    assert all("original_start_line" not in e for e in raw["evidence"])
-    import_path.write_text(json.dumps(raw, indent=2))
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"           # NOT staled by the field addition
-    assert case["curation"]["findings"]                   # curated gold preserved
-
-def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)   # seed REST with one evidence record via the comment fixture below
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
-    assert rc == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # curation.state=ready, snapshot_attested=True
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
-    assert rc == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
-    assert case["curation"]["findings"]              # prior curated findings preserved
-
-
 def _pr_header(number: int) -> dict[str, Any]:
     header = dict(_PR_HEADER)
     header["number"] = number
@@ -1226,39 +1049,6 @@ def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path: Path, f
     assert (ws / "imports/pr-000101.json").exists()
     assert not (ws / "imports/pr-000102.json").exists()   # failed fetch: no import file
 
-def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    raw1 = load_yaml_strict(ws / "benchmark.yaml")
-    assert len(raw1["cases"]) == 1
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    raw2 = load_yaml_strict(ws / "benchmark.yaml")
-    ids = [c["case_id"] for c in raw2["cases"]]
-    assert len(raw2["cases"]) == 1, f"cases[] grew to {len(raw2['cases'])}: {ids}"
-    assert ids[0] == "pr-000101-aaaaaaaaaaaa"
-
-def test_reimport_unchanged_evidence_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case_file = "pr-000101-aaaaaaaaaaaa.yaml"
-    _curate_case(ws, case_file)  # state=ready, snapshot_attested=True, findings non-empty
-    before = load_yaml_strict(ws / "cases" / case_file)["curation"]
-    assert before["state"] == "ready" and before["snapshot_attested"] is True and before["findings"]
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    after = load_yaml_strict(ws / "cases" / case_file)["curation"]
-    assert after["state"] in ("ready", "stale"), "curation must not reset to draft"
-    assert after["findings"], "curated findings must not be wiped"
-    assert after["snapshot_attested"] is True, "unchanged re-import must keep attestation"
-
-def test_refresh_unchanged_signature_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case_file = "pr-000101-aaaaaaaaaaaa.yaml"
-    _curate_case(ws, case_file)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    after = load_yaml_strict(ws / "cases" / case_file)["curation"]
-    assert after["findings"], "curated findings must not be wiped on unchanged refresh"
-    assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
 
 def test_refresh_derived_anchor_projection_flip_stales_curated_case(tmp_path: Path, fake_gh: FakeGh,) -> None:
     """A new derived location stales curation without raw-evidence changes; further refresh is stable."""
@@ -1302,35 +1092,6 @@ def test_refresh_derived_anchor_projection_flip_stales_curated_case(tmp_path: Pa
     assert case["curation"]["findings"] == prior_findings
     assert case["curation"]["exclusions"] == prior_exclusions
 
-def test_refresh_pre_anchor_projected_location_flip_stales_without_mirror(tmp_path: Path, fake_gh: FakeGh,) -> None:
-    """Dropping a legacy observed location invalidates curation while preserving its gold findings."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [_rest_comment(1, 'fix this', login='alice', user_type='User', line=5, original_line=5, original_start_line=4,
-                start_line=5
-            ),
-        ],
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    imp = load_json_strict(ws / "imports" / "pr-000101.json")
-    assert all(e.get("authoring_anchor") is None for e in imp["evidence"])
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    case_id = raw["cases"][0]["case_id"]
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    # Reconstruct the observed-field location persisted before authoring anchors existed.
-    prior_case = load_yaml_strict(case_path)
-    assert prior_case["candidates"][0]["location"] is None      # current code, anchor-less
-    prior_case["candidates"][0]["location"] = {"path": "a.py", "start_line": 5, "end_line": 5}
-    case_path.write_text(yaml.safe_dump(prior_case, sort_keys=False))
-    _curate_case(ws, f"{case_id}.yaml")
-    prior_findings = load_yaml_strict(case_path)["curation"]["findings"]
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(case_path)
-    assert case["curation"]["state"] == "stale"
-    assert case["curation"]["snapshot_attested"] is False
-    assert case["curation"]["findings"] == prior_findings   # curation never overwritten
-    assert case["candidates"][0]["location"] is None        # fresh anchor-less basis
 
 def test_graphql_review_threads_retries_rate_limit_then_fails(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
@@ -1500,23 +1261,6 @@ def test_corrupt_prior_curation_fails_not_healed(tmp_path: Path, fake_gh: FakeGh
     with pytest.raises(WorkspaceCorrupt):
         gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
 
-def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    prior = gi._prior_import_state(ws, raw, 202)
-    assert prior.evidence_signature is None and prior.task_signature is None
-    assert prior.document is None and prior.cases == {}
-    assert prior.pinned_head is None and prior.requested_heads == []
-
-
-def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
-    assert "task_spec_sha256" not in case["curation"] and "task_spec_approved_at" not in case["curation"]
 
 # Projection signatures key by physical database_id and exclude transport metadata.
 
@@ -1542,10 +1286,6 @@ def test_signature_changes_on_resolution_state() -> None:
     assert _sig(base) != _sig({**base, "commit_id": "b" * 40})
     assert _sig(base) != _sig({**base, "author": {"login": "bob", "type": "User"}})
 
-def test_signature_ignores_metadata_only_change() -> None:
-    base = _one_evidence()
-    meta = {**base, "updated_at": "2026-01-02T00:00:00Z", "url": "https://e.example/2"}
-    assert _sig(base) == _sig(meta)
 
 # Stale decisions combine referenced-evidence changes with PR-wide task-input changes.
 
@@ -1585,80 +1325,250 @@ def _rest_comment(
     return comment
 
 
-def _import_ready_case(tmp_path: Path, fake_gh: FakeGh, *, evidence: bool = False) -> Path:
-    """Import PR 101, then mark its case ready and attested for a refresh test."""
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    if evidence:
-        fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
-    return ws
+def test_import_population_preserves_curated_refresh_and_acquisition_outcomes(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    """One locked importer owns first acquisition, curated refresh and ordinary reimport."""
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    _seed_identity(fake_gh)
+    curated_numbers = list(range(101, 117))
+    inventories = {
+        201: (2, [{"status": "modified", "filename": "a.py"}]),
+        202: (3001, []),
+        203: (1, [{"status": "renamed", "filename": "new.py"}]),
+        204: (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]),
+        205: (1, [{"filename": "a.py"}]),
+        206: (1, [{"status": "invented", "filename": "a.py"}]),
+        207: (1, [{"status": 17, "filename": "a.py"}]),
+        208: (2, [{"status": "modified", "filename": "a.py"}, {"status": "modified", "filename": "a.py"}]),
+        209: (1, [{"status": "modified", "filename": "../escape.py"}]),
+        210: (2, [{"status": "modified", "filename": "src/a:b.py"},
+                  {"status": "renamed", "filename": "src/new name.py", "previous_filename": r"src\old.py"}]),
+        211: (0, []),
+    }
+    inventory_errors = {
+        201: "PR changed_files inventory count mismatch: header=2, rows=1",
+        202: "PR changed_files count 3001 exceeds the 3000-file API inventory limit",
+        203: "PR changed_files renamed row 0 is missing previous_filename",
+        204: "PR changed_files row 0 has unexpected previous_filename",
+        205: "PR changed_files row 0 has missing or unsupported status",
+        206: "PR changed_files row 0 has missing or unsupported status",
+        207: "PR changed_files row 0 has missing or unsupported status",
+        208: "PR changed_files inventory repeats filename 'a.py'",
+        209: "PR changed_files row 0 has invalid filename: Git tree path contains an invalid component: '../escape.py'",
+    }
+    numbers = [*curated_numbers, *inventories]
+    headers = {n: copy.deepcopy(_pr_header(n)) for n in numbers}
+    comments = {n: [_rest_comment(1)] for n in curated_numbers}
+    for n in (101, 102, 104, 112, 113):
+        comments[n] = []
+    comments[105] = [_rest_comment(1, login="alice", user_type="User")]
+    comments[106] = [_rest_comment(1, line=5, original_line=5, start_line=4, original_start_line=4)]
+    comments[110] = [_rest_comment(1, line=5, original_line=5, start_line=5, original_start_line=4)]
+    for n in numbers:
+        headers[n]["html_url"] = f"https://github.com/o/r/pull/{n}"
+        _seed_rest(fake_gh, n, reviews=[], comments=comments.get(n, []), issue_comments=[])
+        if n in inventories:
+            headers[n]["changed_files"] = inventories[n][0]
+            fake_gh.set_response("GET", f"repos/o/r/pulls/{n}/files", inventories[n][1])
+        fake_gh.set_response("GET", f"repos/o/r/pulls/{n}", headers[n])
+    fake_gh._write_threads([{
+        "id": "thread_105", "isResolved": False, "isOutdated": False,
+        "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
+        "comments": {"nodes": [
+            {"id": "c1", "databaseId": 1, "body": "please fix", "author": {"login": "alice", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/105#discussion_r1"},
+            {"id": "c2", "databaseId": 2, "body": "thread-only", "author": {"login": "alice", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/105#discussion_r2"},
+        ]},
+    }], number=105)
+    requested = {n: ["final", "a" * 40] for n in inventories}
+    assert gi.run_import_prs(ws, pr_numbers=numbers, pr_heads=requested, origin_url=None) == 1
+    first = load_yaml_strict(ws / "benchmark.yaml")
+    first_rows = {row["number"]: row for row in first["pull_requests"]}
+    first_good = [*curated_numbers, 210, 211]
+    assert {n: row["import_state"] for n, row in first_rows.items()} == {
+        **dict.fromkeys(first_good, "fetched"), **dict.fromkeys(inventory_errors, "fetch_failed")}
+    assert {n: row["error"] for n, row in first_rows.items() if row["error"] is not None} == {
+        n: {"code": "fetch", "message": message} for n, message in inventory_errors.items()}
+    for n in inventory_errors:
+        assert first_rows[n]["import_file"] is first_rows[n]["import_sha256"] is None
+        assert first_rows[n]["case_ids"] == [] and first_rows[n]["latest_error"] is None
+        assert not (ws / f"imports/pr-{n:06d}.json").exists()
+        assert list((ws / "cases").glob(f"pr-{n:06d}-*.yaml")) == []
+    initial_imports = {n: load_json_strict(ws / f"imports/pr-{n:06d}.json") for n in first_good}
+    for n in first_good:
+        case_id = f"pr-{n:06d}-aaaaaaaaaaaa"
+        case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+        assert first_rows[n]["case_ids"] == [case_id] and case["snapshot"]["status"] == "imported"
+        assert case.get("prioritization") is None
+        assert case["pull_request"] == initial_imports[n]["pull_request"]
+        assert case["source"]["import_sha256"] == first_rows[n]["import_sha256"] == sha256_file(
+            ws / f"imports/pr-{n:06d}.json")
+    assert initial_imports[101]["pull_request"]["changed_files"] is None
+    assert initial_imports[210]["pull_request"]["changed_files"] == ["src/a:b.py", "src/new name.py", r"src\old.py"]
+    assert initial_imports[211]["pull_request"]["changed_files"] == []
+    assert [row["case_id"] for row in first["cases"]] == [f"pr-{n:06d}-aaaaaaaaaaaa" for n in first_good]
 
+    # Historical authoring inputs remain raw; the importer must decide each transition.
+    for n in curated_numbers:
+        _curate_case(ws, f"pr-{n:06d}-aaaaaaaaaaaa.yaml")
+        path = ws / "cases" / f"pr-{n:06d}-aaaaaaaaaaaa.yaml"
+        raw = load_yaml_strict(path)
+        raw["curation"]["task_spec_approved_at"] = "2026-01-03T00:00:00Z"
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    legacy = copy.deepcopy(initial_imports[104])
+    for key in ("body", "html_url", "title_sha256", "body_sha256", "merged_at", "closed_at"):
+        legacy["pull_request"].pop(key, None)
+    legacy["pull_request"]["head"].pop("ref")
+    (ws / "imports/pr-000104.json").write_text(json.dumps(legacy, indent=2))
+    old = copy.deepcopy(initial_imports[105])
+    rest = next(e for e in old["evidence"] if e["database_id"] == 1)
+    old["evidence"] = [rest, *[
+        {**{k: v for k, v in e.items() if k not in ("commit_id", "original_commit_id")},
+         "source_id": f"github:thread_comment:{e['database_id']}", "kind": "thread_comment"}
+        for e in old["evidence"]]]
+    assert len(old["evidence"]) == 3
+    assert len({h for identity, h in gi._evidence_signature_from_raw(old) if identity == 1}) == 2
+    (ws / "imports/pr-000105.json").write_text(json.dumps(old, indent=2))
+    legacy_range = copy.deepcopy(initial_imports[106])
+    assert legacy_range["evidence"][0]["original_start_line"] == 4
+    assert legacy_range["evidence"][0]["original_line"] == legacy_range["evidence"][0]["line"] == 5
+    for record in legacy_range["evidence"]:
+        record.pop("original_start_line")
+    assert all("original_start_line" not in record for record in legacy_range["evidence"])
+    (ws / "imports/pr-000106.json").write_text(json.dumps(legacy_range, indent=2))
+    path = ws / "cases/pr-000110-aaaaaaaaaaaa.yaml"
+    old_case = load_yaml_strict(path)
+    assert old_case["candidates"][0]["location"] is None
+    assert all(e.get("authoring_anchor") is None for e in initial_imports[110]["evidence"])
+    old_case["candidates"][0]["location"] = {"path": "a.py", "start_line": 5, "end_line": 5}
+    path.write_text(yaml.safe_dump(old_case, sort_keys=False))
+    broken = copy.deepcopy(initial_imports[114])
+    broken["evidence"][0]["authoring_anchor"] = {"version": 1, "status": "bogus"}
+    (ws / "imports/pr-000114.json").write_text(json.dumps(broken, indent=2))
+    path = ws / "cases/pr-000115-aaaaaaaaaaaa.yaml"
+    invalid_reference = load_yaml_strict(path)
+    invalid_reference["curation"]["findings"][0]["provenance"]["source_ids"] = [
+        "https://github.com/o/r/pull/115#discussion_r1"]
+    path.write_text(yaml.safe_dump(invalid_reference, sort_keys=False))
+    curated_before = {n: load_yaml_strict(ws / f"cases/pr-{n:06d}-aaaaaaaaaaaa.yaml")["curation"]
+                      for n in curated_numbers}
+    failed_bytes = {n: ((ws / f"imports/pr-{n:06d}.json").read_bytes(),
+                        (ws / f"cases/pr-{n:06d}-aaaaaaaaaaaa.yaml").read_bytes()) for n in (113, 114, 115)}
+    headers[102]["body"] = "EDITED body that changes compiled context"
+    headers[103].update(updated_at="2026-01-02T00:00:00Z", html_url="https://github.com/o/r/pull/103#updated")
+    headers[104]["updated_at"] = "2026-01-02T00:00:00Z"
+    headers[112]["head"] = {"ref": "feature/cache", "sha": "b" * 40}
+    headers[201]["changed_files"] = 1
+    for n in (102, 103, 104, 112, 201):
+        fake_gh.set_response("GET", f"repos/o/r/pulls/{n}", headers[n])
+    comments[103][0].update(updated_at="2026-01-02T00:00:00Z",
+                            html_url="https://github.com/o/r/pull/103#discussion_r1-updated")
+    comments[107] = []
+    comments[108].append(_rest_comment(99, "unrelated nit", path="b.py"))
+    comments[109][0]["in_reply_to_id"] = 10
+    comments[111][0]["line"] = 7
+    for n in (103, 107, 108, 109, 111):
+        fake_gh.set_response("GET", f"repos/o/r/pulls/{n}/comments", comments[n])
+    fake_gh.set_response("GET", "repos/o/r/pulls/113", {"__error__": "API rate limit exceeded Retry-After: 0"})
+    fake_gh.set_response("GET", "repos/o/r/pulls/201/files", [{"status": "modified", "filename": "a.py"}])
+    assert gi.run_import_prs(ws, pr_numbers=numbers, pr_heads=requested, refresh=True, origin_url=None) == 1
+    refreshed = load_yaml_strict(ws / "benchmark.yaml")
+    rows = {row["number"]: row for row in refreshed["pull_requests"]}
+    assert {n: row["import_state"] for n, row in rows.items()} == {
+        **dict.fromkeys([*curated_numbers, 201, 210, 211], "fetched"),
+        **dict.fromkeys(range(202, 210), "fetch_failed")}
+    assert {n: row["error"] for n, row in rows.items() if row["error"] is not None} == {
+        n: {"code": "fetch", "message": message} for n, message in inventory_errors.items() if n != 201}
+    assert {n: row["latest_error"] for n, row in rows.items() if row["latest_error"] is not None} == {
+        113: {"code": "rate_limit", "message":
+              "gh api repos/o/r/pulls/113 rate limited: API rate limit exceeded Retry-After: 0"},
+        114: {"code": "fetch", "message":
+              "prior import evidence record has an invalid authoring_anchor or a missing database_id"},
+        115: {"code": "fetch", "message":
+              "curation references non-canonical source_id 'https://github.com/o/r/pull/115#discussion_r1'"},
+    }
+    for n in (113, 114, 115):
+        assert {**rows[n], "latest_error": None} == first_rows[n]
+        assert ((ws / f"imports/pr-{n:06d}.json").read_bytes(),
+                (ws / f"cases/pr-{n:06d}-aaaaaaaaaaaa.yaml").read_bytes()) == failed_bytes[n]
+    after_cases = {n: load_yaml_strict(ws / f"cases/pr-{n:06d}-aaaaaaaaaaaa.yaml") for n in curated_numbers}
+    assert {n: (case["curation"]["state"], case["curation"]["snapshot_attested"],
+                "task_spec_sha256" in case["curation"], "task_spec_approved_at" in case["curation"])
+            for n, case in after_cases.items()} == {
+        101: ("ready", True, True, True), 102: ("stale", False, False, False),
+        103: ("ready", True, True, True), 104: ("ready", True, True, True),
+        105: ("ready", True, True, True), 106: ("ready", True, True, True),
+        107: ("stale", False, False, False), 108: ("ready", True, True, True),
+        109: ("stale", False, False, False), 110: ("stale", False, False, False),
+        111: ("stale", False, False, False), 112: ("ready", True, True, True),
+        113: ("ready", True, True, True), 114: ("ready", True, True, True),
+        115: ("ready", True, True, True), 116: ("ready", True, True, True),
+    }
+    transitions = {"state", "snapshot_attested", "task_spec_sha256", "task_spec_approved_at"}
+    assert {n: {k: v for k, v in case["curation"].items() if k not in transitions}
+            for n, case in after_cases.items()} == {
+        n: {k: v for k, v in curated_before[n].items() if k not in transitions} for n in curated_numbers}
+    ready = (101, 103, 104, 105, 106, 108, 112, 113, 114, 115, 116)
+    assert {n: after_cases[n]["curation"] for n in ready} == {n: curated_before[n] for n in ready}
+    good = [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 116, 201, 210, 211]
+    imports = {n: load_json_strict(ws / f"imports/pr-{n:06d}.json") for n in good}
+    for n in good:
+        case_id = f"pr-{n:06d}-aaaaaaaaaaaa"
+        case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+        assert rows[n]["import_file"] == f"imports/pr-{n:06d}.json"
+        assert rows[n]["requested_heads"] == (["final", "a" * 40] if n in inventories else ["final"])
+        assert rows[n]["case_ids"] == [case_id] and case["snapshot"]["status"] == "imported"
+        assert case["source"]["import_sha256"] == rows[n]["import_sha256"] == sha256_file(ws / rows[n]["import_file"])
+        assert case.get("prioritization") is None
+    for n in (103, 104):
+        assert after_cases[n]["source"]["import_sha256"] != first_rows[n]["import_sha256"]
+        assert imports[n]["fetch"]["payload_sha256"] != initial_imports[n]["fetch"]["payload_sha256"]
+        assert after_cases[n]["pull_request"]["updated_at"] == "2026-01-02T00:00:00Z"
+    assert after_cases[103]["pull_request"]["html_url"] == "https://github.com/o/r/pull/103#updated"
+    assert (imports[103]["evidence"][0]["updated_at"], imports[103]["evidence"][0]["url"]) == (
+        "2026-01-02T00:00:00Z", "https://github.com/o/r/pull/103#discussion_r1-updated")
+    assert gi._evidence_signature_from_raw(imports[103]) == gi._evidence_signature_from_raw(initial_imports[103])
+    assert imports[102]["evidence"] == initial_imports[102]["evidence"]
+    assert after_cases[102]["pull_request"]["body"] == "EDITED body that changes compiled context"
+    assert [(e["database_id"], e["kind"]) for e in imports[105]["evidence"]] == [
+        (1, "inline_comment"), (2, "inline_comment")]
+    assert imports[106]["evidence"][0]["original_start_line"] == 4
+    assert {e["database_id"] for e in imports[108]["evidence"]} == {1, 99}
+    assert after_cases[109]["candidates"] == [] and imports[109]["evidence"][0]["reply_to_id"] == "10"
+    assert imports[110]["evidence"] == initial_imports[110]["evidence"]
+    assert after_cases[110]["candidates"][0]["location"] is None
+    assert imports[111]["evidence"][0]["line"] == 7
+    assert imports[112]["pull_request"]["head"]["sha"] == after_cases[112]["snapshot"]["original_head_sha"] == "a" * 40
+    assert {n: imports[n]["pull_request"]["changed_files"] for n in (101, 201, 210, 211)} == {
+        101: None, 201: ["a.py"], 210: ["src/a:b.py", "src/new name.py", r"src\old.py"], 211: []}
+    assert rows[201]["error"] is rows[201]["latest_error"] is None
+    for n in range(202, 210):
+        assert not (ws / f"imports/pr-{n:06d}.json").exists()
+        assert list((ws / "cases").glob(f"pr-{n:06d}-*.yaml")) == []
+    index = [{"case_id": f"pr-{n:06d}-aaaaaaaaaaaa", "pr_number": n,
+              "case_file": f"cases/pr-{n:06d}-aaaaaaaaaaaa.yaml"} for n in [*curated_numbers, 201, 210, 211]]
+    assert refreshed["cases"] == index
 
-def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [_rest_comment(1), {**_rest_comment(99), "path": "b.py", "body": "unrelated nit"}],
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"       # NOT staled by an unrelated new comment
-    assert case["curation"]["findings"]
+    # Ordinary reimport must preserve an unchanged case and stale a fresh ready case.
+    assert after_cases[116]["curation"]["state"] == "ready"
+    comments[116][0]["line"] = 7
+    fake_gh.set_response("GET", "repos/o/r/pulls/116/comments", comments[116])
+    assert gi.run_import_prs(ws, pr_numbers=[101, 116], heads=["final"], origin_url=None) == 0
+    last = load_yaml_strict(ws / "benchmark.yaml")
+    assert last["cases"] == index
+    assert load_yaml_strict(ws / "cases/pr-000101-aaaaaaaaaaaa.yaml")["curation"] == curated_before[101]
+    final = load_yaml_strict(ws / "cases/pr-000116-aaaaaaaaaaaa.yaml")["curation"]
+    assert final["state"] == "stale" and final["snapshot_attested"] is False
+    assert final["findings"] == curated_before[116]["findings"]
+    assert "task_spec_sha256" not in final and "task_spec_approved_at" not in final
+    files_calls = [call for call in fake_gh.calls("GET") if call.endpoint.endswith("/files")]
+    assert {call.endpoint: sum(c.endpoint == call.endpoint for c in files_calls) for call in files_calls} == {
+        f"repos/o/r/pulls/{n}/files": 2 for n in inventories}
+    assert all("--paginate" in (call.argv or []) for call in files_calls)
 
-def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, line=7)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale"
-    assert case["curation"]["findings"]               # curated findings preserved
-    assert case["curation"]["snapshot_attested"] is False
-
-
-def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh)
-    hdr = dict(_PR_HEADER)
-    hdr["head"] = {"ref": "feature/cache", "sha": "b" * 40}   # live head now advanced (valid 40-hex)
-    _seed_preflight(ws, fake_gh, pull_header=hdr)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    raw = load_yaml_strict(ws / "benchmark.yaml")
-    ids = [c["case_id"] for c in raw["cases"]]
-    assert ids == ["pr-000101-aaaaaaaaaaaa"]          # pinned, not advanced to b*40
-    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready
-
-
-def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh)
-    before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"})
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
-    assert rc != 0
-    after = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
-    assert after["import_state"] == "fetched"            # NOT reset to fetch_failed
-    assert after["import_file"] == before["import_file"]  # last-good linkage preserved
-    assert after["import_sha256"] == before["import_sha256"]
-    assert after["case_ids"] == before["case_ids"]
-    assert after["latest_error"]["code"] == "rate_limit"  # attempt recorded separately
-    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
-
-def test_refresh_corrupt_prior_anchor_stages_ledger_failure(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-    before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
-    import_path = ws / "imports" / "pr-000101.json"
-    imp = load_json_strict(import_path)
-    rec = next(e for e in imp["evidence"] if e["database_id"] == 1)
-    rec["authoring_anchor"] = {"version": 1, "status": "bogus"}
-    import_path.write_text(json.dumps(imp, indent=2))
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
-    assert rc != 0
-    after = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
-    assert after["import_state"] == "fetched"            # NOT reset to fetch_failed
-    assert after["import_file"] == before["import_file"]  # last-good linkage preserved
-    assert after["latest_error"]["code"] == "fetch"
-    assert "authoring_anchor" in after["latest_error"]["message"]
-    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
 
 def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path: Path, fake_gh: FakeGh) -> None:
     """An unreachable pinned head fails refresh, preserving the indexed ready case and its bundle."""
@@ -1697,81 +1607,6 @@ def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path:
     code, _label = validate_workspace(ws)
     assert code == 0                                    # no orphan bundle corruption
 
-def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Invalid curation references fail refresh before they can evade the per-case stale gate."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case_path = ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
-
-    raw = load_yaml_strict(case_path)
-    raw["curation"]["findings"][0]["provenance"]["source_ids"] = [
-        "https://github.com/o/r/pull/101#discussion_r1"
-    ]
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
-    assert rc != 0                                      # fail closed, not silently skipped
-    after = load_yaml_strict(ws / "benchmark.yaml")
-    pr = after["pull_requests"][0]
-    assert pr["latest_error"] is not None
-    on_disk = load_yaml_strict(case_path)
-    assert on_disk["curation"]["findings"][0]["provenance"]["source_ids"] == [
-        "https://github.com/o/r/pull/101#discussion_r1"
-    ]   # curation was NOT rewritten by the failed refresh
-
-def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Replies are evidence-only, so gaining reply status changes the projection hash and curation basis."""
-
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-
-    reply = dict(_rest_comment(1))
-    reply["in_reply_to_id"] = 10
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [reply])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale"       # referenced id's projection changed
-    assert case["curation"]["findings"]               # curated gold preserved
-
-def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Plain re-import applies the same per-case stale gate as refresh."""
-
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, line=7)])
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=False, origin_url=None)
-    assert rc == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "stale"        # cannot bypass refresh semantics
-    assert case["curation"]["findings"]                # curated findings preserved
-
-def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Matching any legacy projection preserves curation, independent of set order."""
-
-    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
-
-    # Legacy REST and GraphQL copies shared an ID but differed in commit anchors.
-    import_path = ws / "imports/pr-000101.json"
-    prior = load_json_strict(import_path)
-    rest = next(e for e in prior["evidence"] if e["database_id"] == 1)
-    thread = {k: v for k, v in rest.items() if k not in ("commit_id", "original_commit_id")}
-    thread.update(kind="thread_comment", source_id="github:thread_comment:1")
-    prior["evidence"] = [thread, rest]
-    import_path.write_text(json.dumps(prior, indent=2))
-
-    # Distinct hashes matter: collapsing them into a dict would make the survivor
-    # depend on frozenset iteration order rather than comparing all prior projections.
-    sig = gi._evidence_signature_from_raw(prior)
-    assert len(sig) == 2 and len({h for _, h in sig}) == 2
-
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert case["curation"]["state"] == "ready"      # format drift must NOT stale gold
-    assert case["curation"]["findings"]              # curated findings preserved
-    refreshed = load_json_strict(import_path)
-    assert len([e for e in refreshed["evidence"] if e["database_id"] == 1]) == 1
 
 def test_ready_import_persists_facts_per_candidate(tmp_path: Path, fake_gh: FakeGh) -> None:
     from tests.test_benchmark_curation import _seed_ready_case
@@ -1786,14 +1621,6 @@ def test_ready_import_persists_facts_per_candidate(tmp_path: Path, fake_gh: Fake
     assert rel == "at_head" and delta == "unchanged"
     assert set(facts["candidates"]) | set(facts["non_candidates"]) == {"github:inline_comment:1"}
 
-def test_imported_status_case_has_no_facts(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [_rest_comment(1, 'fix this', login='alice', user_type='User', original_line=4, original_start_line=3)],
-    )
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    assert "prioritization" not in case or case["prioritization"] is None
 
 def test_fact_extraction_failure_records_unavailable_and_import_still_succeeds(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch

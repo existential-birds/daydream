@@ -1915,8 +1915,10 @@ def test_independent_snapshot_materializes_mixed_index_and_worktree_changes(
     tmp_path: Path,
     repo: Path,
     include_untracked: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One snapshot must preserve simultaneous path-type transitions and exact filename bytes."""
+    monkeypatch.delenv("GIT_EXEC_PATH", raising=False)
     for name in ("staged/a.txt", "staged/b.txt", "working/child.txt", "to-directory"):
         write_and_stage(repo, name, "old\n")
     for name in (" leading and trailing ", "line\nbreak"):

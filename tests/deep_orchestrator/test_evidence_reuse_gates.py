@@ -117,6 +117,7 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(repo / ".daydream" / "deep").read_text())
     gate = record["gates"]["pre-push"]
     assert gate["gate"] == "pre-push"
+    assert gate["format_version"] == 1
     assert gate["result"] == "reused"
     assert gate["reused"] is True
     assert gate["post_commit_verification_used"] is True

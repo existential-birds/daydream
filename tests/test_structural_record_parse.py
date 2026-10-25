@@ -98,19 +98,6 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     assert ctx.data["failed_stacks"] == {}
 
 
-@pytest.mark.parametrize('ordinal', [
-    '١',
-    '01',
-])
-def test_record_artifact_rejects_noncanonical_ordinals(ordinal: str) -> None:
-    from daydream.phases.review import valid_record_artifact
-    from tests.harness.review_result import records_artifact, review_coverage
-
-    coverage = review_coverage()
-    artifact = records_artifact(coverage, 'python', [{'uid': f'python:{ordinal}'}])
-    assert not valid_record_artifact(artifact, scope_id='python', analyzed_revision=coverage.revision.to_dict())
-
-
 def test_report_collection_keeps_each_scope_bound_and_optional_faults_isolated(tmp_path: Path) -> None:
     """One read acquires independent sidecars without discarding or mutating canonical siblings."""
     from daydream.deep.report_context import collect_report_context
@@ -128,12 +115,18 @@ def test_report_collection_keeps_each_scope_bound_and_optional_faults_isolated(t
         "revision",
         "run",
         "nested-sidecar",
+        "arabic-ordinal", "zero-padded-ordinal",
     ]
     coverage = review_coverage(scope_ids=["python-" + kind for kind in kinds])
     canonical, expected, raw_sidecars = {}, {}, {}
     for kind in kinds:
         scope = "python-" + kind
-        artifact = records_artifact(coverage, scope)
+        ordinal = {"arabic-ordinal": "١", "zero-padded-ordinal": "01"}.get(kind, "1")
+        artifact = records_artifact(coverage, scope, [{
+            "id": 1, "uid": f"{scope}:{ordinal}", "file": "api.py", "line": 1,
+            "description": "Boundary mismatch", "severity": "high", "confidence": "HIGH",
+            "rationale": "Shared contract", "evidence": "api.py:1",
+        }] if ordinal != "1" else [])
         records_path = tmp_path / f"stack-{scope}-records.json"
         canonical[records_path] = json.dumps(artifact)
         records_path.write_text(canonical[records_path])
@@ -185,7 +178,8 @@ def test_report_collection_keeps_each_scope_bound_and_optional_faults_isolated(t
             path = tmp_path / f"stack-{scope}-report-context.json"
             raw_sidecars[path] = raw
             path.write_text(raw)
-        assert valid_record_artifact(artifact, scope_id=scope, analyzed_revision=coverage.revision.to_dict())
+        if ordinal == "1":
+            assert valid_record_artifact(artifact, scope_id=scope, analyzed_revision=coverage.revision.to_dict())
         assert not valid_record_artifact(
             {**artifact, "review_context": context}, scope_id=scope, analyzed_revision=coverage.revision.to_dict()
         )
@@ -195,10 +189,12 @@ def test_report_collection_keeps_each_scope_bound_and_optional_faults_isolated(t
 
     assert collected["verification"] == {"status": "failed", "value": None}
     assert {entry["scope_id"]: entry["review_context"] for entry in collected["scopes"]} == expected
-    assert all(
-        entry["originating_run_id"] == coverage.run_id and entry["analyzed_revision"] == coverage.revision.to_dict()
-        for entry in collected["scopes"]
-    )
+    rejected = {"python-arabic-ordinal", "python-zero-padded-ordinal"}
+    assert {entry["scope_id"]: (entry["originating_run_id"], entry["analyzed_revision"])
+            for entry in collected["scopes"]} == {
+        scope: (None, None) if scope in rejected else (coverage.run_id, coverage.revision.to_dict())
+        for scope in expected
+    }
     assert all(path.read_text() == raw for path, raw in (canonical | raw_sidecars).items())
 
 

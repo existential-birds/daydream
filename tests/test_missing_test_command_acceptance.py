@@ -214,11 +214,17 @@ async def test_configured_runner_uses_host_exit_status(
         # The configured-command control needs no retained edit; meaningful
         # repair/checkpoint/fix controls below exercise mutating configured runs.
         backend.fix_edit_line = None
-    if source == "config":
-        (target / ".daydream.toml").write_text(f"test_command = {json.dumps(command)}\n")
+    file_command = command if source == "config" else "false"
+    (target / ".daydream.toml").write_text(
+        f"test_command = {json.dumps(file_command)}\ntest_required_suites = ['python', 'rl']\n")
     rc = await run(make_config(target, stack="python", assume="yes",
                               test_command=command if source == "cli" else None,
+                              test_required_suites=["explicit"] if source == "config" else [],
                               file_config=load_file_config(target)))
+    recipe = load_test_recipe(target / ".daydream/deep")
+    assert recipe is not None
+    assert recipe.command.value == tuple(shlex.split(command)) and recipe.command.source == source
+    assert recipe.declared == (("explicit",) if source == "config" else ("python", "rl"))
     verdict = json.loads((target / ".daydream/deep/test-verdict.json").read_text())
     assert verdict["passed"] is passed
     assert verdict["status"] == "executed"

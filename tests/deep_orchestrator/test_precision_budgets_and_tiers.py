@@ -385,7 +385,8 @@ async def test_environmental_failure_aborts_heal_loop(
     # Root and fork trajectories may project the same host event. Its durable
     # scope identity, together with the real counter, proves one execution.
     assert len({event["scope_id"] for event in executions}) == 1
-    assert all(event["metadata"]["stop_reason"] == "completed" for event in executions)
+    assert all(event["metadata"]["stop_reason"] == "completed"
+               and event["metadata"]["duration_ms"] >= 0 for event in executions)
     verdict = json.loads((run_root / "deep" / "test-verdict.json").read_text())
     assert verdict["status"] == "executed"
     assert verdict["retries"] == 0

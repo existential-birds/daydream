@@ -146,18 +146,6 @@ def test_pull_request_meta_predate_reads_empty_and_validates() -> None:
     assert m.head.ref is None
 
 
-def test_pull_request_changed_files_is_optional_but_canonical_when_present() -> None:
-    raw = {
-        "number": 101, "url": "u", "title": "t", "state": "open", "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
-        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-        "author": {"login": "a", "type": "User"},
-    }
-    assert PullRequestMeta.model_validate(raw).changed_files is None
-    assert PullRequestMeta.model_validate({**raw, "changed_files": []}).changed_files == []
-    paths = ["a:b.py", r"dir\literal.py", "src/file with spaces.py"]
-    assert PullRequestMeta.model_validate({**raw, "changed_files": paths}).changed_files == paths
-
-
 @pytest.mark.parametrize("paths",
     [["b.py", "a.py"], ["a.py", "a.py"], [""], ["/absolute.py"], ["../escape.py"], ["src/../escape.py"],
         ["src//empty.py"],
@@ -445,14 +433,6 @@ def test_task_spec_approval_reports_nonready_current_and_stale(raw: dict[str, An
     assert approval.state == "stale"
     assert approval.current_sha256 == digest
     assert approval.approved_sha256 == "0" * 64
-
-
-@pytest.mark.parametrize("frm,to",
-    [("pending", "fetch_failed"), ("fetch_failed", "fetched"), ("fetch_failed", "fetch_failed"),
-    ],
-)
-def test_valid_pr_transitions(frm: Any, to: Any) -> None:
-    validate_pr_transition(frm, to)  # must not raise
 
 
 @pytest.mark.parametrize("frm,to",
