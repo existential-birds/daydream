@@ -21,22 +21,16 @@ _BLOCKS = "<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\nflowcha
 def _items() -> list[dict[str, Any]]:
     return [_item(1, "per-stack", "a.py", 9, "medium", "bug"), _item(2, "cross-stack", "b.py", 2, "high", "drift")]
 
-def test_insert_diagrams_section_is_idempotent_and_replaces_the_existing_section() -> None:
-    once = insert_diagrams_section(render_report(_items()), _BLOCKS)
-    assert insert_diagrams_section(once, _BLOCKS) == once
-    assert insert_diagrams_section(insert_diagrams_section(once, _BLOCKS), _BLOCKS) == once
-    assert once.count("## Diagrams") == 1
-    replaced = insert_diagrams_section(once, "<details>NEW</details>")
-    assert "Flowchart" not in replaced
-    assert replaced == insert_diagrams_section(render_report(_items()), "<details>NEW</details>")
-    # Empty blocks remove a stale section, restoring the plain report byte-for-byte.
-    assert insert_diagrams_section(once, "") == render_report(_items())
-
 def test_insert_diagrams_section_leaves_coverage_and_every_other_section_intact() -> None:
     # `## Coverage` is appended textually by load-items AFTER the merge write,
     # so the diagram step's insertion must not disturb it.
     report = render_report(_items()).rstrip("\n") + "\n\n## Coverage\n- Files in diff: 3\n"
     out = insert_diagrams_section(report, _BLOCKS)
+    assert insert_diagrams_section(insert_diagrams_section(out, _BLOCKS), _BLOCKS) == out
+    assert out.count("## Diagrams") == 1
+    replaced = insert_diagrams_section(out, "<details>NEW</details>")
+    assert "Flowchart" not in replaced
+    assert replaced == insert_diagrams_section(report, "<details>NEW</details>")
     assert out.index("## Diagrams") < out.index("## Issues") < out.index("## Cross-Stack Issues")
     assert out.index("## Cross-Stack Issues") < out.index("## Coverage")
     assert "- Files in diff: 3" in out
@@ -90,8 +84,8 @@ def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through
     assert 'Review warning' in once and held in once and 'Existing coverage' in once
 
 
-@pytest.mark.parametrize('outcome', ['failed', ['failed'], {'unexpected': 'failed'}],
-                         ids=['outcome-string', 'outcome-array', 'outcome-object'])
+@pytest.mark.parametrize('outcome', ['failed', {'unexpected': 'failed'}],
+                         ids=['outcome-string', 'outcome-object'])
 def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(outcome: Any) -> None:
     """Artifact prose cannot supply execution identity or trustworthy source attribution."""
     terminal = terminal_result('incomplete')

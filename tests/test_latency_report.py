@@ -35,8 +35,10 @@ def test_attribution_counts_shipped_items_per_lens_and_reports_coverage() -> Non
     assert attribution["citations_present"] == 2
     assert attribution["citation_coverage"] == round(2 / 3, 4)
 
-def test_report_is_complete_per_profile_from_the_committed_corpus() -> None:
-    report = build_report(json.loads(_MANIFEST.read_text()))
+def test_main_emits_the_report_from_a_clean_checkout(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--corpus", str(_MANIFEST)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["profiles"]["fast"]["runs"] == 1
     assert set(report["profiles"]) == {"fast", "balanced", "forensic"}
     balanced = report["profiles"]["balanced"]
     assert balanced["phase_latency_seconds"]["wonder"]["p50"] >= 0
@@ -47,11 +49,6 @@ def test_report_is_complete_per_profile_from_the_committed_corpus() -> None:
     assert balanced["shipped_by_lens"]["wonder"] >= 1
     assert report["citations"]["coverage"] > 0
     assert report["calibration"]["surface_signals"]           # A3: the report states its signal lists
-
-def test_main_emits_the_report_from_a_clean_checkout(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--corpus", str(_MANIFEST)]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["profiles"]["fast"]["runs"] == 1
 
 def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
     """Arbiter calls use the deep phase bucket; preserve the legacy arbiter

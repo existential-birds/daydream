@@ -3,9 +3,6 @@ from typing import get_args
 from daydream import severity
 
 
-def test_canonical_levels_are_low_medium_high() -> None:
-    assert severity.CANONICAL_LEVELS == ("low", "medium", "high")
-
 def test_model_facing_levels_are_the_derived_descending_order() -> None:
     assert severity.model_facing_levels() == ("high", "medium", "low")
     # Derived, not frozen: the function tracks the declaration.
