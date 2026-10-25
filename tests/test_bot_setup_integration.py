@@ -105,17 +105,14 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(fake_gh: Fa
 def test_verify_healthy_install_passes_all_checks(
     fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The real installed-workspace doctor reports missing inventory until external repair."""
+    """The real doctor reports each incomplete installation stage until external repair."""
     pem = generate_rsa_pem()
-    monkeypatch.setenv(APP_ID_ENV, "7")
-    monkeypatch.setenv(APP_PRIVATE_KEY_ENV, pem)
     monkeypatch.setattr(bot_setup, "run_setup", lambda *a, **kw: pytest.fail("--verify must remain read-only"))
 
     fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])
     fake_gh.serve_variable_list([])
     fake_gh.serve_installations([{"account": {"login": "o"}}])
     fake_gh.set_response("GET", "/app", value={"permissions": dict(config.APP_PERMISSIONS), "slug": "acme-bot"})
-    _install_workflows(repo_with_origin, message="add workflows")
 
     assert cli_main(["setup", str(repo_with_origin), "--repo", "o/r", "--verify"]) == 1
     incomplete = " ".join(capsys.readouterr().out.replace("║", " ").split())
@@ -123,9 +120,22 @@ def test_verify_healthy_install_passes_all_checks(
     assert "gh secret set <NAME> --repo o/r" in incomplete
     assert "Missing variable DAYDREAM_BOT_HANDLE" in incomplete
     assert "gh variable set DAYDREAM_BOT_HANDLE --repo o/r" in incomplete
+    assert "Skipped: no local App credentials" in incomplete
+    assert "Missing workflow file(s):" in incomplete
+    assert all(name in incomplete for name in ("daydream-review.yml", "daydream-command.yml", "daydream-post.yml"))
+    assert "Out of date workflow file(s)" not in incomplete
+
+    _install_workflows(repo_with_origin, message="add workflows")
+    fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
+    assert cli_main(["setup", str(repo_with_origin), "--repo", "o/r", "--verify"]) == 1
+    remaining = " ".join(capsys.readouterr().out.replace("║", " ").split())
+    assert "Missing secret(s): DAYDREAM_APP_PRIVATE_KEY" in remaining
+    assert "Missing variable" not in remaining
+    assert "Missing workflow file(s)" not in remaining
 
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
-    fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
+    monkeypatch.setenv(APP_ID_ENV, "7")
+    monkeypatch.setenv(APP_PRIVATE_KEY_ENV, pem)
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     assert result.ok is True
     assert all(c.passed for c in result.checks)
