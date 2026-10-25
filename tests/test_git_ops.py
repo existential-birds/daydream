@@ -420,6 +420,12 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
                             for name in tuple(os.environ):
                                 if name.startswith("GIT_"):
                                     poison.delenv(name, raising=False)
+                            # Indexed-value faults must still reach their signing-policy check.
+                            poison.setenv("GIT_CONFIG_COUNT", "2")
+                            poison.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+                            poison.setenv("GIT_CONFIG_VALUE_0", "false")
+                            poison.setenv("GIT_CONFIG_KEY_1", "core.excludesFile")
+                            poison.setenv("GIT_CONFIG_VALUE_1", "/dev/null")
                             poison.setenv(variable, value)
                             with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
                                 git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
