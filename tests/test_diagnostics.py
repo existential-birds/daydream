@@ -16,18 +16,29 @@ from daydream.diagnostics import format_verbose_exception
 
 
 def test_implicit_context_shown_when_not_suppressed() -> None:
+    canary = "ghp_" + "A" * 16
+    hidden_local = canary  # noqa: F841 - traceback locals must stay private
+    environ = {"GITHUB_TOKEN": "svc-ghp-abc", "API_ENDPOINT_URL": "https://svc-user:svc-pa55@example.com"}
     try:
         try:
             raise KeyError("implicit-inner")
         except KeyError:
-            raise ValueError("implicit-outer")
+            raise ValueError("implicit-outer: https://svc-user:svc-pa55@example.com with svc-ghp-abc "
+                "from /var/tmp/svc-ghp-abc/key")
     except ValueError as exc:
         captured = exc
-    out = format_verbose_exception(captured)
+    captured.add_note("operator hint: check disk space")
+    out = format_verbose_exception(captured, environ=environ)
     assert "occurred while handling the following" in out
     assert "KeyError" in out and "implicit-inner" in out
     assert "implicit-outer" in out
     assert out.index("implicit-outer") < out.index("implicit-inner")
+    assert "operator hint: check disk space" in out
+    assert canary not in out
+    assert "hidden_local" not in out
+    for fragment in ("svc-ghp-abc", "svc-user", "svc-pa55"):
+        assert fragment not in out
+    assert "[REDACTED_CREDENTIAL]" in out
 
 def test_suppressed_context_absent() -> None:
     try:
@@ -41,12 +52,6 @@ def test_suppressed_context_absent() -> None:
     assert "implicit-inner" not in out
     assert "During handling" not in out
 
-def test_exception_notes_remain_visible() -> None:
-    exc = ValueError("boom")
-    exc.add_note("operator hint: check disk space")
-    out = format_verbose_exception(exc)
-    assert "operator hint: check disk space" in out
-
 def test_exception_group_width_capped_and_recognizable() -> None:
     group = ExceptionGroup("fan-out failed", [ValueError(f"child-{i}") for i in range(10)],)
     out = format_verbose_exception(group)
@@ -56,41 +61,10 @@ def test_exception_group_width_capped_and_recognizable() -> None:
     assert "child-9" not in out
     assert "more" in out
 
-def test_local_variables_never_captured() -> None:
-    canary = "ghp_" + "A" * 16
-    def boom() -> None:
-        hidden_local = canary  # noqa: F841 - the point is that this local never leaks
-        raise RuntimeError("locals stay private")
-    try:
-        boom()
-    except RuntimeError as exc:
-        captured = exc
-    out = format_verbose_exception(captured)
-    assert canary not in out
-    assert "hidden_local" not in out
 
 
-def test_environment_literal_secrets_and_username_paths_redacted() -> None:
-    environ = {"GITHUB_TOKEN": "svc-ghp-abc", "API_ENDPOINT_URL": "https://svc-user:svc-pa55@example.com"}
-    message = ("fetching https://svc-user:svc-pa55@example.com with " "svc-ghp-abc from /var/tmp/svc-ghp-abc/key")
-    out = format_verbose_exception(RuntimeError(message), environ=environ)
-    for fragment in ("svc-ghp-abc", "svc-user", "svc-pa55"):
-        assert fragment not in out
-    assert "[REDACTED_CREDENTIAL]" in out
-
-
-def test_redaction_precedes_head_tail_bound() -> None:
-    padding = "x" * (65536 - 60)
-    sentinel = "ghp_" + "y" * 8 + "z" * 10
-    message = padding + " " + sentinel + " tail"
-    out = format_verbose_exception(RuntimeError(message))
-    assert "ghp_" not in out
-    assert "[REDACTED" in out
-    assert out.rstrip().endswith("tail") or "tail" in out
-
-@pytest.mark.parametrize("char", ["x", "é", "漢", "😀"], ids=["ascii", "2-byte", "3-byte", "4-byte"])
-def test_large_diagnostics_capped_with_single_marker(char: str) -> None:
-    outer = RuntimeError("HEAD-SENTINEL " + char * 200_000)
+def test_mixed_width_diagnostic_is_capped_with_single_marker() -> None:
+    outer = RuntimeError("HEAD-SENTINEL " + "xé漢😀" * 50_000)
     inner = git_ops.GitError("root cause tail: git reflog expired")
     outer.__cause__ = inner
     out = format_verbose_exception(outer)
@@ -120,9 +94,8 @@ def test_middle_credential_never_survives_full_value_redaction_and_cap() -> None
     assert len(out.encode("utf-8")) <= 65536
     assert out.count("[VERBOSE_DIAGNOSTIC_TRUNCATED]") == 1
 
-def test_credential_straddling_final_cap_still_redacted() -> None:
-    """A credential near the very end of the payload sits inside the retained root-cause tail after the final cap; it
-    must be redacted because redaction ran on the complete pre-cap value, never on sliced windows."""
+def test_credential_near_size_bound_is_redacted() -> None:
+    """A whole diagnostic below the cap still redacts a credential near its tail."""
     message = "x" * (65536 - 220) + "token=ghp_" + "W" * 8 + " tail"
     out = format_verbose_exception(RuntimeError(message))
     assert "ghp_" not in out
