@@ -41,15 +41,21 @@ def test_parse_reviewer_environment_maps_claude_without_openrouter_requirement()
     assert not any(key.startswith("DAYDREAM_JUDGE_") for key in child)
     assert parent["PI_API_KEY"] == "stale-pi"
 
-@pytest.mark.parametrize("environment", [{"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "http://api.anthropic.com"},
+@pytest.mark.parametrize(("environment", "message"), [
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
+     "claude backend requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in the reviewer environment"),
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "DAYDREAM_REVIEW_CASE_ID": "case-parser-http", "ANTHROPIC_API_KEY": "sk-ant",
+      "ANTHROPIC_BASE_URL": "http://api.anthropic.com"}, "ANTHROPIC_BASE_URL must be an HTTPS endpoint"),
     # an empty userinfo (https://@host) is still embedded credentials, not absent
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
-     "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"},
-])
-def test_parse_reviewer_environment_rejects_invalid_claude_credentials(environment: dict[str, str],) -> None:
-    with pytest.raises(entrypoint.EntrypointError, match="ANTHROPIC"):
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
+      "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"}, "ANTHROPIC_BASE_URL must be an HTTPS endpoint"),
+], ids=["environment0", "environment1", "environment2"])
+def test_parse_reviewer_environment_rejects_invalid_claude_credentials(
+    environment: dict[str, str], message: str,
+) -> None:
+    with pytest.raises(entrypoint.EntrypointError) as error:
         entrypoint.parse_reviewer_environment(environment)
+    assert str(error.value) == message
 
 def test_host_reviewer_host_resolution_is_backend_aware() -> None:
     assert run_mod._reviewer_host_from_env({
