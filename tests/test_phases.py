@@ -521,6 +521,7 @@ async def test_strict_commit_publishes_one_retained_population_and_preserves_eve
 @pytest.mark.asyncio
 async def test_host_commit_push_verifies_remote_before_success(
     tmp_path: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Success requires the pushed HEAD on the remote; committing needs no agent turn."""
 
@@ -528,6 +529,7 @@ async def test_host_commit_push_verifies_remote_before_success(
     (work_repo / "fix.py").write_text("fixed\n")  # the daydream change
 
     work = make_work(work_repo)
+    runs = _record_host_runs(monkeypatch)
     ok = await _do_commit(
         ScriptedBackend(), work, push=True, interactive=False, items=[{"file": "fix.py", "description": "fix bug"}],
         **_retained_commit_tree(work.repo, {"fix.py"}),
@@ -535,6 +537,7 @@ async def test_host_commit_push_verifies_remote_before_success(
     assert ok.committed is True
     assert ok.push is not None
     assert ok.push.pushed_repository is None
+    assert runs == []
 
     sha = git_ops.head_sha(work_repo)
     assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
@@ -544,6 +547,7 @@ async def test_host_commit_push_verifies_remote_before_success(
 
 @pytest.mark.asyncio
 async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path, make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ordinary real push returns its exact SHA/branch/GitHub identity."""
 
@@ -559,6 +563,7 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path,
     hook.chmod(0o755)
     (repo / "app.py").write_text("x = 1\n")
 
+    runs = _record_host_runs(monkeypatch)
     result = await _do_commit(
         ScriptedBackend(), make_work(repo), push=True, interactive=False,
             **_retained_commit_tree(repo, {"app.py"}),
@@ -573,6 +578,9 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path,
     assert result.push.pushed_repository == "fork-user/widgets"
     assert git(remote, "rev-parse", "refs/heads/feature") == result.push.sha
     assert hook_marker.read_text() == "ran\n"
+    assert len(runs) == 1
+    assert runs[0]["cwd"] == repo
+    assert runs[0]["cmd"] == ["true"]
 
 
 @pytest.mark.asyncio
@@ -701,39 +709,6 @@ def _install_pre_push_hook(work_repo: Path) -> None:
 def _hook_run_config(test_command: str = "true") -> Any:
     """Minimal RunConfig stand-in resolving a canonical test command."""
     return SimpleNamespace(file_config=None, test_command=test_command)
-
-
-@pytest.mark.asyncio
-async def test_hook_aware_push_runs_suite_exactly_once(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Run one host suite per hook-bearing push attempt, with hooks enabled.
-
-    Without a pre-push hook, rely on the validation already performed by TEST.
-    """
-
-    for hook_present, expected_runs in ((True, 1), (False, 0)):
-        repo = _pushable_repo(tmp_path / f"case-{int(hook_present)}")
-        if hook_present:
-            _install_pre_push_hook(repo)
-        (repo / "fix.py").write_text("fixed\n")  # the daydream change
-
-        runs = _record_host_runs(monkeypatch)
-        ok = await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
-            items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(),
-        )
-        assert ok.committed is True
-        assert ok.push is not None
-        assert len(runs) == expected_runs, (
-            f"hook_present={hook_present}: expected {expected_runs} host run(s), got {len(runs)}"
-        )
-        if hook_present:
-            assert runs[0]["cwd"] == repo
-            assert runs[0]["cmd"] == ["true"]
-        # The hook was never bypassed: the pushed commit really landed.
-        sha = git_ops.head_sha(repo)
-        assert git_ops.remote_contains_commit(repo, "main", sha, remote="origin") is True
 
 
 @pytest.mark.asyncio
@@ -1549,12 +1524,14 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
     monkeypatch.setattr("daydream.phases.handoff.copy_to_clipboard", _copy_to_clipboard)
 
     # Abort at the menu, then approve copying the handoff.
-    _, success, _ = await _run_option4_handoff(monkeypatch, tmp_path, make_work, _handoff_turn("BODY"), clipboard=True,
+    backend, success, _ = await _run_option4_handoff(
+        monkeypatch, tmp_path, make_work, _handoff_turn("BODY"), clipboard=True,
         prompt_fn=lambda *a, **kw: "4" if "Choice" in a[1] else "y",
     )
 
     assert success is False
     assert copied == ["BODY"]
+    assert "## Files readable in the current model workspace\n(none detected)" in backend.last_prompt
 
 
 @pytest.mark.asyncio
@@ -1750,30 +1727,6 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
 # _changed_files — untracked files must appear in the handoff change list
 
 
-def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
-    """A fix that creates a new file is still untracked at abort time."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
-    git(repo, "add", "seed.txt")
-    git_commit(repo, "seed")
-    (repo / "seed.txt").write_text("seed\nmore\n", encoding="utf-8")  # tracked + modified
-    (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")  # untracked + not ignored
-    # Gitignored file must NOT be reported.
-    (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
-    (repo / "ignored.txt").write_text("nope\n", encoding="utf-8")
-    paths = _changed_files(repo)
-    names = {p.name for p in paths}
-    assert "seed.txt" in names  # tracked + modified
-    assert "new.py" in names  # untracked + not ignored
-    assert "ignored.txt" not in names  # excluded by --exclude-standard
-    assert len(paths) == len(set(paths))  # deduped
-
-
-def test_changed_files_returns_empty_on_non_git_dir(tmp_path: Path) -> None:
-    assert _changed_files(tmp_path) == []
-
-
 def test_changed_files_skips_unsafe_lexical_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1809,10 +1762,15 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     outside_two.write_text("two\n", encoding="utf-8")
     linked = repo / "linked.txt"
     linked.symlink_to(outside_one)
-    git(repo, "add", "linked.txt")
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    git(repo, "add", "linked.txt", "seed.txt")
     git_commit(repo, "track outside symlink")
     linked.unlink()
     linked.symlink_to(outside_two)
+    (repo / "seed.txt").write_text("seed\nmore\n", encoding="utf-8")
+    (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (repo / "ignored.txt").write_text("nope\n", encoding="utf-8")
 
     work = make_work(repo)
     session_id = "changed-symlink"
@@ -1822,6 +1780,7 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     ))
 
     live_daydream = artifact_dir_for(repo, allow_standalone=True)
+    run_dir = run_directory(live_daydream, session_id)
     recorder = TrajectoryRecorder(
         path=live_daydream / "runs" / session_id / "trajectory.json", run_flow=DaydreamRunFlow.NORMAL, target_dir=repo,
         artifact_run_dir=live_daydream / "runs" / session_id, agent_model_name="fake-external", session_id=session_id,
@@ -1831,11 +1790,19 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
         saved = live_daydream / "runs" / session_id / "handoff.md"
         assert saved.read_text(encoding="utf-8") == body
     assert written is True
-    assert handoff_path == repo / ".daydream" / "runs" / session_id / "handoff.md"
+    assert handoff_path == run_dir / "handoff.md" == repo / ".daydream" / "runs" / session_id / "handoff.md"
     assert backend.call_count == 1
     assert backend.calls[0]["cwd"] == repo
     assert backend.calls[0]["read_only"] is True
     assert f"- {repo / 'linked.txt'}" in backend.last_prompt
+    prompt = backend.last_prompt
+    changed = prompt.split("## Files readable in the current model workspace\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert f"- {repo / 'seed.txt'}" in changed and f"- {repo / 'new.py'}" in changed
+    assert f"- {repo / 'ignored.txt'}" not in changed
+    assert len(changed) == len(set(changed))
+    assert f"- trajectory: {run_document_path(run_dir)}" in prompt
+    assert f"- sub-trajectories: {siblings_directory(run_dir)}" in prompt
+    assert run_document_path(run_dir).parent == run_dir
     assert "HANDOFF_SYMLINK_SUCCESS" in body
     assert str(outside_one) not in body
     assert str(outside_two) not in body
@@ -2534,27 +2501,3 @@ async def test_a_mismatch_record_names_the_component(
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]
     assert any("tree_key" in line for line in reported), reported
-
-
-@pytest.mark.asyncio
-async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """Resolve the live owner run directory through the layout API, without reconstructing paths."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    work = make_work(repo)
-    live_daydream = artifact_dir_for(repo, allow_standalone=True)
-    session_id = "handoff-layout"
-    run_dir = run_directory(live_daydream, session_id)
-    recorder = TrajectoryRecorder(
-        path=run_document_path(run_dir), run_flow=DaydreamRunFlow.NORMAL, target_dir=repo, artifact_run_dir=run_dir,
-        agent_model_name="fake-external", session_id=session_id,
-    )
-    async with recorder:
-        handoff, artifacts = _resolve_handoff_paths(recorder, work, allow_standalone=True)
-
-    assert artifacts.trajectory == run_document_path(run_dir)
-    assert artifacts.trajectories == siblings_directory(run_dir)
-    assert handoff == run_dir / "handoff.md"
-    assert artifacts.trajectory.parent == run_dir
