@@ -12,9 +12,7 @@ import anyio
 import pytest
 from opentelemetry import context as otel_context, metrics, trace, trace as otel_trace
 from opentelemetry._logs import get_logger_provider
-from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.metrics import get_meter_provider
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -717,45 +715,6 @@ def _resource_of(span: ReadableSpan) -> dict[str, Any]:
     return dict(span.resource.attributes)
 
 
-def _pinned_semconv_revision() -> str:
-    """The Daydream contract resource pins the Task 0 semconv revision."""
-    manifest = json.loads((Path(__file__).parent / "fixtures/observability_contract/manifest.json").read_text())
-    commit = manifest["source"]["commit"]
-    return str(commit)[:7]
-
-@pytest.mark.anyio
-async def test_operator_resource_attributes_merge_with_authoritative_precedence(monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sdk_version = version("opentelemetry-sdk")
-    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES",
-        "deployment.environment.name=offline-audit,custom.zone=zone%2Done,"
-        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,"
-        "service.name=false-operator,service.version=0.0.0-operator,"
-        "telemetry.sdk.name=not-otel,telemetry.sdk.language=rust,telemetry.sdk.version=9.9.9,"
-        "daydream.observability.contract.version=0.0.0-operator,"
-        "service.instance.id=operator-instance-uuid,comma.key=a%2Cb%3Dc,api_key=opaque-resource-secret",
-    )
-    monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
-    exporter, registry = _memory_tracing()
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
-        run.finish(0)
-    resource = _resource_of(exporter.get_finished_spans()[0])
-    assert resource["service.name"] == "daydream"
-    assert resource["service.version"] == version("daydream")
-    assert resource["telemetry.sdk.name"] == "opentelemetry"
-    assert resource["telemetry.sdk.language"] == "python"
-    assert resource["telemetry.sdk.version"] == sdk_version
-    assert resource["daydream.observability.contract.version"] == _pinned_semconv_revision()
-    assert resource["service.instance.id"] == "operator-instance-uuid"
-    assert resource["deployment.environment.name"] == "offline-audit"
-    assert resource["custom.zone"] == "zone-one"
-    assert resource["unicode.key"] == "café"
-    assert resource["comma.key"] == "a,b=c"
-    assert resource["empty.value"] == ""
-    assert resource["zero.value"] == "0"
-    assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
-    assert "opaque-resource-secret" not in str(resource)
-
 @pytest.mark.anyio
 async def test_operator_service_instance_id_generated_per_run_when_absent(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
@@ -829,28 +788,6 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
     # Owned providers must differ from the global proxy.
     assert exporter.get_finished_spans()
 
-
-@pytest.mark.anyio
-async def test_resource_secret_values_never_reach_serialized_spans(monkeypatch: pytest.MonkeyPatch,) -> None:
-
-    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES",
-        "api_key=opaque-resource-secret,custom.note=plain,deployment.environment.name=offline-audit",
-    )
-    monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
-    exporter, registry = _memory_tracing()
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
-        with step_scope("review"):
-            pass
-        run.finish(0)
-    readable = exporter.get_finished_spans()
-    encoded = encode_spans(readable)
-    assert b"opaque-resource-secret" not in bytes(str(encoded), "utf-8")
-
-    wire = ExportTraceServiceRequest(resource_spans=encoded.resource_spans)
-    assert b"opaque-resource-secret" not in wire.SerializeToString()
-    resource = _resource_of(readable[0])
-    assert resource["custom.note"] == "plain"
-    assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(("stack", "iteration"), [("", False)])

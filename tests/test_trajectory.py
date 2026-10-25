@@ -151,47 +151,39 @@ def _single_observation_result(steps: list[Step], index: int) -> Any:
 
 
 async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
-    """The closed-step amendment path persists extra too, not just content."""
-    inv, steps = await _record_events(
-        tmp_path, ToolStartEvent(id="c4", name="shell", input={}), TurnEndEvent(message_id="m1"),
+    """Late failed and successful results amend their host without interruption markers."""
+    _, steps = await _record_events(
+        tmp_path, ToolStartEvent(id="c4", name="shell", input={}), ToolStartEvent(id="d3", name="shell", input={}),
+        TurnEndEvent(message_id="m1"),
         ToolResultEvent(id="c4", output="late", is_error=True, exit_code=1, status="completed"),
+        ToolResultEvent(id="d3", output="made", is_error=False, exit_code=0, status="completed"),
         ResultEvent(structured_output=None, continuation=None),
     )
-    result = _single_observation_result(steps, 0)
-    assert result.extra == {"is_error": True, "exit_code": 1, "status": "completed"}
+    assert len(steps) == 1 and steps[0].observation is not None
+    assert [(result.source_call_id, result.content, result.extra) for result in steps[0].observation.results] == [
+        ("c4", "late", {"is_error": True, "exit_code": 1, "status": "completed"}),
+        ("d3", "made", {"is_error": False, "exit_code": 0, "status": "completed"}),
+    ]
 
 
 INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
 
 
-@pytest.mark.parametrize("host_closed", [False, True], ids=["open-step", "closed-step"])
-async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host_closed: bool) -> None:
-    """Open and closed host steps both receive an incomplete-call marker."""
-    events: list[AgentEvent] = [ToolStartEvent(
-            id="d2" if host_closed else "d1", name="shell", input={} if host_closed else {"command": "sleep 999"},
-        )
-    ]
-    if host_closed:
-        events.append(TurnEndEvent(message_id="m1"))
-    events.append(ResultEvent(structured_output=None, continuation=None))
-    _, steps = await _record_events(tmp_path, *events)
-    result = _single_observation_result(steps, 0)
-    # The marker is distinct from a completed tool-call result.
-    assert result.source_call_id is None
-    assert result.content == INCOMPLETE_CONTENT
-    assert result.extra == {"is_error": True, "status": "interrupted"}
-
-
-async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -> None:
-    """A result arriving before the final flush amends its step and suppresses the marker."""
-    inv, steps = await _record_events(
-        tmp_path, ToolStartEvent(id="d3", name="shell", input={}), TurnEndEvent(message_id="m1"),
-        ToolResultEvent(id="d3", output="made", is_error=False, exit_code=0, status="completed"),
+async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path) -> None:
+    """One conversation interrupts calls on both their closed and still-open hosts."""
+    _, steps = await _record_events(
+        tmp_path, ToolStartEvent(id="d2", name="shell", input={}), TurnEndEvent(message_id="m1"),
+        ToolStartEvent(id="d1", name="shell", input={"command": "sleep 999"}),
         ResultEvent(structured_output=None, continuation=None),
     )
-    result = _single_observation_result(steps, 0)
-    assert result.content == "made"
-    assert result.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
+    assert [(step.step_id, [call.tool_call_id for call in step.tool_calls or []]) for step in steps] == [
+        (1, ["d2"]), (2, ["d1"]),
+    ]
+    closed = _single_observation_result(steps, 0)
+    opened = _single_observation_result(steps, 1)
+    assert closed.source_call_id is opened.source_call_id is None
+    assert closed.content == opened.content == INCOMPLETE_CONTENT
+    assert closed.extra == opened.extra == {"is_error": True, "status": "interrupted"}
 
 
 async def test_mark_aborted_stamps_stop_reason_on_closing_step(recorder: TrajectoryRecorder) -> None:
@@ -259,16 +251,6 @@ async def test_write_failure_degrades_with_warning(recorder: TrajectoryRecorder,
             observe_text_and_result(inv, "hi")
 
     assert any("Trajectory write failed" in m for m in warnings_emitted)
-
-
-async def test_context_var_set_inside_and_cleared_after(recorder: TrajectoryRecorder) -> None:
-    """Behavior E: get_current_recorder is the recorder inside, None after."""
-    assert get_current_recorder() is None
-    async with recorder:
-        assert get_current_recorder() is recorder
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "hi")
-    assert get_current_recorder() is None
 
 
 async def test_dispatch_repeated_descriptor_scopes_keep_distinct_children(recorder: TrajectoryRecorder,) -> None:
@@ -902,6 +884,7 @@ async def test_build_trajectory_omits_backend_when_unset(recorder: TrajectoryRec
     assert "review_backend" not in extra
     assert "fix_backend" not in extra
     assert "test_backend" not in extra
+    assert "phase_events" not in extra
 
 
 async def test_build_trajectory_omits_empty_per_phase_backend_keys(tmp_path: Path,) -> None:
@@ -1033,6 +1016,7 @@ async def test_bound_empty_root_writes_host_only_final_snapshot(tmp_path: Path,)
     assert [event["phase"] for event in phase_events] == ["merge", "merge"]
     assert phase_events[-1]["status"] == "succeeded"
     assert payload["final_metrics"] == {"total_steps": 1}
+    assert "subtrajectories" not in payload["extra"]
     assert not payload["agent"].get("model_name")
     assert recorder._invocation_counter == 0
     assert recorder._step_id_counter == 0
@@ -1084,7 +1068,11 @@ async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(tmp_path
     assert payload["extra"]["run_ended_at"] == snapshot.cutoff_at
     assert payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
     expected_phase_status = "failed" if exception_kind == "runtime" else "cancelled"
-    assert payload["extra"]["phase_events"][-1]["status"] == expected_phase_status
+    phase_events = payload["extra"]["phase_events"]
+    assert [event["event"] for event in phase_events] == ["phase_start", "phase_end"]
+    assert [event["phase"] for event in phase_events] == ["merge", "merge"]
+    assert phase_events[0]["scope_id"] == phase_events[1]["scope_id"]
+    assert phase_events[-1]["status"] == expected_phase_status
     assert recorder.steps == []
     assert recorder._invocation_counter == 0
 
@@ -1133,10 +1121,13 @@ async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_b
         sink, tmp_path, session_id="test", run_flow=DaydreamRunFlow.NORMAL, artifact_run_dir=private_run,
         agent_model_name="test",
     )
+    assert get_current_recorder() is None
     async with recorder:
+        assert get_current_recorder() is recorder
         async with recorder.fork("child") as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                 observe_text_and_result(invocation, "child")
+        assert get_current_recorder() is recorder
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             observe_text_and_result(invocation, "root")
 

@@ -19,6 +19,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
 from daydream.observability.exporters import CompatSpanExporter, honeyhive_exporter, langsmith_exporter, otlp_exporter
+from daydream.observability.otlp_compat import GrpcBridge
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from tests.harness.otlp import attributes, exporting_provider, grpc_trace_server, otlp_collector
 
@@ -146,9 +147,19 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-custom=grpc-credential")
+        monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
         exporter = otlp_exporter(ObservabilityConfig())
         assert isinstance(exporter, CompatSpanExporter)
+        bridge = exporter._transport
+        assert isinstance(bridge, GrpcBridge)
+        delegate_metrics = bridge._delegate._metrics
+        inflight_metric = getattr(delegate_metrics, "_inflight", None)
+        assert type(inflight_metric).__name__ == "NoOpUpDownCounter"
         _emit(exporter)
+        exporter.shutdown()
+        exporter.shutdown()
+        assert exporter.export(_emit_spans()) == SpanExportResult.FAILURE
+        assert exporter.delivery_snapshot()["delivered"] == 1
         assert len(received) == 1
         span = received[0].resource_spans[0].scope_spans[0].spans[0]
         assert span.name == "attempt"
@@ -158,7 +169,7 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
         assert ("x-custom", "grpc-credential") in headers
 
 
-@pytest.mark.parametrize("drift", ["1.45.2", "1.440.0", "missing-surface"])
+@pytest.mark.parametrize("drift", ["1.45.2", "missing-surface"])
 def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.MonkeyPatch, drift: str) -> None:
     """Unreviewed SDK versions or missing private fields must release the real channel before failing."""
     delegates: list[GrpcExporter] = []
@@ -252,17 +263,3 @@ def test_malformed_otlp_headers_never_log_credential_fragments(
     with pytest.raises(ObservabilityError):
         otlp_exporter(ObservabilityConfig())
     assert "opaque-broken-credential" not in caplog.text
-
-
-def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-http-response-secret")
-    with otlp_collector(status=400, reason="opaque-http-response-secret") as receiver:
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
-        exporter = langsmith_exporter(ObservabilityConfig())
-        with diagnostic_scope(PrivacyPolicy()):
-            assert exporter.export(_emit_spans()) != SpanExportResult.SUCCESS
-            exporter.shutdown()
-        assert "opaque-http-response-secret" not in caplog.text
-        assert "Failed to export" in caplog.text

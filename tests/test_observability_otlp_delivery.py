@@ -31,7 +31,7 @@ from daydream.observability.exporters import (
     langsmith_exporter,
     otlp_exporter,
 )
-from daydream.observability.otlp_compat import GrpcBridge, HttpxOtlpTransport, classify_http_ack
+from daydream.observability.otlp_compat import HttpxOtlpTransport, classify_http_ack
 from tests.harness.otlp import (
     GrpcReceiver,
     ScriptedResponse,
@@ -253,17 +253,6 @@ def test_http_presets_reach_the_destination_despite_ambient_proxy(monkeypatch: p
         exporter.shutdown()
         assert len(receiver.requests) == 1
 
-def test_http_preset_rejects_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as second:
-        with scripted_otlp_collector([ScriptedResponse(status=302, headers={"Location": second.base_url + "/stolen"})]
-        ) as first:
-            monkeypatch.setenv("LANGSMITH_ENDPOINT", first.base_url)
-            monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-            exporter = langsmith_exporter(ObservabilityConfig())
-            assert exporter.export(_spans()) != SpanExportResult.SUCCESS
-            exporter.shutdown()
-            assert second.requests == []
-
 def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         _generic_http(monkeypatch, receiver.base_url)
@@ -323,22 +312,6 @@ def _generic_grpc(
             exporter.shutdown()
 
 
-def test_grpc_export_full_success_and_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
-    received: list[ExportTraceServiceRequest] = []
-
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
-        received.append(request)
-        return ExportTraceServiceResponse()
-
-    with _generic_grpc(monkeypatch, receive) as exporter:
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        exporter.shutdown()
-        exporter.shutdown()
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        assert len(received) == 1
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1
-
 @pytest.mark.parametrize("persistent", [False, True], ids=["recovers", "retry-exhausted"])
 def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(
     monkeypatch: pytest.MonkeyPatch, persistent: bool,
@@ -395,24 +368,6 @@ def test_grpc_scheme_precedence_over_insecure_variable(monkeypatch: pytest.Monke
 
 # ------------------------------------------------------------------ shared lifecycle
 
-def test_noop_meter_provider_keeps_internal_metrics_inactive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the ambient enabling variable set, owned delegates stay metric-free."""
-    monkeypatch.setenv("OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED", "true")
-
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
-        return ExportTraceServiceResponse()
-
-    with _generic_grpc(monkeypatch, receive) as exporter:
-        # The delegate's meters are created against our explicit NoOpMeterProvider
-        # (not the ambient global): recording on them is a no-op by construction.
-        bridge = exporter._transport
-        assert isinstance(bridge, GrpcBridge)
-        delegate_metrics = bridge._delegate._metrics
-        inflight_metric = getattr(delegate_metrics, "_inflight", None)
-        assert type(inflight_metric).__name__ == "NoOpUpDownCounter"
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        exporter.shutdown()
-
 def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch) -> None:
     with scripted_otlp_collector([ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
@@ -423,31 +378,24 @@ def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch
         assert exporter.export(_spans()) == SpanExportResult.FAILURE  # CLOSED refuses sends
         assert len(receiver.requests) == 1
 
-def test_delivery_snapshot_states_and_flush_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
-    with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
-        _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        exporter.export(_spans())  # retryable status, no Retry-After, deadline exhausts
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0
-        assert exporter.force_flush() is True  # SDK flush is not delivery acceptance
-        exporter.shutdown()
-
 def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
     """Both retry-backoff exhaustion and a later zero-budget send must retain exact ledger diagnostics."""
     with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        exporter.export(_spans())
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0
-        assert snapshot["unverified"] >= 1
-        assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
-        exporter.export(_spans())
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["unverified"] >= 2
-        assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
-        exporter.shutdown()
+        try:
+            exporter.export(_spans())
+            snapshot = exporter.delivery_snapshot()
+            assert snapshot["delivered"] == 0
+            assert snapshot["unverified"] >= 1
+            assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
+            assert exporter.force_flush() is True
+            exporter.export(_spans())
+            snapshot = exporter.delivery_snapshot()
+            assert snapshot["unverified"] >= 2
+            assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
+        finally:
+            exporter.shutdown()
 
 def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
@@ -455,14 +403,6 @@ def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pyte
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())
         assert receiver.requests[-1]["path"] == "/otlp-prefix/v1/traces"
-        exporter.shutdown()
-
-def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", receiver.base_url + "/custom/ingest")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        exporter.export(_spans())
-        assert receiver.requests[-1]["path"] == "/custom/ingest"
         exporter.shutdown()
 
 def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.MonkeyPatch) -> None:

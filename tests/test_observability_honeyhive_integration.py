@@ -123,6 +123,7 @@ async def test_honeyhive_early_workspace_failure_materializes_session_from_run_i
     root = honeyhive.spans[0]
     native = attributes(root)
     portable = attributes(generic.spans[0])
+    assert portable["daydream.span.kind"] == "run"
     assert root["status"]["code"] == "STATUS_CODE_ERROR"
     assert root["spanId"] == generic.spans[0]["spanId"]
     assert root["traceId"] == generic.spans[0]["traceId"]
@@ -130,6 +131,8 @@ async def test_honeyhive_early_workspace_failure_materializes_session_from_run_i
     assert native["honeyhive.session_id"] == portable["daydream.run.id"]
     assert native["honeyhive.session_auto_create"] is True
     assert native["honeyhive.session_name"] == f"daydream.{portable['daydream.flow']}"
+    assert "daydream.session.id" not in portable
+    assert "daydream.trajectory.id" not in portable
     assert "traceloop.association.properties.session_id" not in portable
     assert {key: value for key, value in native.items() if not key.startswith("honeyhive")} == portable
     assert not any(key.startswith(("honeyhive", "gen_ai.usage.")) for key in portable)

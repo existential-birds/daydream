@@ -874,6 +874,7 @@ class _ExactAllocationBackend(_NoCancelBackend):
         yield _gen_end("gen-b", "second sealed choice", response_id="resp-beta")
         yield MetricsEvent("gen-b", 50, 10, None, 0.001, reasoning_tokens=2, generation_id="gen-b")
         yield CostEvent(0.003, 150, 30, measurement_source="terminal")
+        yield CostEvent(0.003, 150, 30, measurement_source="terminal")
         yield TextEvent("final answer")
         yield ResultEvent(None, None)
         self.ended = True
@@ -888,6 +889,8 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
+    assert lifecycle["diagnostics"] == []
+    assert lifecycle["authoritative_total"] == {"input_tokens": 150, "output_tokens": 30, "cost_usd": 0.003}
     assert {draft["generation_id"]: draft["billed"] for draft in lifecycle["drafts"]} == {
         "gen-a": True, "gen-b": True,
     }
@@ -1001,35 +1004,6 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
     assert meta["gen_ai.usage.cost"] == pytest.approx(0.002)
     payload = json.dumps([request["body"] for request in collector.requests])
     assert "billing_contradiction" not in payload  # diagnostic stays local
-
-
-class _DuplicateIdempotentBackend(_NoCancelBackend):
-    """Identical terminal totals twice: idempotent, children bill."""
-
-    async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
-        yield RequestEvent(prompt)
-        yield _gen_start("gen-dup")
-        yield _gen_end("gen-dup", "choice")
-        yield MetricsEvent("gen-dup", 60, 15, None, 0.003, generation_id="gen-dup")
-        yield CostEvent(0.003, 60, 15, measurement_source="terminal")
-        yield CostEvent(0.003, 60, 15, measurement_source="terminal")  # exact duplicate
-        yield TextEvent("answer")
-        yield ResultEvent(None, None)
-
-async def test_runner_duplicate_identical_totals_are_idempotent(
-    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _DuplicateIdempotentBackend(),
-    )
-    lifecycle = _read_subtrajectory(feature_branch_repo)
-    assert lifecycle["billing_owner"] == "generation_children"
-    assert lifecycle["diagnostics"] == []
-    attempt = _kind(collector.spans, "attempt")[0]
-    assert attributes(attempt)["gen_ai.usage.input_tokens"] == 60
-    generation = _kind(collector.spans, "generation")[0]
-    assert attributes(generation)["daydream.generation.billed"] is True
 
 
 class _ResidualTotalBackend(_NoCancelBackend):
