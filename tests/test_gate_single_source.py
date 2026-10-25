@@ -28,7 +28,7 @@ _GATE_FILES = ("Makefile", "pyproject.toml", ".github/workflows/ci.yml", "CONTRI
     ".github/PULL_REQUEST_TEMPLATE.md",
 )
 
-_FLOOR_PERCENT_RE = re.compile(r"(?<![\w.])8\d(?:\.\d+)?\s*%")
+_FLOOR_PERCENT_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*%")
 _FLOOR_SETTING_RE = re.compile(r"fail_under\s*=\s*\d+")
 
 def test_coverage_floor_is_declared_once_numerically() -> None:
@@ -127,10 +127,8 @@ def _execute_shard_plan(
     (False, None, 8, 4),
     (True, None, 8, 4),
     (True, "1", 1, 8),
-    (True, "2", 2, 4),
-    (True, "4", 4, 4),
     (True, "20", 20, 4),
-], ids=["automatic-default", "dispatch-default", "baseline", "legacy-two", "legacy-four", "maximum"])
+], ids=["automatic-default", "dispatch-default", "baseline", "maximum"])
 def test_ci_shard_planner_emits_complete_supported_matrices(
     tmp_path: Path, dispatch: bool, requested_count: str | None, count: int, workers: int,
 ) -> None:

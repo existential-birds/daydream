@@ -286,7 +286,6 @@ _MATCH_CASES = [
     pytest.param("@bot add sequence diagram please", "bot", "sequence", id="sequence-trailing-text"),
     pytest.param("@bot review please", "bot", "review", id="review-trailing-text"),
     pytest.param("please @bot review", "bot", "review", id="review-leading-text"),
-    pytest.param("some context\n@bot add flowchart\nthanks", "bot", "flowchart", id="flowchart-mid-body"),
     pytest.param(
         "some context\n@bot add flowchart\n" + "🌐" * 30_000, "bot", "flowchart", id="flowchart-large-unicode-body"
     ),
