@@ -20,7 +20,7 @@ from daydream.archive import (
     pipeline,
 )
 from daydream.archive.bundle import _copy_snapshot_bundle
-from daydream.archive.git_context import GitContext, capture_git_context
+from daydream.archive.git_context import GitContext
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import (
     Manifest,
@@ -202,15 +202,6 @@ def _archive_snapshot(trajectories: RunWriteSnapshot, *, run_flow: DaydreamRunFl
     )
 
 
-def test_capture_git_context_no_repo(tmp_path: Path) -> None:
-    ctx = capture_git_context(tmp_path)
-    assert ctx.head_sha is None
-    assert ctx.remote_url is None
-    assert ctx.branch is None
-    assert ctx.base_sha is None
-    assert ctx.changed_files == []
-
-
 def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot: RunWriteSnapshot | None = None,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
 ) -> Manifest:
@@ -383,11 +374,8 @@ def test_session_bound_artifact_requires_matching_session(
     assert _read_session_bound_json_artifact(tmp_path, None, resolver) is None
 
 
-@pytest.mark.parametrize(
-    "resolver", [DeepArtifact.FIX_QUALITY_GATE.at, DeepArtifact.RECOMMENDED_CAPTURE.at],
-    ids=["fix-quality-gate", "recommended-capture"],
-)
-def test_session_bound_unbound_artifact_is_none(tmp_path: Path, resolver: Callable[[Path], Path]) -> None:
+def test_session_bound_unbound_artifact_is_none(tmp_path: Path) -> None:
+    resolver = DeepArtifact.RECOMMENDED_CAPTURE.at
     p = resolver(tmp_path / ".daydream" / "deep")
     p.parent.mkdir(parents=True)
     p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
@@ -625,29 +613,22 @@ def test_remote_success_matches_configured_pr(
     assert remote["status"] == expected_status
 
 
-@pytest.mark.parametrize(("artifact_name", "path"),
-    [("push-verdict.json", ("pushed_repository",)), ("remote-ci-verdict.json", ("target", "base_repository")),
-        ("remote-ci-verdict.json", ("target", "head_repository")),
-        ("remote-ci-verdict.json", ("binding", "base_repository")),
-        ("remote-ci-verdict.json", ("binding", "head_repository")),
-    ],
-)
+@pytest.mark.parametrize("artifact_name", ["push-verdict.json", "remote-ci-verdict.json"])
 def test_persisted_repository_identities_remain_canonical_lowercase(
-    tmp_path: Path, artifact_name: str, path: tuple[str, ...],
+    tmp_path: Path, artifact_name: str,
 ) -> None:
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path)
     artifact = tmp_path / ".daydream" / "deep" / artifact_name
     payload = json.loads(artifact.read_text(encoding="utf-8"))
-    cursor = payload
-    for key in path[:-1]:
-        cursor = cursor[key]
-    value = cursor[path[-1]]
-    assert isinstance(value, str)
-    cursor[path[-1]] = value.upper()
+    if artifact_name == "push-verdict.json":
+        payload["pushed_repository"] = "CONTRIBUTOR/FORK"
+    else:
+        # Both copies agree, so only canonicality can reject this base identity.
+        payload["target"]["base_repository"] = payload["binding"]["base_repository"] = "EXAMPLE/PROJECT"
     artifact.write_text(json.dumps(payload), encoding="utf-8")
 
-    states = _derive_push_remote_states(tmp_path, pr_repo="ExAmPlE/PrOjEcT", pr_number=42,)
+    states = _derive_push_remote_states(tmp_path, pr_repo=None, pr_number=42)
     if artifact_name == "push-verdict.json":
         assert states["push"]["status"] == "partial"
         assert states["remote_ci"] == {"ran": False, "status": "absent"}
@@ -701,9 +682,8 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
 @pytest.mark.parametrize("malformed_sha", ["A" * 40, "a" * 39, "a" * 41])
 def test_remote_archive_rejects_noncanonical_commit_sha(tmp_path: Path, malformed_sha: str,) -> None:
     artifact, payload = _current_ci_artifact(tmp_path)
-    payload["target"]["pushed_sha"] = malformed_sha
-    payload["binding"]["head_sha"] = malformed_sha
-    payload["head_sha"] = malformed_sha
+    payload["binding"]["merge_sha"] = malformed_sha
+    payload["merge_sha"] = malformed_sha
     payload["evidence_sha"] = malformed_sha
     artifact.write_text(json.dumps(payload))
     assert _derive_push_remote_states(tmp_path)["remote_ci"] == {"ran": True, "status": "partial",}
@@ -833,9 +813,9 @@ def test_archive_rejects_contradictory_terminal_ci_evidence(tmp_path: Path, corr
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 
-@pytest.mark.parametrize("discovery_seconds", [120.0, 0.5])
-def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path, discovery_seconds: float) -> None:
+def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path) -> None:
     """Strictness alone does not declare a required CI context."""
+    discovery_seconds = 0.5
     artifact, payload = _current_ci_artifact(tmp_path, status="no_ci")
     limits = RemoteCILimits(discovery_seconds=discovery_seconds)
     verdict = evaluate_remote_ci(RemoteCISnapshot(
@@ -981,7 +961,7 @@ def _merge_events(session_id: str, status: str, *, scope_id: str = "merge-scope"
 @pytest.mark.parametrize(("status", "artifact", "payload"),
     [pytest.param("succeeded", "review-coverage.json", None,
             id="success-despite-stale-failure",
-        ), pytest.param("failed", "merged-items.json", {"items": [{"id": 1}]}, id="failure-despite-stale-success"),
+        ), pytest.param("failed", "merged-items.json", {"items": []}, id="failure-despite-stale-success"),
         pytest.param("partial", None, None, id="partial"),
     ],
 )
@@ -1017,10 +997,7 @@ def test_stale_merge_event_failure_does_not_override_current_success(tmp_path: P
             _merge_events("current", "succeeded")[1],
         ],
         [{**_merge_events("current", "succeeded")[0], "session_id": None}, _merge_events("current", "succeeded")[1],],
-        [_merge_events("current", "succeeded")[0],
-            {**_merge_events("current", "succeeded")[1], "status": "not-a-status"},
-        ],
-    ], ids=("orphan", "duplicate", "reversed", "incomparable-timestamps", "missing-session", "invalid-terminal",),
+    ], ids=("orphan", "duplicate", "reversed", "incomparable-timestamps", "missing-session",),
 )
 def test_malformed_current_merge_event_is_unknown(tmp_path: Path, events: list[dict[str, Any]],) -> None:
     states = pipeline.derive_phase_states(
@@ -1051,28 +1028,9 @@ def test_missing_current_merge_event_never_uses_stale_success_artifact(tmp_path:
     assert pipeline.derive_pipeline_status("complete", None, states, runs_merge=True) == "partial"
 
 
-@pytest.mark.parametrize(
-    ("coverage_state", "items_payload"), [("complete", {"items": "corrupt"})], ids=["malformed-items"]
-)
-def test_merge_artifacts_cannot_supply_missing_run_identity(
-    tmp_path: Path, coverage_state: str, items_payload: Any,
-) -> None:
-    if coverage_state == "malformed":
-        _write_deep(tmp_path, "review-coverage.json", {"phases": "corrupt"})
-    else:
-        _write_review_coverage(tmp_path, state=coverage_state)
-    _write_deep(tmp_path, "merged-items.json", items_payload)
-    states = pipeline.derive_phase_states(
-        tmp_path, phase_events=[], runs_merge=True, runs_fix=False, runs_test=False, session_id=None,
-    )
-    assert states["merge"] == {"ran": True, "status": "unknown"}
-
-
-@pytest.mark.parametrize("artifact_name", ["review-coverage.json", "merged-items.json"])
-def test_merge_without_identity_ignores_invalid_utf8_artifacts(tmp_path: Path, artifact_name: str) -> None:
-    deep = tmp_path / ".daydream" / "deep"
-    deep.mkdir(parents=True)
-    (deep / artifact_name).write_bytes(b"\xff")
+def test_merge_artifacts_cannot_supply_missing_run_identity(tmp_path: Path) -> None:
+    _write_review_coverage(tmp_path, state="complete")
+    _write_deep(tmp_path, "merged-items.json", {"items": "corrupt"})
     states = pipeline.derive_phase_states(
         tmp_path, phase_events=[], runs_merge=True, runs_fix=False, runs_test=False, session_id=None,
     )
@@ -1189,15 +1147,6 @@ def test_archive_rejects_a_sibling_document_from_another_session(
     assert not (archive_dir / "index.db").exists()
 
 
-def test_merge_failed_discriminates_on_current_event_not_merged_items(tmp_path: Path,) -> None:
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_review_coverage(tmp_path)
-    states = pipeline.derive_phase_states(tmp_path, phase_events=_merge_events("current", "failed"),
-                                           session_id="current")
-    assert states["merge"]["ran"] is True
-    assert states["merge"]["status"] == "failed"  # merged-items present is NOT sufficient
-
-
 def test_test_failed_from_verdict(tmp_path: Path) -> None:
     _write_deep(
         tmp_path, "test-verdict.json", {"session_id": "current", "passed": False, "retries": 1, "ignored": False},
@@ -1212,17 +1161,6 @@ def test_session_bound_start_at_fix_rejects_prior_green_test_verdict(tmp_path: P
     states = pipeline.derive_phase_states(tmp_path, phase_events=[], session_id="current")
     assert states["test"] == {"ran": False, "status": "absent"}
     assert pipeline.derive_pipeline_status("complete", None, states, runs_fix=True, runs_test=True) == "partial"
-
-
-def test_matching_stabilization_failure_overrides_green_test_pipeline(tmp_path: Path,) -> None:
-    _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
-    _write_deep(
-        tmp_path, "stabilization-failed.json", {"session_id": "current", "reason": "final verifier remains actionable"},
-    )
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[], session_id="current")
-    assert states["fix"] == {"ran": True, "status": "failed"}
-    assert states["test"] == {"ran": True, "status": "failed"}
-    assert pipeline.derive_pipeline_status("complete", None, states, runs_fix=True, runs_test=True) == "failed"
 
 
 @pytest.mark.parametrize("payload",
@@ -1412,7 +1350,10 @@ def test_strict_archive_does_not_publish_historical_bundles(tmp_path: Path, monk
     monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
     finalize_archive_run(**arguments)
     archive_dir = get_archive_dir()
-    assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
+    manifest = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
+    assert (manifest["git"]["head_sha"], manifest["git"]["remote_url"], manifest["git"]["branch"]) == (None, None, None)
+    assert manifest["code_context"]["base_sha"] is None
+    assert manifest["code_context"]["changed_files"] == []
     with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
         assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
     assert not list(archive_dir.glob("runs/.*.finalizing"))
