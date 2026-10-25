@@ -1,15 +1,23 @@
 """Host-enforced stage allocation through real review runs and native provider events."""
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections.abc import AsyncGenerator, Iterable
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ToolResultEvent, ToolStartEvent
+from daydream import review_result
+from daydream.artifact_visibility import artifact_dir_for
+from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
+from daydream.host_tools import HostToolBinding, HostToolRejected
+from daydream.review_investigation import HANDOFF_MAX_BYTES, ReviewInvestigation
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     StagedBackend,
@@ -19,6 +27,7 @@ from tests.deep_orchestrator.test_review_investigation import (
     stage_ends,
 )
 from tests.harness.review_result import saved_coverage
+from tests.harness.trajectory import read_trajectory
 
 
 class NativeStageBackend(StagedBackend, PiBackend):
@@ -27,8 +36,227 @@ class NativeStageBackend(StagedBackend, PiBackend):
     supports_budget_preamble = False
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
+        binding: HostToolBinding | None = kwargs.get('host_tools')
+        if binding is None:
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+            return
+        schema = args[0] if args else kwargs['output_schema']
+        binding.configure_schema(schema)
+        seen_request = False
+        submissions: dict[str, Any] = {}
+        admission_errors: dict[str, str] = {}
+        async with binding.session():
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                if isinstance(event, RequestEvent):
+                    seen_request = True
+                if not seen_request:
+                    yield RequestEvent(prompt=prompt, output_schema=schema,
+                                       config=PiRequestConfig(schema_emulated=False, no_tools=False))
+                    seen_request = True
+                if isinstance(event, ToolStartEvent):
+                    try:
+                        binding.admit(event.id, event.name, event.input, terminal=event.name == 'structured_output')
+                    except HostToolRejected as exc:
+                        admission_errors[event.id] = str(exc)
+                    if event.name == 'structured_output':
+                        submissions[event.id] = deepcopy(event.input)
+                elif isinstance(event, ToolResultEvent) and event.id in submissions and not event.is_error:
+                    try:
+                        if event.id in admission_errors:
+                            raise HostToolRejected(admission_errors[event.id])
+                        canonical = binding.submit(event.id, submissions[event.id])
+                    except HostToolRejected as exc:
+                        event = replace(event, is_error=True, output=str(exc))
+                    else:
+                        event = replace(event, output=str(canonical))
+                elif isinstance(event, ResultEvent):
+                    if not submissions:
+                        # Default scripted provider follows the same terminal protocol.
+                        submitted = event.structured_output
+                        assert isinstance(submitted, dict)
+                        binding.admit('default-submit', 'structured_output', submitted, terminal=True)
+                        yield ToolStartEvent(id='default-submit', name='structured_output', input=submitted)
+                        canonical = binding.submit('default-submit', submitted)
+                        yield ToolResultEvent(id='default-submit', output=str(canonical), is_error=False)
+                    event = replace(event, structured_output=binding.accepted_result)
+                yield event
+            binding.native_settled = True
+
+
+@pytest.mark.parametrize('fault', ['foreign-source', 'invalid-judgment', 'tampered-original',
+                                 'prior-admitted', 'handoff-bytes'])
+async def test_native_correction_admits_only_the_valid_whole_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Native transport tests cannot prove rejected stage state and shared capacity stay untouched."""
+    review = many_file_review(tmp_path, monkeypatch, count=9 if fault == 'prior-admitted' else 1, docs_count=0)
+    backend = NativeStageBackend(review.repo)
+    backend.fanout_concurrency = 1
+    review.backend = backend
+    checked = False
+    investigations: dict[str, ReviewInvestigation] = {}
+    run_investigation = ReviewInvestigation.run
+
+    async def observe_run(investigation: ReviewInvestigation, *args: Any,
+                          **kwargs: Any) -> tuple[dict[str, Any], str | None]:
+        investigations[investigation.scope_id] = investigation
+        return await run_investigation(investigation, *args, **kwargs)
+
+    monkeypatch.setattr(ReviewInvestigation, 'run', observe_run)
+
+    @backend.script()
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        nonlocal checked
+        if fault == 'prior-admitted' and not stage['progress']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            yield ToolStartEvent(id='submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
+            return
+        if checked:
+            yield ToolStartEvent(id='submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
+            return
+        checked = True
+        binding = backend.calls[-1]['host_tools']
+        investigation = investigations['python']
+
+        def retained_state() -> Any:
+            return deepcopy((investigation.target_progress, investigation.handoff, investigation.admitted_stages,
+                             investigation.coverage.to_dict(), investigation.coverage._target_decision_bytes))
+
+        before = retained_state()
+        # Count the corrected decisions in their actual published nesting. The
+        # rejected plan has these same valid targets, so handoff rejection must
+        # happen after a shared-capacity preview that fits exactly.
+        expected = {**investigation.target_progress, **{
+            target['target_id']: {**target, 'evidence_refs': deepcopy(stage['source_refs'][target['target_id']][:1])}
+            for target in output['targets']}}
+        envelope: dict[str, Any] = {'terminal_result': {'stack_outcomes': [{'scope_id': 'python'}]}}
+        without_decisions = len(json.dumps(envelope, indent=2, ensure_ascii=False).encode())
+        envelope['terminal_result']['stack_outcomes'][0]['target_decisions'] = [
+            expected[key] for key in sorted(expected)]
+        corrected_bytes = len(json.dumps(envelope, indent=2, ensure_ascii=False).encode()) - without_decisions
+        allocated = investigation.coverage._target_decision_bytes
+        retained_limit = review_result.RUN_TARGET_DECISIONS_MAX_BYTES
+        tight_limit = sum(allocated.values()) - allocated['python'] + corrected_bytes
+        monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', tight_limit)
+        bad = deepcopy(output)
+        bad['notes'] = 'REJECTED SEMANTIC NOTE'
+        bad['candidates'] = [candidate(disposition='confirmed', finding=dict(
+            record(), description='Rejected defect'))]
+        original_path: Path | None = None
+        original_bytes: bytes | None = None
+        original_times: tuple[int, int] | None = None
+        if fault == 'foreign-source':
+            bad['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
+        elif fault in {'invalid-judgment', 'prior-admitted'}:
+            bad['candidates'][0]['grounds'] = ''
+        elif fault == 'handoff-bytes':
+            bad['notes'] += 'x' * HANDOFF_MAX_BYTES
+        else:
+            # Corrupt the canonical diff itself, leaving prepared copies intact.
+            original_path = artifact_dir_for(review.repo, allow_standalone=True) / 'diff.patch'
+            assert original_path.is_file()
+            original_stat = original_path.stat()
+            original_times = (original_stat.st_atime_ns, original_stat.st_mtime_ns)
+            original_bytes = original_path.read_bytes()
+            original_path.write_bytes(original_bytes + b'corrupt canonical input\n')
+        try:
+            yield ToolStartEvent(id='rejected-submit', name='structured_output', input=bad)
+            yield ToolResultEvent(id='rejected-submit', output='Receipt.', is_error=False)
+            assert binding.accepted is False and binding.possibly_accepted is False
+            assert retained_state() == before, 'rejected plans must preserve all admitted state and shared capacity'
+            if fault == 'handoff-bytes':
+                assert investigation.assertion_failure_class == 'admission_failure'
+            if original_path is not None:
+                assert original_bytes is not None and original_times is not None
+                original_path.write_bytes(original_bytes)
+                os.utime(original_path, ns=original_times)
+            if fault != 'prior-admitted':
+                output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            yield ToolStartEvent(id='corrected-submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='corrected-submit', output='Submitted.', is_error=False)
+            assert binding.accepted is True
+            assert binding.accepted_result is not None
+            assert binding.accepted_result['targets'][0]['evidence_refs'][0]['role'] == 'assigned'
+            assert investigation.target_progress == expected
+            assert sum(investigation.coverage._target_decision_bytes.values()) == tight_limit
+            accepted = retained_state()
+            # Callback replay returns the same canonical result without admitting again.
+            assert binding.submit('corrected-submit', output) == binding.accepted_result
+            assert retained_state() == accepted
+        finally:
+            monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', retained_limit)
+            if original_path is not None:
+                assert original_bytes is not None and original_times is not None
+                original_path.write_bytes(original_bytes)
+                os.utime(original_path, ns=original_times)
+
+    data = await review.finish('python', findings=('Grounded defect',))
+    assert checked
+    python_stages = [event['metadata'] for event in stage_ends(review, 'python')]
+    assert all(item['admitted'] for item in python_stages)
+    corrected = python_stages[1 if fault == 'prior-admitted' else 0]
+    assert corrected['submission_starts'] == 2
+    assert corrected['failed_submissions'] == 1
+    assert corrected['successful_submissions'] == 1
+    assert corrected['admitted_candidate_count'] == 1
+    assert 'REJECTED SEMANTIC NOTE' not in str(data)
+    assert all('REJECTED SEMANTIC NOTE' not in call['prompt'] for call in backend.calls)
+    assert all('source_id' not in str(decision) for decision in scopes(data)['python']['target_decisions'])
+    for path in (review.output, review.repo / '.review-output.md',
+                 review.repo / '.daydream/deep/review-coverage.json'):
+        assert 'REJECTED SEMANTIC NOTE' not in path.read_text()
+    root = read_trajectory(review.tmp / 'trajectory.json')
+    children = [read_trajectory(review.repo / '.daydream' / summary['sibling_trajectory_ref'])
+                for summary in root['extra']['subtrajectories'] if summary.get('sibling_trajectory_ref')]
+    rejected_steps = [step for child in children for step in child['steps']
+                      if any(call['tool_call_id'] == 'rejected-submit' for call in step.get('tool_calls') or [])]
+    assert len(rejected_steps) == 1
+    assert 'REJECTED SEMANTIC NOTE' in json.dumps(rejected_steps[0])
+    rejected_result, = [result for result in rejected_steps[0]['observation']['results']
+                       if result['source_call_id'] == 'rejected-submit']
+    assert rejected_result['extra']['is_error'] is True
+    assert rejected_result['content'] and len(rejected_result['content'].encode()) <= 1024
+
+
+@pytest.mark.parametrize('order', ['closure-first', 'acceptance-first'])
+async def test_native_stage_authority_order_preserves_truthful_retained_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: str,
+) -> None:
+    """Binding lifecycle tests cannot prove accepted findings survive failed runner settlement."""
+    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
+    backend = NativeStageBackend(review.repo)
+    review.backend = backend
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '2')
+    attempted = 0
+
+    @backend.script()
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        nonlocal attempted
+        attempted += 1
+        binding = backend.calls[-1]['host_tools']
+        output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        yield ToolStartEvent(id='submit', name='structured_output', input=output)
+        if order == 'closure-first':
+            binding.close_authority()
+        yield ToolResultEvent(id='submit', output='Receipt.', is_error=False)
+        if order == 'acceptance-first':
+            assert binding.accepted
+            binding.close_authority()
+            class SettlementFailure(RuntimeError):
+                retryable = True
+            raise SettlementFailure('Native settlement failed after domain acceptance')
+
+    reason = 'backend_failure' if order == 'acceptance-first' else 'evidence_incomplete'
+    data = await review.finish('python', reason=reason,
+        findings=('Grounded defect',) if order == 'acceptance-first' else (), statuses=('failed', 'incomplete'))
+    assert attempted == 1
+    scope = scopes(data)['python']
+    assert scope['partial_evidence'] is (order == 'acceptance-first')
+    assert bool(scope['target_decisions']) is (order == 'acceptance-first')
+    assert data['terminal_result']['analysis_state'] in {'incomplete', 'failed'}
 
 
 @pytest.mark.parametrize('late_work', ['read-and-submit', 'inline', 'new-triage', 'overrun', 'retry',

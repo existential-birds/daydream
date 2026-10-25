@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock, host_tools as host_policy, review_budget
+from daydream import clock, review_budget
 from daydream.agent_capacity import admit_agent
 from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
@@ -223,6 +223,7 @@ async def run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
@@ -260,8 +261,6 @@ async def run_agent(
         if tools_disabled or continuation is not None or review_limits is not None:
             raise ValueError("host tools require a fresh tools-enabled invocation without review finalization")
         deadline = min(deadline, host_tools.deadline) if deadline is not None else host_tools.deadline
-        tool_call_budget = min(tool_call_budget, host_policy._MAX_CALLS) if tool_call_budget is not None else (
-            host_policy._MAX_CALLS)
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
@@ -350,7 +349,8 @@ async def run_agent(
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
         try:
             result = await _run_agent(
-                backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
+                backend, cwd, prompt, phase=phase, output_schema=output_schema, result_schema=result_schema,
+                progress_callback=progress_callback,
                 continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
                 persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
                 tool_call_budget=tool_call_budget,
@@ -433,6 +433,7 @@ async def _run_agent(
     *,
     phase: DaydreamPhase,
     output_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
     progress_callback: Callable[[Text], Any] | None = None,
     continuation: ContinuationToken | None = None,
     agents: dict[str, AgentDefinition] | None = None,
@@ -485,10 +486,6 @@ async def _run_agent(
             recorder = get_current_recorder()
             settings = _resolve_retry_settings(backend, retry_recovery_allowance_s)
             max_attempts = settings.max_attempts
-            # A bound host invocation has live authority and is never replayed.
-            # Native provider recovery remains within its original allowance.
-            if host_tools is not None:
-                max_attempts = 0
             base_delay = settings.base_delay_s
             max_delay = settings.max_delay_s
             resolved_allowance = settings.allowance_s
@@ -572,7 +569,7 @@ async def _run_agent(
                 structured_result = None
                 native_output = False
                 result_continuation = None
-                if investigation_budget is None:
+                if investigation_budget is None and host_tools is None:
                     tool_calls = 0
                 remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
                 if review_evidence is not None:
@@ -846,6 +843,9 @@ async def _run_agent(
                     exception_max_retries = min(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
+                    if host_tools is not None and host_tools.possibly_accepted:
+                        # A callback may have installed state even if transport settlement failed.
+                        exception_max_retries = 0
                     if attempt < exception_max_retries and classification.retries_allowed:
                         # Activate the cumulative retry-recovery allowance on the
                         # first retryable failure, clamped once to whatever the
@@ -1049,7 +1049,8 @@ async def _run_agent(
             review_evidence.checkpoint = None
     output = resolve_output(
         structured_result, raw, native_output=native_output, text_overflow=text_overflow,
-        output_schema=(review_evidence.schema if investigation_budget is not None and review_evidence is not None
+        output_schema=(result_schema if result_schema is not None else
+                       review_evidence.schema if investigation_budget is not None and review_evidence is not None
                        else output_schema), validate_structured_output=validate_structured_output,
         require_full_schema=require_full_schema, staged=investigation_budget is not None,
         schema_rejection_guard=schema_rejection_guard,

@@ -92,7 +92,7 @@ contract versions are independent. Preserve these supplied groups:
 | Fields | Meaning |
 |---|---|
 | `stage`, `scope_id`, `analyzed_revision` | Frozen first-pass/integration/triage identity |
-| `assigned_files`, `source_refs`, `assignment_parts`, `source_summary` | Exact targets, selectable source identities/ranges/fragments; offsets are UTF-8 diff-body bytes |
+| `assigned_files`, `source_refs`, `source_options`, `assignment_parts`, `source_summary` | Exact targets, canonical source identities and host source IDs; offsets are UTF-8 diff-body bytes |
 | `supporting_bundle`, `supporting_catalog` | Bounded admitted context/pointers and availability; no directory-wide access |
 | `remaining_work`, `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Dispatch-time residual work, pace and enforced budgets; future reserves already excluded |
 | `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Transport and original captured input bindings |
@@ -111,9 +111,12 @@ Open/unresolved candidates receive one triage round. Closed reviewer assertions,
 contradictions, unfinished targets, and isolated failures preserve their original
 authority and incomplete coverage; later success cannot erase earlier failures.
 Final-turn output selection and native structured submission remain host-owned;
-malformed envelopes cannot recover nested fragments. Native Pi uses the latest
-successful finalized submission after clean settlement, never prose or fallback
-from a host-invalid success. Budgets/reserves remain host policy; feedback is
+malformed envelopes cannot recover nested fragments. Native Pi's private stage
+contract 13 uses selector submissions and one host-accepted canonical result after
+clean native settlement. Its model schema is distinct from retained canonical
+output; other backends retain their canonical reference schema. The private cache
+identity changes with this contract, while extension API 8 and persisted canonical
+evidence remain compatible. Budgets/reserves remain host policy; feedback is
 system instruction, never a synthetic user turn. Read
 [output selection](../daydream/agent_output.py) and the relevant backend.
 
@@ -126,35 +129,43 @@ and pointered issues. Legacy Markdown-only output blocks plan publication.
 
 ## Invocation-scoped Pi host tools
 
-Trusted callers may pass `host_tools` to `run_agent` for one explicitly granted
-file read. Definitions are immutable; paths, deadlines, counters, credentials
-and callbacks belong to the invocation. Captured-source selection and review
-admission remain in #1627; binding lifetime does not own assignment lifetime.
+Pi review stages bind `HostToolBinding(deadline=..., accept=...)` through
+`run_agent(host_tools=..., output_schema=..., result_schema=...)`. The synchronous
+callback prepares and atomically admits one complete canonical stage or raises a
+correctable `HostToolRejected`. `output_schema` describes model selectors;
+`result_schema` describes canonical retained output. Live handlers, credentials,
+counters and authority belong to the invocation, including preacceptance retries.
 
-Install `uv tool install --editable '.[host-tools]'` for official `mcp==1.30.0`
-and its bundled FastMCP. Bound calls require exactly Pi 1.4.0, POSIX no-follow
-file opens, grant paths beginning with exactly one `/`, and fresh ordinary/read-only
-invocations. Other backends, disabled tools, finalization and continued sessions reject required bindings before model
-work. Ordinary calls retain their version behavior and support SDK 2 consumers,
-including RL; an unavailable compatible host runtime rejects explicitly.
+The packaged native extensions and bounded authenticated loopback endpoint require
+Pi 1.4.0 for the verified completion/tool APIs. They confirm the active terminal
+tool/schema and intended endpoint before provider work. Missing/overridden tools,
+tools-disabled or incompatible modes fail explicitly. There is no filesystem
+reader, filesystem grant protocol, MCP runtime extra or additional model tool.
+Stock Pi reads/searches retain their native behavior and read-only restrictions.
+Ordinary unbound calls retain their supported version/configuration behavior.
+Improve still requires Claude's independent snapshot-root guard.
 
-Readiness requires the intended native endpoint's successful initialize/tool-list
-exchange and actual active names, schemas and direct exposure. Configuration
-overrides and missing/disabled tools fail before provider work. Improve still
-requires Claude's independent snapshot-root guard.
+Assigned `source_options` accompany all supplied parts and bounded deferred
+Structure catalogs. Models choose `{source_id, basis, source_range}` with null
+retaining the exact host identity, or supporting `{path, side, source_range, basis}`.
+The full frozen assignment inventory resolves IDs, including later parts;
+abbreviated prompt examples do not narrow authority. The host supplies revisions,
+hashes, rename paths, roles and fragment metadata, validating original canonical
+inputs again before acceptance. Optional `supporting_files` associates relevance
+and remains forgiving. See [source/admission lifetime and limits](runtime.md#pi-host-tool-lifetime-and-limits).
 
-Authorization errors return correlated native tool results, allowing correction
-within the original wall/tool allowance; bound calls are not replayed as fresh
-attempts. Synchronous supervision observes native events and cannot authorize
-host operations. See [lifetime and limits](runtime.md#pi-host-tool-lifetime-and-limits).
+Only successful host acceptance lets the existing terminal tool terminate.
+Rejected calls remain native history and trajectory evidence while contributing
+no admitted semantic state. Accepted work survives later native execution failure,
+which still marks execution incomplete. No possibly accepted mutation is replayed.
+Native provider/model/authentication, genuine conversation roles, ordinary tools,
+and sibling ownership remain with their existing owners.
 
-Provider, model, settings and authentication remain native. The #1620 delivery
-review uses the current default, verified on 2026-10-24 as `nous` /
-`deepseek/deepseek-v4.1-flash-1017`, without overrides or settings changes.
-
-The optional keyword is additive under extension API 8, requiring no migration
-or cache change. Prompt overrides, sanctioned inputs and real `diff_path` /
-adjacent `hunk-index.json` semantics retain their contracts.
+This additive callback keyword and source-option metadata retain extension API 8.
+The superseded reader was unpublished PR machinery and has no released migration.
+Private stage/cache contract 13 invalidates incompatible cached stage results.
+Prompt overrides must preserve the supplied response schema; sanctioned inputs and
+real `diff_path` / adjacent `hunk-index.json` semantics retain their contracts.
 
 ## Tool supervision
 

@@ -16,6 +16,23 @@ export default function (pi: ExtensionAPI) {
     closeSync(fd);
   }
   if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Output packet unavailable");
+  if (packet.host_tools) {
+    // The paired helper owns the active-schema handshake. A missing or broken
+    // helper cannot silently turn a required host admission into serialization.
+    pi.on("input", async () => {
+      try {
+        const host = packet.host_tools;
+        const response = await fetch(host.url + "/status", {
+          headers: { Authorization: host.authorization },
+          signal: AbortSignal.timeout(host.request_timeout_ms),
+        });
+        const status = await response.json() as any;
+        if (response.ok && status.ready === true) return { action: "continue" as const };
+      } catch { /* Explicit handling is required when Pi catches handler errors. */ }
+      process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed" }) + "\n");
+      return { action: "handled" as const };
+    });
+  }
   if ("output_schema" in packet) {
     if (!packet.output_schema || typeof packet.output_schema !== "object" || Array.isArray(packet.output_schema)) {
       throw new Error("Output schema unavailable");
@@ -29,6 +46,7 @@ export default function (pi: ExtensionAPI) {
     }
     let starts = 0;
     let submitted = false;
+    let submissionIndeterminate = false;
     let reminded = false;
     let warned = false;
     let pendingRecovery = false;
@@ -71,7 +89,7 @@ export default function (pi: ExtensionAPI) {
       if (event.toolName === "structured_output" && !event.isError) submitted = true;
     });
     pi.on("agent_before_settle", (event) => {
-      if (event.outcome !== "completed" || submitted || reminded
+      if (event.outcome !== "completed" || submitted || submissionIndeterminate || reminded
           || (allowance !== undefined && allowance - starts <= 0)) return;
       reminded = true;
       pendingRecovery = true;
@@ -92,7 +110,41 @@ export default function (pi: ExtensionAPI) {
       promptSnippet: "Submit the final structured result",
       promptGuidelines: ["Complete this invocation by calling structured_output alone with the final result; assistant prose does not submit it."],
       parameters: packet.output_schema,
-      async execute(_toolCallId, params) {
+      async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+        if (packet.host_tools) {
+          const host = packet.host_tools;
+          try {
+            const body = JSON.stringify({ id: toolCallId, arguments: params });
+            if (Buffer.byteLength(body) > host.max_frame_bytes) throw new Error("Host frame limit");
+            const response = await fetch(host.url + "/submit", {
+              method: "POST",
+              headers: { Authorization: host.authorization, "Content-Type": "application/json" },
+              body, signal: AbortSignal.timeout(host.request_timeout_ms),
+            });
+            const text = await response.text();
+            if (Buffer.byteLength(text) > host.max_frame_bytes) throw new Error("Host response frame limit");
+            const result = JSON.parse(text);
+            if (!response.ok || !result || typeof result !== "object" || Array.isArray(result)
+                || result.id !== toolCallId) throw new Error("Unconfirmed host response");
+            if (result.accepted === true && result.result
+                && typeof result.result === "object" && !Array.isArray(result.result)) {
+              return { content: [{ type: "text", text: "Review result accepted." }],
+                details: result.result, terminate: true };
+            }
+            if (result.accepted === false && typeof result.error === "string" && result.error.length > 0) {
+              return { content: [{ type: "text", text: result.error.slice(0, 1024) }], isError: true };
+            }
+            throw new Error("Unconfirmed host submission outcome");
+          } catch {
+            submissionIndeterminate = true;
+            ctx.abort();
+            // This is an unsuccessful native stop, never an acceptance receipt.
+            // The error stop hint prevents another core generation; abort also
+            // disables session retry/recovery and before-settle continuation.
+            return { content: [{ type: "text", text: "Host submission outcome could not be confirmed; invocation aborted." }],
+              details: { host_submission_status: "indeterminate" }, isError: true, terminate: true };
+          }
+        }
         return { content: [{ type: "text", text: "Structured result submitted." }], details: params, terminate: true };
       },
     });

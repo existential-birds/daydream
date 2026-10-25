@@ -99,12 +99,23 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
     child = json.loads(child_path.read_text())
     diagnostics = [(step, diagnostic) for step in child['steps']
                    for diagnostic in step.get('extra', {}).get('backend_diagnostics', [])]
-    assert len(diagnostics) == 1
-    step, diagnostic = diagnostics[0]
+    terminal_diagnostics = [(step, diagnostic) for step, diagnostic in diagnostics
+                            if diagnostic['code'] == 'pi_terminal_error']
+    assert len(terminal_diagnostics) == 1
+    lifecycle_diagnostics = [diagnostic for _, diagnostic in diagnostics
+                             if diagnostic['code'] == 'pi_host_tools_lifecycle']
+    assert len(lifecycle_diagnostics) == 1
+    lifecycle = lifecycle_diagnostics[0]['metadata']
+    assert lifecycle['authority_closed'] and lifecycle['native_settled'] and lifecycle['endpoint_cleanup_complete']
+    assert lifecycle['calls'] == 1 and lifecycle['rejections'] == 0
+    step, diagnostic = terminal_diagnostics[0]
     assert diagnostic['message'] == terminal_message
     assert diagnostic['metadata']['category'] == 'UNKNOWN' and diagnostic['metadata']['retryable'] is False
     invocations = child['extra']['subtrajectories']
     assert len(invocations) == 2
+    failed_lifecycle = invocations[1]['backend_lifecycle']
+    assert failed_lifecycle['host_authority_closed'] and failed_lifecycle['host_cleanup_complete']
+    assert failed_lifecycle['host_native_settled'] is False
     assert step['step_id'] in invocations[1]['step_ids']
     assert step['step_id'] not in invocations[0]['step_ids']
     failed_steps = [item for item in child['steps'] if item.get('extra', {}).get('error_subtype') == 'PiError']

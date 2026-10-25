@@ -23,7 +23,7 @@ from contextlib import AsyncExitStack, ExitStack
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream import clock, host_tools as host_policy
 from daydream.backends import (
@@ -70,7 +70,7 @@ from daydream.backends._transport import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
-from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding
+from daydream.host_tools import HostToolBinding
 from daydream.redaction import redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
@@ -605,6 +605,7 @@ class PiBackend:
         probe = CliTransport("pi", ["pi", "--version"], limit=4096, env=environment, cwd=str(cwd),
                              stderr_policy=StderrPolicy.DRAIN_TASK)
         self._transports.append(probe)
+        probe_failed = False
         try:
             allowance = min(host_policy._SETUP_TIMEOUT_S, binding.deadline - clock.monotonic())
             async with asyncio.timeout(max(0.0, allowance)):
@@ -619,9 +620,18 @@ class PiBackend:
             if code != 0 or lines != ["1.4.0"]:
                 raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
         except (TimeoutError, OSError, ValueError):
+            probe_failed = True
             raise PiError("Could not verify required Pi 1.4.0 host-tool capabilities", category="HOST_TOOLS") from None
+        except BaseException:
+            probe_failed = True
+            raise
         finally:
-            await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)
+            try:
+                await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)
+            except BaseException:
+                binding.mark_cleanup_failed()
+                if not probe_failed:
+                    raise
 
     async def execute(
         self,
@@ -670,19 +680,20 @@ class PiBackend:
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        if host_tools is not None and (tools_disabled or finalization or continuation is not None):
-            raise PiError("Host tools require a fresh tools-enabled native invocation",
-                          category="HOST_TOOLS", retryable=False)
-        if host_tools is not None:
-            host_tools.validate_platform()
-            tool_call_budget = min(tool_call_budget, host_policy._MAX_CALLS) if tool_call_budget is not None else (
-                host_policy._MAX_CALLS)
-            host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
-                                tool_call_budget=tool_call_budget)
-
         args: list[str] = ["pi", "--mode", "json"]
         native_output = (output_schema is not None and validate_structured_output
                          and not (finalization or tools_disabled))
+        if host_tools is not None:
+            if not native_output:
+                raise PiError("Host admission requires a tools-enabled native terminal schema",
+                              category="HOST_TOOLS", retryable=False)
+            assert output_schema is not None
+            host_tools.configure_schema(output_schema)
+            # run_agent passes the residual allocation on retries; the binding
+            # stores an original cumulative limit, so account for earlier starts.
+            host_tools.restrict(deadline=(clock.monotonic() + wall_budget_s) if wall_budget_s is not None else None,
+                                tool_call_budget=(host_tools.calls + tool_call_budget)
+                                if tool_call_budget is not None else None)
 
         configured_model = None
         if self._model_override is None:
@@ -797,8 +808,7 @@ class PiBackend:
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")
-                         + ("," + NATIVE_READ_FILE if host_tools is not None else "")])
+            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -832,6 +842,8 @@ class PiBackend:
         submission_calls: dict[str, str] = {}
         incomplete_calls: set[str] = set()
         pending_submission: Any = None
+        pending_submission_generation: str | None = None
+        pending_usage: dict[str, Any] | None = None
         # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
         # captured for error reporting when the process exits non-zero.
         stderr_lines: list[str] = []
@@ -851,9 +863,46 @@ class PiBackend:
         seen_host_starts: dict[str, tuple[str | None, str]] = {}
         seen_host_results: dict[str, tuple[str | None, str]] = {}
         ambiguous_host_identity = False
+        host_submission_indeterminate = False
         host_server = None
 
         transport: CliTransport | None = None
+
+        def observe_usage(message: dict[str, Any], source: Literal["message_end", "turn_end"]) -> MetricsEvent | None:
+            nonlocal total_input, total_output, total_cache_read, total_cache_write, total_cost
+            nonlocal last_model, last_provider
+            last_model = message.get("responseModel") or message.get("model") or last_model
+            last_provider = message.get("provider") or last_provider
+            usage = _extract_usage(message)
+            inp = usage["input"]
+            outp = usage["output"]
+            cached = usage["cacheRead"]
+            created = usage["cacheWrite"]
+            cost = usage["cost_total"]
+            if isinstance(inp, int):
+                inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
+                total_input = (total_input or 0) + inp
+            if isinstance(outp, int):
+                total_output = (total_output or 0) + outp
+            if isinstance(cached, int):
+                total_cache_read = (total_cache_read or 0) + cached
+            if isinstance(created, int):
+                total_cache_write = (total_cache_write or 0) + created
+            if isinstance(cost, (int, float)):
+                total_cost = (total_cost or 0.0) + cost
+            if not isinstance(inp, int) or not isinstance(outp, int):
+                return None
+            return MetricsEvent(
+                message_id="",  # Pi has no per-message id.
+                prompt_tokens=inp,
+                completion_tokens=outp,
+                cached_tokens=cached if isinstance(cached, int) else None,
+                cost_usd=cost if isinstance(cost, (int, float)) else None,
+                model_name=last_model,
+                provider_name=last_provider,
+                cache_creation_tokens=created if isinstance(created, int) else None,
+                measurement_source=source,
+            )
 
         def associate_submission(call_id: Any, expected: str | None, state: str) -> None:
             if (not isinstance(call_id, str) or not call_id or len(call_id.encode()) > 2048
@@ -940,7 +989,7 @@ class PiBackend:
                 model_mode="single",
                 selected_tools_count=(
                     0 if finalization or tools_disabled else
-                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output) + int(host_tools is not None)
+                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output)
                     if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
@@ -955,16 +1004,17 @@ class PiBackend:
         )
 
         attachments = AsyncExitStack()
+        native_failed = False
         try:
             extensions: list[tuple[str, str, dict[str, Any]]] = []
             if host_tools is not None:
                 host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(cwd, child_env, host_tools)
-                if read_only:
-                    args.extend(["--extension", "builtin:mcp"])
                 extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
             if native_output:
                 packet: dict[str, Any] = {"output_schema": output_schema}
+                if host_server is not None:
+                    packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:
                     packet["tool_call_budget"] = tool_call_budget
                     assignment = _pi_submission_assignment(review_instructions)
@@ -1053,7 +1103,7 @@ class PiBackend:
 
                 event_type = event.get("type", "")
                 if event_type == "daydream_host_tools_ready":
-                    if host_server is None or not host_server.listed:
+                    if host_server is None or not host_server.ready:
                         raise PiError("Native host readiness was not established", category="HOST_TOOLS")
                     host_ready = True
                     continue
@@ -1080,8 +1130,6 @@ class PiBackend:
                             ambiguous_host_identity = True
                             yield identity_diagnostic(event)
                         continue
-                    if event_type == "tool_execution_start" and len(seen) >= 256:
-                        raise PiError("Native tool evidence capacity exhausted", category="HOST_TOOLS")
                     seen[native_id] = identity
 
                 if event_type == "agent_start":
@@ -1129,6 +1177,10 @@ class PiBackend:
                 elif event_type == "message_end":
                     msg = event.get("message") or {}
                     if msg.get("role") == "assistant":
+                        # The finalized message already contains native usage.
+                        # Keep normal accounting at turn_end, but retain this
+                        # evidence if tool correlation/transport fails before it.
+                        pending_usage = msg
                         if lifecycle is not None:
                             lifecycle.generation_ended()
                         last_model = msg.get("responseModel") or msg.get("model") or last_model
@@ -1230,6 +1282,7 @@ class PiBackend:
                             if details is None or diagnostic is not None or size > _PI_FINAL_PAYLOAD_MAX_BYTES:
                                 raise PiError("Invalid output details", retryable=False, category="STREAM_TRUNCATION")
                             pending_submission = admitted
+                            pending_submission_generation = last_generation_id
 
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
@@ -1253,6 +1306,11 @@ class PiBackend:
                         lifecycle.active_tools(active_tool_calls)
                     call_id = event.get("toolCallId")
                     result = event.get("result")
+                    if (host_tools is not None and event.get("toolName") == "structured_output"
+                            and event.get("isError") is True and isinstance(result, dict)
+                            and result.get("details") == {"host_submission_status": "indeterminate"}):
+                        host_submission_indeterminate = True
+                        host_tools.close_authority()
                     yield ToolResultEvent(
                         id=call_id or str(uuid.uuid4()), output=_render_tool_result(result),
                         is_error=bool(event.get("isError", False)),
@@ -1284,35 +1342,10 @@ class PiBackend:
                     if stop_reason is not None:
                         saw_finish_reason = True
                         finish_reason = stop_reason
-                    usage = _extract_usage(msg)
-                    inp = usage["input"]
-                    outp = usage["output"]
-                    cached = usage["cacheRead"]
-                    created = usage["cacheWrite"]
-                    cost = usage["cost_total"]
-                    if isinstance(inp, int):
-                        inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
-                        total_input = (total_input or 0) + inp
-                    if isinstance(outp, int):
-                        total_output = (total_output or 0) + outp
-                    if isinstance(cached, int):
-                        total_cache_read = (total_cache_read or 0) + cached
-                    if isinstance(created, int):
-                        total_cache_write = (total_cache_write or 0) + created
-                    if isinstance(cost, (int, float)):
-                        total_cost = (total_cost or 0.0) + cost
-                    if isinstance(inp, int) and isinstance(outp, int):
-                        yield MetricsEvent(
-                            message_id="",  # Pi has no per-message id.
-                            prompt_tokens=inp,
-                            completion_tokens=outp,
-                            cached_tokens=cached if isinstance(cached, int) else None,
-                            cost_usd=cost if isinstance(cost, (int, float)) else None,
-                            model_name=last_model,
-                            provider_name=last_provider,
-                            cache_creation_tokens=created if isinstance(created, int) else None,
-                            measurement_source="turn_end",
-                        )
+                    pending_usage = None
+                    metrics = observe_usage(msg, "turn_end")
+                    if metrics is not None:
+                        yield metrics
                     # Use native stopReason/model/provider when exposed. Pi has no message
                     # id; keep it empty and retain host-observed timing.
                     if stop_reason == "error":
@@ -1394,21 +1427,38 @@ class PiBackend:
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
                 or (host_tools is not None and not host_ready)
+                or (host_tools is not None and (
+                    not host_tools.accepted or pending_submission != host_tools.accepted_result
+                    or pending_submission_generation != last_generation_id))
                 or ambiguous_host_identity
+                or host_submission_indeterminate
             )
             if host_server is not None and host_tools is not None:
                 await attachments.aclose()
                 if not host_tools.cleanup_complete:
                     native_unsettled = True
-                yield DiagnosticEvent(code="pi_host_tools_lifecycle", message="Invocation host-tool outcomes",
+                yield DiagnosticEvent(code="pi_host_tools_lifecycle", message="Invocation host endpoint outcomes",
                                       metadata={"authority_closed": not host_tools.authority_open,
                                                 "native_settled": host_tools.native_settled,
-                                                "cleanup_complete": host_tools.cleanup_complete,
+                                                "endpoint_cleanup_complete": host_tools.cleanup_complete,
                                                 "calls": host_tools.calls, "rejections": host_tools.rejections})
             if native_output and returncode == 0 and not native_unsettled:
                 structured_result = pending_submission
+            if pending_usage is not None:
+                # EOF can arrive before turn_end. Include its already-finalized
+                # usage before the single terminal total, rather than first
+                # publishing a stale aggregate and correcting it on failure.
+                message = pending_usage
+                pending_usage = None
+                metrics = observe_usage(message, "message_end")
+                if metrics is not None:
+                    yield metrics
             for terminal in terminal_events():
                 yield terminal
+
+            if host_submission_indeterminate:
+                raise PiError("Native host submission did not receive a confirmed outcome",
+                              retryable=False, category="HOST_TOOLS")
 
             # Fail fast on non-zero exit: if pi crashed without emitting a
             # turn_end error event, surface the failure with diagnostic output
@@ -1430,13 +1480,35 @@ class PiBackend:
                     category="STREAM_TRUNCATION",
                 )
 
+        except Exception:
+            native_failed = True
+            if pending_usage is not None:
+                # Do not consume later native events after an association error.
+                # Flush only usage already observed on the finalized assistant
+                # message, once; successful turns cleared it at turn_end.
+                message = pending_usage
+                pending_usage = None
+                metrics = observe_usage(message, "message_end")
+                if metrics is not None:
+                    yield metrics
+                yield terminal_events()[0]
+            raise
+        except BaseException:
+            native_failed = True
+            raise
         finally:
             if host_tools is not None:
                 host_tools.close_authority()
             try:
                 if transport is not None:
-                    await teardown(transport, self._transports,
-                                   cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
+                    try:
+                        await teardown(transport, self._transports,
+                                       cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
+                    except BaseException:
+                        if host_tools is not None:
+                            host_tools.mark_cleanup_failed()
+                        if host_tools is None or not native_failed:
+                            raise
             finally:
                 try:
                     await attachments.aclose()

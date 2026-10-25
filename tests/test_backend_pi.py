@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import httpx
 import pytest
 
 from daydream.agent import run_agent
@@ -80,10 +81,10 @@ from tests.harness.stub_backend import (
 from tests.harness.trajectory import make_recorder
 
 
-def test_ordinary_pi_fresh_process_does_not_require_optional_host_runtime(
+def test_ordinary_pi_fresh_process_does_not_load_host_admission_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ordinary Pi executes without the optional runtime; preloaded all-extras modules hide eager imports."""
+    """Ordinary Pi runs without a host endpoint; all-extras imports can hide unwanted eager endpoint loading."""
     fixture = install_protocol_cli(tmp_path / "external", "pi")
     target = tmp_path / "repo"
     target.mkdir()
@@ -94,17 +95,9 @@ def test_ordinary_pi_fresh_process_does_not_require_optional_host_runtime(
 import asyncio
 import sys
 from pathlib import Path
-import claude_agent_sdk
-import mcp.server
-# Bootstrap the mandatory Claude dependency, then forbid the optional runtime.
+# Forbid admission endpoint loading in a fresh ordinary invocation.
 assert not any(name == "daydream" or name.startswith("daydream.") for name in sys.modules)
-for name in tuple(sys.modules):
-    if name.startswith("mcp.server.fastmcp"):
-        sys.modules[name] = None
-for name in ("FastMCP", "fastmcp"):
-    vars(mcp.server).pop(name, None)
 sys.modules["daydream.host_tools_server"] = None
-sys.modules["mcp.server.fastmcp"] = None
 from daydream.backends.pi import PiBackend
 from daydream.backends import ResultEvent, TextEvent
 
@@ -116,7 +109,6 @@ async def main():
 
 asyncio.run(main())
 assert sys.modules["daydream.host_tools_server"] is None
-assert sys.modules["mcp.server.fastmcp"] is None
 '''
     result = subprocess.run([sys.executable, "-c", script, str(target)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
@@ -768,17 +760,82 @@ def _capture_pi_subprocess(
     monkeypatch: pytest.MonkeyPatch, captured: list[list[str]],
     response: Callable[[list[str]], MagicMock] | None = None,
 ) -> None:
-    """Intercept only pi spawns, record argv, and replay a no-op session.
+    """Replay only native process bytes while keeping required HTTP admission real.
 
-    Keep the real backend/factory; other asyncio subprocess calls pass through.
+    Runner configuration/recording tests must not imply domain acceptance by
+    prewriting successful native receipts. Installed-Pi tests own actual extension
+    execution; this external-process seam drives the same callback and returns its
+    canonical details before the adapter receives the corresponding native rows.
     """
-    # Any permits this forwarding wrapper around the keyword-typed subprocess signature.
     real_exec: Any = asyncio.create_subprocess_exec
     async def _fake_exec(*args: object, **kwargs: object) -> MagicMock:
         if args and args[0] == "pi":
             argv = [str(a) for a in args]
+            if argv == ["pi", "--version"]:
+                return make_mock_process(["1.4.0"])
             captured.append(argv)
-            return response(argv) if response else make_mock_process_from_fixture("simple_text.jsonl")
+            process = response(argv) if response else make_mock_process_from_fixture("simple_text.jsonl")
+            environment = cast(dict[str, str], kwargs.get("env") or {})
+            packet_path = environment.get("DAYDREAM_PI_HOST_PACKET")
+            if packet_path is None:
+                return process
+            packet = json.loads(Path(packet_path).read_text())
+            async def request(path: str, value: dict[str, Any]) -> dict[str, Any]:
+                async with httpx.AsyncClient(base_url=packet["url"],
+                    headers={"Authorization": packet["authorization"]}) as client:
+                    result = await client.post(path, json=value)
+                    assert result.status_code == 200, result.text
+                    return cast(dict[str, Any], result.json())
+            assert (await request("/ready", {"tool_name": packet["tool_name"], "schema": packet["schema"]}))["ready"]
+            stdout: Any = process.stdout
+            original_readline = stdout.readline
+            ready_pending = True
+            terminal_call: str | None = None
+            arguments: dict[str, Any] = {}
+            permissions: dict[str, dict[str, Any]] = {}
+            finalized: dict[str, dict[str, Any]] = {}
+            async def readline() -> bytes:
+                nonlocal ready_pending, terminal_call
+                if ready_pending:
+                    ready_pending = False
+                    return b'{"type":"daydream_host_tools_ready"}\n'
+                raw: bytes = await original_readline()
+                if not raw:
+                    return raw
+                row = json.loads(raw)
+                event_type = row.get("type")
+                message = row.get("message") or {}
+                if event_type == "message_end" and message.get("role") == "assistant":
+                    calls = [part for part in message.get("content", []) if part.get("type") == "toolCall"]
+                    terminal_call = (calls[0]["id"] if len(calls) == 1
+                        and calls[0]["name"] == "structured_output"
+                        and message.get("stopReason") in {"stop", "toolUse"} else None)
+                elif event_type == "tool_execution_start":
+                    call_id = row["toolCallId"]
+                    arguments[call_id] = row.get("args")
+                    permissions[call_id] = await request("/admit", {"id": call_id, "name": row["toolName"],
+                        "arguments": row.get("args"), "terminal": terminal_call == call_id})
+                elif event_type == "tool_execution_end" and row.get("toolName") == "structured_output":
+                    call_id = row["toolCallId"]
+                    receipt = permissions[call_id]
+                    if receipt.get("allowed") and row.get("isError") is False:
+                        receipt = await request("/submit", {"id": call_id, "arguments": arguments[call_id]})
+                        assert receipt["id"] == call_id
+                    if receipt.get("accepted"):
+                        native = {"isError": False, "content": [{"type": "text", "text": "Review result accepted."}],
+                                  "details": receipt["result"]}
+                    else:
+                        native = {"isError": True, "content": [{"type": "text",
+                                  "text": receipt.get("error", "Rejected native terminal call")}]}
+                    finalized[call_id] = native
+                    row.update(isError=native["isError"], result={key: val for key, val in native.items()
+                                                               if key != "isError"})
+                elif event_type == "message_end" and message.get("role") == "toolResult":
+                    if message.get("toolCallId") in finalized:
+                        row["message"] = {**message, **finalized[message["toolCallId"]]}
+                return (json.dumps(row) + "\n").encode()
+            stdout.readline = readline
+            return process
         return cast(MagicMock, await real_exec(*args, **kwargs))
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _fake_exec)
 

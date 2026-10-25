@@ -5,7 +5,7 @@ from typing import Any
 
 from daydream.output_schema import result_array_schema, severity_enum_schema, strict_object
 from daydream.repository_paths import REPOSITORY_FILE_PATH_SCHEMA
-from daydream.review_source_refs import SOURCE_REFS_SCHEMA
+from daydream.review_source_refs import SOURCE_REFS_SCHEMA, SOURCE_SELECTORS_SCHEMA
 
 _FINDING_FIELDS = {
     "id": {"type": "integer"},
@@ -72,6 +72,13 @@ def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str,
     schema = copy.deepcopy(transport_schema)
     schema['required'].remove('supporting_files')
     schema['properties']['supporting_files'] = {}
+    return schema
+
+
+def review_stage_submission_schema(canonical_schema: dict[str, Any]) -> dict[str, Any]:
+    """Pi models select sources; only the host constructs retained references."""
+    schema = copy.deepcopy(canonical_schema)
+    schema['properties']['targets']['items']['properties']['evidence_refs'] = copy.deepcopy(SOURCE_SELECTORS_SCHEMA)
     return schema
 
 ALTERNATIVE_REVIEW_SCHEMA = result_array_schema("issues", {

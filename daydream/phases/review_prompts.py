@@ -13,7 +13,7 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.review_budget import STAGED_REVIEW_GUIDANCE
+from daydream.review_budget import staged_review_guidance
 from daydream.severity import SEVERITY_RUBRIC
 
 
@@ -28,7 +28,7 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
         'triage': 'Resolve assigned review candidates',
     }.get(review_stage['stage'], 'Complete the assigned review stage')
     return (
-        STAGED_REVIEW_GUIDANCE + '\nPersistent assignment identities: '
+        staged_review_guidance(review_stage) + '\nPersistent assignment identities: '
         + json.dumps({'stage': review_stage['stage'], 'targets': review_stage['assigned_target_ids'],
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),

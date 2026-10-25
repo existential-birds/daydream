@@ -34,7 +34,6 @@ dependencies = [
 [project.optional-dependencies]
 benchmark = ["harbor>=0.24.0,<0.25"]
 hub = ["huggingface_hub>=2.2.0"]
-host-tools = ["mcp==1.30.0", "starlette>=0.27", "uvicorn>=0.31.1"]
 
 [dependency-groups]
 dev = [

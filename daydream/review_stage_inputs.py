@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 from daydream import prompt_budget as inputs
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
+from daydream.backends.osprey import OspreyBackend
+from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
@@ -19,7 +21,12 @@ from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
-from daydream.review_source_refs import lf_lines, part_source_mapping, validate_source_refs
+from daydream.review_source_refs import (
+    canonicalize_source_selectors,
+    lf_lines,
+    part_source_mapping,
+    validate_source_refs,
+)
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
@@ -142,6 +149,13 @@ class StageInputFactory:
         for expected in self.canonical:
             if self._canonical(expected.label, expected.path) != expected:
                 raise inputs.SanctionedInputUnavailable("canonical review inputs changed")
+
+    def canonicalize_source_selectors(self, selectors: Any, expected_refs: Iterable[dict[str, Any]], *,
+                                      require_assigned: bool = True) -> list[dict[str, Any]]:
+        """Recheck the original canonical inputs immediately before resolving selectors."""
+        self._revalidate_canonical()
+        return canonicalize_source_selectors(selectors, expected_refs, revision=self.revision,
+            source_root=self.work.repo, require_assigned=require_assigned)
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}
@@ -317,7 +331,7 @@ class StageInputFactory:
 
     def _before_context(self, files: set[str], directory: Path, statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
-        if type(self.backend).__name__ not in {"PiBackend", "OspreyBackend"}:
+        if not isinstance(self.backend, (PiBackend, OspreyBackend)):
             return {}
         candidates: dict[str, Path] = {}
         for index, file in enumerate(sorted(files)):
@@ -392,7 +406,8 @@ class StageInputFactory:
                     deferred_contents[label] = part.diff
                     continue
                 descriptor = _json({'target_id': part.assignment['target_id'],
-                                    'source_refs': part.assignment['source_refs'][:4]})
+                                    'source_refs': part.assignment['source_refs'],
+                                    'source_options': part.assignment['source_options']})
                 candidate = {**contents, label: part.diff, f'{label}-sources': descriptor}
                 if (self.transport is inputs.SanctionedInputTransport.EXACT_PATHS and len(candidate) <= 128
                         and sum(len(text.encode()) for text in candidate.values()) <= 1024 * 1024
@@ -470,10 +485,9 @@ class StageInputFactory:
                     if label not in deferred_paths:
                         continue
                     entry: dict[str, Any] = {'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
-                             'path': str(deferred_paths[label]), 'source_refs': part.assignment['source_refs'][:4]}
-                    while entry['source_refs'] and len(_json({'parts': [entry]}).encode()) > 12_000:
-                        entry['source_refs'].pop()
-                    if entry['source_refs']:
+                             'path': str(deferred_paths[label]), 'source_refs': part.assignment['source_refs'],
+                             'source_options': part.assignment['source_options']}
+                    if len(_json({'parts': [entry]}).encode()) <= 12_000:
                         catalog_entries.append(entry)
                     else:
                         deferred_paths.pop(label)

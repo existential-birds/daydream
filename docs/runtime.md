@@ -30,27 +30,44 @@ because a failed replacement may preserve an older complete artifact.
 
 ## Pi host-tool lifetime and limits
 
-A binding grants exact file paths and a finite absolute deadline. The host
-checks schema, operation, path, open authority, capacity and deadline before
-reading. Component-wise no-follow opens require regular files; only complete
-UTF-8 contents return. One isolated reader per invocation lets cancellation end filesystem
-work before evidence freezes.
+Pi keeps its stock read/search tools, offsets and pagination. Existing private
+artifact/sanctioned-input owners furnish frozen diff parts and source context.
+Models select assigned source IDs or supporting path/side/LF ranges; the host
+constructs canonical `evidence_refs` from the full assignment inventory and pinned
+regular Git blobs. Exact continuation fragments retain their null source ranges.
+Supporting attribution cannot satisfy assigned coverage. Correspondence is never
+proof of a read, understanding or an executed check.
 
-Definitions/schemas, frames, arguments, serialized results, items, cumulative
-calls, callback lifetime and concurrent requests/reads have finite bounds.
-Results stay below Pi's direct MCP truncation threshold; overflow rejects whole
-results and excess callbacks are not queued. Native admission charges each call once,
-including rejections. Events, progress and retries cannot replenish allowances.
+The existing `structured_output` terminal tool calls one invocation-local host
+callback. Only a sole terminal call in a completed native generation may enter
+admission. The host validates required judgments, original captured inputs, source
+selectors and shared retention limits before installing the entire stage. Rejection
+returns a correlated native error and changes no findings, decisions, notes or
+capacity. Correction uses the same conversation and cumulative wall/tool allowance.
+Successful acceptance installs state once, returns canonical output and permits
+native termination; duplicate accepted callbacks cannot admit or charge retention
+again. Unbound structured calls retain their ordinary serializer behavior.
 
-Close authority before shutdown and join/isolate callbacks, read processes and
-writers before finalizing evidence. Bound calls require positive native
-settlement even without an output schema; tool success, prose, endpoint shutdown
-and child exit cannot establish it. Preserve usage and truthful incomplete
-outcomes; see [lifecycle evidence](observability.md#pi-host-tool-lifecycle-evidence).
+Recheck open authority and the original deadline immediately before synchronous
+installation, with no await or detached thread between that check and mutation.
+Closure-first denies mutation; acceptance-first retains admitted work even when
+native settlement later fails. A possibly accepted callback cannot be replayed.
+Preacceptance retries use existing cumulative policy. Frames, arguments, results,
+items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
+Every real native tool start counts, including failed submissions, with no separate
+eight-call ceiling or hidden nested tool execution.
+
+Close authority before shutdown and join/isolate callback transports and evidence
+writers before freezing. Native reads use the existing process cleanup. Acceptance,
+native settlement/EOF/zero exit and cleanup are separate outcomes; acceptance or a
+receipt alone cannot establish successful execution. Preserve admitted findings,
+usage and truthful incomplete coverage; see
+[lifecycle evidence](observability.md#pi-host-tool-lifecycle-evidence).
 
 Endpoint credentials stay outside persisted configuration/public evidence.
-Cached backends do not own sibling grants. Enforcement works without recording
-or tracing. See [supported capabilities](extensions.md#invocation-scoped-pi-host-tools).
+Bindings and resources belong to one invocation; sibling shutdown is isolated.
+Enforcement works without recording or tracing. See
+[supported capabilities](extensions.md#invocation-scoped-pi-host-tools).
 
 ## Validation and repair
 

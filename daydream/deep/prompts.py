@@ -31,7 +31,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
-from daydream.review_budget import STAGED_REVIEW_GUIDANCE
+from daydream.review_budget import staged_review_guidance
 from daydream.severity import SEVERITY_RUBRIC
 
 DOC_REVIEW_NOTICE = (
@@ -348,7 +348,7 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
             parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
-    parts.append(STAGED_REVIEW_GUIDANCE)
+    parts.append(staged_review_guidance(review_stage))
     parts.append("Host review stage budget fields are dispatch-time snapshots: remaining_tool_calls is the "
         "reviewer's cumulative capacity; hard_tool_call_allowance is the current invocation allocation; "
         "advisory_tool_call_target guides pace rather than limiting useful assigned checks. "

@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **pi:** add bounded invocation-scoped native MCP file reads with pre-provider
-  readiness, correctable errors, exact bytes and separate lifecycle evidence
+- **pi:** admit review submissions inside the native terminal tool, with
+  correctable source selectors and host-built canonical references while keeping
+  stock reads, search and pagination
   ([#1620](https://github.com/existential-birds/daydream/issues/1620)). Requires
-  the `host-tools` extra, Pi 1.4.0 and POSIX; additive under extension API 8.
-  Ordinary SDK 2 consumers remain compatible; Improve isolation is unchanged.
+  Pi 1.4.0; extension API 8 remains compatible. Private stage/cache contract 13
+  invalidates prior stage caches.
 
 ### Changed
 
@@ -27,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **pi:** require a successful native MCP tool-list exchange before host-tool readiness.
+- **pi:** retain accepted findings across later native failures, reject mixed or
+  incomplete terminal generations before admission, and preserve cumulative
+  allowances during correction and safe preacceptance retry.
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

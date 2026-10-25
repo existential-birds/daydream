@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +38,100 @@ SOURCE_REF_SCHEMA = strict_object({
     'role': {'enum': ['assigned', 'supporting']},
 })
 SOURCE_REFS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': SOURCE_REF_SCHEMA}
+_BASIS = {'enum': ['supplied_diff', 'source_inspection', 'executed_check']}
+SOURCE_SELECTORS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': {'anyOf': [
+    strict_object({
+        'source_id': {'type': 'string', 'pattern': '^source:[0-9a-f]{64}$'},
+        'basis': _BASIS, 'source_range': {'anyOf': [_RANGE, {'type': 'null'}]},
+    }),
+    strict_object({
+        'path': {'type': 'string', 'minLength': 1, 'maxLength': 4096},
+        'side': {'enum': ['old', 'new']}, 'source_range': _RANGE,
+        'basis': {'enum': ['source_inspection', 'executed_check']},
+    }),
+]}}
 
 
 def _sha(body: str | bytes) -> str:
     return hashlib.sha256(body.encode('utf-8') if isinstance(body, str) else body).hexdigest()
+
+
+def source_id(reference: dict[str, Any]) -> str:
+    """Name one exact host-assigned identity independently of the model's basis claim."""
+    identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
+    return 'source:' + _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(',', ':')))
+
+
+def source_options(references: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe every supplied source without asking a model to reproduce its mechanics."""
+    return [{'source_id': source_id(reference),
+             **{key: deepcopy(reference[key]) for key in ('path', 'side', 'source_range')},
+             'basis': 'supplied_diff'} for reference in references]
+
+
+def canonicalize_source_selectors(
+    selectors: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
+    source_root: Path, require_assigned: bool = True,
+) -> list[dict[str, Any]]:
+    """Resolve a complete selection atomically against frozen assignment/Git identities.
+
+    A null assigned range retains the original range, including exact continuation
+    fragments. Supporting selections cannot provide hashes or satisfy assigned work.
+    No selected source is evidence that a model read or understood its contents.
+    """
+    if not validates_schema(selectors, SOURCE_SELECTORS_SCHEMA):
+        raise ValueError('invalid source selector shape')
+    try:
+        if len(json.dumps(selectors, ensure_ascii=False).encode('utf-8')) > SOURCE_REFS_MAX_BYTES:
+            raise ValueError('source selectors exceed their byte allowance')
+        requested = {selector['source_id'] for selector in selectors if 'source_id' in selector}
+        assigned: dict[str, dict[str, Any]] = {}
+        for expected in expected_refs:
+            identifier = source_id(expected)
+            if identifier in requested:
+                assigned[identifier] = expected
+            if requested <= assigned.keys():
+                break
+        if requested != assigned.keys():
+            raise ValueError('source selector is outside the assigned inventory')
+        resolved: list[dict[str, Any]] = []
+        for selector in selectors:
+            if 'source_id' in selector:
+                reference = deepcopy(assigned[selector['source_id']])
+                bounds = selector['source_range']
+                original = reference['source_range']
+                if bounds is not None:
+                    if (not isinstance(original, dict)
+                            or not original['start'] <= bounds['start'] <= bounds['end'] <= original['end']):
+                        raise ValueError('source range is outside its assigned identity')
+                    reference['source_range'] = deepcopy(bounds)
+                reference.update(basis=selector['basis'], role='assigned')
+            else:
+                path, side, bounds = selector['path'], selector['side'], selector['source_range']
+                if not git_observed_path_is_confined(source_root, path):
+                    raise ValueError('supporting source path is not confined')
+                pinned_revision = revision['merge_base_sha' if side == 'old' else 'head_sha']
+                _, contents = frozen_source(source_root, pinned_revision, path)
+                if len(contents) > _SUPPORTING_SOURCE_MAX_BYTES:
+                    raise ValueError('supporting source exceeds its byte allowance')
+                contents.decode('utf-8')
+                line_count = contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n'))
+                if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
+                    raise ValueError('supporting source range is outside its pinned blob')
+                reference = {
+                    'artifact_sha256': _sha(contents), 'part_sha256': None, 'revision': pinned_revision,
+                    'path': path, 'side': side, 'source_range': deepcopy(bounds), 'fragment': None,
+                    'basis': selector['basis'], 'role': 'supporting',
+                }
+            resolved.append(reference)
+        # Canonical evidence has its own retained bounds and contract, independent
+        # of the smaller model-facing selector schema.
+        if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,
+                                    require_assigned=require_assigned):
+            raise ValueError('source selectors do not identify valid canonical evidence')
+    except (GitError, OSError, UnicodeError, KeyError, TypeError) as exc:
+        raise ValueError('frozen source selection is unavailable') from exc
+    return resolved
 
 
 def lf_lines(text: str) -> list[str]:
@@ -134,7 +225,7 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
         refs.append({**identity, 'revision': revision['head_sha'], 'path': assignment['file'], 'side': 'diff',
                      'source_range': None, 'fragment': {'offset': offset,
                      'bytes': len(metadata), 'sha256': _sha(metadata)}})
-    return {'source_refs': refs, 'source_summary': summaries,
+    return {'source_refs': refs, 'source_options': source_options(refs), 'source_summary': summaries,
             'fragment_offset_basis': 'UTF-8 bytes in the original diff hunk body; never a source line number'}
 
 

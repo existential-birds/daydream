@@ -49,9 +49,12 @@ distinct. Never infer provider root causes or missing tools from absent telemetr
 Host requests/rejections retain native IDs, roles and generation history;
 admission creates no synthetic tool events or billing. Lifecycle observations
 separately record authority closure, native settlement and aggregate cleanup of
-callbacks, readers and endpoint, after cleanup on every exit path. A successful
-read cannot establish native settlement; suppressing a late result cannot prove
-cleanup. See [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
+callbacks, native process and endpoint, after cleanup on every exit path. Domain
+acceptance retains canonical findings independently of later native failure;
+rejected selector payloads remain raw evidence without entering semantic handoffs.
+A successful callback cannot establish native settlement; suppressing a late
+result cannot prove cleanup. See
+[the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
 
 ## Codex lifecycle evidence
 
