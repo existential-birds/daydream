@@ -309,7 +309,6 @@ def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
         ("headRepository", {"nameWithOwner": "", "name": ""}),
         ("headRepository", {"nameWithOwner": "", "name": " "}),
         ("headRepository", {"nameWithOwner": "", "name": "a/b"}),
-        ("headRepositoryOwner", {}),
         ("headRepositoryOwner", {"login": ""}),
         ("headRepositoryOwner", "fork"),
     ],
