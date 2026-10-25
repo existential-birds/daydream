@@ -141,21 +141,8 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
 
-def test_no_marker_without_fingerprint() -> None:
-    assert (parse_finding_markers(format_comment_body(
-                ParsedIssue(path="a.py", line=3, title="T", body="B"), "inline", renderers=BUILTIN_RENDERERS
-            )
-        )
-        == []
-    )
 
 
-def test_extract_anchors_prefers_long_tokens() -> None:
-    anchors = extract_anchors("Null check\nThe function `compute_total` dereferences `items` in handleRequest")
-    # Backtick tokens should appear; longest first.
-    assert "compute_total" in anchors
-    assert "handleRequest" in anchors
-    assert anchors == sorted(anchors, key=len, reverse=True)
 
 
 @pytest.fixture
@@ -167,15 +154,6 @@ def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
     raise AssertionError("gh fallback invoked")
 
 
-def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
-    """Link the fork commit while retaining the base repository as the POST target."""
-    fork_pr = replace(pr, head_repo="forky/widgets")
-    payload = payload_for(
-        fork_pr, pr_review.ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
-    )
-    body = payload["body"]
-    assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
-    assert "https://github.com/acme/widgets/commit/head123" not in body
 
 
 def test_warning_retains_distinct_diagnostics_for_a_shared_scope_and_phase() -> None:
@@ -229,14 +207,18 @@ def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any],
 
 def test_find_open_pr_captures_head_repo_for_fork_pr(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """Capture fork identity for commit links while posting to the base repository."""
-    row, _, _ = _local_pr_row(git_repo, head_owner="forky")
-    row["headRepository"] = {"name": "widgets", "nameWithOwner": "forky/widgets"}
+    row, _, head = _local_pr_row(git_repo, head_owner="forky")
+    row["headRepository"] = {"name": "Widgets", "nameWithOwner": "FORKY/widgets"}
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("acme", "widgets"),)
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert (info.owner, info.repo) == ("acme", "widgets")
-    assert info.head_repo == "forky/widgets"
+    assert info.head_repo == "FORKY/widgets"
+    body = payload_for(info, pr_review.ClassifiedIssues(), run_info="test run info",
+                       renderers=BUILTIN_RENDERERS)["body"]
+    assert (f"- **Reviewed commit:** [`{head[:7]}`](https://github.com/FORKY/widgets/commit/{head})") in body
+    assert f"https://github.com/acme/widgets/commit/{head}" not in body
     assert info.head_ref == "feature"
 
 
@@ -307,10 +289,6 @@ def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     assert slug not in str(error.value)
 
 
-def test_head_slug_allows_case_differences() -> None:
-    assert pr_review._head_repo_slug_from_row({"headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
-        "headRepositoryOwner": {"login": "fork"},
-    }) == "FORK/widgets"
 
 
 @pytest.mark.parametrize(("field", "value"),
@@ -551,6 +529,11 @@ def test_classify_places_findings_against_real_changed_ranges(git_repo: Path) ->
     ]
     assert [issue.title for issue in result.body_only] == ["unchanged", "cross stack"]
     assert "posted on line 24; reviewer cited line 2" in result.inline[5].body
+    assert "<!-- daydream-finding:" not in result.inline[0].body
+    note = "**Placement:** posted on line 7; reviewer cited line 4."
+    assert note in issues[1].body and note in result.inline[1].body
+    classify(git_repo, _pr_for(base, head), issues)
+    assert issues[1].body.count("**Placement:**") == 1
 
 
 def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
@@ -621,22 +604,6 @@ def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> Non
 
 
 
-def test_classify_annotates_relocated_line(git_repo: Path) -> None:
-    lines = [f"row_{i}" for i in range(1, 31)]
-    lines[14] = "settle_window = 5  # cited here"
-    base = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
-    lines[19] = "row_20_changed"
-    head = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "change row 20")
-    issue = ParsedIssue(path="x.py", line=15, title="t", body="`settle_window` is too small")
-
-    result = classify(git_repo, _pr_for(base, head), [issue])
-
-    assert [c.line for c in result.inline] == [17]
-    note = "**Placement:** posted on line 17; reviewer cited line 15."
-    assert note in issue.body, "the relocation was not recorded on the finding"
-    assert note in result.inline[0].body, "the posted comment does not show the relocation"
-    classify(git_repo, _pr_for(base, head), [issue])
-    assert issue.body.count("**Placement:**") == 1
 
 
 def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:

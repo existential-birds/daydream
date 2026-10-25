@@ -224,16 +224,6 @@ def test_e2e_deep_mode_aggregates_fork_files(tmp_path: Path) -> None:
     assert "| Fix | claude-sonnet-4-5 | 3 | 5,000 (50%) | 1,300 | $0.07 |" in out
 
 
-def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
-    """Cached tokens are a subset of prompt tokens, including in malformed input."""
-    p = _single_phase_trajectory(tmp_path, prompt=10, completion=5, cached=20, cost_usd=0.0)
-    out = render_run_info_block([p])
-    assert "10 in (10 cached, 100% hit) → 5 out" in out
-    assert "20 cached" not in out
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    cells = [c.strip() for c in review_row.split("|")]
-    # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
-    assert cells[4] == "10 (100%)"
 
 
 def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
@@ -313,7 +303,9 @@ def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path
             step_id=len(steps) + 1, timestamp=None if first is None else (start + timedelta(seconds=first)).isoformat()
         )
         agent = _agent_step(step_id=len(steps) + 2, phase=phase, model="gpt-5.5", cost_usd=0.01)
-        if phase == "review":
+        if phase == "intent":
+            agent["metrics"].update(prompt_tokens=10, completion_tokens=5, cached_tokens=20)
+        elif phase == "review":
             agent["metrics"].update(prompt_tokens=20_000, completion_tokens=1_000, cached_tokens=14_000, cost_usd=None)
         elif phase == "verify":
             del agent["model_name"]
@@ -336,8 +328,9 @@ def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path
     report = render_run_info_block([parent, fork])
     assert "- **Model:** gpt-5.5" in report
     assert "- **Cost:** $0.18" in report
-    assert "- **Tokens:** 36,000 in (17,000 cached, 47% hit) → 1,800 out" in report
+    assert "- **Tokens:** 35,010 in (16,510 cached, 47% hit) → 1,705 out" in report
     assert "- **Steps / tool calls:** 8 / 0" in report
+    assert "| Understand Intent | gpt-5.5 | 0 | 10 (100%) | 5 | $0.01 | <1s |" in report
     assert "| Review | gpt-5.5 | 0 | 20,000 (70%) | 1,000 | $0.07 | 59s |" in report
     assert "| Verify Recommendations | gpt-5.5 | 0 | 10,000 | 200 | $0.06 | 1h 1m |" in report
     latencies = {

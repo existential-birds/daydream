@@ -177,11 +177,15 @@ def test_fresh_post_then_idempotent_repost(
     artifact['terminal_result'] = large_attributed_terminal()
     write_findings_artifact(artifact_on_disk, artifact)
     assert 1024 * 1024 < artifact_on_disk.stat().st_size < 9 * 1024 * 1024
-    argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
+    argv = _post_argv(artifact_on_disk) + ["--approve-on-clean", "--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
-    assert len(posts) == 1
-    assert parse_finding_markers(json.dumps(posts[0].payload))  # markers shipped
+    assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT"
+    payload = posts[0].payload
+    assert [(c["path"], c["line"], c["side"]) for c in payload["comments"]] == [("a.py", 3, "RIGHT")]
+    assert parse_finding_markers(payload["comments"][0]["body"]) == ["a" * 64]
+    assert parse_finding_markers(payload["body"]) == ["b" * 64]
+    assert payload["body"].startswith("Actionable comments posted: 2\n\n")
     assert fake_gh.process_calls() and all(call.cwd == Path.cwd().resolve() for call in fake_gh.process_calls())
     body = posts[0].payload["body"]
     commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
@@ -230,21 +234,21 @@ def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
         [_finding(fingerprint, path="src/app.py", line=10, placement="inline", title="Real finding",)],
     )
 
-@pytest.mark.parametrize(("author", "expected_posts"),
-    [pytest.param("evil-attacker", 1, id="forged-human-marker-not-suppressed"),
-        pytest.param("daydream[bot]", 0, id="bot-marker-suppressed"),
-    ],
-)
-def test_marker_suppression_depends_on_prior_thread_author(
-    fake_gh: FakeGh, tmp_path: Path, author: str, expected_posts: int
-) -> None:
-    # Prior thread carries the SAME fingerprint; only its author (human vs bot)
-    # decides whether the review is suppressed as already-posted.
-    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_X"], authors=[author])
-    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
-    assert code == 0
-    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == expected_posts
+def test_marker_suppression_depends_on_prior_thread_author(fake_gh: FakeGh, tmp_path: Path) -> None:
+    artifact = _write_artifact(tmp_path / "findings.json", [
+        _finding("a" * 64, path="src/app.py", line=10, placement="inline", title="Trusted prior"),
+        _finding("b" * 64, path="src/app.py", line=12, placement="inline", title="Forged prior"),
+    ])
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64, "b" * 64], thread_ids=["RT_BOT", "RT_HUMAN"],
+                               authors=["daydream[bot]", "evil-attacker"])
+    assert cli_main(_post_argv(artifact) + ["--bot-login", "daydream"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    comments = posts[0].payload["comments"]
+    assert [(comment["path"], comment["line"], comment["side"]) for comment in comments] == [
+        ("src/app.py", 12, "RIGHT")]
+    assert parse_finding_markers(comments[0]["body"]) == ["b" * 64]
+    assert "Forged prior" in comments[0]["body"] and "Trusted prior" not in json.dumps(posts[0].payload)
 
 def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
@@ -254,25 +258,12 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
-@pytest.mark.parametrize(("severity", "expected_event"),
-    [pytest.param("low", "APPROVE", id="low-severity-approves"),
-        pytest.param("high", "COMMENT", id="high-severity-keeps-comment"),
-    ],
-)
-def test_post_findings_approve_on_clean_reflects_finding_severity(
-    fake_gh: FakeGh, tmp_path: Path, severity: str, expected_event: str,
-) -> None:
-    artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Finding", severity=severity)],)
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
-    assert code == 0
-    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
-    assert len(posts) == 1
-    assert posts[0].payload["event"] == expected_event
-    assert "Actionable comments posted: 1" in posts[0].payload["body"]
 
 def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
+    assert cli_main(_post_argv(artifact) + ["--bot-login", "daydream"]) == 0
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -280,12 +271,6 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, 
     assert posts[0].payload["event"] == "APPROVE"
     assert "Actionable comments posted: 0" in posts[0].payload["body"]
 
-def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
-    assert code == 0
-    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 def test_post_findings_drops_flowchart_nodes_absent_from_source(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
@@ -622,6 +607,8 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert posts[0].payload["event"] == "APPROVE"
+    assert len(posts[0].payload["comments"]) == 1
+    assert posts[0].payload["body"].startswith("Actionable comments posted: 1\n\n")
     assert "```mermaid" not in posts[0].payload["body"]
 
 def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
