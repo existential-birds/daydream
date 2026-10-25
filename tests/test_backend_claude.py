@@ -607,26 +607,22 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
 # --- Session continuation via SDK resume --------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("token", "expected_resume"),
-    [
-        (ContinuationToken(backend="claude", data={"session_id": "sess-123"}), "sess-123"),
-        (ContinuationToken(backend="codex", data={"thread_id": "th-1"}), None),
-    ], ids=["claude-minted", "foreign-backend"],
-)
-async def test_continuation_token_controls_resume(
-    monkeypatch: pytest.MonkeyPatch, token: ContinuationToken, expected_resume: str | None,
+async def test_foreign_continuation_token_starts_cold(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A claude-minted token becomes ``options.resume``; a foreign token starts cold."""
+    """A foreign token cannot resume Claude even when it carries a session id."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
         monkeypatch,
         scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-123")], captured=captured),
     )
     backend = ClaudeBackend(model="opus")
+    token = ContinuationToken(
+        backend="codex", data={"thread_id": "th-1", "session_id": "foreign-session"},
+    )
     async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
         pass
-    assert captured["options"].resume == expected_resume
+    assert captured["options"].resume is None
 
 
 @pytest.mark.parametrize(("persist_session", "session_id"), [(False, "sess-9"), (True, None)])
@@ -644,12 +640,7 @@ async def test_result_continuation_requires_persisted_native_session(
     assert len(results) == 1
     assert results[0].session_id == session_id
     assert captured["options"].extra_args == ({} if persist_session else {"no-session-persistence": None})
-    if persist_session and session_id:
-        assert results[0].continuation is not None
-        assert results[0].continuation.backend == "claude"
-        assert results[0].continuation.data["session_id"] == session_id
-    else:
-        assert results[0].continuation is None
+    assert results[0].continuation is None
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -772,6 +763,7 @@ async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
         assert first_result.structured_output == {"issues": []}
         token = first_result.continuation
         assert token is not None and token.data["session_id"] == "native-session"
+        assert token.backend == "claude"
         assert [event.text for event in first if isinstance(event, TextEvent)] == ["Checking", "Partial"]
         assert [(event.id, event.name, event.input) for event in first if isinstance(event, ToolStartEvent)] == [
             ("read", "Read", {"file": "source.py"}),
