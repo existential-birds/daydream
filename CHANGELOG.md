@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **dependencies:** consolidate pending Dependabot updates for the root and RL
+  projects, including Claude Agent SDK 0.2.172, aiohttp 3.14.4, Filelock 4.2.1,
+  Pillow 13.0.0, certifi 2026.10.19, grpcio 1.84.1, and Ruff 0.17.2; refresh
+  the benchmark runtime lock and pinned Python/uv setup actions.
+
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
 
