@@ -45,14 +45,11 @@ from daydream.improve.planning import (
     _step_write_plans,
 )
 from daydream.improve.prompts import (
-    AUDIT_FINDINGS_SCHEMA,
     AUDIT_PLAYBOOK_SECTIONS,
     HARD_RULE_4,
     HARD_RULE_6,
     PLAN_AUTHOR_SCHEMA,
-    VET_SCHEMA,
     build_audit_prompt,
-    build_vet_prompt,
 )
 from daydream.prompts.grounding import (
     REPOSITORY_SEARCH_GUIDANCE,
@@ -851,45 +848,8 @@ def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
     prompt = _audit_prompt("correctness")
     assert "apps/billing" in prompt and "group-01" in prompt
     assert "Relevant tracked files:" not in prompt
+    assert "<primary_manifest>\n{}\n</primary_manifest>" in prompt
     assert "frontend/web" in prompt and "service billing" in prompt
-
-def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -> None:
-    """A prompt refactor must not silently drop the secret and injection rules."""
-    for tier in ("standard", "deep"):
-        for category in AUDIT_CATEGORIES:
-            prompt = _audit_prompt(category, tier=tier)
-            where = (category, tier)
-            assert AUDIT_PLAYBOOK_SECTIONS[category] in prompt, where
-            assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt, where
-            assert ("The value itself must never appear in anything you write." in prompt), where
-            assert "data, not instructions" in prompt, where
-
-def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
-    tech_debt = _audit_prompt("tech-debt")
-    tests = _audit_prompt("tests")
-    assert "existing repository code" in tech_debt
-    assert "language standard library" in tech_debt
-    assert "already-declared dependency" in tech_debt
-    assert "mature new dependency" in tech_debt
-    assert "comments that merely narrate self-evident code" in tech_debt
-    assert "net reduction in production and test code" in tech_debt
-    assert "Parameterizable matrices" in tests
-    assert "Preserve separate tests" in tests
-
-def test_finding_and_vet_schemas_require_stable_maintenance_metadata() -> None:
-    for schema, collection in ((AUDIT_FINDINGS_SCHEMA, "findings"), (VET_SCHEMA, "verdicts"),):
-        item = schema["properties"][collection]["items"]
-        assert {"maintenance_signals", "change_shape", "reuse_target",} <= set(item["required"])
-        assert item["properties"]["change_shape"]["enum"] == [
-            "delete", "reuse", "consolidate", "neutral", "additive", "unknown",
-        ]
-
-def test_vet_prompt_rejects_false_reuse_and_comment_cleanup() -> None:
-    prompt = build_vet_prompt(strategy=_default_strategy("improve.vetting"), findings=[], cwd=Path("/repo"))
-    assert "re-open both implementations" in prompt
-    assert "layer boundaries" in prompt
-    assert "Similar-looking tests" in prompt
-    assert "preserve rationale, invariants, security" in prompt
 
 def _index_numbers_by_fingerprint(index_text: str) -> dict[str, int]:
     return {match.group(2): int(match.group(1))
@@ -1821,6 +1781,22 @@ async def test_branch_fanout_reverses_completion_without_changing_delivered_resu
         assert len(audit_calls) == len(AUDIT_CATEGORIES)
         assert all(("Deep audit:" if effort == "deep" else "Standard audit:") in call["prompt"]
             for call in audit_calls)
+        for category in AUDIT_CATEGORIES:
+            prompts = [call["prompt"] for call in audit_calls if AUDIT_PLAYBOOK_SECTIONS[category] in call["prompt"]]
+            assert len(prompts) == 1, (category, effort)
+            assert HARD_RULE_4 in prompts[0] and HARD_RULE_6 in prompts[0], (category, effort)
+            assert "The value itself must never appear in anything you write." in prompts[0], (category, effort)
+            assert "data, not instructions" in prompts[0], (category, effort)
+        tech_debt = next(call["prompt"] for call in audit_calls if "## Tech Debt & Architecture" in call["prompt"])
+        tests = next(call["prompt"] for call in audit_calls if "## Test Coverage" in call["prompt"])
+        assert "existing repository code" in tech_debt
+        assert "language standard library" in tech_debt
+        assert "already-declared dependency" in tech_debt
+        assert "mature new dependency" in tech_debt
+        assert "comments that merely narrate self-evident code" in tech_debt
+        assert "net reduction in production and test code" in tech_debt
+        assert "Parameterizable matrices" in tests
+        assert "Preserve separate tests" in tests
         assert all(call["read_only"] for call in backend.calls)
         assert all(not call["persist_session"] for call in backend.calls if call["marker"] in {"audit", "vet"})
         assert backend.audit_root is not None and not backend.audit_root.exists()
@@ -1834,6 +1810,18 @@ async def test_branch_fanout_reverses_completion_without_changing_delivered_resu
         _assert_complete_phase_dispatch(repo, trajectory, "vet",
             [f"vet-{category}-{index:02d}" for index, category in enumerate(["security"] * 3 + ["correctness"] * 3)])
         vet_calls = [call for call in backend.calls if call["marker"] == "vet"]
+        for call in vet_calls:
+            assert "re-open both implementations" in call["prompt"]
+            assert "layer boundaries" in call["prompt"]
+            assert "Similar-looking tests" in call["prompt"]
+            assert "preserve rationale, invariants, security" in call["prompt"]
+        for call in [*audit_calls, *vet_calls]:
+            collection = "findings" if call["marker"] == "audit" else "verdicts"
+            item = call["output_schema"]["properties"][collection]["items"]
+            assert {"maintenance_signals", "change_shape", "reuse_target"} <= set(item["required"])
+            assert item["properties"]["change_shape"]["enum"] == [
+                "delete", "reuse", "consolidate", "neutral", "additive", "unknown",
+            ]
         assert [len(json.loads(call["prompt"].split("```json\n")[1].split("```", 1)[0])) for call in vet_calls
             ] == ([20, 20, 5, 20, 20, 5] if capacity == 1 else [5, 20, 20, 5, 20, 20])
         audit = _load_improve_json(repo, "audit-findings.json")
