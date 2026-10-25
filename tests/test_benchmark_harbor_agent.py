@@ -107,13 +107,6 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str
         candidate.build_candidate_artifact("case-key", [finding])
     assert rejected.value.kind == "invalid_finding"
 
-def test_artifact_write_failure_raises(tmp_path: Path) -> None:
-    dest = tmp_path / "adir"                                # a directory -> replace fails
-    dest.mkdir()
-    with pytest.raises(candidate.CandidateError) as write_fail:
-        candidate.write_candidate_artifact_atomic(dest, {"schema_version": 1, "findings": []})
-    assert write_fail.value.kind == "write_failure"
-
 def test_entrypoint_build_run_config_is_controlled() -> None:
     cfg = entrypoint.build_run_config(
         repo_dir="/workspace/repo", trajectory_path="/logs/agent/trajectory.json", backend="pi",

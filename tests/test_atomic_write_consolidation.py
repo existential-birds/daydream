@@ -83,19 +83,13 @@ def test_no_hand_rolled_temp_rename_writer_remains() -> None:
     for path in _scope_files():
         rel = path.relative_to(_REPO_ROOT).as_posix()
         source = path.read_text(encoding="utf-8")
+        defined = {node.name for node in ast.walk(ast.parse(source))
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        offenders += [f"{rel}::{name}" for name in sorted(_DELETED_PRIVATE_WRITERS.get(rel, set()) & defined)]
         offenders += [f"{rel}:{line} os.replace()/os.rename()" for line in _os_replace_lines(source)
                       if rel not in _PERMITTED_OS_REPLACE_FILES]
         offenders += [f"{rel}:{line} Path.replace()/Path.rename()" for line in _single_arg_replace_lines(source)]
     assert offenders == []
-
-def test_deleted_private_writer_helpers_stay_deleted() -> None:
-    surviving: list[str] = []
-    for rel, names in _DELETED_PRIVATE_WRITERS.items():
-        defined = {node.name for node in ast.walk(ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8")))
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        surviving += [f"{rel}::{name}" for name in sorted(names & defined)]
-    assert surviving == []
 
 def test_scanner_reports_a_reintroduced_hand_rolled_writer() -> None:
     """The guard's own discrimination check: feed it the shape it exists to catch."""
