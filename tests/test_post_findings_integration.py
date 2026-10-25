@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -412,7 +413,7 @@ def _api_head_artifact(
 
 def _serve_contents(fake_gh: FakeGh, path: str, source: str) -> None:
     """Serve *source* as the contents-API body for *path* (the ``?ref=`` is asserted separately)."""
-    fake_gh.set_response("GET", f"repos/o/r/contents/{path}",
+    fake_gh.set_response("GET", f"repos/o/r/contents/{quote(path)}",
         value={"type": "file", "path": path, "sha": "a" * 40, "encoding": "base64",
             "content": base64.b64encode(source.encode()).decode(),
         },
@@ -424,13 +425,18 @@ def _contents_calls(fake_gh: FakeGh) -> list[str]:
     return [call.endpoint for call in fake_gh.calls("GET") if call.endpoint.startswith("repos/o/r/contents/")]
 
 def test_post_findings_posts_flowchart_evidence_read_without_a_checkout(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    _serve_contents(fake_gh, "a.py", "def run():\n    return 1\n")
-    artifact = _api_head_artifact(tmp_path)
+    _serve_contents(fake_gh, "src/deep/a b.py", "def run():\n    return 1\n")
+    diagrams = _flowchart_payload()
+    spec = diagrams["results"]["flowchart"]["spec_final"]
+    spec["root"]["file"] = "src/deep/a b.py"
+    spec["nodes"][0]["evidence"]["file"] = "src/deep/a b.py"
+    spec["nodes"][1]["evidence"]["file"] = "src/deep/a b.py"
+    artifact = _api_head_artifact(tmp_path, diagrams=diagrams)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
     assert code == 0
-    assert _contents_calls(fake_gh) == [f"repos/o/r/contents/a.py?ref={_API_HEAD_SHA}"]
+    assert _contents_calls(fake_gh) == [f"repos/o/r/contents/src/deep/a%20b.py?ref={_API_HEAD_SHA}"]
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert "```mermaid" in posts[0].payload["body"]

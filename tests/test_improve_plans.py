@@ -736,6 +736,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert list_reanchor_worktrees(repo, private_workspace_owner=owner) == [worktree, named, stale]
     outcome = prune_named_reanchor_worktree(repo, named.name, private_workspace_owner=owner)
     assert outcome.verdict == PRUNE_REMOVED and outcome.plan_count == 2 and not named.exists()
+    assert git_ops.worktree_lock_mtime(stale) is None
     assert prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner) == 1
     assert not stale.exists() and worktree.is_dir() and ordinary.is_dir()
     assert git_ops.worktree_lock_mtime(worktree) is not None
@@ -878,6 +879,9 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
     git_ops.worktree_add(repo, other, "main", detach=True, lock_reason=lock_other)
     git_ops.worktree_add(repo, target, "main", detach=True, lock_reason=lock_target)
     assert git_ops.git_dir(other) != git_ops.git_dir(target)
+    assert (git_ops.git_dir(target) / "locked").read_text() == (
+        "active-run\n" if lock_state == "live" else "crashed-run\n"
+    )
     if lock_state == "stale":
         os.utime(git_ops.git_dir(target) / "locked", (0, 0))
 

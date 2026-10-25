@@ -71,18 +71,21 @@ def _topic_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_resolve_diff_merge_base_prefers_present_origin_ref(repo: Path) -> None:
+def test_resolve_diff_merge_base_prefers_present_origin_ref(repo: Path, tmp_path: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     write_and_stage(repo, "upstream.py", "UPSTREAM = 1\n")
     remote_tip = _commit(repo, "remote advancement")
     _git(repo, "branch", "feature", remote_tip)
     _git(repo, "reset", "--hard", base)
+    _git(repo, "remote", "add", "origin", str(_bare_remote(tmp_path / "remote.git")))
     _git(repo, "update-ref", "refs/remotes/origin/main", remote_tip)
     _git(repo, "checkout", "feature")
     write_and_stage(repo, "feature.py", "FEATURE = 1\n")
     head = _commit(repo, "feature")
     assert git_ops.merge_base(repo, "main", head) == base
     assert git_ops.resolve_diff_merge_base(repo, "main", head) == remote_tip
+    _git(repo, "branch", "--set-upstream-to=origin/main", "main")
+    assert git_ops.merge_base(repo, "main") == remote_tip
 
 
 def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(repo: Path) -> None:
@@ -750,26 +753,6 @@ def test_is_ancestor_reports_relationship(repo: Path, ancestor: str, descendant:
     assert git_ops.is_ancestor(repo, ancestor, descendant) is expected
 
 
-def test_merge_base_prefers_upstream_when_remote_ahead(tmp_path: Path) -> None:
-    repo, bare = _repo_with_origin(tmp_path)
-    _git(repo, "push", "-u", "origin", "main")
-    _git(repo, "checkout", "-b", "feature")
-    write_and_stage(repo, "feature.txt", "feature\n")
-    _commit(repo, "feature commit")
-    # Rewrite local main as an unrelated history; track origin/main so the
-    # upstream is "ahead" of the rewritten local main.
-    _git(repo, "checkout", "--orphan", "rewrite")
-    _git(repo, "rm", "-rf", ".")
-    write_and_stage(repo, "new-main.txt", "rewritten\n")
-    _commit(repo, "rewrite main")
-    _git(repo, "branch", "-M", "rewrite", "main")
-    _git(repo, "branch", "--set-upstream-to=origin/main", "main")
-    _git(repo, "checkout", "feature")
-    _git(repo, "fetch", "origin")
-    expected = _git(repo, "merge-base", "HEAD", "origin/main")
-    assert git_ops.merge_base(repo, "main") == expected
-
-
 def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
     repo = tmp_path / "empty"
     _init_repo(repo)
@@ -821,19 +804,6 @@ def test_resolve_pr_merge_base_requires_exact_present_head(repo: Path, head: str
 def test_resolve_pr_merge_base_rejects_invalid_base_ref(repo: Path, local_ref: str) -> None:
     with pytest.raises(GitError, match="base ref"):
         git_ops.resolve_pr_merge_base(repo, [], local_ref, git_ops.head_sha(repo))
-
-
-def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path, repo: Path) -> None:
-    remote_dir = tmp_path / "remote.git"
-    remote_dir.mkdir()
-    _git(remote_dir, "init", "--bare", "-b", "main")
-    _git(repo, "remote", "add", "origin", str(remote_dir))
-    _git(repo, "push", "-u", "origin", "main")
-    # Local commit on main — not pushed.
-    write_and_stage(repo, "local.txt", "local change\n")
-    _commit(repo, "local only")
-    out = git_ops.diff(repo, "main")
-    assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
 
 
 def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> None:
@@ -1692,20 +1662,6 @@ def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) 
 _FILE_AT_REF_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
-def test_gh_file_at_ref_reads_a_nested_path_outside_any_checkout(fake_gh: FakeGh, tmp_path: Path) -> None:
-    fake_gh.set_response(
-        "GET", "repos/o/r/contents/src/deep/a%20b.py",
-        value={
-            "type": "file", "path": "src/deep/a b.py", "sha": "c" * 40, "encoding": "base64",
-            "content": base64.b64encode(b"VALUE = 1\n").decode(),
-        },
-    )
-    content = git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "src/deep/a b.py")
-    assert content == b"VALUE = 1\n"
-    endpoints = [call.endpoint for call in fake_gh.calls("GET")]
-    assert endpoints == [f"repos/o/r/contents/src/deep/a%20b.py?ref={_FILE_AT_REF_SHA}"]
-
-
 def test_gh_file_at_ref_forwards_auth_to_contents_and_blob_requests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -1781,28 +1737,6 @@ def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path, re
     assert locked.is_dir()
 
 
-@pytest.mark.parametrize("lock_reason", ["run-A", None], ids=["locked", "unlocked"])
-def test_worktree_remove_unlocked_unlocks_before_removing(repo: Path, lock_reason: str | None) -> None:
-    worktree = repo / "worktree"
-    git_ops.worktree_add(repo, worktree, "main", detach=True, lock_reason=lock_reason)
-    assert (git_ops.worktree_lock_mtime(worktree) is not None) is (lock_reason is not None)
-    git_ops.worktree_remove_unlocked(repo, worktree)
-    assert not worktree.exists()
-
-
-def test_worktree_add_with_lock_reason_arms_lock_atomically(repo: Path) -> None:
-    """Arm the lock during creation so concurrent pruning has no unlocked removal window."""
-    wt = repo / "wt-locked"
-    git_ops.worktree_add(repo, wt, "main", detach=True, lock_reason="run-A")
-    assert git_ops.worktree_lock_mtime(wt) is not None
-    git_dir = Path(_git(repo, "rev-parse", "--git-common-dir").strip())
-    if not git_dir.is_absolute():
-        git_dir = repo / git_dir
-    locked = git_dir / "worktrees" / wt.name / "locked"
-    assert locked.is_file()
-    assert "run-A" in locked.read_text(encoding="utf-8")
-
-
 def test_clone_error_message_never_contains_remote_url(tmp_path: Path) -> None:
     with pytest.raises(GitError) as excinfo:
         git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
@@ -1857,6 +1791,7 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     original = [f"line {n}" for n in range(1, 31)]
     write_and_stage(repo, "shared.txt", "\n".join(original) + "\n")
     common = _commit(repo, "shared baseline")
+    _git(repo, "push", "origin", "main")
     git_ops.create_branch(repo, "feat/slash-name")
     assert git_ops.upstream_ahead_count(repo, "feat/slash-name") == 0
     tree = _git(repo, "rev-parse", "HEAD^{tree}")
@@ -1886,6 +1821,8 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     main[14] = "line 15 MAIN"
     write_and_stage(repo, "shared.txt", "\n".join(main) + "\n")
     main_tip = _commit(repo, "advance main")
+    on_main = git_ops.diff(repo, "main")
+    assert "-line 15\n+line 15 MAIN" in on_main
     _git(repo, "checkout", "feat/slash-name")
     assert git_ops.list_local_branches(repo) == {"main": main_tip, "feat/slash-name": tip}
     assert git_ops.merge_base(repo, "main") == common

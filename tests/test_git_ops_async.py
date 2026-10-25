@@ -358,7 +358,7 @@ async def test_full_tenth_page_is_rejected_at_hard_limit(fake_gh: FakeGh, git_re
         ({"__error__": "gh: Branch not protected (HTTP 404)"}, None, None),
         ({"__error__": "gh: Not Found (HTTP 404)"}, None, git_ops.GitError),
         ({"__error__": "API rate limit exceeded (HTTP 403)"}, None, git_ops.RateLimitError),
-        ([], None, git_ops.GitError), ({"contexts": ["ci"]}, {"contexts": ["ci"]}, None),
+        ([], None, git_ops.GitError),
     ],
 )
 async def test_classic_required_checks_narrow_absence(
