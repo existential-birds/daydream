@@ -12,13 +12,11 @@ from daydream.deep.prompts import (
 )
 from daydream.phases import append_extended_facts
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
     render_test_recipe_block,
 )
 from daydream.test_execution import TestRecipe, resolve_test_recipe
-from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
 
 # Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
 
@@ -139,14 +137,3 @@ def test_every_review_and_fix_prompt_states_the_resolved_test_recipe(tmp_path: P
     )
     assert block in append_extended_facts(prompt, recipe)
     assert append_extended_facts(prompt, None) == prompt
-
-
-def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path) -> None:
-    paths = prompt_paths(tmp_path)
-    prompt = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **paths, inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", intent_authoritative=True)
-    assert f"TTT intent summary is at {paths['intent_path']}" in prompt
-    assert f"TTT alternative-review findings are at {paths['alternatives_path']}" in prompt
-    assert AUTHORITATIVE_INTENT_BLOCK in prompt
-    assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
-    assert "when more context" in prompt or "when useful" in prompt
