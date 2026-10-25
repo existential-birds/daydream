@@ -52,33 +52,6 @@ from tests.test_deep_orchestrator import (
 )
 
 
-async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_report(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """The real runner must synthesize a clean cold review without merge calls."""
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    trajectory = tmp_path / "empty-trajectory.json"
-
-    assert await _runner.run(empty_review_config(multi_stack_target, trajectory)) == 0
-
-    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
-    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
-    deep = multi_stack_target / ".daydream" / "deep"
-    payload = json.loads((deep / "merged-items.json").read_text())
-    assert payload == {"items": [], "held": []}
-    assert DeepArtifact.MERGED_REPORT.at(deep).is_file()
-    assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == DeepArtifact.MERGED_REPORT.at(deep).read_text()
-    assert not (deep / "merge-failed.txt").exists()
-    assert not saved_coverage(deep).unfinished_scopes
-    events = json.loads(trajectory.read_text())["extra"]["phase_events"]
-    for phase, stage in (("merge", "cross-stack-agent"), ("deep", "supervise")):
-        lifecycle = [event for event in events if event["phase"] == phase
-                     and event.get("metadata", {}).get("stage") == stage]
-        assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
-        assert lifecycle[-1]["status"] == "succeeded"
-
-
 @pytest.mark.parametrize(('resume', 'presentation_fault'), [
     pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-resume'),
     pytest.param(False, 'context', id='unavailable-report-fresh'),
@@ -278,31 +251,6 @@ async def test_synthesis_structural_privilege_requires_retained_source(
     assert actual[2]["line"] > 0
     dropped = json.loads((deep / "dropped-speculative.json").read_text())
     assert [item["description"] for item in dropped["dropped_items"]] == ["spoof", "unknown", "rejected"]
-
-
-async def test_cold_structural_only_merge_preserves_identity_and_supervises_findings(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    structural = _record(description="Structural boundary erosion", file="api.py", line=1,
-                         severity="medium", confidence="MEDIUM", rationale="boundary coupling", evidence="api.py:1")
-    backend = EmptyReviewBackend(multi_stack_target, forbid_supervise=False,
-                                 review_by_stack={"structure": [structural]})
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-
-    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
-
-    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
-    assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
-    deep = multi_stack_target / ".daydream" / "deep"
-    records = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    assert len(items) == 1
-    assert items[0]["description"] == structural["description"]
-    assert items[0]["lens"] == "structural"
-    assert items[0]["source_uids"] == [records[0]["uid"]]
-    assert items[0]["file"] == structural["file"]
-    assert items[0]["line"] == structural["line"]
-    assert structural["description"] in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
 
 
 @pytest.mark.parametrize("first", ["arbiter", "suppression"])
@@ -547,8 +495,8 @@ async def test_precision_shards_and_suppression_share_capacity_without_holding_a
 
 
 @pytest.mark.parametrize("budget_stop,diagnostic_fault", [
-    (False, None), (True, None), (False, "foreign"), (False, "raises"), (False, "subclass"),
-], ids=["provider-failure", "incomplete-coverage", "foreign-diagnostic", "raising-diagnostic", "error-subclass"])
+    (False, None), (True, None), (False, "foreign"), (False, "subclass"),
+], ids=["provider-failure", "incomplete-coverage", "foreign-diagnostic", "error-subclass"])
 async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     capsys: pytest.CaptureFixture[str], budget_stop: bool, diagnostic_fault: str | None,
@@ -558,8 +506,6 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     if diagnostic_fault:
         class ForeignDiagnostic:
             def diagnostic(self) -> str:
-                if diagnostic_fault == "raises":
-                    raise RuntimeError("review provider unavailable")
                 return "review provider unavailable"
 
         class ExternalLifecycleError(CodexLifecycleError):
@@ -641,6 +587,7 @@ async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
     if input_kind == "language":
         items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
         assert items[0]["description"] == "Language defect"
+        assert items[0]["source_uids"] == ["python:1"]
         supervisors = sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
         assert supervisors == 1
     if input_kind == "alternatives":

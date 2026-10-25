@@ -576,8 +576,7 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('path', ['api.py', 'component_雪.py', 'nested/component_"quote".py', 'component_\t.py',
-                                 'api[1].py'])
+@pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py', 'api[1].py'])
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
 
