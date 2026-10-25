@@ -90,12 +90,9 @@ def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp
     git(repo, "config", "diff.review.textconv", "echo DRIVER_OUTPUT")
     git(repo, "config", "diff.external", "false")
     git(repo, "config", "diff.noprefix", "true")
+    git(repo, "config", "color.diff", "always")
 
     patch = git_ops.committed_diff(repo, base, head)
-
-    assert "-VALUE = 'base'" in patch
-    assert "+VALUE = 'head'" in patch
-    assert "dirty" not in patch and "DRIVER_OUTPUT" not in patch
 
     captured = tmp_path / "captured"
     captured.mkdir()
@@ -116,5 +113,8 @@ def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp
     for assignment in (part for batch in inputs.assignment_batches for part in batch if part["file"] != "api.py"):
         [ref] = assignment["source_refs"]
         assert ref["side"] == "diff" and ref["fragment"]["bytes"] > 0
+    assert "-VALUE = 'base'" in patch
+    assert "+VALUE = 'head'" in patch
+    assert "dirty" not in patch and "DRIVER_OUTPUT" not in patch
     assert "Binary files a/data.bin and b/data.bin differ" in patch
     assert "old mode 100644\nnew mode 100755" in patch
