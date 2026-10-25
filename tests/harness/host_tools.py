@@ -23,7 +23,10 @@ async def gated_reader(monkeypatch: pytest.MonkeyPatch, root: Path, source: Path
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
     loop = asyncio.get_running_loop()
-    loop.add_reader(read_fd, entered.set)
+    def notify() -> None:
+        loop.remove_reader(read_fd)
+        entered.set()
+    loop.add_reader(read_fd, notify)
     children: list[asyncio.subprocess.Process] = []
     spawn = asyncio.create_subprocess_exec
     script = ("import os,sys,runpy; original=os.open\n"

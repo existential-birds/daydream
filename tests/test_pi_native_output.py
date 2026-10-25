@@ -392,7 +392,7 @@ async def test_native_schema_rejection_spends_original_host_allowance(
 
     Direct adapter calls prevent run_agent's later observer from accidentally enforcing admission."""
     allowed = tmp_path.resolve() / "permitted.txt"
-    expected = "ONLY_ADMITTED_CORRECTION_MAY_READ_THIS\n"
+    expected = "ONLY_ADMITTED_CORRECTION_MAY_READ_THIS"
     allowed.write_text(expected)
     native_provider.turns = [[("invalid-schema", NATIVE_READ_FILE, invalid_arguments)],
                              [("corrected", NATIVE_READ_FILE, {"path": str(allowed)})]]
