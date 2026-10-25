@@ -457,6 +457,11 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert len(roots) == 1
     root = json.loads(roots[0].read_bytes())
     assert atif_validate(root, validate_images=False) is True
+    commit_ends = [event for event in root["extra"]["phase_events"]
+        if event["phase"] == "commit" and event["event"] == "phase_end"]
+    assert len(commit_ends) == 1
+    assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
+    assert commit_ends[0]["metadata"]["duration_ms"] >= 0
     fix_summaries = [summary for summary in root["extra"]["subtrajectories"] if summary["phase"] == "fix"]
     assert len(fix_summaries) == 2
     for summary in fix_summaries:

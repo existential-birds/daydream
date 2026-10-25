@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import signal
-import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -13,7 +12,6 @@ import anyio
 import pytest
 
 import daydream.trajectory as trajectory_module
-from daydream import git_ops
 from daydream.atif import validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
@@ -27,10 +25,6 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.cli import _signal_handler
-from daydream.phases.publish import (
-    _do_commit,
-)
-from daydream.run_config import RunConfig
 from daydream.trajectory import (
     PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME,
@@ -52,7 +46,6 @@ from daydream.trajectory import (
 )
 from daydream.trajectory.recorder import _safe_descriptor
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
-from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory, trajectory_payload
 
 
@@ -1178,38 +1171,6 @@ async def test_artifact_final_writer_failure_preserves_existing_primary_exceptio
 
     assert raised.value is primary
     assert any("trajectory finalization" in note for note in primary.__notes__)
-
-
-async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: Any,) -> None:
-    """Real-path: _do_commit's host-native commit emits a distinct ``commit``
-    phase event with duration_ms + stop_reason (issue #726 task 12)."""
-
-    work = make_work(git_repo)
-    (git_repo / "app.py").write_text("x = 0\n")
-    _git_add_commit(git_repo)
-    (git_repo / "app.py").write_text("x = 1\n")
-
-    rec = make_recorder(git_repo)
-    async with rec:
-        ok = await _do_commit(
-            ScriptedBackend(), work, push=False, config=RunConfig(test_command="true"),
-            retained_paths=frozenset({"app.py"}),
-            retained_states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"}),
-            initial_index=git_ops.snapshot_index(git_repo),
-        )
-    assert ok.committed is True
-    assert ok.push is None
-
-    commit_ends = [x.to_dict() for x in rec._phase_events if x.phase.value == "commit" and x.event == "phase_end"]
-    assert len(commit_ends) == 1
-    assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
-    assert commit_ends[0]["metadata"]["duration_ms"] >= 0
-
-
-def _git_add_commit(repo: Path) -> None:
-
-    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
-    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], cwd=repo, check=True,)
 
 
 async def test_dispatch_registers_late_dynamic_fork_before_scope_exit(recorder: TrajectoryRecorder) -> None:
