@@ -217,16 +217,6 @@ def test_evaluate_pinned_context_requires_exact_check_name_and_app(target: Remot
     assert verdict.missing_contexts == ("Build (app 7)",)
 
 
-def test_evaluate_unpinned_context_requires_all_latest_matching_producers(target: RemoteCITarget) -> None:
-    snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
-        head=(_observation("Build", "pass", app_id=7), _observation("bUiLd", "fail", source="status", app_id=None),),
-    )
-    verdict = evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits())
-
-    assert verdict.status == "failed"
-    assert verdict.failing_contexts == ("Build",)
-
-
 def test_evaluate_required_pending_and_deadlines(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
         head=(_observation("Build", "pending"),),
@@ -287,19 +277,6 @@ def test_evaluate_closed_or_changed_fixed_identity_is_superseded(target: RemoteC
     assert evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits()).status == "superseded"
 
 
-def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path, target: RemoteCITarget) -> None:
-    verdict = evaluate_remote_ci(_snapshot(target), elapsed=120, stable_polls=2, limits=RemoteCILimits())
-    path = tmp_path / "deep" / "remote-ci-verdict.json"
-    path.parent.mkdir()
-    path.write_text('{"status":"stale"}\n', encoding="utf-8")
-    write_remote_ci_verdict(path, verdict, session_id="session-2", poll_count=2, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:02:00Z", discovery_deadline=120.0, completion_deadline=1_800.0,
-    )
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    assert loaded["status"] == "no_ci"
-    assert loaded["session_id"] == "session-2"
-
-
 def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: RemoteCITarget) -> None:
     failed = evaluate_remote_ci(_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
             head=(_observation("Build", "fail"),),
@@ -308,11 +285,17 @@ def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: 
     handoff = remote_ci_handoff_payload(failed, session_id="session-3")
 
     assert handoff["outcome"] == "failed"
-    assert handoff["target"] == remote_ci_verdict_payload(
-        failed, session_id="session-3", poll_count=1, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:12Z", discovery_deadline=120, completion_deadline=1_800,
-    )["target"]
-    assert handoff["binding"] is not None
+    assert handoff["session_id"] == "session-3"
+    assert handoff["target"] == {
+        "base_repository": "example/project", "base_ref": "main", "head_repository": "contributor/fork",
+        "head_ref": "feature/ci", "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42",
+        "remote": "fork", "pushed_sha": PUSHED_SHA,
+    }
+    assert handoff["binding"] == {
+        "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42",
+        "base_repository": "example/project", "base_ref": "main", "head_repository": "contributor/fork",
+        "head_ref": "feature/ci", "head_sha": PUSHED_SHA, "merge_sha": None, "state": "open",
+    }
     assert "ordinary push" in str(handoff["next_action"])
 
     passed = evaluate_remote_ci(
@@ -442,6 +425,7 @@ async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_de
     clock.value = 25.0
     fetcher = _ScriptedFetcher([_snapshot(target)] * 4)
     verdict_path = tmp_path / "verdict.json"
+    verdict_path.write_text('{"status":"stale"}\n', encoding="utf-8")
     limits = RemoteCILimits(poll_seconds=60, discovery_seconds=120, completion_seconds=1800,)
     def persist(verdict: RemoteCIVerdict) -> None:
         write_remote_ci_verdict(
@@ -454,6 +438,7 @@ async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_de
     )
     artifact = json.loads(verdict_path.read_text())
     assert verdict.status == "no_ci"
+    assert artifact["status"] == "no_ci" and artifact["session_id"] == "deadline-session"
     assert verdict.elapsed_seconds == 120.0
     assert fetcher.deadlines == [125.0, 125.0]
     assert artifact["polling"]["discovery_deadline"] == fetcher.deadlines[0]
@@ -641,18 +626,6 @@ def _page(endpoint: str, *, page: int = 1) -> str:
     return f"{endpoint}{separator}per_page=100&page={page}"
 
 
-def _seed_fetch(fake_gh: FakeGh, target: RemoteCITarget) -> None:
-    fake_gh.set_response("GET", "repos/example/project/pulls/42", _pr_row(target, merge_commit_sha=None))
-    fake_gh.set_response("GET", _page("repos/example/project/rules/branches/main"), [])
-    fake_gh.set_response("GET", "repos/example/project/branches/main/protection/required_status_checks",
-        {"strict": False, "contexts": ["Build"], "checks": []},
-    )
-    fake_gh.set_response("GET", _page("repos/example/project/actions/workflows"), {"total_count": 0, "workflows": []},)
-    checks_endpoint = f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
-    fake_gh.set_response("GET", _page(checks_endpoint), {"total_count": 1, "check_runs": [_check(1, "Build")]},)
-    fake_gh.set_response("GET", _page(f"repos/example/project/commits/{PUSHED_SHA}/statuses"), [],)
-
-
 async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_rows(
     fake_gh: FakeGh,
     git_repo: Path,
@@ -667,7 +640,10 @@ async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_r
     checks = f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
     statuses = f"repos/example/project/commits/{PUSHED_SHA}/statuses"
     fake_gh.set_response("GET", "repos/example/project/pulls/42", _pr_row(target, merge_commit_sha=None))
-    fake_gh.set_response("GET", _page(rules), [])
+    fake_gh.set_response("GET", _page(rules), [{"type": "required_status_checks", "parameters": {
+        "strict_required_status_checks_policy": False,
+        "required_status_checks": [{"context": "Ruleset"}, {"context": "Ruleset null", "integration_id": None}],
+    }}])
     fake_gh.set_response("GET", classic, {"strict": False, "contexts": ["Build"], "checks": []})
     workflow = {"id": 7, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"}
     fake_gh.set_response("GET", _page(workflows), {"total_count": 1, "workflows": [workflow]})
@@ -675,10 +651,12 @@ async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_r
     check_rows = [_check(1, "Build", conclusion="failure"), _check(2, "Build",
         url=f"https://ci.example.test/run?token={secret}&X-Amz-Signature={secret}&opaque={secret}&page=1",
         summary=f"Authorization: Bearer {secret} " + "x" * 500),
-        _check(3, "build", conclusion="failure", app_id=11)]
-    fake_gh.set_response("GET", _page(checks), {"total_count": 3, "check_runs": check_rows})
+        _check(3, "build", conclusion="failure", app_id=11), _check(4, "Build", app_id=7, url=None),
+        _check(5, "Ruleset"), _check(6, "Ruleset null")]
+    fake_gh.set_response("GET", _page(checks), {"total_count": 6, "check_runs": check_rows})
     rows = [_status(index + 1, f"Status-{index:03}") for index in range(101)]
-    rows += [_status(103, "lInT"), _status(102, "Lint", state="failure")]
+    rows += [_status(103, "lInT"), _status(102, "Lint", state="failure"),
+        _status(104, "bUiLd", state="failure", url=None)]
     fake_gh.set_response("GET", _page(statuses), rows[:100])
     fake_gh.set_response("GET", _page(statuses, page=2), rows[100:])
     budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
@@ -687,18 +665,28 @@ async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_r
 
     assert snapshot.binding == _binding(target)
     assert snapshot.target == target and snapshot.merge_observations == ()
-    assert snapshot.policy.contexts == (RequiredContext("Build", None),)
+    assert snapshot.policy == RequiredPolicy((RequiredContext("Build", None), RequiredContext("Ruleset", None),
+        RequiredContext("Ruleset null", None)), False)
     assert snapshot.active_workflows == (workflow,)
     assert [
         (row.context, row.state, row.app_id) for row in snapshot.head_observations if row.source == "check_run"
-    ] == [("Build", "pass", 10), ("build", "fail", 11)]
-    build = snapshot.head_observations[0]
+    ] == [("Build", "pass", 7), ("Build", "pass", 10), ("Ruleset", "pass", 10),
+        ("Ruleset null", "pass", 10), ("build", "fail", 11)]
+    build = next(row for row in snapshot.head_observations if (row.context, row.app_id) == ("Build", 10))
     assert secret not in (build.url or "") and secret not in (build.diagnostic or "")
     assert "REDACTED" in (build.url or "") and len(build.diagnostic or "") <= 120
     observed_statuses = [row for row in snapshot.head_observations if row.source == "status"]
-    assert len(observed_statuses) == 102
-    assert {row.context for row in observed_statuses} == {"lInT", *(f"Status-{index:03}" for index in range(101))}
-    assert all(row.state == "pass" and row.app_id is None for row in observed_statuses)
+    assert [(row.context, row.state, row.app_id) for row in observed_statuses] == [
+        ("bUiLd", "fail", None), ("lInT", "pass", None),
+        *((f"Status-{index:03}", "pass", None) for index in range(101))]
+    verdict = evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits())
+    assert verdict.status == "failed" and verdict.failing_contexts == ("Build",)
+    assert [(row.source, row.context, row.state, row.app_id) for row in verdict.required_observations] == [
+        ("check_run", "Build", "pass", 7), ("check_run", "Build", "pass", 10), ("status", "bUiLd", "fail", None),
+        ("check_run", "Ruleset", "pass", 10), ("check_run", "Ruleset null", "pass", 10)]
+    assert [(row.context, row.state, row.app_id) for row in verdict.advisory_observations] == [
+        ("build", "fail", 11), ("lInT", "pass", None),
+        *((f"Status-{index:03}", "pass", None) for index in range(101))]
     assert "must not persist" not in repr(snapshot)
     calls = fake_gh.process_calls()
     assert [call.argv[-1] for call in calls] == [
@@ -744,34 +732,6 @@ async def test_expired_remote_ci_budget_skips_auth_resolution_and_gh_spawn(fake_
     assert verdict.status == "unavailable"
     assert verdict.reason == "remote CI deadline expired during the first poll"
     assert emitted == [verdict]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("required_entry", [{"context": "Ruleset"}, {"context": "Ruleset", "integration_id": None}],)
-async def test_github_fetcher_accepts_unpinned_ruleset_requirement(
-    fake_gh: FakeGh, git_repo: Path, required_entry: dict[str, object],
-) -> None:
-    target = _target(git_repo)
-    _seed_fetch(fake_gh, target)
-    fake_gh.set_response("GET", _page("repos/example/project/rules/branches/main"),
-        [{"type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": False, "required_status_checks": [required_entry],
-                },
-            }
-        ],
-    )
-    fake_gh.set_response("GET", "repos/example/project/branches/main/protection/required_status_checks",
-        {"strict": False, "contexts": [], "checks": []},
-    )
-    checks_endpoint = (f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest")
-    fake_gh.set_response("GET", _page(checks_endpoint), {"total_count": 1, "check_runs": [_check(1, "Ruleset")]},)
-    budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
-    snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
-
-    assert snapshot.policy.contexts == (RequiredContext("Ruleset", None),)
-    assert snapshot.head_observations[0].context == "Ruleset"
-    assert len(fake_gh.process_calls()) == 6
 
 
 @pytest.mark.asyncio
