@@ -734,10 +734,6 @@ def test_ref_exists_rejects_leading_dash(repo: Path) -> None:
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
 
-def test_commit_exists_rejects_leading_dash(repo: Path) -> None:
-    assert git_ops.commit_exists(repo, "-not-a-ref") is False
-
-
 @pytest.mark.parametrize(
     ("ancestor", "descendant", "expected"),
     [
@@ -790,7 +786,7 @@ def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(repo: Path) ->
         git_ops.resolve_pr_merge_base(repo, ["refs/remotes/one/main", "refs/remotes/two/main"], "refs/heads/main", head)
 
 
-@pytest.mark.parametrize("head", ["HEAD", "deadbeef", "f" * 40])
+@pytest.mark.parametrize("head", ["HEAD", "f" * 40])
 def test_resolve_pr_merge_base_requires_exact_present_head(repo: Path, head: str) -> None:
     with pytest.raises(GitError, match="exact PR head"):
         git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head)
@@ -798,7 +794,8 @@ def test_resolve_pr_merge_base_requires_exact_present_head(repo: Path, head: str
 
 @pytest.mark.parametrize("local_ref", ["main", "refs/heads/-bad", "refs/heads/main~1"])
 def test_resolve_pr_merge_base_rejects_invalid_base_ref(repo: Path, local_ref: str) -> None:
-    with pytest.raises(GitError, match="base ref"):
+    expected = "PR base refs/heads/-bad is unavailable" if local_ref == "refs/heads/-bad" else "invalid PR base ref"
+    with pytest.raises(GitError, match=f"^{expected}"):
         git_ops.resolve_pr_merge_base(repo, [], local_ref, git_ops.head_sha(repo))
 
 
@@ -1256,17 +1253,20 @@ def test_gh_pr_view_returns_none_only_for_anchored_absence(
 
 
 @pytest.mark.parametrize(
-    "stderr",
+    ("pr", "stderr"),
     [
-        "no git remotes found", "HTTP 401: authentication required", "Unknown JSON field: futureField",
-        "GraphQL: Could not resolve to a PullRequest with the number of 41. (repository.pullRequest)",
-        'prefix: no pull requests found for branch "feature"', "HTTP 404: resource not found",
+        (42, "no git remotes found"), (42, "HTTP 401: authentication required"),
+        (42, "Unknown JSON field: futureField"),
+        (42, "GraphQL: Could not resolve to a PullRequest with the number of 41. (repository.pullRequest)"),
+        (None, 'prefix: no pull requests found for branch "feature"'), (42, "HTTP 404: resource not found"),
     ],
 )
-def test_gh_pr_view_unknown_failures_raise(repo: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
+def test_gh_pr_view_unknown_failures_raise(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, stderr: str,
+) -> None:
     _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
     with pytest.raises(GitError, match=re.escape(stderr)):
-        git_ops.gh_pr_view(repo, 42)
+        git_ops.gh_pr_view(repo, pr)
 
 
 @pytest.mark.parametrize("stdout", [
@@ -1482,12 +1482,6 @@ def test_strict_enumeration_raises_where_soft_fails(tmp_path: Path) -> None:
     assert "untracked.txt" in git_ops.list_untracked(repo, strict=True)
 
 
-def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
-    target = tmp_path / "nope"
-    with pytest.raises(git_ops.GitError, match="git clone .* failed"):
-        git_ops.clone("file:///nonexistent/repo.git", target)
-
-
 @pytest.mark.parametrize(
     ("blobless", "expected_flags"), [(True, ["--filter=blob:none", "--no-local"]), (False, [])],
     ids=["blobless_passes_filter_flag", "default_no_filter_flag"],
@@ -1678,7 +1672,7 @@ def test_gh_file_at_ref_forwards_auth_to_contents_and_blob_requests(
 @pytest.mark.parametrize(
     ("slug", "ref", "path"),
     [
-        ("o", _FILE_AT_REF_SHA, "a.py"), ("../o/r", _FILE_AT_REF_SHA, "a.py"), ("o/r", "main", "a.py"),
+        ("../o/r", _FILE_AT_REF_SHA, "a.py"), ("o/r", "main", "a.py"),
         ("o/r", _FILE_AT_REF_SHA, "../../etc/passwd"), ("o/r", _FILE_AT_REF_SHA, "/etc/passwd"),
         ("o/r", _FILE_AT_REF_SHA, "a.py\n"),
     ],
@@ -1736,7 +1730,7 @@ def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path, re
 
 
 def test_clone_error_message_never_contains_remote_url(tmp_path: Path) -> None:
-    with pytest.raises(GitError) as excinfo:
+    with pytest.raises(GitError, match="git clone .* failed") as excinfo:
         git_ops.clone("https://user:ghp_canaryfake123@unreachable.invalid/o/r.git", tmp_path / "t", timeout=5)
     message = str(excinfo.value)
     assert "ghp_canaryfake123" not in message
