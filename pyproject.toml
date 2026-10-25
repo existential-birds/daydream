@@ -4,7 +4,7 @@ version = "0.30.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.14"
 dependencies = [
-    "claude-agent-sdk==0.2.167",
+    "claude-agent-sdk==0.2.172",
     "anyio>=4.15.1",
     "rich>=15.0.0",
     "pyfiglet>=1.0",
@@ -37,14 +37,14 @@ hub = ["huggingface_hub>=2.2.0"]
 
 [dependency-groups]
 dev = [
-    "grpcio>=1.84.0",
+    "grpcio>=1.84.1",
     "grpc-stubs>=1.53",
     "opentelemetry-proto>=1.42,<2",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-xdist>=3.6",
-    "ruff>=0.17.1",
+    "ruff>=0.17.2",
     "types-jsonschema>=4.26.0.20261006",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260906",
     "types-requests>=2.33.0.20261006",
