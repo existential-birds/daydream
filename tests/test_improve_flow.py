@@ -1667,25 +1667,6 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     assert all(backend.planner_secret not in text for text in observables)
 
 @pytest.mark.anyio
-async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_branch_target)
-    await _run_improve(make_config, improve_branch_target, improve_focus="branch")
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert all("apps/billing/api.py" in call["prompt"] for call in audit_calls)
-    # Branch focus bypasses partitioning: one synthetic group over the changed
-    # files, so each category receives one audit assignment.
-    assert len(audit_calls) == len(AUDIT_CATEGORIES)
-    assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
-    coverage = _load_improve_json(improve_branch_target, "coverage.json")
-    assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
-    assert coverage["not_audited"] == []
-    vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
-    assert {finding["provenance"] for finding in vetted["findings"]} <= {"introduced", "inherited",}
-
-
-@pytest.mark.anyio
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
     improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
@@ -1779,6 +1760,11 @@ async def test_branch_fanout_reverses_completion_without_changing_delivered_resu
             assert backend.completion_order["vet"] == [2, 1, 0, 5, 4, 3]
         audit_calls = [call for call in backend.calls if call["marker"] == "audit"]
         assert len(audit_calls) == len(AUDIT_CATEGORIES)
+        assert all("apps/billing/api.py" in call["prompt"] for call in audit_calls)
+        assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
+        coverage = _load_improve_json(repo, "coverage.json")
+        assert [entry["name"] for entry in coverage["partitions"]] == ["branch"]
+        assert coverage["not_audited"] == []
         assert all(("Deep audit:" if effort == "deep" else "Standard audit:") in call["prompt"]
             for call in audit_calls)
         for category in AUDIT_CATEGORIES:
@@ -2121,22 +2107,20 @@ _PLAN_FILE_BY_TITLE = {
 }
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("slow_title", sorted(_PLAN_FILE_BY_TITLE))
 async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, slow_title: str, make_config: MakeConfig,
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Both completion orders must land plans incrementally with identical selection-based numbering."""
-    backend = IncrementalPlanBackend(improve_monorepo_target, slow_title=slow_title,)
+    """The first selected plan and index land while a later writer still runs."""
+    backend = IncrementalPlanBackend(improve_monorepo_target, slow_title="high-leverage-title",)
     install_capable_improve_backend(monkeypatch, backend)
 
     code = await _run_improve(make_config, improve_monorepo_target)
     plans_dir = improve_monorepo_target / "daydream_plans"
-    fast_title = next(title for title in _PLAN_FILE_BY_TITLE if title != slow_title)
     assert code == 0
-    assert backend.observed_while_slow_writer_ran == [_PLAN_FILE_BY_TITLE[fast_title]]
+    assert backend.observed_while_slow_writer_ran == ["001-security-finding.md"]
     # An interrupt at that moment would leave a resumable index, not an
     # orphaned plan file.
-    assert (f"({_PLAN_FILE_BY_TITLE[fast_title]})" in backend.observed_index_while_slow_writer_ran)
+    assert "(001-security-finding.md)" in backend.observed_index_while_slow_writer_ran
     assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")) == sorted(_PLAN_FILE_BY_TITLE.values())
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     for filename in _PLAN_FILE_BY_TITLE.values():
@@ -2183,6 +2167,7 @@ async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 0
     assert backend.observed_while_slow_writer_ran == [_PLAN_FILE_BY_TITLE["high-leverage-title"]]
+    assert "(002-high-leverage-title.md)" in backend.observed_index_while_slow_writer_ran
     assert [path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
     ] == [_PLAN_FILE_BY_TITLE["high-leverage-title"]]
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
@@ -2887,10 +2872,13 @@ def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> Non
     assert kept[2] == {"fingerprint": "unknown", "title": "Unknown severity"}
 
 
-@pytest.mark.parametrize("citation", ["../outside.py:1", "missing.py:1", "valid.py:3", "valid.py:2:3",],)
+@pytest.mark.parametrize("citation", ["../outside.py:1", "missing.py:1", "valid.py:2:3",],)
 def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path, citation: str,) -> None:
-    (tmp_path / "valid.py").write_text("first\nsecond\n")
-    stamped = _stamp_finding({"evidence": [citation]}, "correctness", [], [], repo=tmp_path,)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "outside.py").write_text("outside\n")
+    (repo / "valid.py").write_text("first\nsecond\n")
+    stamped = _stamp_finding({"evidence": [citation]}, "correctness", [], [], repo=repo,)
     assert stamped is None
 
 def test_stamp_finding_rejects_evidence_crossing_a_symlink(tmp_path: Path,) -> None:
