@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pi:** require a successful native MCP tool-list exchange before host-tool readiness.
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

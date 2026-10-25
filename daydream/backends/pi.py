@@ -956,20 +956,13 @@ class PiBackend:
 
         attachments = AsyncExitStack()
         try:
+            extensions: list[tuple[str, str, dict[str, Any]]] = []
             if host_tools is not None:
                 host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(cwd, child_env, host_tools)
-                host_packet = _write_prompt_attachment(json.dumps(host_server.packet()), attachments)
-                child_env["DAYDREAM_PI_HOST_PACKET"] = str(host_packet)
-                host_extension = attachments.enter_context(
-                    as_file(files("daydream.backends").joinpath("pi_host_tools.ts")))
-                if read_only and not native_output:
-                    args.append("--no-extensions")
                 if read_only:
                     args.extend(["--extension", "builtin:mcp"])
-                args.extend(["--extension", str(host_extension)])
-            else:
-                child_env.pop("DAYDREAM_PI_HOST_PACKET", None)
+                extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
             if native_output:
                 packet: dict[str, Any] = {"output_schema": output_schema}
                 if tool_call_budget is not None:
@@ -977,16 +970,15 @@ class PiBackend:
                     assignment = _pi_submission_assignment(review_instructions)
                     if assignment is not None:
                         packet["submission_assignment"] = assignment
-                packet_text = json.dumps(packet, ensure_ascii=False)
-                packet_path = _write_prompt_attachment(packet_text, attachments)
-                child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)
-                extension = attachments.enter_context(
-                    as_file(files("daydream.backends").joinpath("pi_structured_output.ts")))
-                if read_only:
-                    args.append("--no-extensions")
+                extensions.append(("DAYDREAM_PI_OUTPUT_PACKET", "pi_structured_output.ts", packet))
+            for variable in ("DAYDREAM_PI_HOST_PACKET", "DAYDREAM_PI_OUTPUT_PACKET"):
+                child_env.pop(variable, None)
+            if read_only and (native_output or host_tools is not None):
+                args.append("--no-extensions")
+            for variable, resource, packet in extensions:
+                child_env[variable] = str(_write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments))
+                extension = attachments.enter_context(as_file(files("daydream.backends").joinpath(resource)))
                 args.extend(["--extension", str(extension)])
-            else:
-                child_env.pop("DAYDREAM_PI_OUTPUT_PACKET", None)
             if not tools_disabled:
                 args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
             if review_instructions and not finalization:
@@ -1071,6 +1063,26 @@ class PiBackend:
                     lifecycle.native_event()
                 if event_type in {"agent_start", "turn_start", "message_start", "tool_execution_start"}:
                     saw_native_settlement = False
+
+                if host_tools is not None and event_type in {"tool_execution_start", "tool_execution_end"}:
+                    native_id = event.get("toolCallId")
+                    if event_type == "tool_execution_start":
+                        if not isinstance(native_id, str) or not native_id or len(native_id.encode()) > 512:
+                            raise PiError("Invalid native tool identity", category="HOST_TOOLS")
+                        seen = seen_host_starts
+                    else:
+                        if not isinstance(native_id, str) or native_id not in seen_host_starts:
+                            raise PiError("Uncorrelated native tool result", category="HOST_TOOLS")
+                        seen = seen_host_results
+                    identity = host_event_identity(event)
+                    if native_id in seen:
+                        if seen[native_id] != identity:
+                            ambiguous_host_identity = True
+                            yield identity_diagnostic(event)
+                        continue
+                    if event_type == "tool_execution_start" and len(seen) >= 256:
+                        raise PiError("Native tool evidence capacity exhausted", category="HOST_TOOLS")
+                    seen[native_id] = identity
 
                 if event_type == "agent_start":
                     pass  # Lifecycle marker; nothing to emit.
@@ -1220,19 +1232,6 @@ class PiBackend:
                             pending_submission = admitted
 
                 elif event_type == "tool_execution_start":
-                    if host_tools is not None:
-                        native_id = event.get("toolCallId")
-                        if not isinstance(native_id, str) or not native_id or len(native_id.encode()) > 512:
-                            raise PiError("Invalid native tool identity", category="HOST_TOOLS")
-                        identity = host_event_identity(event)
-                        if native_id in seen_host_starts:
-                            if seen_host_starts[native_id] != identity:
-                                ambiguous_host_identity = True
-                                yield identity_diagnostic(event)
-                            continue
-                        if len(seen_host_starts) >= 256:
-                            raise PiError("Native tool evidence capacity exhausted", category="HOST_TOOLS")
-                        seen_host_starts[native_id] = identity
                     active_tool_calls += 1
                     if lifecycle is not None:
                         lifecycle.active_tools(active_tool_calls)
@@ -1249,17 +1248,6 @@ class PiBackend:
                         associate_submission(event.get("toolCallId"), "proposed", "started")
 
                 elif event_type == "tool_execution_end":
-                    if host_tools is not None:
-                        native_id = event.get("toolCallId")
-                        if not isinstance(native_id, str) or native_id not in seen_host_starts:
-                            raise PiError("Uncorrelated native tool result", category="HOST_TOOLS")
-                        identity = host_event_identity(event)
-                        if native_id in seen_host_results:
-                            if seen_host_results[native_id] != identity:
-                                ambiguous_host_identity = True
-                                yield identity_diagnostic(event)
-                            continue
-                        seen_host_results[native_id] = identity
                     active_tool_calls = max(0, active_tool_calls - 1)
                     if lifecycle is not None:
                         lifecycle.active_tools(active_tool_calls)

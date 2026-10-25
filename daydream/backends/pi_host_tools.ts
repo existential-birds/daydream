@@ -1,5 +1,6 @@
 /** Native MCP registration and pre-provider readiness for one private invocation. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -7,12 +8,6 @@ export default function (pi: ExtensionAPI) {
   let failed = false;
   let ready = false;
   const admissions = new Map<string, { allowed: boolean; error?: string; consumed?: boolean }>();
-  const canonical = (value: any): string => {
-    if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
-    if (value && typeof value === "object") return "{" + Object.keys(value).sort()
-      .map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
-    return JSON.stringify(value);
-  };
   const request = async (path: string, value?: any) => {
     const body = value === undefined ? undefined : JSON.stringify(value);
     if (body && Buffer.byteLength(body) > packet.max_frame_bytes) throw new Error("Host frame limit");
@@ -34,7 +29,7 @@ export default function (pi: ExtensionAPI) {
         const tool = pi.getAllTools().find(candidate => candidate.name === packet.tool_name);
         if (status.ready && tool && tool.exposure === "direct"
             && pi.getActiveTools().includes(packet.tool_name)
-            && canonical(tool.parameters) === canonical(packet.schema)) {
+            && isDeepStrictEqual(JSON.parse(JSON.stringify(tool.parameters)), packet.schema)) {
           ready = true;
           process.stdout.write(JSON.stringify({ type: "daydream_host_tools_ready" }) + "\n");
           return { action: "continue" as const };

@@ -16,31 +16,32 @@ import pytest
 
 from daydream import host_tools as policy
 from daydream.host_tools import NATIVE_READ_FILE, HostToolBinding, HostToolRejected
-from daydream.host_tools_server import PiHostToolServer
 from tests.harness.host_tools import gated_reader
 
 
 @asynccontextmanager
-async def _endpoint(binding: HostToolBinding) -> AsyncIterator[tuple[PiHostToolServer, httpx.AsyncClient]]:
+async def _endpoint(binding: HostToolBinding) -> AsyncIterator[httpx.AsyncClient]:
     async with binding.session() as server:
         async with httpx.AsyncClient(base_url=server.url, headers={
             "Authorization": server.packet()["authorization"], "Accept": "application/json, text/event-stream",
         }, timeout=3) as client:
-            yield server, client
+            yield client
 
 
-@pytest.mark.parametrize("fault", ["missing", "extra", "number", "array", "null", "params-array", "unicode-id"])
+@pytest.mark.parametrize("fault", ["missing", "extra", "number", "array", "null", "params-array", "unicode-id",
+                                  "empty", "long"])
 async def test_http_schema_rejections_precede_sdk_coercion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     """Raw schema/Unicode-ID errors stay exact and bounded; native validation hides SDK coercion/escaping."""
     path = tmp_path.resolve() / "allowed"
     path.write_text("secret bytes")
-    monkeypatch.setattr(policy, "_MAX_FRAME_BYTES", 512)
+    monkeypatch.setattr(policy, "_MAX_FRAME_BYTES", 4096 if fault == "long" else 512)
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
     arguments: Any = {"missing": {}, "extra": {"path": str(path), "other": True}, "number": {"path": 42},
-                      "array": [], "null": None, "params-array": {"path": str(path)}, "unicode-id": {}}[fault]
-    async with _endpoint(binding) as (_, client):
+                      "array": [], "null": None, "params-array": {"path": str(path)}, "unicode-id": {},
+                      "empty": {"path": ""}, "long": {"path": "x" * 2049}}[fault]
+    async with _endpoint(binding) as client:
         params: Any = [] if fault == "params-array" else {"name": "read_file", "arguments": arguments}
         call_id = "界" * 100 if fault == "unicode-id" else "malformed"
         frame = json.dumps({"jsonrpc": "2.0", "id": call_id, "method": "tools/call", "params": params},
@@ -62,7 +63,7 @@ async def test_http_admission_bounds_reject_before_tool_work(
     """Raw frames cannot bypass limits, credentials or UTF-8 charging; ordinary native calls miss these inputs."""
     monkeypatch.setattr(policy, "_MAX_HTTP_REQUESTS", 2)
     binding = HostToolBinding((tmp_path.resolve() / "allowed",), deadline=time.monotonic() + 10)
-    async with _endpoint(binding) as (_, client):
+    async with _endpoint(binding) as client:
         if fault == "json":
             response = await client.post("/admit", content=b"{broken")
         elif fault == "frame":
@@ -96,6 +97,29 @@ async def test_http_admission_bounds_reject_before_tool_work(
             assert response.json()["allowed"] is False
         assert binding.authority_open is (fault in {"unauthorized", "http-capacity", "unicode-path", "unicode-key"})
     assert binding.calls == int(fault in {"unicode-path", "unicode-key"}) and binding.cleanup_complete
+
+
+async def test_readiness_requires_an_explicit_native_tool_list(tmp_path: Path) -> None:
+    """An SDK cache lookup can list definitions internally; only successful wire listing establishes readiness."""
+    path = tmp_path.resolve() / "allowed"
+    binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
+    async with _endpoint(binding) as client:
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "host-test", "version": "1"}}})
+        assert response.status_code == 200 and response.json()["id"] == 1
+        client.headers["mcp-session-id"] = response.headers["mcp-session-id"]
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        assert response.status_code == 202
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "read_file", "arguments": {"path": str(path)}}})
+        assert response.status_code == 200 and response.json()["result"]["isError"]
+        assert "no native admission" in response.json()["result"]["content"][0]["text"]
+        assert not (await client.get("/status")).json()["ready"]
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+        assert response.status_code == 200 and response.json()["id"] == 3
+        assert [tool["name"] for tool in response.json()["result"]["tools"]] == ["read_file"]
+        assert (await client.get("/status")).json()["ready"]
+    assert binding.calls == 0 and binding.cleanup_complete
 
 
 def test_host_grant_rejects_double_root_existing_path(tmp_path: Path) -> None:
@@ -159,7 +183,7 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
     binding.restrict(deadline=None, tool_call_budget=2)
     deadline = binding.deadline
-    async with _endpoint(binding) as (_, client):
+    async with _endpoint(binding) as client:
         packet = {"id": "first", "name": NATIVE_READ_FILE, "arguments": {"path": str(path)}}
         assert (await client.post("/admit", json=packet)).json() == {"allowed": True}
         duplicate = (await client.post("/admit", json=packet)).json()
@@ -203,7 +227,7 @@ async def test_revoked_or_expired_authority_cannot_start_admitted_read(
 async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str,
 ) -> None:
-    """Owner close/deadline ends an actual blocked filesystem operation without queueing another."""
+    """Owner close/deadline reaps blocked I/O; identical pending reads spend once without queueing."""
     path = tmp_path.resolve() / "source"
     path.write_text("must never be returned")
     monkeypatch.setattr(policy, "_CALLBACK_TIMEOUT_S", 0.3 if finish == "callback-deadline" else 5)
@@ -212,11 +236,13 @@ async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
         async with binding.session():
             arguments = {"path": str(path)}
             binding.admit("active", NATIVE_READ_FILE, arguments)
+            binding.admit("same-args-before", NATIVE_READ_FILE, arguments)
             task = asyncio.create_task(binding.read_file(arguments))
             await asyncio.wait_for(entered.wait(), 3)
             binding.admit("parallel", NATIVE_READ_FILE, arguments)
-            with pytest.raises(HostToolRejected, match="concurrency exhausted"):
-                await binding.read_file(arguments)
+            for expected in ("concurrency exhausted", "concurrency exhausted", "no native admission"):
+                with pytest.raises(HostToolRejected, match=expected):
+                    await binding.read_file(arguments)
             if finish == "callback-deadline":
                 with pytest.raises(HostToolRejected, match="callback deadline"):
                     await task

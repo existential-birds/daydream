@@ -15,13 +15,14 @@ import sys
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from daydream import clock
+from daydream.json_utils import validates_schema
 
 if TYPE_CHECKING:
     from daydream.host_tools_server import PiHostToolServer
@@ -66,7 +67,7 @@ class HostToolBinding:
         self._claimed = self._cleanup_failed = False
         self._call_limit = _MAX_CALLS
         self._admitted: set[str] = set()
-        self._pending: dict[str, list[str]] = {}
+        self._pending: list[str] = []
         self._reading = False
         self._reader: asyncio.subprocess.Process | None = None
         self._late_cleanup: set[asyncio.Task[None]] = set()
@@ -115,14 +116,14 @@ class HostToolBinding:
         if malformed:
             raise self._reject("Invalid bounded host frame")
         if name == NATIVE_READ_FILE:
-            self._pending.setdefault(self._arguments_key(arguments), []).append(call_id)
+            self._pending.append(self._arguments_key(arguments))
 
     def _arguments_key(self, arguments: Any) -> str:
         try:
             encoded = json.dumps(arguments, ensure_ascii=False, allow_nan=False, sort_keys=True,
                                  separators=(",", ":"))
             byte_count = len(encoded.encode("utf-8", errors="strict"))
-        except (TypeError, ValueError, UnicodeError, RecursionError):
+        except (TypeError, ValueError, RecursionError):
             raise self._reject("Invalid host-tool arguments") from None
         if byte_count > _MAX_ARGUMENT_BYTES:
             raise self._reject("Host-tool argument byte limit exceeded")
@@ -131,14 +132,10 @@ class HostToolBinding:
     async def read_file(self, arguments: Any) -> str:
         self._check_open()
         key = self._arguments_key(arguments)
-        pending = self._pending.get(key)
-        if not pending:
+        if key not in self._pending:
             raise self._reject("Host callback has no native admission")
-        pending.pop(0)
-        if not pending:
-            self._pending.pop(key)
-        if (not isinstance(arguments, dict) or set(arguments) != {"path"}
-                or not isinstance(arguments["path"], str) or not 1 <= len(arguments["path"]) <= 2048):
+        self._pending.remove(key)
+        if not validates_schema(arguments, _read_schema()):
             raise self._reject("Expected exactly one bounded string path")
         if arguments["path"] not in self._paths:
             raise self._reject("Path is not permitted by this invocation")
@@ -194,7 +191,7 @@ class HostToolBinding:
                 if version("mcp") != "1.30.0":
                     raise ImportError("unsupported SDK version")
                 module = import_module("daydream.host_tools_server")
-            except (ImportError, PackageNotFoundError):
+            except ImportError:
                 raise PiError(guidance + "; install a compatible host-tools extra", category="HOST_TOOLS") from None
             self.validate_platform()
             server = module.PiHostToolServer(self)

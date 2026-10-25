@@ -6,21 +6,21 @@ import json
 import os
 import stat
 import sys
+from contextlib import ExitStack
 
 
 def read_file(path: str, limit: int) -> bytes:
-    descriptors: list[int] = []
-    try:
+    with ExitStack() as descriptors:
         directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-        descriptors.append(directory)
+        descriptors.callback(os.close, directory)
         parts = path.split("/")[1:]
         if not parts or any(part in {"", ".", ".."} for part in parts):
             raise ValueError("invalid path")
         for part in parts[:-1]:
             directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            descriptors.append(directory)
+            descriptors.callback(os.close, directory)
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        descriptors.append(fd)
+        descriptors.callback(os.close, fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError("nonregular file")
         data = bytearray()
@@ -32,9 +32,6 @@ def read_file(path: str, limit: int) -> bytes:
         if len(data) > limit:
             raise ValueError("oversized file")
         return bytes(data)
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
 
 
 def main() -> None:

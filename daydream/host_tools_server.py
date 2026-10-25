@@ -18,26 +18,22 @@ from typing import Any
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import Tool, ToolAnnotations
 from starlette.exceptions import HTTPException
 from starlette.types import Message, Receive, Scope, Send
 
 from daydream import clock, host_tools as policy
 from daydream.host_tools import HostToolBinding, HostToolRejected
+from daydream.json_utils import validates_schema
 
 
 class _ReadServer(FastMCP[None]):
-    owner: PiHostToolServer
-
     async def list_tools(self) -> list[Tool]:
         # Stateful SDK dispatch admits this only on the initialized session.
         if self.get_context().session.client_params is None:
             raise ValueError("Native MCP session is not initialized")
-        tools = [Tool(name="read_file", description=policy._READ_DESCRIPTION, inputSchema=policy._read_schema(),
+        return [Tool(name="read_file", description=policy._READ_DESCRIPTION, inputSchema=policy._read_schema(),
                       annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False))]
-        self.owner.listed = True
-        return tools
 
 
 class _LocalUvicorn(uvicorn.Server):
@@ -78,13 +74,9 @@ class PiHostToolServer:
         self._active = 0
         self.url = ""
         mcp = _ReadServer("daydream-host", stateless_http=False, json_response=True)
-        mcp.owner = self
 
         async def read_file(path: str) -> str:
-            try:
-                return await binding.read_file({"path": path})
-            except HostToolRejected as exc:
-                raise ToolError(str(exc)) from None
+            return await binding.read_file({"path": path})
 
         mcp.add_tool(read_file, name="read_file", description=policy._READ_DESCRIPTION, structured_output=False)
         self.app = mcp.streamable_http_app()
@@ -93,7 +85,7 @@ class PiHostToolServer:
         """Private transport material, never part of recorded request configuration."""
         return {
             "url": self.url, "authorization": "Bearer " + self._secret,
-            "server_name": "daydream_host", "tool_name": "mcp__daydream_host__read_file",
+            "server_name": "daydream_host", "tool_name": policy.NATIVE_READ_FILE,
             "schema": policy._read_schema(), "setup_timeout_ms": int(policy._SETUP_TIMEOUT_S * 1000),
             "request_timeout_ms": max(1, int(policy._CALLBACK_TIMEOUT_S * 1000)),
             "max_frame_bytes": policy._MAX_FRAME_BYTES,
@@ -203,9 +195,7 @@ class PiHostToolServer:
                     params = value.get("params")
                     arguments = params.get("arguments") if isinstance(params, dict) else None
                     # Reject original JSON shape before the SDK can coerce it.
-                    if (not isinstance(arguments, dict) or set(arguments) != {"path"}
-                            or not isinstance(arguments["path"], str)
-                            or not 1 <= len(arguments["path"]) <= 2048):
+                    if not validates_schema(arguments, policy._read_schema()):
                         await self._reply(send, 200, {"jsonrpc": "2.0", "id": request_id, "result": {
                             "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}})
                         return
@@ -230,6 +220,10 @@ class PiHostToolServer:
                     messages.append(message)
 
                 await self.app(scope, replay, observe)
+                if scope["method"] == "POST" and method == "tools/list" and request_id is not None:
+                    response = json.loads(b"".join(message.get("body", b"") for message in messages))
+                    if isinstance(response.get("result", {}).get("tools"), list):
+                        self.listed = True
                 for message in messages:
                     await send(message)
         except HTTPException as exc:
