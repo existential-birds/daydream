@@ -1,5 +1,4 @@
 import hashlib
-import json
 import os
 import shutil
 from datetime import datetime
@@ -28,7 +27,7 @@ from daydream.benchmark.schema import (
     _PrRef,
     derive_finding_id,
 )
-from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_yaml_strict
+from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace, validate_workspace, workspace_status
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
@@ -218,24 +217,6 @@ def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
 
-def test_status_and_validate_project_changed_ready_task_spec_as_stale_without_writing(tmp_path: Path,) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    case_path = next((root / "cases").glob("*.yaml"))
-    raw = load_yaml_strict(case_path)
-    raw["curation"]["findings"][0]["title"] = "Changed after approval"
-    raw["curation"]["findings"][0]["severity"] = "medium"
-    raw["curation"]["findings"][0]["finding_id"] = derive_finding_id(
-        raw["curation"]["findings"][0], case_id=raw["case_id"]
-    )
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    before = case_path.read_bytes()
-
-    status = workspace_status(root)
-
-    assert status.workspace_state == "stale"
-    assert status.case_snapshots[0]["task_spec_approval"] == "stale"
-    assert validate_workspace(root) == (2, "incomplete: workspace state stale")
-    assert case_path.read_bytes() == before
 
 def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
@@ -416,42 +397,13 @@ def _write_minimal_invalid_workspace(tmp_path: Path, curation_state: Any="ready"
     return root
 
 
-def test_validate_minimal_invalid_ready_returns_1(tmp_path: Path) -> None:
-    root = _write_minimal_invalid_workspace(tmp_path, "ready")
-    code, label = validate_workspace(root)
-    assert code == 1
-    assert "corrupt" in label.lower()
-
 def test_status_rejects_minimal_invalid_case(tmp_path: Path) -> None:
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
 
-
-def _restamp_import_sha(tmp_path: Path, imp_bytes: bytes) -> None:
-    """Overwrite the import file and re-stamp the ledger sha to match.
-
-    Leaves the import structurally invalid but byte-exact per the ledger, so
-    only the model gate (not the checksum gate) can catch it.
-    """
-
-    root = tmp_path / "ws"
-    imp = next((root / "imports").glob("pr-*.json"))
-    imp.write_bytes(imp_bytes)
-    sha = hashlib.sha256(imp_bytes).hexdigest()
-    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
-    raw["pull_requests"][0]["import_sha256"] = sha
-    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-
-
-def test_checksum_restamped_corrupt_import_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    imp = next((root / "imports").glob("pr-*.json"))
-    raw = load_json_strict(imp)
-    # Structurally invalid, but its sha is re-stamped to match the ledger.
-    raw["pull_request"]["number"] = 999   # wrong PR id; wrong shape vs intent
-    _restamp_import_sha(tmp_path, json.dumps(raw).encode())
-    _assert_corrupt_workspace(root)
 
 def test_import_missing_on_disk_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")

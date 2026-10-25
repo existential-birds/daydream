@@ -36,10 +36,6 @@ def test_load_yaml_safe_load_no_object_execution(tmp_path: Path) -> None:
         load_yaml_strict(p)
 
 
-
-
-
-
 def test_workspace_lock_contention_is_explicit(tmp_path: Path) -> None:
     # Separate open file descriptions conflict even within one process.
     # Probe without blocking to avoid deadlocking on the first holder.
@@ -105,7 +101,6 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path, monke
     assert load_json_strict(data) == {"k": 2} and load_yaml_strict(manifest) == {"schema_version": 2}
 
 
-
 @pytest.mark.parametrize("boundary", [0, 1, 2, 3, "manifest"])
 def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, boundary: int | Literal["manifest"]
 ) -> None:
@@ -155,14 +150,6 @@ def test_transaction_retirement_refuses_digest_mismatch(tmp_path: Path) -> None:
             tx.retire("snapshots/old.bundle", expected_sha256="f" * 64)
     assert bundle.read_bytes() == b"old bundle"
 
-def test_prepared_journal_rolls_back_on_startup(tmp_path: Path) -> None:
-    data = tmp_path / "cases" / "b.yaml"
-    data.parent.mkdir(parents=True)
-    with Transaction(tmp_path, op_id="op-2", kind="write") as tx:
-        _stage(tx, data, "new-b")
-        tx.prepare()  # fsync prepared, do NOT commit -> simulates crash
-    recover_startup(tmp_path)
-    assert not data.exists()
 
 def test_committing_journal_rolls_back_in_reverse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rels = ["cases/a.yaml", "cases/b.yaml", "benchmark.yaml"]
@@ -338,7 +325,6 @@ def test_stage_rejects_symlink_parent_escape(tmp_path: Path) -> None:
     assert not (outside / "x.yaml").exists()
 
 
-
 def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
     """Build a valid prepared transaction, then corrupt its journal doc."""
     target = tmp_path / "target.yaml"
@@ -391,19 +377,57 @@ def test_cross_transaction_target_conflict_is_corruption(tmp_path: Path) -> None
         recover_startup(tmp_path)
     assert target.read_text() == "before"  # neither journal applied; no last-writer-wins
 
-def test_disjoint_transactions_both_recover(tmp_path: Path) -> None:
-    t1 = tmp_path / "a.yaml"
-    t2 = tmp_path / "b.yaml"
-    t1.write_text("a-before")
-    t2.write_text("b-before")
-    with Transaction(tmp_path, op_id="op-a", kind="write") as tx:
-        _stage(tx, t1, "a-after")
-        tx.prepare()
+def test_disjoint_journals_recover_each_durable_state_and_restart(tmp_path: Path) -> None:
+    """One startup recovers every disjoint durable journal and preserves user content."""
+    prepared = tmp_path / "prepared.yaml"
+    committing = tmp_path / "committing.yaml"
+    complete = tmp_path / "complete.yaml"
+    prepared.write_text("prepared-before")
+    committing.write_text("committing-before")
+    complete.write_text("complete-before")
+    os.chmod(committing, 0o600)
+    os.chmod(complete, 0o600)
+    prepared_faults = TransactionFaultDriver(tmp_path, op_id="op-a", kind="init")
+    with prepared_faults.transaction as tx:
+        tx.create_dir("cases")
+        tx.stage("prepared.yaml", b"prepared-after")
+        tx.stage("cases/new.yaml", b"new")
+        prepared_faults.halt_at("target-0")
+    kept = tmp_path / "cases" / "keep.yaml"
+    kept.write_text("keep")
     with Transaction(tmp_path, op_id="op-b", kind="write") as tx:
-        _stage(tx, t2, "b-after")
-        tx.prepare()
-    recover_startup(tmp_path)  # disjoint targets must both roll back cleanly
-    assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
+        tx.stage("committing.yaml", b"committing-after")
+        tx.begin_commit()
+    complete_faults = TransactionFaultDriver(tmp_path, op_id="op-c", kind="write")
+    with complete_faults.transaction as tx:
+        tx.stage("complete.yaml", b"complete-after")
+        complete_faults.halt_at("manifest")
+    journals = [load_json_strict(tmp_path / "transactions" / op / "journal.json")
+                for op in ("op-a", "op-b", "op-c")]
+    assert [(doc["state"], doc["applied_count"]) for doc in journals] == [
+        ("prepared", 0), ("committing", 1), ("complete", 1),
+    ]
+    assert (prepared.read_text(), committing.read_text(), complete.read_text()) == (
+        "prepared-before", "committing-after", "complete-after",
+    )
+    assert not (tmp_path / "cases" / "new.yaml").exists()
+
+    recover_startup(tmp_path)
+
+    assert (prepared.read_text(), committing.read_text(), complete.read_text()) == (
+        "prepared-before", "committing-before", "complete-after",
+    )
+    assert not (tmp_path / "cases" / "new.yaml").exists()
+    assert kept.read_text() == "keep"
+    assert stat.S_IMODE(kept.parent.stat().st_mode) == 0o700
+    assert [stat.S_IMODE(path.stat().st_mode) for path in (committing, complete)] == [0o600, 0o600]
+    assert list((tmp_path / "transactions").iterdir()) == []
+    recover_startup(tmp_path)
+    assert (prepared.read_text(), committing.read_text(), complete.read_text()) == (
+        "prepared-before", "committing-before", "complete-after",
+    )
+    assert not (tmp_path / "cases" / "new.yaml").exists() and kept.read_text() == "keep"
+    assert list((tmp_path / "transactions").iterdir()) == []
 
 def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
     # A journaled operation ensures recovery reaches _empty_transactions.
@@ -461,74 +485,6 @@ def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) 
             assert (root / rel).read_text() == content  # every target back to all-old
         assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
 
-def test_single_target_target_boundary(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    root.mkdir()
-    t = root / "t.yaml"
-    t.write_text("before")
-    faults = TransactionFaultDriver(root, op_id="op-1t", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, t, "after")
-        faults.halt_at("target-0")
-    recover_startup(root)
-    assert t.read_text() == "before"
-    assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
-
-def test_verify_complete_preserves_0600_target(tmp_path: Path) -> None:
-    t = tmp_path / "target.yaml"
-    t.write_text("old")
-    os.chmod(t, 0o600)
-    faults = TransactionFaultDriver(tmp_path, op_id="op-c", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, t, "new")
-        faults.halt_at("manifest")
-    recover_startup(tmp_path)
-    assert stat.S_IMODE(t.stat().st_mode) == 0o600
-
-def test_rollback_preserves_0700_scaffold_dir(tmp_path: Path) -> None:
-    with Transaction(tmp_path, op_id="op-i", kind="init") as tx:
-        tx.create_dir("cases")
-        tx.stage("cases/keep.yaml", b"keep")
-        tx.prepare()
-    (tmp_path / "cases" / "keep.yaml").write_text("keep")  # non-empty -> dir preserved
-    recover_startup(tmp_path)
-    if (tmp_path / "cases").exists():
-        assert stat.S_IMODE((tmp_path / "cases").stat().st_mode) == 0o700
-
-def test_rollback_committing_restored_target_is_0600(tmp_path: Path) -> None:
-    t = tmp_path / "target.yaml"
-    t.write_text("old")
-    os.chmod(t, 0o600)
-    with Transaction(tmp_path, op_id="op-r", kind="write") as tx:
-        _stage(tx, t, "new")
-        tx.begin_commit()
-    recover_startup(tmp_path)
-    assert t.read_text() == "old"
-    assert stat.S_IMODE(t.stat().st_mode) == 0o600
-
-def test_restart_recovery_is_idempotent(tmp_path: Path) -> None:
-    t = tmp_path / "target.yaml"
-    t.write_text("old")
-    with Transaction(tmp_path, op_id="op-idem", kind="write") as tx:
-        _stage(tx, t, "new")
-        tx.begin_commit()
-    recover_startup(tmp_path)   # first pass: roll back committing journal
-    first_txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
-    recover_startup(tmp_path)   # second pass: must be a clean no-op
-    assert t.read_text() == "old"                       # state identical to first pass
-    txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
-    assert txn == first_txn                              # no leftover residue, no second-pass failure
-
-def test_complete_restart_recovery_is_idempotent(tmp_path: Path) -> None:
-    t = tmp_path / "target.yaml"
-    t.write_text("old")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-idem2", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, t, "new")
-        faults.halt_at("manifest")
-    recover_startup(tmp_path)
-    recover_startup(tmp_path)   # second pass: complete journal already verified+cleaned
-    assert t.read_text() == "new"
 
 def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
     """A noncanonical in-root journal path must roll back via its canonical target."""

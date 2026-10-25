@@ -202,6 +202,10 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
         "bundle": bundle_path.read_bytes(),
     }
 
+    projected = workspace_status(ws)
+    assert projected.workspace_state == "stale"
+    assert projected.case_snapshots[0]["task_spec_approval"] == "stale"
+    assert validate_workspace(ws) == (2, "incomplete: workspace state stale")
     with pytest.raises(SystemExit) as status:
         top_cli.main(["benchmark", "status", str(ws)])
     assert status.value.code == 0
