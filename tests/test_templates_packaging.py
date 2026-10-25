@@ -1,6 +1,6 @@
-"""Workflow templates must ship in package data for editable and built installs.
+"""Workflow templates and native tools must ship in built wheels.
 
-Check discovery and secret/variable-name agreement with the shipped YAML.
+The packaged single-file variant must agree with the setup secret/variable names.
 """
 
 from __future__ import annotations
@@ -18,20 +18,8 @@ _EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-
 _SINGLE_TEMPLATE_PATH = "daydream/templates/workflows/single/daydream.yml"
 
 
-
-def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
-    single = (_REPO_ROOT / _SINGLE_TEMPLATE_PATH).read_text(encoding="utf-8")
-    for secret in config.SETUP_SECRET_NAMES:
-        assert secret in single
-    assert config.BOT_HANDLE_VAR in single
-
 def test_templates_and_native_tools_present_in_built_wheel() -> None:
-    """Build a real wheel and confirm shipped templates and the native tool are included.
-
-    The editable-install tests above exercise importlib.resources against the source tree; they would pass even if
-    the [tool.hatch.build.targets.wheel] include glob were missing or mis-typed. This test catches that gap: it
-    builds an actual wheel in a temp directory and inspects the zip archive to verify each template lands at the
-    expected path inside the distribution."""
+    """Build a real wheel to check packaged paths and canonical workflow names."""
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["uv", "build", "--wheel", "--out-dir", tmp], cwd=_REPO_ROOT, check=True, capture_output=True,)
         wheels = list(Path(tmp).glob("*.whl"))
@@ -42,8 +30,12 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
-        assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "
-            f"Found resources: {sorted(names_in_wheel.intersection(expected_paths))!r}. "
-            f"Expected paths: {sorted(expected_paths)!r}. "
-            f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
-        )
+            assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "
+                f"Found resources: {sorted(names_in_wheel.intersection(expected_paths))!r}. "
+                f"Expected paths: {sorted(expected_paths)!r}. "
+                f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
+            )
+            single = zf.read(_SINGLE_TEMPLATE_PATH).decode("utf-8")
+            for secret in config.SETUP_SECRET_NAMES:
+                assert secret in single
+            assert config.BOT_HANDLE_VAR in single
