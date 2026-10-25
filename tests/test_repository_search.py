@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from daydream.commands.search import search_repository
+from daydream.commands.search import handle_search_command, search_repository
 from tests.harness.git_helpers import git
 
 
-def test_search_preserves_git_membership_and_requires_named_ignored_expansion(git_repo: Path) -> None:
+def test_search_preserves_git_membership_and_requires_named_ignored_expansion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     # One real Git population joins admitted paths and their literal bounded CLI match evidence.
     repo = git_repo
     contents = {
@@ -37,12 +39,11 @@ def test_search_preserves_git_membership_and_requires_named_ignored_expansion(gi
     assert set(normal["visited_files"]) == expected
     assert {hit["path"] for hit in normal["matches"]} == expected
     assert normal["incomplete"] == [] and normal["skipped_files"] == 0
-    completed = subprocess.run(
-        [sys.executable, "-m", "daydream", "search", "needle", *roots, "--expand", "deps/package",
-         "--reason", "trace generated caller"], cwd=repo, capture_output=True, text=True, timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    expanded = json.loads(completed.stdout)
+    monkeypatch.chdir(repo)
+    assert handle_search_command(["needle", *roots, "--expand", "deps/package",
+        "--reason", "trace generated caller",
+    ]) == 0
+    expanded = json.loads(capsys.readouterr().out)
     assert {hit["path"] for hit in expanded["matches"]} == set(contents)
     assert expanded["expansion"] == {"paths": ["deps/package"], "reason": "trace generated caller"}
     assert {hit["path"]: (hit["line"], hit["text"].startswith("..."), hit["text"].endswith("..."))
