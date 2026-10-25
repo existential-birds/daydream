@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -18,20 +19,21 @@ from daydream.backends import Backend, create_backend
 from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
 from daydream.trajectory import DaydreamPhase, DispatchHandle, dispatch_scope, maybe_fork
+from tests.conftest import make_multi_stack_target
 from tests.harness.codex_lifecycle_cli import FIX_MARKER, LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.processes import wait_for_process_group_exit
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder, read_trajectory, root_trajectory
 from tests.test_deep_orchestrator import MakeConfig, _silence
 
 
-@pytest.mark.parametrize("worker_mode,expected_failure", [
-    ("terminal_open_stdout", "terminal_drain"),
-    ("descendant_stdout", "terminal_drain"),
-    ("unfinished_next_turn", "without valid public turn.completed"),
-])
-async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    worker_mode: LifecycleMode, expected_failure: str,
+async def _case_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    worker_mode: LifecycleMode,
+    expected_failure: str,
 ) -> None:
     """A stalled or unfinished turn restores its group and preserves healthy edits.
 
@@ -121,6 +123,32 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
             assert lifecycle["process_exit_s"] is not None
     for row in observations:
         await wait_for_process_group_exit(row["pid"])
+
+
+async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[LifecycleMode, str]] = [
+        ("terminal_open_stdout", "terminal_drain"),
+        ("descendant_stdout", "terminal_drain"),
+        ("unfinished_next_turn", "without valid public turn.completed"),
+    ]
+    case_index = 0
+    for worker_mode, expected_failure in cases_0:
+        with (
+            subtests.test(worker_mode=worker_mode, expected_failure=expected_failure),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
+                multi_stack_target=multi_stack_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                worker_mode=worker_mode,
+                expected_failure=expected_failure,
+            )
 
 
 async def test_suspended_host_consumers_reproduce_missing_later_public_evidence(

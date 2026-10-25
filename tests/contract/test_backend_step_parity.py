@@ -14,6 +14,7 @@ from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ToolResultEvent
 from daydream.trajectory import DaydreamPhase
 from tests.contract._loaders import claude_loader, codex_loader, pi_loader
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 CANONICAL = Path(__file__).parent / "fixtures" / "canonical_script.json"
@@ -57,22 +58,30 @@ def _compare_steps(left: list[Step], right: list[Step]) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("read_only", [False, True], ids=["read-write", "read-only"])
 async def test_claude_and_codex_produce_identical_steps(
-    tmp_path: Path, read_only: bool
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """The canonical script must produce identical selected Step fields."""
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for read_only in cases:
+        row_index += 1
+        with subtests.test(read_only=read_only):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
 
-    claude_steps = await _run_backend_against_canonical(
-        claude_loader, tmp_path / "claude", read_only=read_only
-    )
-    codex_steps = await _run_backend_against_canonical(
-        codex_loader, tmp_path / "codex", read_only=read_only
-    )
-    _compare_steps(claude_steps, codex_steps)
-    if read_only:
-        pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi", read_only=True)
-        _compare_steps(claude_steps, pi_steps)
+                claude_steps = await _run_backend_against_canonical(
+                    claude_loader, tmp_path / "claude", read_only=read_only
+                )
+                codex_steps = await _run_backend_against_canonical(
+                    codex_loader, tmp_path / "codex", read_only=read_only
+                )
+                _compare_steps(claude_steps, codex_steps)
+                if read_only:
+                    pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi", read_only=True)
+                    _compare_steps(claude_steps, pi_steps)
 
 
 @pytest.mark.asyncio

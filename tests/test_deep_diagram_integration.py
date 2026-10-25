@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +44,7 @@ from tests.harness.diagram_repos import build_large_cross_module_repo, load_diag
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import assert_dispatch_children, root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
@@ -896,8 +897,7 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
-def test_diagram_author_prompt_requires_current_inline_contract(
+def _case_diagram_author_prompt_requires_current_inline_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obsolete: bool
 ) -> None:
     """Current overrides receive inline inputs; obsolete signatures fail explicitly."""
@@ -916,8 +916,19 @@ def test_diagram_author_prompt_requires_current_inline_contract(
     assert prompt.startswith("current:")
     assert "exploration=None" in prompt  # no dangling host path on a clone run
 
-@pytest.mark.parametrize("kind", ["sequence", "flowchart"])
-async def test_disposable_clone_authoring_completes_without_artifact_reads(
+
+def test_diagram_author_prompt_requires_current_inline_contract(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for obsolete in cases_0:
+        with subtests.test(obsolete=obsolete), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_diagram_author_prompt_requires_current_inline_contract(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, obsolete=obsolete
+            )
+
+
+async def _case_disposable_clone_authoring_completes_without_artifact_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     """Issue #1123 acceptance: the full author turn on a disposable-clone backend
@@ -943,6 +954,20 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
         recorder=None, backend=_Wall(),
     )
     assert result["status"] != "failed"  # authoring completed
+
+
+async def test_disposable_clone_authoring_completes_without_artifact_reads(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["sequence", "flowchart"]
+    case_index = 0
+    for kind in cases_0:
+        with subtests.test(kind=kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_disposable_clone_authoring_completes_without_artifact_reads(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, kind=kind
+            )
+
 
 # --- Issue #1214: transport-aware advisory-input budgeting -------------------
 

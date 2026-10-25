@@ -75,6 +75,7 @@ from tests.harness.stub_backend import (
     silence as _silence,
     stage_result,
 )
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 
@@ -282,28 +283,34 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
 
-@pytest.mark.parametrize("schema", [
-    {"type": "object", "properties": {"issues": {"type": "array"}}},
-    {"type": "object", "properties": {"x": {"type": "string"}}},
-])
-async def test_structured_output(schema: dict[str, Any]) -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
-    events, mock_exec = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
-                                             output_schema=schema, finalization=True)
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output is None
-    assert json.loads(next(event.text for event in events if isinstance(event, TextEvent))) == {
-        "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}
-    # Request records preserve the logical prompt; argv carries only an attachment.
-    flat_args = list(mock_exec.call_args.args)
-    positional = flat_args[-1]
-    assert positional.startswith("@/")
-    assert not Path(positional[1:]).exists()
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    assert "JSON schema" in request.prompt
-    assert json.dumps(schema) in request.prompt
+async def test_structured_output(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[dict[str, Any]] = [
+        {"type": "object", "properties": {"issues": {"type": "array"}}},
+        {"type": "object", "properties": {"x": {"type": "string"}}},
+    ]
+    for schema in cases:
+        with subtests.test(schema=schema):
+            backend = PiBackend(model="glm-5.2")
+            mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
+            events, mock_exec = await replay_process(
+                backend, mock_proc, Path("/tmp"), "Parse", output_schema=schema, finalization=True
+            )
+            result_events = [e for e in events if isinstance(e, ResultEvent)]
+            assert len(result_events) == 1
+            assert result_events[0].structured_output is None
+            assert json.loads(next(event.text for event in events if isinstance(event, TextEvent))) == {
+                "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]
+            }
+            # Request records preserve the logical prompt; argv carries only an attachment.
+            flat_args = list(mock_exec.call_args.args)
+            positional = flat_args[-1]
+            assert positional.startswith("@/")
+            assert not Path(positional[1:]).exists()
+            request = next(e for e in events if isinstance(e, RequestEvent))
+            assert "JSON schema" in request.prompt
+            assert json.dumps(schema) in request.prompt
 
 async def test_text_transport_forwards_incidental_json_and_empty_result() -> None:
     """The host receives the entire final text, including incidental JSON (issue #1445)."""
@@ -317,66 +324,138 @@ async def test_text_transport_forwards_incidental_json_and_empty_result() -> Non
     text = next(event.text for event in events if isinstance(event, TextEvent))
     assert '["module", "moduleVersion", "surface"]' in text and '{"issues": []}' in text
 
-@pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first',
-                                  'null-details', 'oversized-details', 'wrong-id', 'unsettled', 'late-exit'])
-async def test_native_output_uses_finalized_transcript_order_and_requires_complete_settlement(fault: str) -> None:
+async def test_native_output_uses_finalized_transcript_order_and_requires_complete_settlement(
+    subtests: pytest.Subtests,
+) -> None:
     """Daydream selects settled successful submissions independently of execution completion order."""
-    calls: list[dict[str, Any]] = [
-        {'type': 'toolCall', 'id': call_id, 'name': 'structured_output', 'arguments': {'answer': value}}
-             for call_id, value in [('first', 'first'), ('last', 'last')]]
-    if fault == 'domain-truncation':
-        calls[-1]['arguments']['truncation'] = {'truncated': True, 'firstLineExceedsLimit': True}
-    rows: list[dict[str, Any]] = [{'type': 'agent_start'}, {'type': 'turn_start'},
-        {'type': 'message_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
-        *[{'type': 'tool_execution_start', 'toolCallId': call['id'], 'toolName': 'structured_output',
-           'args': call['arguments']} for call in calls],
-        # Parallel completion arrives in the reverse order; finalized messages remain transcript ordered.
-        *[{'type': 'tool_execution_end', 'toolCallId': call['id'], 'toolName': 'structured_output',
-           'isError': False, 'result': {'content': [{'type': 'text', 'text': 'Submitted.'}],
-                                      'details': call['arguments']}} for call in reversed(calls)],
-        *[{'type': 'message_end', 'message': {'role': 'toolResult', 'toolCallId': call['id'],
-           'toolName': 'structured_output', 'isError': False,
-           'content': [{'type': 'text', 'text': 'Submitted.'}], 'details': call['arguments']}} for call in calls],
-        {'type': 'turn_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
-        {'type': 'agent_end', 'messages': []}, {'type': 'agent_settled'}]
-    if fault == 'failed-last':
-        rows[5]['isError'] = True
-        rows[-4]['message']['isError'] = True
-    elif fault in {'mixed-read', 'mixed-read-first'}:
-        read_call = {'type': 'toolCall', 'id': 'read', 'name': 'read', 'arguments': {'path': 'api.py'}}
-        calls.insert(0 if fault == 'mixed-read-first' else len(calls), read_call)
-        rows[3:3] = [{'type': 'tool_execution_start', 'toolCallId': 'read', 'toolName': 'read',
-                     'args': read_call['arguments']},
-                    {'type': 'tool_execution_end', 'toolCallId': 'read', 'toolName': 'read',
-                     'isError': False, 'result': {'content': [{'type': 'text', 'text': 'VALUE = 1'}]}}]
-    elif fault == 'null-details':
-        rows[-4]['message']['details'] = None
-    elif fault == 'oversized-details':
-        rows[-4]['message']['details'] = {'answer': 'x' * (129 * 1024)}
-    elif fault == 'wrong-id':
-        rows[-4]['message']['toolCallId'] = 'unassociated'
-    elif fault == 'unsettled':
-        rows.pop()
-    process = make_mock_process([json.dumps(row) for row in rows])
-    if fault == 'late-exit':
-        process.wait.return_value = process.returncode = 7
-    schema = {'type': 'object', 'properties': {'answer': {'type': 'string'}, 'truncation': {
-        'type': 'object', 'properties': {'truncated': {'type': 'boolean'},
-                                          'firstLineExceedsLimit': {'type': 'boolean'}}}}, 'required': ['answer']}
-    if fault in {'none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first'}:
-        events, _ = await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer',
-                                         output_schema=schema)
-        result = next(event for event in events if isinstance(event, ResultEvent))
-        expected = {'answer': 'first' if fault == 'failed-last' else 'last',
-                    **({'truncation': {'truncated': True, 'firstLineExceedsLimit': True}}
-                                       if fault == 'domain-truncation' else {})}
-        assert result.structured_output == expected
-        assert all(not event.truncated for event in events if isinstance(event, ToolResultEvent))
-        assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
-            ['read', 'first', 'last'] if fault in {'mixed-read', 'mixed-read-first'} else ['first', 'last'])
-    else:
-        with pytest.raises(PiError):
-            await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer', output_schema=schema)
+    cases: list[str] = [
+        "none",
+        "domain-truncation",
+        "failed-last",
+        "mixed-read",
+        "mixed-read-first",
+        "null-details",
+        "oversized-details",
+        "wrong-id",
+        "unsettled",
+        "late-exit",
+    ]
+    for fault in cases:
+        with subtests.test(fault=fault):
+            calls: list[dict[str, Any]] = [
+                {"type": "toolCall", "id": call_id, "name": "structured_output", "arguments": {"answer": value}}
+                for call_id, value in [("first", "first"), ("last", "last")]
+            ]
+            if fault == "domain-truncation":
+                calls[-1]["arguments"]["truncation"] = {"truncated": True, "firstLineExceedsLimit": True}
+            rows: list[dict[str, Any]] = [
+                {"type": "agent_start"},
+                {"type": "turn_start"},
+                {"type": "message_end", "message": {"role": "assistant", "content": calls, "stopReason": "toolUse"}},
+                *[
+                    {
+                        "type": "tool_execution_start",
+                        "toolCallId": call["id"],
+                        "toolName": "structured_output",
+                        "args": call["arguments"],
+                    }
+                    for call in calls
+                ],
+                # Parallel completion arrives in the reverse order; finalized messages remain transcript ordered.
+                *[
+                    {
+                        "type": "tool_execution_end",
+                        "toolCallId": call["id"],
+                        "toolName": "structured_output",
+                        "isError": False,
+                        "result": {"content": [{"type": "text", "text": "Submitted."}], "details": call["arguments"]},
+                    }
+                    for call in reversed(calls)
+                ],
+                *[
+                    {
+                        "type": "message_end",
+                        "message": {
+                            "role": "toolResult",
+                            "toolCallId": call["id"],
+                            "toolName": "structured_output",
+                            "isError": False,
+                            "content": [{"type": "text", "text": "Submitted."}],
+                            "details": call["arguments"],
+                        },
+                    }
+                    for call in calls
+                ],
+                {"type": "turn_end", "message": {"role": "assistant", "content": calls, "stopReason": "toolUse"}},
+                {"type": "agent_end", "messages": []},
+                {"type": "agent_settled"},
+            ]
+            if fault == "failed-last":
+                rows[5]["isError"] = True
+                rows[-4]["message"]["isError"] = True
+            elif fault in {"mixed-read", "mixed-read-first"}:
+                read_call = {"type": "toolCall", "id": "read", "name": "read", "arguments": {"path": "api.py"}}
+                calls.insert(0 if fault == "mixed-read-first" else len(calls), read_call)
+                rows[3:3] = [
+                    {
+                        "type": "tool_execution_start",
+                        "toolCallId": "read",
+                        "toolName": "read",
+                        "args": read_call["arguments"],
+                    },
+                    {
+                        "type": "tool_execution_end",
+                        "toolCallId": "read",
+                        "toolName": "read",
+                        "isError": False,
+                        "result": {"content": [{"type": "text", "text": "VALUE = 1"}]},
+                    },
+                ]
+            elif fault == "null-details":
+                rows[-4]["message"]["details"] = None
+            elif fault == "oversized-details":
+                rows[-4]["message"]["details"] = {"answer": "x" * (129 * 1024)}
+            elif fault == "wrong-id":
+                rows[-4]["message"]["toolCallId"] = "unassociated"
+            elif fault == "unsettled":
+                rows.pop()
+            process = make_mock_process([json.dumps(row) for row in rows])
+            if fault == "late-exit":
+                process.wait.return_value = process.returncode = 7
+            schema = {
+                "type": "object",
+                "properties": {
+                    "answer": {"type": "string"},
+                    "truncation": {
+                        "type": "object",
+                        "properties": {"truncated": {"type": "boolean"}, "firstLineExceedsLimit": {"type": "boolean"}},
+                    },
+                },
+                "required": ["answer"],
+            }
+            if fault in {"none", "domain-truncation", "failed-last", "mixed-read", "mixed-read-first"}:
+                events, _ = await replay_process(
+                    PiBackend(model="fixture"), process, Path("/tmp"), "Answer", output_schema=schema
+                )
+                result = next(event for event in events if isinstance(event, ResultEvent))
+                expected = {
+                    "answer": "first" if fault == "failed-last" else "last",
+                    **(
+                        {"truncation": {"truncated": True, "firstLineExceedsLimit": True}}
+                        if fault == "domain-truncation"
+                        else {}
+                    ),
+                }
+                assert result.structured_output == expected
+                assert all(not event.truncated for event in events if isinstance(event, ToolResultEvent))
+                assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
+                    ["read", "first", "last"] if fault in {"mixed-read", "mixed-read-first"} else ["first", "last"]
+                )
+            else:
+                with pytest.raises(PiError):
+                    await replay_process(
+                        PiBackend(model="fixture"), process, Path("/tmp"), "Answer", output_schema=schema
+                    )
 
 
 async def test_error_turn_raises_pi_error() -> None:
@@ -583,16 +662,19 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
         ],
     )
 
-@pytest.mark.parametrize(
-    ("result", "expected"),
-    [
+def test_render_tool_result(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any]] = [
         ({"content": [{"type": "text", "text": "line1"}, {"type": "text", "text": "line2"}]}, "line1line2"),
-        ({"content": "raw"}, "raw"), ({"details": {"note": "x"}}, '{"details": {"note": "x"}}'), ("plain", "plain"),
+        ({"content": "raw"}, "raw"),
+        ({"details": {"note": "x"}}, '{"details": {"note": "x"}}'),
+        ("plain", "plain"),
         (None, ""),
-    ], ids=["text-blocks", "string-content", "details-fallback", "non-dict-str", "non-dict-none"],
-)
-def test_render_tool_result(result: Any, expected: Any) -> None:
-    assert _render_tool_result(result) == expected
+    ]
+    for result, expected in cases:
+        with subtests.test(result=result):
+            assert _render_tool_result(result) == expected
 
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
@@ -675,20 +757,31 @@ async def test_explicit_model_overrides_pi_settings(pi_workspace: Path, monkeypa
 
 # Migration guards: GLM-pin and provider/model mismatch warnings
 
-@pytest.mark.parametrize("provider", [None, "zai"])
 async def test_glm_pin_warning_requires_implicit_provider(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, provider: str | None,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    if provider is None:
-        monkeypatch.delenv("PI_PROVIDER", raising=False)
-    else:
-        monkeypatch.setenv("PI_PROVIDER", provider)
-    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
-    with caplog.at_level("WARNING"):
-        flat_args, _ = await _run_and_capture_args(PiBackend(model="glm-5.2"))
-    assert any("z.ai-hosted GLM" in record.getMessage() for record in caplog.records) is (provider is None)
-    assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
-    assert flat_args[flat_args.index("--provider") + 1] == (provider or "nous")
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str | None] = [None, "zai"]
+    for provider in cases:
+        row_index += 1
+        with subtests.test(provider=provider):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                caplog.clear()
+                if provider is None:
+                    monkeypatch.delenv("PI_PROVIDER", raising=False)
+                else:
+                    monkeypatch.setenv("PI_PROVIDER", provider)
+                monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+                with caplog.at_level("WARNING"):
+                    flat_args, _ = await _run_and_capture_args(PiBackend(model="glm-5.2"))
+                assert any("z.ai-hosted GLM" in record.getMessage() for record in caplog.records) is (provider is None)
+                assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
+                assert flat_args[flat_args.index("--provider") + 1] == (provider or "nous")
 
 
 async def test_glm_pin_warning_fires_once_across_executes(
@@ -892,14 +985,20 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
     assert PiError("429 rate limit", retryable=True).retryable is True
     assert str(PiError("auth failed", retryable=False)) == "auth failed"
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        ("429 Too Many Requests", "RATE_LIMIT"), ("502 status code (no body)", "SERVER_ERROR"),
-        ("503 status code (no body)", "SERVER_ERROR"), ("service unavailable", "SERVER_ERROR"),
-        ("request timed out after 30 seconds", "TIMEOUT"), ("socket hang up", "STREAM_DROP"),
-        ("Pi CLI exited with return code 1", "PROCESS_EXIT"), ("authentication required", "AUTH_CONFIG"),
-        ("synthetic opaque failure", "UNKNOWN"), ("model not found: gpt-5 (503)", "AUTH_CONFIG"),
+def test_pi_error_categories_are_stable_host_codes(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
+        ("429 Too Many Requests", "RATE_LIMIT"),
+        ("502 status code (no body)", "SERVER_ERROR"),
+        ("503 status code (no body)", "SERVER_ERROR"),
+        ("service unavailable", "SERVER_ERROR"),
+        ("request timed out after 30 seconds", "TIMEOUT"),
+        ("socket hang up", "STREAM_DROP"),
+        ("Pi CLI exited with return code 1", "PROCESS_EXIT"),
+        ("authentication required", "AUTH_CONFIG"),
+        ("synthetic opaque failure", "UNKNOWN"),
+        ("model not found: gpt-5 (503)", "AUTH_CONFIG"),
         ("response failed JSON schema validation: additionalProperties", "SCHEMA"),
         ("provider rate limit", "RATE_LIMIT"),
         ("Upstream error from Wafer: The model is temporarily at capacity. Please retry shortly.", "SERVER_ERROR"),
@@ -917,33 +1016,29 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         ("Invalid configuration: the model is temporarily at capacity.", "AUTH_CONFIG"),
         ("Model not found: the model is temporarily at capacity.", "AUTH_CONFIG"),
         ("JSON schema validation failed: the model is temporarily at capacity.", "SCHEMA"),
-    ],
-    ids=[
-        "rate-limit", "server-error-502", "server-error-503", "server-error-service-unavailable", "timeout",
-        "stream-drop", "process-exit", "auth-config", "unknown", "permanent-beats-transient",
-        "schema", "provider-noun-is-not-permanent", "wafer-temporary-capacity", "temporary-capacity-case-space",
-        "negated-temporary-capacity", "contracted-negated-capacity", "not-at-capacity", "capacity-planning",
-        "permanent-capacity", "hypothetical-capacity-if", "capacity-check-whether",
-        "capacity-question", "capacity-postfixed-condition",
-        "capacity-auth-precedence", "capacity-config-precedence",
-        "capacity-model-precedence", "capacity-schema-precedence",
-    ],
-)
-def test_pi_error_categories_are_stable_host_codes(message: str, expected: str) -> None:
-    category = _pi_error_category(message)
-    assert category == expected
-    retryable = _pi_retryable_for(category=category, message=message)
-    assert retryable is (expected in {"RATE_LIMIT", "SERVER_ERROR", "TIMEOUT", "STREAM_DROP"})
-    assert classify_failure(PiError(message, category=category, retryable=retryable)).retries_allowed is retryable
+    ]
+    for message, expected in cases:
+        with subtests.test(message=message):
+            category = _pi_error_category(message)
+            assert category == expected
+            retryable = _pi_retryable_for(category=category, message=message)
+            assert retryable is (expected in {"RATE_LIMIT", "SERVER_ERROR", "TIMEOUT", "STREAM_DROP"})
+            assert (
+                classify_failure(PiError(message, category=category, retryable=retryable)).retries_allowed is retryable
+            )
 
-@pytest.mark.parametrize("message", ["Service is currently overloaded", "capacity exceeded", "Request throttled"])
-def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) -> None:
+def test_overload_throttle_and_capacity_messages_stay_retryable(
+    subtests: pytest.Subtests,
+) -> None:
     """Throttle/capacity categories must remain retryable even when the message also contains a generic
     permanent-error token.
     """
-    category = _pi_error_category(message)
-    assert category == "SERVER_ERROR"
-    assert _pi_retryable_for(category=category, message=message) is True
+    cases: list[str] = ["Service is currently overloaded", "capacity exceeded", "Request throttled"]
+    for message in cases:
+        with subtests.test(message=message):
+            category = _pi_error_category(message)
+            assert category == "SERVER_ERROR"
+            assert _pi_retryable_for(category=category, message=message) is True
 
 def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: Path) -> None:
     source = {"HOME": str(tmp_path), "PATH": "/run/bin"}
@@ -960,37 +1055,41 @@ def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: P
         )
         assert invalid.retry_policy.retry_recovery_allowance_s is None, junk
 
-@pytest.mark.parametrize(
-    "message",
-    ["503 status code (no body)", "Stream ended without finish_reason", "request timeout while waiting for response"],
-)
-def test_pi_transient_failures_are_retryable(message: str) -> None:
-    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is True
+def test_pi_transient_failures_are_retryable(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = [
+        "503 status code (no body)",
+        "Stream ended without finish_reason",
+        "request timeout while waiting for response",
+    ]
+    for message in cases:
+        with subtests.test(message=message):
+            assert _pi_retryable_for(category=_pi_error_category(message), message=message) is True
 
-@pytest.mark.parametrize(
-    "lines",
-    [
-        pytest.param(
-            ['{"type":"session","sessionId":"pi_ses_truncated"}', '{"type":"agent_start"}', '{"type":"turn_start"}'],
-            id="without-finish-reason",
-        ),
-        pytest.param(
-            [
-                '{"type":"session","sessionId":"pi_ses_truncated"}', '{"type":"agent_start"}', '{"type":"turn_start"}',
-                '{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}', '{"type":"turn_start"}',
-            ], id="after-completed-earlier-turn",
-        ),
-    ],
-)
-async def test_stream_eof_without_finish_reason_is_retryable_pi_error(lines: list[str]) -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(lines)
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(PiError, match="finish_reason") as raised:
-            async for _ in backend.execute(Path("/tmp"), "Truncated"):
-                pass
-    assert raised.value.retryable is True
-    assert raised.value.category == "STREAM_TRUNCATION"
+async def test_stream_eof_without_finish_reason_is_retryable_pi_error(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[list[str]] = [
+        ['{"type":"session","sessionId":"pi_ses_truncated"}', '{"type":"agent_start"}', '{"type":"turn_start"}'],
+        [
+            '{"type":"session","sessionId":"pi_ses_truncated"}',
+            '{"type":"agent_start"}',
+            '{"type":"turn_start"}',
+            '{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}',
+            '{"type":"turn_start"}',
+        ],
+    ]
+    for lines in cases:
+        with subtests.test(lines=lines):
+            backend = PiBackend(model="glm-5.2")
+            mock_proc = make_mock_process(lines)
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+                with pytest.raises(PiError, match="finish_reason") as raised:
+                    async for _ in backend.execute(Path("/tmp"), "Truncated"):
+                        pass
+            assert raised.value.retryable is True
+            assert raised.value.category == "STREAM_TRUNCATION"
 
 async def test_pi_stream_timeout_is_retryable() -> None:
     backend = PiBackend(model="glm-5.2")
@@ -1011,163 +1110,232 @@ async def test_pi_stream_timeout_is_retryable() -> None:
 
 # pi retry classification
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
-        ("429 Too Many Requests", True), ("502 status code (no body)", True), ("502 Bad Gateway", True),
-        ("503 status code (no body)", True), ("503 Service Unavailable", True),
-        ("Service is currently overloaded", True), ("rate limit exceeded", True), ("rate_limit hit", True),
-        ("Capacity unavailable", True), ("too many requests from this IP", True), ("Request throttled", True),
+def test_is_retryable_error_message(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any]] = [
+        ("429 Too Many Requests", True),
+        ("502 status code (no body)", True),
+        ("502 Bad Gateway", True),
+        ("503 status code (no body)", True),
+        ("503 Service Unavailable", True),
+        ("Service is currently overloaded", True),
+        ("rate limit exceeded", True),
+        ("rate_limit hit", True),
+        ("Capacity unavailable", True),
+        ("too many requests from this IP", True),
+        ("Request throttled", True),
         ("throttling in effect", True),
         ("OVERLOAD detected", True),  # case-insensitive
         # Stream-drop signatures (z.ai/GLM connection drops).
-        ("terminated", True), ("ECONNRESET", True), ("connection reset", True), ("socket hang up", True),
-        ("premature close", True), ("EPIPE", True), ("auth failed", False), ("service is not overloaded", False),
-        ("capacity planning required", False), ("", False), ("Unknown Pi error", False),
-    ],
-    ids=[
-        "429", "502-status-code", "502-bad-gateway", "503-status-code", "503-service-unavailable", "overload",
-        "rate-limit-space", "rate_limit-underscore", "capacity", "too-many-requests", "throttle", "throttling",
-        "case-insensitive", "stream-drop-terminated", "stream-drop-econnreset", "stream-drop-connection-reset",
-        "stream-drop-socket-hang-up", "stream-drop-premature-close", "stream-drop-epipe", "auth-failed",
-        "not-overloaded", "capacity-planning", "empty", "unknown",
-    ],
-)
-def test_is_retryable_error_message(message: Any, expected: Any) -> None:
-    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is expected
+        ("terminated", True),
+        ("ECONNRESET", True),
+        ("connection reset", True),
+        ("socket hang up", True),
+        ("premature close", True),
+        ("EPIPE", True),
+        ("auth failed", False),
+        ("service is not overloaded", False),
+        ("capacity planning required", False),
+        ("", False),
+        ("Unknown Pi error", False),
+    ]
+    for message, expected in cases:
+        with subtests.test(message=message):
+            assert _pi_retryable_for(category=_pi_error_category(message), message=message) is expected
 
 # _is_retryable_exit_code
 
-@pytest.mark.parametrize(
-    ("code", "expected"), [(-9, True), (137, True), (1, False), (2, False), (0, False)],
-    ids=["sigkill", "oom-137", "exit-1", "exit-2", "zero"],
-)
-def test_is_retryable_exit_code(code: Any, expected: Any) -> None:
-    assert _is_retryable_exit_code(code) is expected
+def test_is_retryable_exit_code(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any]] = [(-9, True), (137, True), (1, False), (2, False), (0, False)]
+    for code, expected in cases:
+        with subtests.test(code=code):
+            assert _is_retryable_exit_code(code) is expected
 
 # Error turn uses retryable classifier
 
-@pytest.mark.parametrize(
-    ("error_message", "expected_retryable", "expected_category"),
-    [
+async def test_error_turn_sets_retryable_via_classifier(
+    subtests: pytest.Subtests,
+) -> None:
+    """Public terminal errors retain diagnosis without altering classification or totals."""
+    cases: list[tuple[str, bool, str]] = [
         ("429 Too Many Requests - rate limit exceeded", True, "RATE_LIMIT"),
         ("502 status code (no body)", True, "SERVER_ERROR"),
         ("authentication required", False, "AUTH_CONFIG"),
         ("Provider finish_reason: error", False, "UNKNOWN"),
-    ], ids=["429-retryable", "502-retryable", "auth-non-retryable", "opaque-finish-error"],
-)
-async def test_error_turn_sets_retryable_via_classifier(
-    error_message: str, expected_retryable: bool, expected_category: str,
-) -> None:
-    """Public terminal errors retain diagnosis without altering classification or totals."""
-    backend = PiBackend(model="glm-5.2")
-    lines = [
-        '{"type":"session","sessionId":"pi_ses_err"}', '{"type":"agent_start"}', '{"type":"turn_start"}',
-        '{"type":"turn_end","message":{"role":"assistant","content":[],'
-        f'"stopReason":"error","rawStopReason":"error","errorMessage":{json.dumps(error_message)},'
-        '"usage":{"input":100,"output":10,"cost":{"total":0.01}}}}',
     ]
-    mock_proc = make_mock_process(lines)
-    events = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as spawn:
-        with pytest.raises(PiError) as exc_info:
-            async for event in backend.execute(Path("/tmp"), "p"):
-                events.append(event)
-    assert exc_info.value.retryable is expected_retryable
-    assert exc_info.value.category == expected_category
-    assert spawn.call_count == 1
-    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
-    assert len(diagnostics) == 1 and diagnostics[0].message == error_message
-    assert diagnostics[0].metadata == {
-        "category": expected_category, "retryable": expected_retryable, "finish_reason": "error",
-        "raw_stop_reason": "error", "message_source": "native",
-    }
-    assert events.index(diagnostics[0]) < next(i for i, event in enumerate(events) if isinstance(event, TurnEndEvent))
-    totals = [event for event in events if isinstance(event, CostEvent)]
-    assert len(totals) == 1 and totals[0].input_tokens == 100 and totals[0].output_tokens == 10
-    assert totals[0].cost_usd == 0.01
-    assert mock_proc.returncode is not None
+    for error_message, expected_retryable, expected_category in cases:
+        with subtests.test(error_message=error_message):
+            backend = PiBackend(model="glm-5.2")
+            lines = [
+                '{"type":"session","sessionId":"pi_ses_err"}',
+                '{"type":"agent_start"}',
+                '{"type":"turn_start"}',
+                '{"type":"turn_end","message":{"role":"assistant","content":[],'
+                f'"stopReason":"error","rawStopReason":"error","errorMessage":{json.dumps(error_message)},'
+                '"usage":{"input":100,"output":10,"cost":{"total":0.01}}}}',
+            ]
+            mock_proc = make_mock_process(lines)
+            events = []
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as spawn:
+                with pytest.raises(PiError) as exc_info:
+                    async for event in backend.execute(Path("/tmp"), "p"):
+                        events.append(event)
+            assert exc_info.value.retryable is expected_retryable
+            assert exc_info.value.category == expected_category
+            assert spawn.call_count == 1
+            diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+            assert len(diagnostics) == 1 and diagnostics[0].message == error_message
+            assert diagnostics[0].metadata == {
+                "category": expected_category,
+                "retryable": expected_retryable,
+                "finish_reason": "error",
+                "raw_stop_reason": "error",
+                "message_source": "native",
+            }
+            assert events.index(diagnostics[0]) < next(
+                i for i, event in enumerate(events) if isinstance(event, TurnEndEvent)
+            )
+            totals = [event for event in events if isinstance(event, CostEvent)]
+            assert len(totals) == 1 and totals[0].input_tokens == 100 and totals[0].output_tokens == 10
+            assert totals[0].cost_usd == 0.01
+            assert mock_proc.returncode is not None
 
 
-@pytest.mark.parametrize("native", [
-    {}, {"errorMessage": None, "rawStopReason": {"not": "a string"}},
-    {"errorMessage": ["invalid"], "rawStopReason": 7},
-    {"errorMessage": 'failure: -----BEGIN PRIVATE KEY-----\n' + 'x' * 5000
-     + '\n-----END PRIVATE KEY-----\n' + 'safe ' * 2000,
-     "rawStopReason": 'TOKEN=hidden-secret; ' + 'reason ' * 1000},
-], ids=["absent", "null", "malformed", "oversized-secret"])
 async def test_pi_terminal_diagnostic_is_bounded_and_redacted_before_persistence(
-    tmp_path: Path, native: dict[str, Any],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Public optional fields cannot crash error handling or leak cut-off secret fragments."""
-    backend = PiBackend(model="fixture-model")
-    backend.retry_attempts = 0
-    message = {"role": "assistant", "content": [], "stopReason": "error", **native}
-    recorder = make_recorder(tmp_path)
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process([
-        json.dumps({"type": "turn_end", "message": message}),
-    ])) as spawn:
-        async with recorder:
-            with pytest.raises(PiError) as failure:
-                await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
-                                progress_callback=lambda _: None)
-    assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
-    assert spawn.call_count == 1
-    document = json.loads(recorder.path.read_text())
-    diagnostics = [diagnostic for step in document["steps"]
-                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
-    assert len(diagnostics) == 1
-    diagnostic = diagnostics[0]
-    assert len(diagnostic["message"]) <= 4096
-    if isinstance(native.get("errorMessage"), str):
-        assert diagnostic["metadata"]["message_source"] == "native"
-        assert diagnostic["metadata"]["message_truncated"] is True
-        assert "[REDACTED_PEM_KEY]" in diagnostic["message"]
-        assert "x" * 20 not in json.dumps(diagnostics) and "hidden-secret" not in json.dumps(diagnostics)
-        assert "[REDACTED_ENV_VAR]" in diagnostic["metadata"]["raw_stop_reason"]
-        assert len(diagnostic["metadata"]["raw_stop_reason"]) == 256
-        assert diagnostic["metadata"]["raw_stop_reason_truncated"] is True
-    else:
-        assert diagnostic["message"] == "" and diagnostic["metadata"]["message_source"] == "unavailable"
-        assert "raw_stop_reason" not in diagnostic["metadata"]
+    table_root = tmp_path
+    row_index = 0
+    cases: list[dict[str, Any]] = [
+        {},
+        {"errorMessage": None, "rawStopReason": {"not": "a string"}},
+        {"errorMessage": ["invalid"], "rawStopReason": 7},
+        {
+            "errorMessage": "failure: -----BEGIN PRIVATE KEY-----\n"
+            + "x" * 5000
+            + "\n-----END PRIVATE KEY-----\n"
+            + "safe " * 2000,
+            "rawStopReason": "TOKEN=hidden-secret; " + "reason " * 1000,
+        },
+    ]
+    for native in cases:
+        row_index += 1
+        with subtests.test(native=native):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                backend = PiBackend(model="fixture-model")
+                backend.retry_attempts = 0
+                message = {"role": "assistant", "content": [], "stopReason": "error", **native}
+                recorder = make_recorder(tmp_path)
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec",
+                    return_value=make_mock_process(
+                        [
+                            json.dumps({"type": "turn_end", "message": message}),
+                        ]
+                    ),
+                ) as spawn:
+                    async with recorder:
+                        with pytest.raises(PiError) as failure:
+                            await run_agent(
+                                backend,
+                                tmp_path,
+                                "Review",
+                                phase=DaydreamPhase.REVIEW,
+                                progress_callback=lambda _: None,
+                            )
+                assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
+                assert spawn.call_count == 1
+                document = json.loads(recorder.path.read_text())
+                diagnostics = [
+                    diagnostic
+                    for step in document["steps"]
+                    for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+                ]
+                assert len(diagnostics) == 1
+                diagnostic = diagnostics[0]
+                assert len(diagnostic["message"]) <= 4096
+                if isinstance(native.get("errorMessage"), str):
+                    assert diagnostic["metadata"]["message_source"] == "native"
+                    assert diagnostic["metadata"]["message_truncated"] is True
+                    assert "[REDACTED_PEM_KEY]" in diagnostic["message"]
+                    assert "x" * 20 not in json.dumps(diagnostics) and "hidden-secret" not in json.dumps(diagnostics)
+                    assert "[REDACTED_ENV_VAR]" in diagnostic["metadata"]["raw_stop_reason"]
+                    assert len(diagnostic["metadata"]["raw_stop_reason"]) == 256
+                    assert diagnostic["metadata"]["raw_stop_reason_truncated"] is True
+                else:
+                    assert diagnostic["message"] == "" and diagnostic["metadata"]["message_source"] == "unavailable"
+                    assert "raw_stop_reason" not in diagnostic["metadata"]
 
 
-@pytest.mark.parametrize("redaction_fault", ["raises", "nontext"])
 async def test_pi_diagnostic_redaction_fault_preserves_native_failure_and_terminal_usage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redaction_fault: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A failed evidence sanitizer must neither replace PiError nor lose terminal billing."""
-    def broken_redactor(_: str) -> Any:
-        if redaction_fault == "raises":
-            raise RuntimeError("redactor unavailable")
-        return None
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["raises", "nontext"]
+    for redaction_fault in cases:
+        row_index += 1
+        with subtests.test(redaction_fault=redaction_fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
 
-    monkeypatch.setattr("daydream.backends.pi.redact_structured_text", broken_redactor)
-    backend = PiBackend(model="fixture-model")
-    backend.retry_attempts = 0
-    recorder = make_recorder(tmp_path)
-    native = {"role": "assistant", "stopReason": "error", "errorMessage": "Provider finish_reason: error",
-              "rawStopReason": "TOKEN=never-persist", "usage": {"input": 100, "output": 10,
-                                                                     "cost": {"total": 0.01}}}
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process([
-        json.dumps({"type": "turn_end", "message": native}),
-    ])) as spawn:
-        async with recorder:
-            with pytest.raises(PiError) as failure:
-                await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
-                                progress_callback=lambda _: None)
-    assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
-    assert spawn.call_count == 1
-    document = json.loads(recorder.path.read_text())
-    diagnostics = [diagnostic for step in document["steps"]
-                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
-    assert len(diagnostics) == 1
-    assert diagnostics[0]["message"] == "[DIAGNOSTIC_REDACTION_FAILED]"
-    assert diagnostics[0]["metadata"]["raw_stop_reason"] == "[DIAGNOSTIC_REDACTION_FAILED]"
-    assert "never-persist" not in json.dumps(document)
-    assert document["final_metrics"]["total_prompt_tokens"] == 100
-    assert document["final_metrics"]["total_completion_tokens"] == 10
-    assert document["final_metrics"]["total_cost_usd"] == 0.01
+                def broken_redactor(_: str) -> Any:
+                    if redaction_fault == "raises":
+                        raise RuntimeError("redactor unavailable")
+                    return None
+
+                monkeypatch.setattr("daydream.backends.pi.redact_structured_text", broken_redactor)
+                backend = PiBackend(model="fixture-model")
+                backend.retry_attempts = 0
+                recorder = make_recorder(tmp_path)
+                native = {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "Provider finish_reason: error",
+                    "rawStopReason": "TOKEN=never-persist",
+                    "usage": {"input": 100, "output": 10, "cost": {"total": 0.01}},
+                }
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec",
+                    return_value=make_mock_process(
+                        [
+                            json.dumps({"type": "turn_end", "message": native}),
+                        ]
+                    ),
+                ) as spawn:
+                    async with recorder:
+                        with pytest.raises(PiError) as failure:
+                            await run_agent(
+                                backend,
+                                tmp_path,
+                                "Review",
+                                phase=DaydreamPhase.REVIEW,
+                                progress_callback=lambda _: None,
+                            )
+                assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
+                assert spawn.call_count == 1
+                document = json.loads(recorder.path.read_text())
+                diagnostics = [
+                    diagnostic
+                    for step in document["steps"]
+                    for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+                ]
+                assert len(diagnostics) == 1
+                assert diagnostics[0]["message"] == "[DIAGNOSTIC_REDACTION_FAILED]"
+                assert diagnostics[0]["metadata"]["raw_stop_reason"] == "[DIAGNOSTIC_REDACTION_FAILED]"
+                assert "never-persist" not in json.dumps(document)
+                assert document["final_metrics"]["total_prompt_tokens"] == 100
+                assert document["final_metrics"]["total_completion_tokens"] == 10
+                assert document["final_metrics"]["total_cost_usd"] == 0.01
 
 
 async def test_error_turn_carries_structured_retry_hint_from_the_provider_payload() -> None:
@@ -1216,84 +1384,110 @@ async def test_error_turn_carries_structured_retry_hint_from_the_provider_payloa
         events = [e async for e in backend.execute(Path("/tmp"), "p")]
     assert any(getattr(e, "text", None) == "done" for e in events)
 
-@pytest.mark.parametrize(
-    ("returncode", "output_lines", "expected_retryable"),
-    [
+async def test_nonzero_exit_sets_retryable_via_exit_code(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any, Any]] = [
         (-9, [], True),  # SIGKILL/OOM
         (1, ["Error: not authenticated"], False),  # auth/config error
-    ], ids=["oom-sigkill-retryable", "exit-1-non-retryable"],
-)
-async def test_nonzero_exit_sets_retryable_via_exit_code(
-    returncode: Any, output_lines: Any, expected_retryable: Any,
-) -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(output_lines)
-    mock_proc.returncode = returncode
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(PiError) as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "p"):
-                pass
-    assert exc_info.value.retryable is expected_retryable
+    ]
+    for returncode, output_lines, expected_retryable in cases:
+        with subtests.test(returncode=returncode):
+            backend = PiBackend(model="glm-5.2")
+            mock_proc = make_mock_process(output_lines)
+            mock_proc.returncode = returncode
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+                with pytest.raises(PiError) as exc_info:
+                    async for _ in backend.execute(Path("/tmp"), "p"):
+                        pass
+            assert exc_info.value.retryable is expected_retryable
 
 # Retry env knobs
 
-@pytest.mark.parametrize(
-    ("env_var", "parse", "env_value", "expected", "warn_fragment"),
-    [
+def test_pi_retry_env_knobs(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, Callable[[], int | float], str | None, Any, str | None]] = [
         ("DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, None, _PI_DEFAULT_RETRY_ATTEMPTS, None),
         ("DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "5", 5, None),
         (
-            "DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "", _PI_DEFAULT_RETRY_ATTEMPTS,
+            "DAYDREAM_PI_RETRY_ATTEMPTS",
+            _pi_retry_attempts,
+            "",
+            _PI_DEFAULT_RETRY_ATTEMPTS,
             f"is not a valid integer; using default {_PI_DEFAULT_RETRY_ATTEMPTS}",
         ),
         (
-            "DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "-1", _PI_DEFAULT_RETRY_ATTEMPTS,
+            "DAYDREAM_PI_RETRY_ATTEMPTS",
+            _pi_retry_attempts,
+            "-1",
+            _PI_DEFAULT_RETRY_ATTEMPTS,
             f"is negative; using default {_PI_DEFAULT_RETRY_ATTEMPTS}",
-        ), ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, None, _PI_DEFAULT_RETRY_BASE_DELAY, None),
+        ),
+        ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, None, _PI_DEFAULT_RETRY_BASE_DELAY, None),
         ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "0.5", 0.5, None),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "nan", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S",
+            _pi_retry_base_delay,
+            "nan",
+            _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not finite; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "inf", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S",
+            _pi_retry_base_delay,
+            "inf",
+            _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not finite; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S",
+            _pi_retry_base_delay,
+            "",
+            _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
-        ), ("DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, None, _PI_DEFAULT_RETRY_MAX_DELAY, None),
+        ),
+        ("DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, None, _PI_DEFAULT_RETRY_MAX_DELAY, None),
         ("DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "45.5", 45.5, None),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "not-a-float", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S",
+            _pi_retry_max_delay,
+            "not-a-float",
+            _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "-1", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S",
+            _pi_retry_max_delay,
+            "-1",
+            _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is negative; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S",
+            _pi_retry_max_delay,
+            "",
+            _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
-    ],
-    ids=[
-        "attempts-default", "attempts-env-override", "attempts-empty-warns", "attempts-negative-warns",
-        "base-default", "base-env-override",
-        "base-nan-warns", "base-inf-warns", "base-empty-warns", "max-default", "max-env-override", "max-invalid-warns",
-        "max-negative-warns", "max-empty-warns",
-    ],
-)
-def test_pi_retry_env_knobs(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_var: str, parse: Callable[[], int | float],
-    env_value: str | None, expected: Any, warn_fragment: str | None,
-) -> None:
-    if env_value is not None:
-        monkeypatch.setenv(env_var, env_value)
-    assert parse() == expected
-    if warn_fragment is not None:
-        assert warn_fragment in caplog.text
-        assert f"{env_var}={env_value!r}" in caplog.text
+    ]
+    for env_var, parse, env_value, expected, warn_fragment in cases:
+        row_index += 1
+        with subtests.test(env_var=env_var):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                caplog.clear()
+                if env_value is not None:
+                    monkeypatch.setenv(env_var, env_value)
+                assert parse() == expected
+                if warn_fragment is not None:
+                    assert warn_fragment in caplog.text
+                    assert f"{env_var}={env_value!r}" in caplog.text
 
 # fanout_concurrency
 
@@ -1302,32 +1496,61 @@ def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch: pytest.MonkeyPatch) 
     backend = PiBackend(model="glm-5.2")
     assert backend.fanout_concurrency == 10
 
-@pytest.mark.parametrize(("env_value", "expected"), [ ("6", 6), ("0", 10), ("-1", 10), ("invalid", 10), ("", 10), ])
 def test_pi_fanout_concurrency_env_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: Any, expected: int,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.setenv("DAYDREAM_PI_FANOUT_CONCURRENCY", env_value)
-    assert PiBackend(model="glm-5.2").fanout_concurrency == expected
-    if expected == 10:
-        assert "using default 10" in caplog.text
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[Any, int]] = [
+        ("6", 6),
+        ("0", 10),
+        ("-1", 10),
+        ("invalid", 10),
+        ("", 10),
+    ]
+    for env_value, expected in cases:
+        row_index += 1
+        with subtests.test(expected=expected):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                caplog.clear()
+                monkeypatch.setenv("DAYDREAM_PI_FANOUT_CONCURRENCY", env_value)
+                assert PiBackend(model="glm-5.2").fanout_concurrency == expected
+                if expected == 10:
+                    assert "using default 10" in caplog.text
 
-@pytest.mark.parametrize(("effort", "ambient", "expected"), [
-    ("max", None, "max"), ("xhigh", "low", "xhigh"), (None, "high", "high"), (None, None, None),
-])
 async def test_pi_reasoning_effort_precedes_ambient_thinking(
-    monkeypatch: pytest.MonkeyPatch, effort: str | None, ambient: str | None, expected: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    if ambient is None:
-        monkeypatch.delenv("PI_THINKING", raising=False)
-    else:
-        monkeypatch.setenv("PI_THINKING", ambient)
-    flat_args, _ = await _run_and_capture_args(PiBackend(model="glm-5.2", reasoning_effort=effort))
-    if expected is None:
-        assert "--thinking" not in flat_args
-    else:
-        assert flat_args[flat_args.index("--thinking") + 1] == expected
-    if effort and ambient and effort != ambient:
-        assert ambient not in flat_args
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str | None, str | None, str | None]] = [
+        ("max", None, "max"),
+        ("xhigh", "low", "xhigh"),
+        (None, "high", "high"),
+        (None, None, None),
+    ]
+    for effort, ambient, expected in cases:
+        row_index += 1
+        with subtests.test(effort=effort):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                if ambient is None:
+                    monkeypatch.delenv("PI_THINKING", raising=False)
+                else:
+                    monkeypatch.setenv("PI_THINKING", ambient)
+                flat_args, _ = await _run_and_capture_args(PiBackend(model="glm-5.2", reasoning_effort=effort))
+                if expected is None:
+                    assert "--thinking" not in flat_args
+                else:
+                    assert flat_args[flat_args.index("--thinking") + 1] == expected
+                if effort and ambient and effort != ambient:
+                    assert ambient not in flat_args
 
 
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
@@ -1343,45 +1566,66 @@ def test_pi_replay_fixture_is_sanitized_labeled() -> None:
     assert "395.332" not in text.split("\n")[0]
 
 
-@pytest.mark.parametrize('mode', ['native', 'no-schema', 'disabled', 'finalization', 'validation-opt-out'])
-async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    monkeypatch.delenv("PI_PROVIDER", raising=False)
-    monkeypatch.delenv("PI_API_KEY", raising=False)
-    backend = PiBackend(model="glm-5.2")
-    schema = None if mode == "no-schema" else {"type": "object", "properties": {"answer": {"type": "string"}}}
-    process = make_mock_process((FIXTURES_DIR / 'simple_text.jsonl').read_text().splitlines()
-                                + ['{"type":"agent_settled"}'])
-    if mode == 'disabled':
-        process.stdin = MagicMock()
-    events, spawn = await replay_process(
-        backend, process, Path("/tmp"), "structured please",
-        output_schema=schema, tools_disabled=mode == "disabled", finalization=mode == "finalization",
-        validate_structured_output=mode != "validation-opt-out",
-        read_only=True, persist_session=False,
-    )
-    flat_args = list(spawn.call_args.args)
-    request = next(event for event in events if isinstance(event, RequestEvent))
-    config = request.config
-    assert isinstance(config, PiRequestConfig)
-    assert config.read_only is True
-    if mode in {'disabled', 'finalization'}:
-        assert '--no-tools' in flat_args and config.selected_tools_count == 0
-    else:
-        assert flat_args[flat_args.index('--tools') + 1] == 'read,find,ls,grep' + (
-            ',structured_output' if mode == 'native' else '')
-        assert config.selected_tools_count == (5 if mode == 'native' else 4)
-        assert config.selected_tools_present is True
-    assert config.no_skills is True and "--no-skills" in flat_args
-    assert config.schema_emulated is (mode not in {"native", "no-schema"})
-    assert config.persist_session is False and "--no-session" in flat_args
-    assert config.continuation_mode == "fresh"
-    assert config.model_mode == "single"
-    assert config.max_turns is None  # accepted by daydream, never passed to Pi
-    # System preamble is invocation-level content, never a config value.
-    assert request.system_prompt is not None
-    if mode != "finalization":
-        assert "Attempt dispatch-time snapshot:" in request.system_prompt
-        assert "tool-call allocation is uncapped" in request.system_prompt
+async def test_pi_request_event_config_matches_exact_argv(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["native", "no-schema", "disabled", "finalization", "validation-opt-out"]
+    for mode in cases:
+        row_index += 1
+        with subtests.test(mode=mode):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.delenv("PI_PROVIDER", raising=False)
+                monkeypatch.delenv("PI_API_KEY", raising=False)
+                backend = PiBackend(model="glm-5.2")
+                schema = (
+                    None if mode == "no-schema" else {"type": "object", "properties": {"answer": {"type": "string"}}}
+                )
+                process = make_mock_process(
+                    (FIXTURES_DIR / "simple_text.jsonl").read_text().splitlines() + ['{"type":"agent_settled"}']
+                )
+                if mode == "disabled":
+                    process.stdin = MagicMock()
+                events, spawn = await replay_process(
+                    backend,
+                    process,
+                    Path("/tmp"),
+                    "structured please",
+                    output_schema=schema,
+                    tools_disabled=mode == "disabled",
+                    finalization=mode == "finalization",
+                    validate_structured_output=mode != "validation-opt-out",
+                    read_only=True,
+                    persist_session=False,
+                )
+                flat_args = list(spawn.call_args.args)
+                request = next(event for event in events if isinstance(event, RequestEvent))
+                config = request.config
+                assert isinstance(config, PiRequestConfig)
+                assert config.read_only is True
+                if mode in {"disabled", "finalization"}:
+                    assert "--no-tools" in flat_args and config.selected_tools_count == 0
+                else:
+                    assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep" + (
+                        ",structured_output" if mode == "native" else ""
+                    )
+                    assert config.selected_tools_count == (5 if mode == "native" else 4)
+                    assert config.selected_tools_present is True
+                assert config.no_skills is True and "--no-skills" in flat_args
+                assert config.schema_emulated is (mode not in {"native", "no-schema"})
+                assert config.persist_session is False and "--no-session" in flat_args
+                assert config.continuation_mode == "fresh"
+                assert config.model_mode == "single"
+                assert config.max_turns is None  # accepted by daydream, never passed to Pi
+                # System preamble is invocation-level content, never a config value.
+                assert request.system_prompt is not None
+                if mode != "finalization":
+                    assert "Attempt dispatch-time snapshot:" in request.system_prompt
+                    assert "tool-call allocation is uncapped" in request.system_prompt
 
 
 async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:

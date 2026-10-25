@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from daydream.benchmark.schema import case_id_for
 from daydream.benchmark.storage import recover_startup
 from daydream.git_ops import GitError, process as git_process
 from tests.harness.git_helpers import git as _git, seed_pr_origin, seeded_commit, write_and_stage
+from tests.harness.table_cases import isolated_case
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 
@@ -216,81 +218,71 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
             snapshot.derive_authoring_path(m, *args)
         assert expected_reason in str(exc.value)
 
-def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path, origin: str) -> None:
+
+def test_snapshot_mirror_bundle_and_offline_clone_round_trip(
+    tmp_path: Path,
+    origin: str,
+    monkeypatch: pytest.MonkeyPatch,
+    subtests: pytest.Subtests,
+) -> None:
+    """A shared real Git mirror produces deterministic two-commit bundles and faithful offline clones."""
     mirror = tmp_path / "cache" / "repository.git"
     sn.ensure_mirror(tmp_path)
     assert mirror.is_dir()
-    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
-    assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
-    assert sn.rev_parse(mirror, "refs/heads/base_tip") == _SHA_BASE2
-    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
-    assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
-
-def test_ancestor_of_pr_head_enforced(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
-    pr_head = sn.rev_parse(m, "refs/pull/1/head")
-    assert sn.head_reachability(m, _SHA_BASE2, pr_head) == "ok"     # ancestor
-    assert sn.head_reachability(m, _SHA_HEAD, pr_head) == "ok"      # equal
-    assert sn.head_reachability(m, _SHA_BASE3, pr_head) == "head_not_on_pr"
-    assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"
-
-def test_resolve_base_and_trees(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
-    base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
-    assert base == _SHA_BASE2
-    trees = sn.resolve_trees(m, base, _SHA_HEAD)
-    assert isinstance(trees, tuple)
-    bt, ht = trees
-    assert bt == _SHA_BASE2_TREE and ht == _SHA_HEAD_TREE
-    assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
-
-def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
-    assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
-    assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
-    d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    assert re.fullmatch(r"[0-9a-f]{64}", d)
-
-def test_bundle_two_refs_deterministic(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
+    with subtests.test(stage="fetch-and-reachability"):
+        _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
+        assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
+        assert sn.rev_parse(mirror, "refs/heads/base_tip") == _SHA_BASE2
+        _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
+        assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
+        _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
+        pr_head = sn.rev_parse(mirror, "refs/pull/1/head")
+        assert sn.head_reachability(mirror, _SHA_BASE2, pr_head) == "ok"
+        assert sn.head_reachability(mirror, _SHA_HEAD, pr_head) == "ok"
+        assert sn.head_reachability(mirror, _SHA_BASE3, pr_head) == "head_not_on_pr"
+        assert sn.head_reachability(mirror, "0" * 40, pr_head) == "head_unreachable"
+    _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
+    with subtests.test(stage="base-trees-and-diff"):
+        base = sn.resolve_original_base(mirror, "refs/heads/base_tip", _SHA_HEAD)
+        assert base == _SHA_BASE2
+        trees = sn.resolve_trees(mirror, base, _SHA_HEAD)
+        assert isinstance(trees, tuple)
+        assert trees == (_SHA_BASE2_TREE, _SHA_HEAD_TREE)
+        assert sn.resolve_trees(mirror, base, "0" * 40) == "missing_object"
+        assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
+        assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None
+        assert re.fullmatch(r"[0-9a-f]{64}", sn.canonical_diff_sha256(mirror, _SHA_BASE2, _SHA_HEAD))
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
-    base_commit = sn.rev_parse(m, "refs/heads/base")
-    head_commit = sn.rev_parse(m, "refs/heads/head")
-    assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _SHA_BASE2_TREE
-    assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _SHA_HEAD_TREE
-    assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
-    first = storage.sha256_file(bundle)
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    assert storage.sha256_file(bundle) == first
+    sn.build_bundle(mirror, _SHA_BASE2, _SHA_HEAD, bundle)
+    with subtests.test(stage="bundle-shape-and-determinism"):
+        assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
+        base_commit = sn.rev_parse(mirror, "refs/heads/base")
+        head_commit = sn.rev_parse(mirror, "refs/heads/head")
+        assert sn.rev_parse(mirror, f"{base_commit}^{{tree}}") == _SHA_BASE2_TREE
+        assert sn.rev_parse(mirror, f"{head_commit}^{{tree}}") == _SHA_HEAD_TREE
+        assert sn.rev_parse(mirror, f"{head_commit}^") == base_commit
+        first = storage.sha256_file(bundle)
+        sn.build_bundle(mirror, _SHA_BASE2, _SHA_HEAD, bundle)
+        assert storage.sha256_file(bundle) == first
+    with subtests.test(stage="relative-bundle"):
+        relative = Path(os.path.relpath(bundle, tmp_path))
+        with monkeypatch.context() as patch:
+            patch.chdir(tmp_path)
+            assert sn.bundle_heads(relative) == {"refs/heads/base", "refs/heads/head"}
+            assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
+    with subtests.test(stage="offline-clone"):
+        diff_sha = sn.canonical_diff_sha256(mirror, _SHA_BASE2, _SHA_HEAD)
+        sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+        bad = tmp_path / "snapshots" / "bad.bundle"
+        bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
+        with pytest.raises(git_ops.GitError):
+            sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+    with subtests.test(stage="abbreviation-stability"):
+        _git(mirror, "config", "core.abbrev", "12")
+        sn.build_bundle(mirror, _SHA_BASE2, _SHA_HEAD, bundle)
+        diff_sha = sn.canonical_diff_sha256(mirror, _SHA_BASE2, _SHA_HEAD)
+        sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
-def test_bundle_heads_accepts_relative_path_from_any_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    origin: str,
-) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
-    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    rel_bundle = Path(os.path.relpath(bundle, tmp_path))
-    monkeypatch.chdir(tmp_path)
-    heads_rel = sn.bundle_heads(rel_bundle)
-    heads_abs = sn.bundle_heads(bundle)
-    assert heads_rel == {"refs/heads/base", "refs/heads/head"}
-    assert heads_abs == {"refs/heads/base", "refs/heads/head"}
-
-def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: str) -> None:
-    """The same base/head pair hashes identically whether the diff runs in a
-    mirror whose effective core.abbrev is widened past the clone's. Failing-by-
-    construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
-    default, so validate_offline_clone raises a digest mismatch."""
-
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
-    _git(m, "config", "core.abbrev", "12")
-    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
 def test_git_fetch_wires_command_scoped_credential_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -313,16 +305,6 @@ def test_git_fetch_wires_command_scoped_credential_helper(
     argv = captured["argv"]
     assert "-c" in argv and any(a.startswith("credential.helper=!gh auth git-credential") for a in argv)
 
-def test_offline_clone_validates(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
-    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
-    bad = tmp_path / "snapshots" / "bad.bundle"
-    bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
-    with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
 def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -> None:
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
@@ -388,23 +370,29 @@ def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     assert sn.changed_paths(sn.mirror(tmp_path), authoring_sha, head_sha) == {"old.py", "new.py"}
 
-@pytest.mark.parametrize("stdout",
-    [
+def test_changed_paths_rejects_malformed_nul_records(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[bytes] = [
         b"M\x00a.py",
         b"M\x00\x00",
         b"R100\x00old.py\x00",
         b"R101\x00old.py\x00new.py\x00",
         b"R100\x00old.py\x00new.py\x00junk\x00",
         b"Z\x00a.py\x00",
-    ],
-)
-def test_changed_paths_rejects_malformed_nul_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes
-) -> None:
-    monkeypatch.setattr(
-        git_process, "_run_git", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, b""),
-    )
-    with pytest.raises(GitError, match="name-status"):
-        sn.changed_paths(tmp_path, "a" * 40, "b" * 40)
+    ]
+    for case_index, stdout in enumerate(cases):
+        with subtests.test(stdout=stdout):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                monkeypatch.setattr(
+                    git_process,
+                    "_run_git",
+                    lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, b""),
+                )
+                with pytest.raises(GitError, match="name-status"):
+                    sn.changed_paths(tmp_path, "a" * 40, "b" * 40)
+
 
 def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path, origin: str) -> None:
     drifted, bundle = sn.freeze_one(

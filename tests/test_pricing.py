@@ -14,20 +14,34 @@ from daydream.pricing import (
     load_user_prices,
     resolve_prices,
 )
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize("model", (
-    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6", "openai/gpt-6.1-sol", "gpt-6.1-sol",
-))
-def test_openai_long_context_rates_apply_to_whole_request(model: str) -> None:
+def test_openai_long_context_rates_apply_to_whole_request(
+    subtests: pytest.Subtests,
+) -> None:
     """GPT-5.6 and GPT-6.1 Sol use long-context rates only above the 272K boundary."""
-    price = MODEL_PRICES[model]
-    assert compute_cost_from_totals(model, total_input_tokens=272_000, cached_input_tokens=72_000, output_tokens=10_000
-    ) == pytest.approx((200_000 * price.input + 72_000 * price.cached_input + 10_000 * price.output) / 1_000_000)
-    assert compute_cost_from_totals(model, total_input_tokens=272_001, cached_input_tokens=72_000, output_tokens=10_000
-    ) == pytest.approx(
-        (200_001 * price.input * 2 + 72_000 * price.cached_input * 2 + 10_000 * price.output * 1.5) / 1_000_000
+    cases: tuple[str, ...] = (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.6",
+        "openai/gpt-6.1-sol",
+        "gpt-6.1-sol",
     )
+    for model in cases:
+        with subtests.test(model=model):
+            price = MODEL_PRICES[model]
+            assert compute_cost_from_totals(
+                model, total_input_tokens=272_000, cached_input_tokens=72_000, output_tokens=10_000
+            ) == pytest.approx(
+                (200_000 * price.input + 72_000 * price.cached_input + 10_000 * price.output) / 1_000_000
+            )
+            assert compute_cost_from_totals(
+                model, total_input_tokens=272_001, cached_input_tokens=72_000, output_tokens=10_000
+            ) == pytest.approx(
+                (200_001 * price.input * 2 + 72_000 * price.cached_input * 2 + 10_000 * price.output * 1.5) / 1_000_000
+            )
 
 def test_claude_sonnet_5_uses_the_rate_in_effect_on_the_usage_date() -> None:
     """Introductory pricing lasts through 2026-08-31."""
@@ -61,21 +75,31 @@ def test_all_covered_models_have_complete_entries() -> None:
         assert price.output >= 0, name
 
 
-@pytest.mark.parametrize(("model", "expected"),
-    [
-        # 100K input + 100K output at the published per-1M rates.
-        ("gpt-5.6-sol", (5.00 + 30.00) * 0.1), ("gpt-5.6-terra", (2.50 + 15.00) * 0.1),
-        ("gpt-5.6-luna", (1.00 + 6.00) * 0.1), ("gpt-5.6", (5.00 + 30.00) * 0.1),
-        ("claude-sonnet-5", (3.00 + 15.00) * 0.1),
-        ("openai/gpt-6.1-sol", (2.00 + 10.00) * 0.1), ("gpt-6.1-sol", (2.00 + 10.00) * 0.1),
-    ],
-)
-def test_new_default_model_ids_price_to_published_rates(model: str, expected: float) -> None:
+def test_new_default_model_ids_price_to_published_rates(
+    subtests: pytest.Subtests,
+) -> None:
     """Exact-match lookup requires every default id and alias to have a price entry."""
-    cost = compute_cost(model=model, input_tokens=100_000, cached_input_tokens=0, output_tokens=100_000,)
-    assert cost is not None, model
-    assert cost > 0, model
-    assert cost == pytest.approx(expected), model
+    cases: list[tuple[str, float]] = [
+        # 100K input + 100K output at the published per-1M rates.
+        ("gpt-5.6-sol", (5.00 + 30.00) * 0.1),
+        ("gpt-5.6-terra", (2.50 + 15.00) * 0.1),
+        ("gpt-5.6-luna", (1.00 + 6.00) * 0.1),
+        ("gpt-5.6", (5.00 + 30.00) * 0.1),
+        ("claude-sonnet-5", (3.00 + 15.00) * 0.1),
+        ("openai/gpt-6.1-sol", (2.00 + 10.00) * 0.1),
+        ("gpt-6.1-sol", (2.00 + 10.00) * 0.1),
+    ]
+    for model, expected in cases:
+        with subtests.test(model=model):
+            cost = compute_cost(
+                model=model,
+                input_tokens=100_000,
+                cached_input_tokens=0,
+                output_tokens=100_000,
+            )
+            assert cost is not None, model
+            assert cost > 0, model
+            assert cost == pytest.approx(expected), model
 
 def test_gpt56_bare_alias_matches_sol() -> None:
     assert MODEL_PRICES["gpt-5.6"] == MODEL_PRICES["gpt-5.6-sol"]
@@ -118,21 +142,33 @@ def test_load_user_prices_missing_required_field_skips_entry(tmp_path: Path, cap
     assert "ok" in loaded
     assert any("missing required field" in rec.message for rec in caplog.records)
 
-@pytest.mark.parametrize(("model", "input_value", "warning"),
-    [pytest.param("neg", "-1.0", "negative", id="negative"),
-        pytest.param("nan-model", "nan", "non-finite", id="nan"),
-        pytest.param("inf-model", "inf", "non-finite", id="positive-infinity"),
-        pytest.param("neginf-model", "-inf", "non-finite", id="negative-infinity"),
-    ],
-)
 def test_load_user_prices_invalid_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, model: str, input_value: str, warning: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    subtests: pytest.Subtests,
 ) -> None:
-    prices_file = _write(tmp_path / "prices.toml", f'[prices."{model}"]\ninput = {input_value}\noutput = 2.0\n',)
-    with caplog.at_level("WARNING"):
-        loaded = load_user_prices(path=prices_file)
-    assert loaded == {}
-    assert any(warning in rec.message for rec in caplog.records)
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str, str]] = [
+        ("neg", "-1.0", "negative"),
+        ("nan-model", "nan", "non-finite"),
+        ("inf-model", "inf", "non-finite"),
+        ("neginf-model", "-inf", "non-finite"),
+    ]
+    for model, input_value, warning in cases:
+        row_index += 1
+        with subtests.test(model=model):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                caplog.clear()
+                prices_file = _write(
+                    tmp_path / "prices.toml",
+                    f'[prices."{model}"]\ninput = {input_value}\noutput = 2.0\n',
+                )
+                with caplog.at_level("WARNING"):
+                    loaded = load_user_prices(path=prices_file)
+                assert loaded == {}
+                assert any(warning in rec.message for rec in caplog.records)
 
 def test_load_user_prices_unresolvable_home_returns_empty(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,

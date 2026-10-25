@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import types
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -46,52 +47,76 @@ def _finding_content() -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("locationless", [False, True])
-def test_public_content_parser_preserves_valid_values(copied_verifier: ModuleType, locationless: bool,) -> None:
-    raw = _finding_content()
-    raw.update(title=" t " + "x" * 497, body="é" * 4096, severity=None)
-    if locationless:
-        raw.update(path=None, start_line=None, end_line=None)
-    original = dict(raw)
-    for module in (verifier_core, copied_verifier):
-        parsed = module.parse_finding_content(raw)
-        assert parsed == original and parsed is not raw
-        assert raw == original
+def test_public_content_parser_preserves_valid_values(copied_verifier: ModuleType, subtests: pytest.Subtests) -> None:
+    cases: Sequence[bool] = [False, True]
+    for case_index, locationless in enumerate(cases):
+        with subtests.test(locationless=locationless):
+            raw = _finding_content()
+            raw.update(title=" t " + "x" * 497, body="é" * 4096, severity=None)
+            if locationless:
+                raw.update(path=None, start_line=None, end_line=None)
+            original = dict(raw)
+            for module in (verifier_core, copied_verifier):
+                parsed = module.parse_finding_content(raw)
+                assert parsed == original and parsed is not raw
+                assert raw == original
 
-@pytest.mark.parametrize("changes",
-    [
-        {"title": " "}, {"title": "x" * 501}, {"title": "a\x00b"},
-        {"body": ""}, {"body": "é" * 4096 + "x"}, {"body": "a\x00b"},
-        {"severity": "critical"}, {"path": ""}, {"path": "/src/cache.py"},
-        {"path": "src/../cache.py"}, {"path": "src/ca\x00che.py"},
-        {"start_line": True}, {"end_line": False}, {"start_line": 0},
-        {"end_line": -1}, {"start_line": "3"}, {"end_line": 2},
-        {"path": None}, {"start_line": None}, {"end_line": None}, {"path": None, "start_line": None},
-        {"path": None, "end_line": None}, {"start_line": None, "end_line": None},
-    ],
-)
-def test_public_content_parser_rejection_matches_copied_verifier(copied_verifier: ModuleType, changes: dict[str, Any],
+
+def test_public_content_parser_rejection_matches_copied_verifier(
+    copied_verifier: ModuleType,
+    subtests: pytest.Subtests,
 ) -> None:
-    raw = _finding_content() | changes
-    messages = []
-    for module in (verifier_core, copied_verifier):
-        with pytest.raises(module.VerifierError) as rejected:
-            module.parse_finding_content(raw)
-        messages.append(str(rejected.value))
-    assert messages[0] == messages[1]
+    cases: Sequence[dict[str, Any]] = [
+        {"title": " "},
+        {"title": "x" * 501},
+        {"title": "a\x00b"},
+        {"body": ""},
+        {"body": "é" * 4096 + "x"},
+        {"body": "a\x00b"},
+        {"severity": "critical"},
+        {"path": ""},
+        {"path": "/src/cache.py"},
+        {"path": "src/../cache.py"},
+        {"path": "src/ca\x00che.py"},
+        {"start_line": True},
+        {"end_line": False},
+        {"start_line": 0},
+        {"end_line": -1},
+        {"start_line": "3"},
+        {"end_line": 2},
+        {"path": None},
+        {"start_line": None},
+        {"end_line": None},
+        {"path": None, "start_line": None},
+        {"path": None, "end_line": None},
+        {"start_line": None, "end_line": None},
+    ]
+    for case_index, changes in enumerate(cases):
+        with subtests.test(changes=changes):
+            raw = _finding_content() | changes
+            messages = []
+            for module in (verifier_core, copied_verifier):
+                with pytest.raises(module.VerifierError) as rejected:
+                    module.parse_finding_content(raw)
+                messages.append(str(rejected.value))
+            assert messages[0] == messages[1]
 
-@pytest.mark.parametrize("shape", ["non-object", "missing-severity", "unknown-key"])
-def test_public_content_parser_requires_exact_keys(copied_verifier: ModuleType, shape: str,) -> None:
-    raw: Any = _finding_content()
-    if shape == "non-object":
-        raw = []
-    elif shape == "missing-severity":
-        del raw["severity"]
-    else:
-        raw["finding_id"] = "a" * 64
-    for module in (verifier_core, copied_verifier):
-        with pytest.raises(module.VerifierError):
-            module.parse_finding_content(raw)
+
+def test_public_content_parser_requires_exact_keys(copied_verifier: ModuleType, subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = ["non-object", "missing-severity", "unknown-key"]
+    for case_index, shape in enumerate(cases):
+        with subtests.test(shape=shape):
+            raw: Any = _finding_content()
+            if shape == "non-object":
+                raw = []
+            elif shape == "missing-severity":
+                del raw["severity"]
+            else:
+                raw["finding_id"] = "a" * 64
+            for module in (verifier_core, copied_verifier):
+                with pytest.raises(module.VerifierError):
+                    module.parse_finding_content(raw)
+
 
 def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType) -> None:
     key = "case-validation-parity"

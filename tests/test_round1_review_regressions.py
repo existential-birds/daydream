@@ -22,6 +22,7 @@ from daydream.backends import TextEvent, TurnEndEvent
 from daydream.review_evidence import ReviewEvidence
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
+from tests.harness.table_cases import isolated_case
 
 REVIEW_STRICT_SCHEMA = {
     "type": "object",
@@ -86,22 +87,34 @@ def test_review_evidence_without_a_schema_never_checkpoints() -> None:
     assert evidence.checkpoint is None
 
 
-@pytest.mark.parametrize("require_full_schema", [True, False])
 async def test_agent_prefers_a_fully_valid_candidate_over_a_later_salvageable_one(
-    tmp_path: Path, require_full_schema: bool,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """item:5 -- strict-first ordering under the salvage-tolerant gate."""
-    authoritative = json.dumps({"findings": ["real finding"]})
-    # A later, merely salvageable object: it carries the required key with a list
-    # value but violates additionalProperties, so only _salvageable admits it.
-    incidental = json.dumps({"findings": [], "evidence_digest": "incidental"})
-    raw = f"{authoritative}\n\nAlso, quoting a snippet: {incidental}"
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [True, False]
+    for require_full_schema in cases:
+        row_index += 1
+        with subtests.test(require_full_schema=require_full_schema):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                authoritative = json.dumps({"findings": ["real finding"]})
+                # A later, merely salvageable object: it carries the required key with a list
+                # value but violates additionalProperties, so only _salvageable admits it.
+                incidental = json.dumps({"findings": [], "evidence_digest": "incidental"})
+                raw = f"{authoritative}\n\nAlso, quoting a snippet: {incidental}"
 
-    result, _, _ = await agent_module.run_agent(
-        ScriptedBackend(events=[TextEvent(text=raw)]), tmp_path, "review", phase=DaydreamPhase.REVIEW,
-        output_schema=REVIEW_STRICT_SCHEMA, require_full_schema=require_full_schema,
-    )
-    assert result == {"findings": ["real finding"]}
+                result, _, _ = await agent_module.run_agent(
+                    ScriptedBackend(events=[TextEvent(text=raw)]),
+                    tmp_path,
+                    "review",
+                    phase=DaydreamPhase.REVIEW,
+                    output_schema=REVIEW_STRICT_SCHEMA,
+                    require_full_schema=require_full_schema,
+                )
+                assert result == {"findings": ["real finding"]}
 
 
 async def test_agent_salvage_gate_still_admits_a_shape_when_nothing_is_fully_valid(tmp_path: Path) -> None:

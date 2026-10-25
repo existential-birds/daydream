@@ -40,6 +40,7 @@ from tests.harness.git_helpers import (
     work_context,
     write_and_stage,
 )
+from tests.harness.table_cases import isolated_case
 
 
 def _seed(repo: Path, files: dict[str, bytes]) -> None:
@@ -135,13 +136,30 @@ def _items() -> list[dict[str, object]]:
         {"id": 3, "item_uid": "item:3", "file": "src/c.py", "related_files": None},
     ]
 
-@pytest.mark.parametrize(
-    "value",
-    ["", 7, None, "/tmp/outside", "../outside", "src/../outside", "a\n.py", "a`touch nope`", "bad-\udcff.py"],
-)
-def test_model_path_normalization_rejects_malformed_and_escaping_values(tmp_path: Path, value: object) -> None:
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
-        canonicalize_repository_file_path(tmp_path, value)
+def test_model_path_normalization_rejects_malformed_and_escaping_values(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[object] = [
+        "",
+        7,
+        None,
+        "/tmp/outside",
+        "../outside",
+        "src/../outside",
+        "a\n.py",
+        "a`touch nope`",
+        "bad-\udcff.py",
+    ]
+    for value in cases:
+        row_index += 1
+        with subtests.test(value=value):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
+                    canonicalize_repository_file_path(tmp_path, value)
 
 def test_model_path_normalization_removes_dot_prefix_and_rejects_symlink_escape(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -216,39 +234,80 @@ def test_accepted_retarget_is_audited_without_widening_policy(tmp_path: Path) ->
     assert event.phase == "fix"
     assert event.round_number == 2
 
-@pytest.mark.parametrize("reviewed_path", ["odd\nname.py", "literal-$(value)[1].py", "native-\udcff.py"])
-def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path, reviewed_path: str,) -> None:
+def test_footprint_treats_reviewed_git_names_separately_from_model_paths(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["odd\nname.py", "literal-$(value)[1].py", "native-\udcff.py"]
+    for reviewed_path in cases:
+        row_index += 1
+        with subtests.test(reviewed_path=reviewed_path):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                try:
+                    _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
+                except OSError as exc:
+                    if exc.errno == errno.EILSEQ:
+                        pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
+                    raise
+                (git_repo / reviewed_path).write_bytes(b"reviewed\n")
+                reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
+                assert reviewed == {reviewed_path}
+                item = {"item_uid": "item:normal", "file": "normal.py"}
+                footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
 
-    try:
-        _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
-    except OSError as exc:
-        if exc.errno == errno.EILSEQ:
-            pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
-        raise
-    (git_repo / reviewed_path).write_bytes(b"reviewed\n")
-    reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
-    assert reviewed == {reviewed_path}
-    item = {"item_uid": "item:normal", "file": "normal.py"}
-    footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
+                assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
+                assert footprint.group_paths([item]) == frozenset({"normal.py"})
+                reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
+                assert reviewed_event.path == reviewed_path
+                assert reviewed_event.path_kind == "git"
+                assert (
+                    footprint.accept_retarget(
+                        git_repo,
+                        "item:normal",
+                        reviewed_path,
+                        phase="fix",
+                        round_number=1,
+                    )
+                    is None
+                )
+                assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
 
-    assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
-    assert footprint.group_paths([item]) == frozenset({"normal.py"})
-    reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
-    assert reviewed_event.path == reviewed_path
-    assert reviewed_event.path_kind == "git"
-    assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
-    assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+def test_footprint_rejects_unconfined_reviewed_git_paths(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["", ".", "/outside", "../outside", "src/../outside", "src//a.py"]
+    for reviewed_path in cases:
+        row_index += 1
+        with subtests.test(reviewed_path=reviewed_path):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                with pytest.raises(InvalidRepositoryFilePath, match="invalid reviewed repository path"):
+                    AuthorizedFixFootprint.build(tmp_path, {reviewed_path}, [])
 
-@pytest.mark.parametrize("reviewed_path", ["", ".", "/outside", "../outside", "src/../outside", "src//a.py"])
-def test_footprint_rejects_unconfined_reviewed_git_paths(tmp_path: Path, reviewed_path: str) -> None:
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid reviewed repository path"):
-        AuthorizedFixFootprint.build(tmp_path, {reviewed_path}, [])
-
-@pytest.mark.parametrize("related", ["src/b.py", ["src/b.py", 7], ["../escape.py"], ["src/../escape.py"]],)
-def test_footprint_rejects_malformed_related_paths(tmp_path: Path, related: object) -> None:
-    item = {"id": 1, "item_uid": "item:1", "file": "src/a.py", "related_files": related}
-    with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
-        AuthorizedFixFootprint.build(tmp_path, set(), [item])
+def test_footprint_rejects_malformed_related_paths(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[object] = ["src/b.py", ["src/b.py", 7], ["../escape.py"], ["src/../escape.py"]]
+    for related in cases:
+        row_index += 1
+        with subtests.test(related=related):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                item = {"id": 1, "item_uid": "item:1", "file": "src/a.py", "related_files": related}
+                with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
+                    AuthorizedFixFootprint.build(tmp_path, set(), [item])
 
 def test_generated_authorization_is_idempotent_and_retarget_is_item_bounded(tmp_path: Path) -> None:
     footprint = AuthorizedFixFootprint.build(tmp_path, set(), _items())
@@ -703,12 +762,25 @@ def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path
     assert current[0].digest == checked_out_head
     assert git_ops.tree_key(current) != git_ops.tree_key(baseline)
 
-@pytest.mark.parametrize("dirty_path", ["source.py", "untracked.py"])
-def test_dirty_gitlink_cannot_claim_commit_only_test_evidence(git_repo: Path, dirty_path: str,) -> None:
-    nested = _add_gitlink(git_repo)
-    (nested / dirty_path).write_bytes(b"value = 2\n")
-    with pytest.raises(GitError, match="dirty gitlink"):
-        git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
+def test_dirty_gitlink_cannot_claim_commit_only_test_evidence(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["source.py", "untracked.py"]
+    for dirty_path in cases:
+        row_index += 1
+        with subtests.test(dirty_path=dirty_path):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                nested = _add_gitlink(git_repo)
+                (nested / dirty_path).write_bytes(b"value = 2\n")
+                with pytest.raises(GitError, match="dirty gitlink"):
+                    git_ops.snapshot_worktree_paths(git_repo, ["dependency"])
 
 def test_uninitialized_gitlink_cannot_capture_parent_repository_head(git_repo: Path) -> None:
     nested = git_repo / "dependency"

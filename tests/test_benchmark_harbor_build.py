@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -303,37 +303,57 @@ def test_build_gold_list_rejects_partially_populated_location() -> None:
             "provenance": {"kind": "authored", "source_ids": []},
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
-@pytest.mark.parametrize(("present", "location"),
-    [(False, None), (True, None), (True, {}), (True, {"path": None}), (True, {"start_line": None, "end_line": None})],
-)
-def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: object) -> None:
-    finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None}
-    if present:
-        finding["location"] = location
-    [gold] = build.build_gold_list([finding], key="case-locationless")
-    [oracle] = build.build_oracle_artifact("case-locationless", [finding])["findings"]
-    for parsed in (gold, oracle):
-        assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
+def test_gold_and_oracle_preserve_locationless_inputs(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[bool, object]] = [
+        (False, None),
+        (True, None),
+        (True, {}),
+        (True, {"path": None}),
+        (True, {"start_line": None, "end_line": None}),
+    ]
+    for case_index, (present, location) in enumerate(cases):
+        with subtests.test(present=present, location=location):
+            finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None}
+            if present:
+                finding["location"] = location
+            [gold] = build.build_gold_list([finding], key="case-locationless")
+            [oracle] = build.build_oracle_artifact("case-locationless", [finding])["findings"]
+            for parsed in (gold, oracle):
+                assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
 
-@pytest.mark.parametrize(
-    ("oracle", "count", "accepted"), [(False, 50, True), (False, 51, False), (True, 100, True), (True, 101, False)],
-)
-def test_build_gold_and_oracle_cap(oracle: bool, count: int, accepted: bool) -> None:
-    findings = [{"finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
-        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
-        "provenance": {"kind": "authored", "source_ids": []},
-    } for i in range(count)]
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    def build_artifact() -> list[dict[str, Any]]:
-        if oracle:
-            return cast(list[dict[str, Any]], build.build_oracle_artifact(key, findings)["findings"])
-        return build.build_gold_list(findings, key=key)
 
-    if accepted:
-        assert len(build_artifact()) == count
-    else:
-        with pytest.raises(build.CompileError):
-            build_artifact()
+def test_build_gold_and_oracle_cap(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[bool, int, bool]] = [
+        (False, 50, True),
+        (False, 51, False),
+        (True, 100, True),
+        (True, 101, False),
+    ]
+    for case_index, (oracle, count, accepted) in enumerate(cases):
+        with subtests.test(oracle=oracle, count=count, accepted=accepted):
+            findings = [
+                {
+                    "finding_id": f"{i:064x}",
+                    "title": f"T{i}",
+                    "body": "B",
+                    "severity": "low",
+                    "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
+                    "provenance": {"kind": "authored", "source_ids": []},
+                }
+                for i in range(count)
+            ]
+            key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+
+            def build_artifact() -> list[dict[str, Any]]:
+                if oracle:
+                    return cast(list[dict[str, Any]], build.build_oracle_artifact(key, findings)["findings"])
+                return build.build_gold_list(findings, key=key)
+
+            if accepted:
+                assert len(build_artifact()) == count
+            else:
+                with pytest.raises(build.CompileError):
+                    build_artifact()
 
 
 def _load_json(path: Path) -> Any:

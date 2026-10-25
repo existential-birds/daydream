@@ -27,6 +27,7 @@ from daydream.trajectory import (
 )
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import work_context
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 
@@ -60,16 +61,22 @@ def _recorder(tmp_path: Path, session_id: str = "run-info", *, model: str = "gpt
     )
     return recorder
 
-@pytest.mark.parametrize(("source", "diagnostic"),
-    [(LiveRunInfoSource(recorder=None, artifacts=None), "run info: recorder unavailable"),
-        (LiveRunInfoSource(recorder=_recorder(Path(".")), artifacts=None), "run info: artifact session unavailable",),
-    ],
-)
-def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunInfoSource, diagnostic: str,) -> None:
-    result = render_live_run_info(source)
+def test_missing_live_source_returns_bounded_unavailable_result(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[LiveRunInfoSource, str]] = [
+        (LiveRunInfoSource(recorder=None, artifacts=None), "run info: recorder unavailable"),
+        (
+            LiveRunInfoSource(recorder=_recorder(Path(".")), artifacts=None),
+            "run info: artifact session unavailable",
+        ),
+    ]
+    for source, diagnostic in cases:
+        with subtests.test(diagnostic=diagnostic):
+            result = render_live_run_info(source)
 
-    assert FALLBACK_NOTE in result.markdown
-    assert result.diagnostic == diagnostic
+            assert FALLBACK_NOTE in result.markdown
+            assert result.diagnostic == diagnostic
 
 async def test_live_provider_renders_parent_and_real_retained_complete_sibling(tmp_path: Path,) -> None:
     repo = _make_repo_with_main(tmp_path)
@@ -133,18 +140,32 @@ def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> Non
     assert result.diagnostic == "run info: trajectory identity invalid"
 
 
-@pytest.mark.parametrize(("snapshot_id", "document_session", "document_id"),
-    [("child", "other-session", "child"), ("child", "run-info", "other-child"), ("run-info", "run-info", "run-info")],
-)
 def test_invalid_sibling_identity_returns_unavailable(
-    tmp_path: Path, snapshot_id: str, document_session: str, document_id: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    document = _trajectory(document_session, document_id)
-    snapshot = TrajectoryDocumentSnapshot(snapshot_id, tmp_path / "ignored.json", document.model_dump_json().encode(),)
-    result = render_live_run_info(_source_with_snapshots(tmp_path, (snapshot,)))
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str, str]] = [
+        ("child", "other-session", "child"),
+        ("child", "run-info", "other-child"),
+        ("run-info", "run-info", "run-info"),
+    ]
+    for snapshot_id, document_session, document_id in cases:
+        row_index += 1
+        with subtests.test(snapshot_id=snapshot_id):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                document = _trajectory(document_session, document_id)
+                snapshot = TrajectoryDocumentSnapshot(
+                    snapshot_id,
+                    tmp_path / "ignored.json",
+                    document.model_dump_json().encode(),
+                )
+                result = render_live_run_info(_source_with_snapshots(tmp_path, (snapshot,)))
 
-    assert result.diagnostic == "run info: trajectory identity invalid"
-    assert FALLBACK_NOTE in result.markdown
+                assert result.diagnostic == "run info: trajectory identity invalid"
+                assert FALLBACK_NOTE in result.markdown
 
 def test_malformed_sibling_and_duplicate_ids_return_unavailable(tmp_path: Path) -> None:
     malformed = TrajectoryDocumentSnapshot("child", tmp_path / "ignored.json", b"{bad json",)

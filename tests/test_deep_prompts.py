@@ -1,5 +1,5 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +29,7 @@ from daydream.prompts.grounding import (
 )
 from daydream.test_execution import TestRecipe, resolve_test_recipe
 from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
+from tests.harness.table_cases import isolated_case
 
 _paths = partial(prompt_paths, output_name="stack-python-review.md")
 
@@ -95,14 +96,23 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
     msg = f"unknown builder name: {name!r}"
     raise ValueError(msg)
 
-@pytest.mark.parametrize("name", ["per-stack", "structural", "generic-fallback", "arbiter", "merge"])
-def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
+def _case_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     """#279: the precedence rule appears only when a fresh PR body was ingested."""
     assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
     # NEW #579: the untrusted framing rides with the rule — same gating.
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in _build_gated(name, tmp_path, intent_authoritative=True)
+
+
+def test_authoritative_intent_rule_is_gated(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["per-stack", "structural", "generic-fallback", "arbiter", "merge"]
+    case_index = 0
+    for name in cases_0:
+        with subtests.test(name=name), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_authoritative_intent_rule_is_gated(name=name, tmp_path=scenario.tmp_path)
+
 
 # --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
 
@@ -128,12 +138,21 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
 
 
-@pytest.mark.parametrize('name', ['per_stack', 'generic_fallback'])
-def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, name: str) -> None:
+def _case_diff_instruction_allows_useful_source_investigation(tmp_path: Path, name: str) -> None:
     """Supplied hunks come first and reviewers can inspect more context when useful."""
     prompt = _review_prompt(name, tmp_path, inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n")
     assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
     assert "when more context" in prompt or "when useful" in prompt
+
+
+def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["per_stack", "generic_fallback"]
+    case_index = 0
+    for name in cases_0:
+        with subtests.test(name=name), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_diff_instruction_allows_useful_source_investigation(tmp_path=scenario.tmp_path, name=name)
+
 
 def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tmp_path: Path) -> None:
     """Exploration pointers stay bounded while useful source inspection remains optional."""

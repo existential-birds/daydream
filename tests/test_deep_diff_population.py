@@ -1,5 +1,5 @@
 """Supplementary contracts for bounded-patch metadata and snapshot evidence."""
-
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -8,14 +8,7 @@ from daydream.deep.diff import bound_deep_diff
 from daydream.deep.routing_record import read_routing_record, write_routing_record
 
 
-@pytest.mark.parametrize("patch, expected_bytes, expected_blocks", [
-    pytest.param("", 0, 0, id="empty"),
-    pytest.param("diff --git a/x b/x\n+++ b/x\n+é\n", 31, 1, id="utf8"),
-    pytest.param("diff --git a/x b/x\n+++ b/x\n+diff --git é\n", 42, 1, id="header-text-in-content"),
-])
-def test_fitting_patch_reports_complete_retention(
-    patch: str, expected_bytes: int, expected_blocks: int,
-) -> None:
+def _case_fitting_patch_reports_complete_retention(patch: str, expected_bytes: int, expected_blocks: int) -> None:
     bounded, info = bound_deep_diff(patch)
 
     assert bounded == patch
@@ -25,6 +18,19 @@ def test_fitting_patch_reports_complete_retention(
     assert info.total_blocks == info.retained_blocks == expected_blocks
     assert info.marker is None
     assert info.dropped_paths == info.oversize_paths == []
+
+
+def test_fitting_patch_reports_complete_retention(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, int, int]] = [
+        ("", 0, 0),
+        ("diff --git a/x b/x\n+++ b/x\n+é\n", 31, 1),
+        ("diff --git a/x b/x\n+++ b/x\n+diff --git é\n", 42, 1),
+    ]
+    for patch, expected_bytes, expected_blocks in cases_0:
+        with subtests.test(patch=patch, expected_bytes=expected_bytes, expected_blocks=expected_blocks):
+            _case_fitting_patch_reports_complete_retention(
+                patch=patch, expected_bytes=expected_bytes, expected_blocks=expected_blocks
+            )
 
 
 def test_oversized_first_block_counts_only_retained_patch_bytes() -> None:

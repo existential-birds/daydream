@@ -20,49 +20,48 @@ from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 
 
 class TestExtractJson:
-    @pytest.mark.parametrize(("text", "expected"),
-        [pytest.param('{"findings": [], "ok": true}', {"findings": [], "ok": True}, id="clean-json-object",),
-            pytest.param("[1, 2, 3]", [1, 2, 3], id="clean-json-array"),
-            pytest.param('prefix {broken {"x": 1}', {"x": 1}, id="unclosed-outer-object"),
-            pytest.param('prefix [broken [1, 2]', [1, 2], id="unclosed-outer-array"),
-            pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
-            pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
-            pytest.param('prefix {"x": [1, {"y": 2}]} tail', {"x": [1, {"y": 2}]}, id="mixed-nesting"),
-            pytest.param(
-                'prefix ' + json.dumps({"msg": 'escaped " quote, \\ slash, } ] brackets'}) + ' tail',
+    def test_extract_json(
+        self,
+        subtests: pytest.Subtests,
+    ) -> None:
+        cases: list[tuple[str, Any]] = [
+            ('{"findings": [], "ok": true}', {"findings": [], "ok": True}),
+            ("[1, 2, 3]", [1, 2, 3]),
+            ('prefix {broken {"x": 1}', {"x": 1}),
+            ("prefix [broken [1, 2]", [1, 2]),
+            ("prefix [1] then { }", {}),
+            ("prefix [1] then [2]", [1]),
+            ('prefix {"x": [1, {"y": 2}]} tail', {"x": [1, {"y": 2}]}),
+            (
+                "prefix " + json.dumps({"msg": 'escaped " quote, \\ slash, } ] brackets'}) + " tail",
                 {"msg": 'escaped " quote, \\ slash, } ] brackets'},
-                id="prose-wrapped-string-escapes",
             ),
-            pytest.param(
-                '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```',
-                {"findings": [{"arb_id": 1, "keep": True}]}, id="markdown-fenced-json",
+            ('```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```', {"findings": [{"arb_id": 1, "keep": True}]}),
+            ('```\n{"x": 1}\n```', {"x": 1}),
+            (
+                'Based on my analysis of all findings, here are my verdicts:\n'
+                '{"findings": [{"arb_id": 1, "keep": false}]}',
+                {"findings": [{"arb_id": 1, "keep": False}]},
             ),
-            pytest.param('```\n{"x": 1}\n```', {"x": 1}, id="markdown-fenced-bare"),
-            pytest.param(
-                "Based on my analysis of all findings, here are my verdicts:\n"
-                '{"findings": [{"arb_id": 1, "keep": false}]}', {"findings": [{"arb_id": 1, "keep": False}]},
-                id="prose-wrapped-json",
-            ),
-            pytest.param(
+            (
                 'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.',
-                [{"id": 1, "severity": "high"}], id="prose-wrapped-array",
-            ), pytest.param("", None, id="empty-string"),
-            pytest.param("   \n  ", None, id="whitespace-only"),
-            pytest.param("This is just prose with no JSON whatsoever.", None, id="no-json-at-all",),
-            pytest.param('{"msg": "contains a } brace", "ok": true}', {"msg": "contains a } brace", "ok": True},
-                id="json-with-nested-braces-in-strings",
-            ), pytest.param("[1, bad] then [3,4]", [3, 4], id="unparseable-array-then-valid-array",),
-            pytest.param('{bad} then {"issues":[1,2]}', {"issues": [1, 2]}, id="unparseable-object-then-valid-object",
-            ), pytest.param('prefix {bad {"findings": []}} suffix', {"findings": []},
-                id="nested-valid-json-inside-balanced-invalid-span",
-            ), pytest.param('note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
-                {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
-                id="largest-object-wins-over-smaller-earlier-object",
+                [{"id": 1, "severity": "high"}],
             ),
-        ],
-    )
-    def test_extract_json(self, text: str, expected: Any) -> None:
-        assert extract_json(text) == expected
+            ("", None),
+            ("   \n  ", None),
+            ("This is just prose with no JSON whatsoever.", None),
+            ('{"msg": "contains a } brace", "ok": true}', {"msg": "contains a } brace", "ok": True}),
+            ("[1, bad] then [3,4]", [3, 4]),
+            ('{bad} then {"issues":[1,2]}', {"issues": [1, 2]}),
+            ('prefix {bad {"findings": []}} suffix', {"findings": []}),
+            (
+                'note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
+                {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
+            ),
+        ]
+        for text, expected in cases:
+            with subtests.test(text=text):
+                assert extract_json(text) == expected
 
     def test_stray_prose_bracket_does_not_beat_the_real_object(self) -> None:
         # Regression for the sentry-67876 arbiter crash. The model's prose
@@ -127,47 +126,61 @@ class TestExtractJsonBySchema:
         assert sel.value is None
         assert sel.candidate_count == 0
 
-    @pytest.mark.parametrize("text", [
-        '["module", "surface"] inspected. {"issues": []}',
-        'prefix {bad {"issues": []}} suffix',
-        '```json\n{"issues": []}\n```',
-        "This is just prose with no JSON whatsoever.",
-        "",
-    ])
-    def test_selection_offers_exactly_the_shared_candidate_scan(self, text: str) -> None:
+    def test_selection_offers_exactly_the_shared_candidate_scan(
+        self,
+        subtests: pytest.Subtests,
+    ) -> None:
         """Schema selection reads the one scan, not a second copy of it: the offered
         values are the whole candidate set in descending document order (the order
         "last admitted wins" walks), and candidate_count is that scan's size."""
-        offered: list[Any] = []
+        cases: list[str] = [
+            '["module", "surface"] inspected. {"issues": []}',
+            'prefix {bad {"issues": []}} suffix',
+            '```json\n{"issues": []}\n```',
+            "This is just prose with no JSON whatsoever.",
+            "",
+        ]
+        for text in cases:
+            with subtests.test(text=text):
+                offered: list[Any] = []
 
-        def record(value: Any, _schema: dict[str, Any]) -> bool:
-            offered.append(value)
-            return False
+                def record(value: Any, _schema: dict[str, Any]) -> bool:
+                    offered.append(value)
+                    return False
 
-        selection = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=record)
-        scan = sorted(json_utils._json_candidates(text), key=lambda item: item[0], reverse=True)
-        assert offered == [value for _start, value, _span_len in scan]
-        assert (selection.candidate_count, selection.value) == (len(scan), None)
+                selection = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=record)
+                scan = sorted(json_utils._json_candidates(text), key=lambda item: item[0], reverse=True)
+                assert offered == [value for _start, value, _span_len in scan]
+                assert (selection.candidate_count, selection.value) == (len(scan), None)
 
-@pytest.mark.parametrize(("text", "expected", "syntax"), [
-    ('```\n{"issues": []}\n```', {"issues": []}, False),
-    (json.dumps({"result": {"issues": ['braces } ] and escaped " quotes \\']}}),
-     {"issues": ['braces } ] and escaped " quotes \\']}, False),
-    ('[{"issues": []}] followed by {"issues": []}', {"issues": []}, False),
-    ('{"result": {"issues": []} tail', None, True),
-    ('{"issues": []} "literal [ unfinished"', None, True),
-    ('[] ' * 128 + '{"issues": []}', None, True),
-])
 def test_staged_decoder_consumes_outer_spans_and_bounds_packaging(
-    text: str, expected: Any, syntax: bool,
+    subtests: pytest.Subtests,
 ) -> None:
-    schema = {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}},
-              "additionalProperties": False}
-    selection = extract_json_by_schema(text, schema=schema, accept=validates_schema, require_complete_root=True)
-    assert selection.value == expected
-    assert (selection.syntax_error is not None) is syntax
-    assert not selection.schema_retry_eligible and selection.rejection is None
-    assert selection.candidate_count <= 128
+    cases: list[tuple[str, Any, bool]] = [
+        ('```\n{"issues": []}\n```', {"issues": []}, False),
+        (
+            json.dumps({"result": {"issues": ['braces } ] and escaped " quotes \\']}}),
+            {"issues": ['braces } ] and escaped " quotes \\']},
+            False,
+        ),
+        ('[{"issues": []}] followed by {"issues": []}', {"issues": []}, False),
+        ('{"result": {"issues": []} tail', None, True),
+        ('{"issues": []} "literal [ unfinished"', None, True),
+        ("[] " * 128 + '{"issues": []}', None, True),
+    ]
+    for text, expected, syntax in cases:
+        with subtests.test(text=text):
+            schema = {
+                "type": "object",
+                "required": ["issues"],
+                "properties": {"issues": {"type": "array"}},
+                "additionalProperties": False,
+            }
+            selection = extract_json_by_schema(text, schema=schema, accept=validates_schema, require_complete_root=True)
+            assert selection.value == expected
+            assert (selection.syntax_error is not None) is syntax
+            assert not selection.schema_retry_eligible and selection.rejection is None
+            assert selection.candidate_count <= 128
 
 
 class TestAtomicWritePrimitives:

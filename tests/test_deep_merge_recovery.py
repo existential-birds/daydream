@@ -8,7 +8,7 @@ Phase tests mock only the backend; integration uses runner.run.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -28,9 +28,11 @@ from daydream.review_budget import review_warnings
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
+from tests.conftest import make_multi_stack_target
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import record_pool, review_coverage
 from tests.harness.stub_backend import install_stub_backend, silence
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
@@ -143,10 +145,12 @@ async def test_empty_supervision_persists_complete_host_noop(
     assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
 
 
-@pytest.mark.parametrize("failed_phase", ["merge", "supervision"])
-async def test_phase_failure_preserves_original_error_when_coverage_write_also_fails(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    make_config: Callable[..., RunConfig], failed_phase: str,
+async def _case_phase_failure_preserves_original_error_when_coverage_write_also_fails(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+    failed_phase: str,
 ) -> None:
     """The production terminal boundary must retain the provider's first failure."""
     from daydream import json_utils
@@ -188,10 +192,30 @@ async def test_phase_failure_preserves_original_error_when_coverage_write_also_f
     assert not output.exists()
 
 
-@pytest.mark.parametrize("fault", ["synthesis", "projection"])
-async def test_public_resume_retains_failure_until_same_revision_remerge(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    make_config: Callable[..., RunConfig], fault: str,
+async def test_phase_failure_preserves_original_error_when_coverage_write_also_fails(
+    make_config: Callable[..., RunConfig], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["merge", "supervision"]
+    case_index = 0
+    for failed_phase in cases_0:
+        with subtests.test(failed_phase=failed_phase), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_phase_failure_preserves_original_error_when_coverage_write_also_fails(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                failed_phase=failed_phase,
+            )
+
+
+async def _case_public_resume_retains_failure_until_same_revision_remerge(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+    fault: str,
 ) -> None:
     """Fix-only export preserves a failed synthesis/projection; actual remerge repairs it."""
     from daydream.findings import load_findings_artifact
@@ -229,6 +253,24 @@ async def test_public_resume_retains_failure_until_same_revision_remerge(
         assert first["analysis_state"] == "complete" and loaded[1].findings == []
 
 
+async def test_public_resume_retains_failure_until_same_revision_remerge(
+    make_config: Callable[..., RunConfig], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["synthesis", "projection"]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_public_resume_retains_failure_until_same_revision_remerge(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                fault=fault,
+            )
+
+
 def _salvage_record() -> dict[str, object]:
     """Minimal per-stack record shape accepted by the merge phase."""
     return {"id": 1, "file": "api.py", "line": 1, "severity": "high", "confidence": "HIGH", "rationale": "r",
@@ -249,13 +291,24 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     inputs["records"].write_text(json.dumps([_salvage_record()]))
     return inputs
 
-@pytest.mark.parametrize('diagnostics', [None, [], {'scopes': {}, 'phases': {'extra': 'failure'}},
-                                       {'scopes': {'python': 'x' * 1025}, 'phases': {}}])
-def test_coverage_rejects_malformed_failure_diagnostics(diagnostics: Any) -> None:
+def _case_coverage_rejects_malformed_failure_diagnostics(diagnostics: Any) -> None:
     payload = review_coverage().to_dict()
     payload['diagnostics'] = diagnostics
     with pytest.raises(ValueError):
         ReviewCoverage.from_dict(payload)
+
+
+def test_coverage_rejects_malformed_failure_diagnostics(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[Any] = [
+        None,
+        [],
+        {"scopes": {}, "phases": {"extra": "failure"}},
+        {"scopes": {"python": "x" * 1025}, "phases": {}},
+    ]
+    for diagnostics in cases_0:
+        with subtests.test(diagnostics=diagnostics):
+            _case_coverage_rejects_malformed_failure_diagnostics(diagnostics=diagnostics)
+
 
 async def test_merge_salvage_applies_dedup_prefilter(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
@@ -302,9 +355,8 @@ def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
         ]
     return ScriptedBackend(responder=respond, model="op-5")
 
-@pytest.mark.parametrize("envelope", [True, False], ids=["current-envelope", "bare-array-rejected"])
-async def test_merge_requires_current_result_envelope(
-    tmp_path: Path, make_work: Callable[..., WorkContext], envelope: bool,
+async def _case_merge_requires_current_result_envelope(
+    tmp_path: Path, make_work: Callable[..., WorkContext], envelope: bool
 ) -> None:
     args = _merge_args(tmp_path)
     records = [_merge_item(1, "api.py", "high", desc="unbounded cache write")]
@@ -321,14 +373,22 @@ async def test_merge_requires_current_result_envelope(
     assert [i["file"] for i in items["items"]] == ["api.py"]
     assert items.get("partial") is not True
 
-@pytest.mark.parametrize("merge_text",
-    ["The review is done; no JSON items list here.",
-        # Reopen #361: the archived Pi str shape must raise a byte-identical CrossStackMergeError.
-        ARCHIVED_MERGE_STR,
-    ], ids=["generic", "archived"],
-)
-async def test_merge_raises_structured_error_on_str(
-    tmp_path: Path, make_work: Callable[..., WorkContext], merge_text: Any,
+
+async def test_merge_requires_current_result_envelope(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [True, False]
+    case_index = 0
+    for envelope in cases_0:
+        with subtests.test(envelope=envelope), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_merge_requires_current_result_envelope(
+                tmp_path=scenario.tmp_path, make_work=make_work, envelope=envelope
+            )
+
+
+async def _case_merge_raises_structured_error_on_str(
+    tmp_path: Path, make_work: Callable[..., WorkContext], merge_text: Any
 ) -> None:
     """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
     args = _merge_args(tmp_path)
@@ -338,6 +398,20 @@ async def test_merge_raises_structured_error_on_str(
     assert excinfo.value.response_shape == "StructuredOutputFailure"
     assert excinfo.value.stack_context == ["python"]
     assert str(excinfo.value) == CROSS_STACK_MERGE_ERR_MSG
+
+
+async def test_merge_raises_structured_error_on_str(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[Any] = ["The review is done; no JSON items list here.", ARCHIVED_MERGE_STR]
+    case_index = 0
+    for merge_text in cases_0:
+        with subtests.test(merge_text=merge_text), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_merge_raises_structured_error_on_str(
+                tmp_path=scenario.tmp_path, make_work=make_work, merge_text=merge_text
+            )
+
 
 async def test_merge_rejects_bare_list_and_salvages_bound_records(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -447,17 +521,28 @@ async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(
     assert {p["record_b_id"] for p in dedup["record_duplicate_pairs"]} == {"1"}
     assert {p["record_b_file"] for p in dedup["record_duplicate_pairs"]} == {"api.py"}
 
-@pytest.mark.parametrize("payload", [
-    {}, {"record_duplicate_pairs": None}, {"record_duplicate_pairs": [{}]},
-    {"record_duplicate_pairs": [{"record_b_uid": ""}]},
-])
-def test_merge_salvage_rejects_dedup_without_current_identity(tmp_path: Path, payload: dict[str, Any]) -> None:
+def _case_merge_salvage_rejects_dedup_without_current_identity(tmp_path: Path, payload: dict[str, Any]) -> None:
     DeepArtifact.DEDUP_CANDIDATES.at(tmp_path).write_text(json.dumps(payload))
     records = [{"id": 1, "file": "api.py", "description": "Sample issue", "uid": "generic:1"},
                {"id": 1, "file": "api.py", "description": "Sample issue", "uid": "python:1"}]
     with pytest.raises(ValueError):
         _drop_cross_stack_duplicates(tmp_path, records)
     assert [record["uid"] for record in records] == ["generic:1", "python:1"]
+
+
+def test_merge_salvage_rejects_dedup_without_current_identity(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[dict[str, Any]] = [
+        {},
+        {"record_duplicate_pairs": None},
+        {"record_duplicate_pairs": [{}]},
+        {"record_duplicate_pairs": [{"record_b_uid": ""}]},
+    ]
+    case_index = 0
+    for payload in cases_0:
+        with subtests.test(payload=payload), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_merge_salvage_rejects_dedup_without_current_identity(tmp_path=scenario.tmp_path, payload=payload)
+
 
 async def test_merge_salvage_partial_items_carry_source_uids(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

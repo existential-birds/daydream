@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -33,21 +34,26 @@ from daydream.remote_ci import (
     wait_for_remote_ci,
     write_remote_ci_verdict,
 )
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.processes import (
     fd_count,
     wait_for_fd_baseline,
     wait_for_process_group_exit,
     wait_for_process_ids,
 )
+from tests.harness.table_cases import isolated_case
 
 PUSHED_SHA = "1" * 40
 MERGE_SHA = "2" * 40
 
-@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
-def test_limits_reject_nonfinite_time_values(value: float) -> None:
-    with pytest.raises(ValueError):
-        RemoteCILimits(request_seconds=value)
+def test_limits_reject_nonfinite_time_values(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[float] = [math.nan, math.inf, -math.inf]
+    for value in cases:
+        with subtests.test(value=value):
+            with pytest.raises(ValueError):
+                RemoteCILimits(request_seconds=value)
 
 
 def _target(tmp_path: Path) -> RemoteCITarget:
@@ -119,43 +125,67 @@ def _snapshot(target: RemoteCITarget, *, policy: RequiredPolicy = RequiredPolicy
         head_observations=head, merge_observations=merge,
     )
 
-@pytest.mark.parametrize("replacement",
-    [{"number": 43}, {"number": True}, {"html_url": "https://github.com/example/project/pull/43"},
-        {"state": "merged"}, {"merge_commit_sha": "ABC"},
+def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(
+    target: RemoteCITarget,
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[dict[str, object]] = [
+        {"number": 43},
+        {"number": True},
+        {"html_url": "https://github.com/example/project/pull/43"},
+        {"state": "merged"},
+        {"merge_commit_sha": "ABC"},
         {"head": {"ref": "feature/ci", "sha": PUSHED_SHA, "repo": None}},
         {"head": {"ref": "other", "sha": PUSHED_SHA, "repo": {"full_name": "contributor/fork"}}},
         {"base": {"ref": "other", "repo": {"full_name": "example/project"}}},
-    ],
-)
-def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(target: RemoteCITarget, replacement: dict[str, object]
+    ]
+    for replacement in cases:
+        with subtests.test(replacement=replacement):
+            with pytest.raises(ValueError):
+                parse_pr_ci_binding(_pr_row(target, **replacement), target)
+
+def test_policy_rejects_present_invalid_ruleset_integration_id(
+    subtests: pytest.Subtests,
 ) -> None:
-    with pytest.raises(ValueError):
-        parse_pr_ci_binding(_pr_row(target, **replacement), target)
+    cases: list[object] = [True, 0, -1, "7", {}]
+    for integration_id in cases:
+        with subtests.test(integration_id=integration_id):
+            with pytest.raises(ValueError, match="app id"):
+                parse_required_policy(
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {
+                                "strict_required_status_checks_policy": False,
+                                "required_status_checks": [{"context": "Build", "integration_id": integration_id}],
+                            },
+                        }
+                    ],
+                    None,
+                )
 
-@pytest.mark.parametrize("integration_id", [True, 0, -1, "7", {}])
-def test_policy_rejects_present_invalid_ruleset_integration_id(integration_id: object,) -> None:
-    with pytest.raises(ValueError, match="app id"):
-        parse_required_policy([{"type": "required_status_checks",
-                    "parameters": {"strict_required_status_checks_policy": False,
-                        "required_status_checks": [{"context": "Build", "integration_id": integration_id}],
-                    },
-                }
-            ], None,
-        )
-
-@pytest.mark.parametrize(("active", "classic"),
-    [({}, None), ([{"type": "required_status_checks", "parameters": None}], None),
-        ([{"type": "required_status_checks",
+def test_policy_rejects_unknown_or_malformed_shapes(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[object, object]] = [
+        ({}, None),
+        ([{"type": "required_status_checks", "parameters": None}], None),
+        (
+            [
+                {
+                    "type": "required_status_checks",
                     "parameters": {"strict_required_status_checks_policy": 1, "required_status_checks": []},
                 }
-            ], None,
-        ), ([], {"strict": False, "contexts": [""], "checks": []}),
+            ],
+            None,
+        ),
+        ([], {"strict": False, "contexts": [""], "checks": []}),
         ([], {"strict": False, "contexts": [], "checks": [{"context": "x", "app_id": 0}]}),
-    ],
-)
-def test_policy_rejects_unknown_or_malformed_shapes(active: object, classic: object) -> None:
-    with pytest.raises(ValueError):
-        parse_required_policy(active, classic)
+    ]
+    for active, classic in cases:
+        with subtests.test(active=active):
+            with pytest.raises(ValueError):
+                parse_required_policy(active, classic)
 
 def test_observations_reduce_latest_producers_with_source_specific_case_rules() -> None:
     observations = parse_observations([
@@ -176,17 +206,23 @@ def test_observation_legacy_error_is_failure_but_check_error_is_unsupported() ->
     with pytest.raises(ValueError):
         parse_observations([_check(1, "Build", conclusion="error")], [], expected_sha=PUSHED_SHA, limit=2_000,)
 
-@pytest.mark.parametrize(("checks", "statuses"),
-    [([_check(0, "Build")], []), ([_check(1, "Build"), _check(1, "Other")], []),
-        ([_check(1, "Build", sha="3" * 40)], []), ([_check(1, "Build", app_id=True)], []),
+def test_observations_reject_stale_or_malformed_rows(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[object, object]] = [
+        ([_check(0, "Build")], []),
+        ([_check(1, "Build"), _check(1, "Other")], []),
+        ([_check(1, "Build", sha="3" * 40)], []),
+        ([_check(1, "Build", app_id=True)], []),
         ([_check(1, "Build", url="ftp://example.test/run")], []),
-        ([_check(1, "Build", status="completed", conclusion=None)], []), ([], [_status(1, "Build", state="unknown")]),
+        ([_check(1, "Build", status="completed", conclusion=None)], []),
+        ([], [_status(1, "Build", state="unknown")]),
         ([], [_status(1, "Build", sha="3" * 40)]),
-    ],
-)
-def test_observations_reject_stale_or_malformed_rows(checks: object, statuses: object) -> None:
-    with pytest.raises(ValueError):
-        parse_observations(checks, statuses, expected_sha=PUSHED_SHA, limit=2_000)
+    ]
+    for checks, statuses in cases:
+        with subtests.test(checks=checks):
+            with pytest.raises(ValueError):
+                parse_observations(checks, statuses, expected_sha=PUSHED_SHA, limit=2_000)
 
 def test_observation_sanitizes_url_and_redacts_bounded_diagnostic() -> None:
     secret = "sk-12345678901234567890"
@@ -203,17 +239,22 @@ def test_observation_sanitizes_url_and_redacts_bounded_diagnostic() -> None:
     assert "REDACTED" in (result.url or "")
     assert len(result.diagnostic or "") <= 120
 
-@pytest.mark.parametrize("rows",
-    [{}, [{"id": True, "name": "CI", "path": "ci.yml", "state": "active"}],
+def test_active_workflow_parser_rejects_unknown_or_malformed_rows(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[object] = [
+        {},
+        [{"id": True, "name": "CI", "path": "ci.yml", "state": "active"}],
         [{"id": 1, "name": "CI", "path": "ci.yml", "state": "mystery"}],
-        [{"id": 1, "name": "CI", "path": "ci.yml", "state": "active"},
+        [
+            {"id": 1, "name": "CI", "path": "ci.yml", "state": "active"},
             {"id": 1, "name": "Other", "path": "other.yml", "state": "active"},
         ],
-    ],
-)
-def test_active_workflow_parser_rejects_unknown_or_malformed_rows(rows: object) -> None:
-    with pytest.raises(ValueError):
-        parse_active_workflows(rows)
+    ]
+    for rows in cases:
+        with subtests.test(rows=rows):
+            with pytest.raises(ValueError):
+                parse_active_workflows(rows)
 
 def test_evaluate_pinned_context_requires_exact_check_name_and_app(target: RemoteCITarget) -> None:
     policy = RequiredPolicy((RequiredContext("Build", 7),), True)
@@ -466,15 +507,29 @@ async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_de
     assert artifact["polling"]["completion_deadline"] == 1805.0
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("started", [float("inf"), 11.0])
-async def test_waiter_rejects_nonfinite_or_future_explicit_start(tmp_path: Path, started: float) -> None:
-    clock = _Clock()
-    clock.value = 10.0
-    with pytest.raises(ValueError, match="monotonic start"):
-        await wait_for_remote_ci(
-            _target(tmp_path), fetcher=_ScriptedFetcher([]), monotonic=clock, monotonic_started_at=started,
-            sleep=clock.sleep, on_snapshot=lambda _verdict: None,
-        )
+async def test_waiter_rejects_nonfinite_or_future_explicit_start(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[float] = [float("inf"), 11.0]
+    for started in cases:
+        row_index += 1
+        with subtests.test(started=started):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                clock = _Clock()
+                clock.value = 10.0
+                with pytest.raises(ValueError, match="monotonic start"):
+                    await wait_for_remote_ci(
+                        _target(tmp_path),
+                        fetcher=_ScriptedFetcher([]),
+                        monotonic=clock,
+                        monotonic_started_at=started,
+                        sleep=clock.sleep,
+                        on_snapshot=lambda _verdict: None,
+                    )
 
 @pytest.mark.asyncio
 async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(target: RemoteCITarget) -> None:
@@ -688,31 +743,59 @@ async def test_expired_remote_ci_budget_skips_auth_resolution_and_gh_spawn(fake_
     assert emitted == [verdict]
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("required_entry", [{"context": "Ruleset"}, {"context": "Ruleset", "integration_id": None}],)
 async def test_github_fetcher_accepts_unpinned_ruleset_requirement(
-    fake_gh: FakeGh, git_repo: Path, required_entry: dict[str, object],
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    target = _target(git_repo)
-    _seed_fetch(fake_gh, target)
-    fake_gh.set_response("GET", _page("repos/example/project/rules/branches/main"),
-        [{"type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": False, "required_status_checks": [required_entry],
-                },
-            }
-        ],
-    )
-    fake_gh.set_response("GET", "repos/example/project/branches/main/protection/required_status_checks",
-        {"strict": False, "contexts": [], "checks": []},
-    )
-    checks_endpoint = (f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest")
-    fake_gh.set_response("GET", _page(checks_endpoint), {"total_count": 1, "check_runs": [_check(1, "Ruleset")]},)
-    budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
-    snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[dict[str, object]] = [{"context": "Ruleset"}, {"context": "Ruleset", "integration_id": None}]
+    for required_entry in cases:
+        row_index += 1
+        with subtests.test(required_entry=required_entry):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                target = _target(git_repo)
+                _seed_fetch(fake_gh, target)
+                fake_gh.set_response(
+                    "GET",
+                    _page("repos/example/project/rules/branches/main"),
+                    [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {
+                                "strict_required_status_checks_policy": False,
+                                "required_status_checks": [required_entry],
+                            },
+                        }
+                    ],
+                )
+                fake_gh.set_response(
+                    "GET",
+                    "repos/example/project/branches/main/protection/required_status_checks",
+                    {"strict": False, "contexts": [], "checks": []},
+                )
+                checks_endpoint = f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
+                fake_gh.set_response(
+                    "GET",
+                    _page(checks_endpoint),
+                    {"total_count": 1, "check_runs": [_check(1, "Ruleset")]},
+                )
+                budget = GitHubRequestBudget(
+                    deadline=time.monotonic() + 30,
+                    per_request_seconds=5,
+                    monotonic=time.monotonic,
+                )
+                snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
 
-    assert snapshot.policy.contexts == (RequiredContext("Ruleset", None),)
-    assert snapshot.head_observations[0].context == "Ruleset"
-    assert len(fake_gh.process_calls()) == 6
+                assert snapshot.policy.contexts == (RequiredContext("Ruleset", None),)
+                assert snapshot.head_observations[0].context == "Ruleset"
+                assert len(fake_gh.process_calls()) == 6
 
 @pytest.mark.asyncio
 async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(

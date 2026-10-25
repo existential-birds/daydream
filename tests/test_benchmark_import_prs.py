@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -27,13 +28,14 @@ from daydream.benchmark.workspace import init_workspace, validate_workspace, wor
 from daydream.git_ops import RateLimitError
 from daydream.pr_review import FINDING_MARKER_RE, finding_marker
 from tests.harness import github_schema as gs
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import (
     git as _seed_git,
     seed_pr_origin,
     seeded_commit as _seed_commit,
     write_and_stage as _seed_write,
 )
+from tests.harness.table_cases import isolated_case
 
 _PR_HEADER = {"number": 101, "url": "https://github.com/o/r/pull/101", "html_url": "https://github.com/o/r/pull/101",
     "title": "Fix cache", "body": "", "state": "open", "base": {"ref": "main", "sha": "b" * 40},
@@ -109,24 +111,34 @@ def test_fetch_changed_files_persists_complete_rename_union(tmp_path: Path, fake
     calls = fake_gh.calls("GET", "repos/o/r/pulls/101/files")
     assert len(calls) == 1 and "--paginate" in (calls[0].argv or [])
 
-@pytest.mark.parametrize(("count", "rows"),
-    [(2, [{"status": "modified", "filename": "a.py"}]), (3001, []),
+def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[int, list[Any]]] = [
+        (2, [{"status": "modified", "filename": "a.py"}]),
+        (3001, []),
         (1, [{"status": "renamed", "filename": "new.py"}]),
-        (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]), (1, [{"filename": "a.py"}]),
-        (1, [{"status": "invented", "filename": "a.py"}]), (1, [{"status": 17, "filename": "a.py"}]),
+        (1, [{"status": "modified", "filename": "new.py", "previous_filename": "old.py"}]),
+        (1, [{"filename": "a.py"}]),
+        (1, [{"status": "invented", "filename": "a.py"}]),
+        (1, [{"status": 17, "filename": "a.py"}]),
         (2, [{"status": "modified", "filename": "a.py"}, {"status": "modified", "filename": "a.py"}]),
         (1, [{"status": "modified", "filename": "../escape.py"}]),
-    ],
-)
-def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
-    tmp_path: Path, fake_gh: FakeGh, count: int, rows: list[Any]
-) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", {**_PR_HEADER, "changed_files": count})
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
-    _seed_empty_rest(fake_gh)
-    with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
-        gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+    ]
+    for case_index, (count, rows) in enumerate(cases):
+        with subtests.test(count=count, rows=rows):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                fake_gh = install_fake_gh(tmp_path / "fake-gh-state", sandbox.monkeypatch)
+                ws = _fetch_workspace(tmp_path)
+                fake_gh.set_response("GET", "repos/o/r/pulls/101", {**_PR_HEADER, "changed_files": count})
+                fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
+                _seed_empty_rest(fake_gh)
+                with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
+                    gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+
 
 def test_final_only_fetch_does_not_request_changed_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
@@ -158,42 +170,55 @@ def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh
     assert snapshot["original_base_sha"] == "b" * 40
     assert snapshot["requested_base_sha"] == "b" * 40
 
-@pytest.mark.parametrize("body_field,expected", [
-    (None, ""),                      # null body -> empty
-    ("", ""),                        # empty body
-    ("héllo wörld \u00e9", "héllo wörld \u00e9"),          # Unicode preserved
-    ("line1\nline2\nline3", "line1\nline2\nline3"),        # newlines preserved
-    ("x" * 50000, "x" * 50000),      # over context-limit body (never bounded here; persisted whole)
-])
-def test_import_body_shape_preserved(tmp_path: Path, fake_gh: FakeGh, body_field: Any, expected: str) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["body"] = body_field
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    assert doc.pull_request.body == expected
-    assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+def test_import_body_shape_preserved(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[Any, str]] = [
+        (None, ""),  # null body -> empty
+        ("", ""),  # empty body
+        ("héllo wörld \u00e9", "héllo wörld \u00e9"),  # Unicode preserved
+        ("line1\nline2\nline3", "line1\nline2\nline3"),  # newlines preserved
+        ("x" * 50000, "x" * 50000),  # over context-limit body (never bounded here; persisted whole)
+    ]
+    for case_index, (body_field, expected) in enumerate(cases):
+        with subtests.test(body_field=body_field, expected=expected):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                fake_gh = install_fake_gh(tmp_path / "fake-gh-state", sandbox.monkeypatch)
+                ws = _fetch_workspace(tmp_path)
+                header = dict(_PR_HEADER)
+                header["body"] = body_field
+                fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+                _seed_empty_rest(fake_gh)
+                doc = gi.fetch_and_normalize(ws, "o/r", 101)
+                assert doc.pull_request.body == expected
+                assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
 
-@pytest.mark.parametrize("state,merged_at,closed_at,expect_merged", [("open", None, None, False),
-    ("closed", None, "2026-01-02T00:00:00Z", False),     # closed-unmerged
-    ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
-])
-def test_import_merged_state_distinction(
-    tmp_path: Path, fake_gh: FakeGh, state: Any, merged_at: Any, closed_at: Any, expect_merged: Any,
-) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["state"] = state
-    header["merged_at"] = merged_at
-    header["closed_at"] = closed_at
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    pr = doc.pull_request
-    assert pr.state == state
-    assert (pr.merged_at is not None) == expect_merged
-    assert (pr.closed_at is not None) == (closed_at is not None)
+
+def test_import_merged_state_distinction(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[Any, Any, Any, Any]] = [
+        ("open", None, None, False),
+        ("closed", None, "2026-01-02T00:00:00Z", False),  # closed-unmerged
+        ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
+    ]
+    for case_index, (state, merged_at, closed_at, expect_merged) in enumerate(cases):
+        with subtests.test(state=state, merged_at=merged_at, closed_at=closed_at, expect_merged=expect_merged):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                fake_gh = install_fake_gh(tmp_path / "fake-gh-state", sandbox.monkeypatch)
+                ws = _fetch_workspace(tmp_path)
+                header = dict(_PR_HEADER)
+                header["state"] = state
+                header["merged_at"] = merged_at
+                header["closed_at"] = closed_at
+                fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+                _seed_empty_rest(fake_gh)
+                doc = gi.fetch_and_normalize(ws, "o/r", 101)
+                pr = doc.pull_request
+                assert pr.state == state
+                assert (pr.merged_at is not None) == expect_merged
+                assert (pr.closed_at is not None) == (closed_at is not None)
+
 
 def test_import_no_comments_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
@@ -385,37 +410,57 @@ def _project_from_anchor(*, anchor_commit: str | None = None,
     return gi._project_one(rec, head_sha=head_sha)
 
 
-@pytest.mark.parametrize("outdated", [False, True])
-@pytest.mark.parametrize(("raw_template", "expected_title", "expected_body"),
-    [
+def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str, str]] = [
         ("\n{marker}\r\n## Cache race\r\nDetails.\r\n", "Cache race", "\n\n## Cache race\nDetails."),
         ("Before {marker} after\n{marker}\n", "Before after", "Before  after"),
         ("{marker}", "", ""),
         ("<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->", "<!-- daydream-finding: ab -->"),
-    ],
-)
-def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
-    raw_template: str, expected_title: str, expected_body: str, outdated: bool,
-) -> None:
-    raw_body = raw_template.format(marker=finding_marker("f" * 64))
-    rec = _evidence_record(
-        body=raw_body, commit_id="a" * 40, original_commit_id="a" * 40, path="feature.py", line=2, original_line=2,
-        subject_type="line", side="RIGHT", authoring_anchor=schema.AuthoringAnchor(
-            version=1, status="derived", commit_id="a" * 40, path="feature.py", start_line=2, end_line=2,
-        ), outdated=outdated,
-    )
-    before = rec.model_dump()
+    ]
+    cases_1: Sequence[bool] = [False, True]
+    for case_index_0, (raw_template, expected_title, expected_body) in enumerate(cases_0):
+        for case_index_1, outdated in enumerate(cases_1):
+            with subtests.test(
+                raw_template=raw_template,
+                expected_title=expected_title,
+                expected_body=expected_body,
+                outdated=outdated,
+            ):
+                raw_body = raw_template.format(marker=finding_marker("f" * 64))
+                rec = _evidence_record(
+                    body=raw_body,
+                    commit_id="a" * 40,
+                    original_commit_id="a" * 40,
+                    path="feature.py",
+                    line=2,
+                    original_line=2,
+                    subject_type="line",
+                    side="RIGHT",
+                    authoring_anchor=schema.AuthoringAnchor(
+                        version=1,
+                        status="derived",
+                        commit_id="a" * 40,
+                        path="feature.py",
+                        start_line=2,
+                        end_line=2,
+                    ),
+                    outdated=outdated,
+                )
+                before = rec.model_dump()
 
-    candidate = gi._project_one(rec, head_sha="a" * 40)
+                candidate = gi._project_one(rec, head_sha="a" * 40)
 
-    assert candidate.title == expected_title
-    assert candidate.body == expected_body
-    assert not FINDING_MARKER_RE.search(candidate.title + "\n" + candidate.body)
-    assert candidate.source_id == rec.source_id
-    assert candidate.location == schema.Location(path="feature.py", start_line=2, end_line=2)
-    assert candidate.exact_acceptable is (bool(expected_title) and not outdated)
-    assert candidate.not_exact_reason == ("outdated" if outdated else "title" if not expected_title else None)
-    assert rec.model_dump() == before
+                assert candidate.title == expected_title
+                assert candidate.body == expected_body
+                assert not FINDING_MARKER_RE.search(candidate.title + "\n" + candidate.body)
+                assert candidate.source_id == rec.source_id
+                assert candidate.location == schema.Location(path="feature.py", start_line=2, end_line=2)
+                assert candidate.exact_acceptable is (bool(expected_title) and not outdated)
+                assert candidate.not_exact_reason == (
+                    "outdated" if outdated else "title" if not expected_title else None
+                )
+                assert rec.model_dump() == before
+
 
 def test_exact_acceptance_from_authoring_anchor_matches_head() -> None:
     """GitHub's re-anchored commit matches head, but the authoring commit must gate acceptance."""
@@ -604,15 +649,23 @@ def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: P
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"] == _REPO_ID    # unchanged: no mutation staged
 
-@pytest.mark.parametrize("node_id", [5, "12345"], ids=["integer", "numeric-string"])
-def test_preflight_rejects_numeric_node_id(tmp_path: Path, fake_gh: FakeGh, node_id: Any) -> None:
-    ws = tmp_path / "ws"
-    _seed_manifest(ws)
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": node_id})
-    with pytest.raises(gi.PreflightError) as ex:
-        gi.preflight(ws, pr_count=1)
-    assert ex.value.code == "repo_unresolved"
+def test_preflight_rejects_numeric_node_id(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[Any] = [5, "12345"]
+    case_ids_0 = ["integer", "numeric-string"]
+    for case_index, node_id in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], node_id=node_id):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                fake_gh = install_fake_gh(tmp_path / "fake-gh-state", sandbox.monkeypatch)
+                ws = tmp_path / "ws"
+                _seed_manifest(ws)
+                fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+                fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": node_id})
+                with pytest.raises(gi.PreflightError) as ex:
+                    gi.preflight(ws, pr_count=1)
+                assert ex.value.code == "repo_unresolved"
+
 
 def test_status_reports_last_preflight_verification(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -10,6 +10,7 @@ from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.selection import _apply_share_caps
 from tests.harness.record_projection import add_projection_run, projection_config, seed_projection_store
 from tests.harness.scripts import cli_main
+from tests.harness.table_cases import isolated_case
 from tests.test_corpus_projection import _read_jsonl
 
 
@@ -166,42 +167,84 @@ def _store_with_caps_population(tmp_path: Path) -> Any:
     return store
 
 
-@pytest.mark.parametrize("dimension", ["stack", "repo", "profile"])
 def test_real_cli_applies_caps_and_pins_matching_report(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], dimension: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    store = _store_with_caps_population(tmp_path)
-    config = projection_config(store, tmp_path, **{f"max_{dimension}_share": 0.5})
-    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-            "--out", str(config.out_dir / "corpus.jsonl"),
-            f"--max-{dimension}-share", "0.5"]
-    assert cli_main(args + ["--dry-run"]) == 0
-    dry_text = capsys.readouterr().out
-    assert not config.out_dir.exists()
-    assert cli_main(args) == 0
-    records = _read_jsonl(config.out_dir / "corpus.jsonl")
-    assert len(records) == 4
-    assert "4" in dry_text
-    getter = {"stack": lambda r: str(r["stack"]), "repo": lambda r: str(r["lineage"]["repo_slug"]),
-              "profile": lambda r: str(r["profile"]["profile_name"])}[dimension]
-    _assert_shares_within(records, [(dimension, getter, 0.5)])
-    lineage = json.loads((config.out_dir / "lineage.json").read_text())
-    assert lineage["share_caps"]["configured"][dimension] == 0.5
-    assert lineage["share_caps"]["version"] == 1
-    assert any(key.startswith(f"share-cap:{dimension}:") for key in lineage["exclusions_by_reason"])
-    direct = build_frozen_corpus(projection_config(store, tmp_path, out_dir=tmp_path / "direct",
-                                                  **{f"max_{dimension}_share": 0.5}))
-    assert direct["share_caps"] == lineage["share_caps"]
+    case_root = tmp_path
+    cases: Sequence[str] = ["stack", "repo", "profile"]
+    for case_index, dimension in enumerate(cases):
+        with subtests.test(dimension=dimension):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                capsys.readouterr()
+                store = _store_with_caps_population(tmp_path)
+                config = projection_config(store, tmp_path, **{f"max_{dimension}_share": 0.5})
+                args = [
+                    "corpus",
+                    "build",
+                    "--store",
+                    str(store.root),
+                    "--snapshot-id",
+                    config.snapshot_id,
+                    "--out",
+                    str(config.out_dir / "corpus.jsonl"),
+                    f"--max-{dimension}-share",
+                    "0.5",
+                ]
+                assert cli_main(args + ["--dry-run"]) == 0
+                dry_text = capsys.readouterr().out
+                assert not config.out_dir.exists()
+                assert cli_main(args) == 0
+                records = _read_jsonl(config.out_dir / "corpus.jsonl")
+                assert len(records) == 4
+                assert "4" in dry_text
+                getter = {
+                    "stack": lambda r: str(r["stack"]),
+                    "repo": lambda r: str(r["lineage"]["repo_slug"]),
+                    "profile": lambda r: str(r["profile"]["profile_name"]),
+                }[dimension]
+                _assert_shares_within(records, [(dimension, getter, 0.5)])
+                lineage = json.loads((config.out_dir / "lineage.json").read_text())
+                assert lineage["share_caps"]["configured"][dimension] == 0.5
+                assert lineage["share_caps"]["version"] == 1
+                assert any(key.startswith(f"share-cap:{dimension}:") for key in lineage["exclusions_by_reason"])
+                direct = build_frozen_corpus(
+                    projection_config(store, tmp_path, out_dir=tmp_path / "direct", **{f"max_{dimension}_share": 0.5})
+                )
+                assert direct["share_caps"] == lineage["share_caps"]
 
 
-@pytest.mark.parametrize(("dimension", "value"), [(dimension, value) for dimension in ("stack", "repo", "profile")
-                                                  for value in ("0", "-0.1", "1.5")])
-def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimension: str, value: str) -> None:
-    store = _store_with_caps_population(tmp_path)
-    config = projection_config(store, tmp_path)
-    assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-                     "--out", str(config.out_dir / "corpus.jsonl"), f"--max-{dimension}-share", value]) == 1
-    assert not config.out_dir.exists()
+def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[str, str]] = [
+        (dimension, value) for dimension in ("stack", "repo", "profile") for value in ("0", "-0.1", "1.5")
+    ]
+    for case_index, (dimension, value) in enumerate(cases):
+        with subtests.test(dimension=dimension, value=value):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                store = _store_with_caps_population(tmp_path)
+                config = projection_config(store, tmp_path)
+                assert (
+                    cli_main(
+                        [
+                            "corpus",
+                            "build",
+                            "--store",
+                            str(store.root),
+                            "--snapshot-id",
+                            config.snapshot_id,
+                            "--out",
+                            str(config.out_dir / "corpus.jsonl"),
+                            f"--max-{dimension}-share",
+                            value,
+                        ]
+                    )
+                    == 1
+                )
+                assert not config.out_dir.exists()
 
 
 def test_build_caps_account_for_final_population_and_fail_closed(tmp_path: Path) -> None:

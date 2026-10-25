@@ -20,6 +20,7 @@ from daydream.backends import (
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
+from tests.harness.table_cases import isolated_case
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}
@@ -188,21 +189,42 @@ async def test_structured_fallback_requires_merge_envelope(rec: Console, tmp_pat
     assert isinstance(result, dict if envelope else str)
 
 
-@pytest.mark.parametrize("primary", [None, {"issues": "invalid", "description": "REJECTED_RESULT"}])
 async def test_log_presents_only_resolved_result_once(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], primary: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    sentinel = "ghp_" + "x" * 16
-    payload = {"issues": [{"id": 1, "description": "Accepted " + sentinel}]}
-    backend = ScriptedBackend(events=[TextEvent(text=json.dumps(payload)),
-                                      ResultEvent(structured_output=primary, continuation=None)])
-    result, _, _ = await run_agent(
-        backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
-        output_schema={"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}},
-        run_context=RunContext(InteractionPolicy(log_mode=True)),
-    )
-    assert result == payload
-    output = capsys.readouterr().out
-    assert output.count("[result]") == 1 and "[result] {\"issues\": [" in output
-    assert "REJECTED_RESULT" not in output and sentinel not in output
-    assert "[REDACTED_API_KEY]" in output
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [None, {"issues": "invalid", "description": "REJECTED_RESULT"}]
+    for primary in cases:
+        row_index += 1
+        with subtests.test(primary=primary):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                capsys.readouterr()
+                sentinel = "ghp_" + "x" * 16
+                payload = {"issues": [{"id": 1, "description": "Accepted " + sentinel}]}
+                backend = ScriptedBackend(
+                    events=[
+                        TextEvent(text=json.dumps(payload)),
+                        ResultEvent(structured_output=primary, continuation=None),
+                    ]
+                )
+                result, _, _ = await run_agent(
+                    backend,
+                    tmp_path,
+                    "review",
+                    phase=DaydreamPhase.REVIEW,
+                    output_schema={
+                        "type": "object",
+                        "required": ["issues"],
+                        "properties": {"issues": {"type": "array"}},
+                    },
+                    run_context=RunContext(InteractionPolicy(log_mode=True)),
+                )
+                assert result == payload
+                output = capsys.readouterr().out
+                assert output.count("[result]") == 1 and '[result] {"issues": [' in output
+                assert "REJECTED_RESULT" not in output and sentinel not in output
+                assert "[REDACTED_API_KEY]" in output

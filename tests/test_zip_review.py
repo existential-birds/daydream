@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.harness.git_helpers import git, init_repo
+from tests.harness.table_cases import isolated_case
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "zip-review.sh"
 
@@ -26,42 +27,56 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "zip-review.sh"
 # pathlib call.
 PYTHON_SHAPED_DIR = ("archive'+(__import__('pathlib').Path('python-source-ran')" ".write_text('executed') and '')+'")
 
-@pytest.mark.parametrize(("metadata_source", "expected_zip_name"),
-    [pytest.param("manifest", "from-manifest.zip", id="manifest"),
-        pytest.param("trajectory", "from-trajectory.zip", id="trajectory"),
-    ],
-)
-def test_zip_review_treats_archive_paths_as_data(metadata_source: str, expected_zip_name: str, tmp_path: Path,
+def test_zip_review_treats_archive_paths_as_data(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Archive paths reach python3 as data via sys.argv, never as source."""
-    archive_root = tmp_path / PYTHON_SHAPED_DIR
-    run_dir = archive_root / "runs" / "run-id"
-    run_dir.mkdir(parents=True)
-    (run_dir / "review-output.md").write_text("review\n")
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str]] = [
+        ("manifest", "from-manifest.zip"),
+        ("trajectory", "from-trajectory.zip"),
+    ]
+    for metadata_source, expected_zip_name in cases:
+        row_index += 1
+        with subtests.test(metadata_source=metadata_source):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                archive_root = tmp_path / PYTHON_SHAPED_DIR
+                run_dir = archive_root / "runs" / "run-id"
+                run_dir.mkdir(parents=True)
+                (run_dir / "review-output.md").write_text("review\n")
 
-    if metadata_source == "manifest":
-        (run_dir / "trajectory.json").write_text("{}")
-        (run_dir / "manifest.json").write_text(json.dumps({"git": {"branch": "team/from-manifest"}}))
-    else:
-        target_repo = tmp_path / "target-repo"
-        init_repo(target_repo)
-        git(target_repo, "checkout", "-b", "team/from-trajectory")
-        (run_dir / "trajectory.json").write_text(json.dumps({"extra": {"target_dir": str(target_repo)}}))
+                if metadata_source == "manifest":
+                    (run_dir / "trajectory.json").write_text("{}")
+                    (run_dir / "manifest.json").write_text(json.dumps({"git": {"branch": "team/from-manifest"}}))
+                else:
+                    target_repo = tmp_path / "target-repo"
+                    init_repo(target_repo)
+                    git(target_repo, "checkout", "-b", "team/from-trajectory")
+                    (run_dir / "trajectory.json").write_text(json.dumps({"extra": {"target_dir": str(target_repo)}}))
 
-    result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        [str(SCRIPT), str(archive_root)], cwd=tmp_path, capture_output=True, text=True, check=False,
-    )
-    assert result.returncode == 0, (f"exit={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}")
-    assert f"Output: {expected_zip_name}" in result.stdout
+                result = subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                    [str(SCRIPT), str(archive_root)],
+                    cwd=tmp_path,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert result.returncode == 0, (
+                    f"exit={result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+                )
+                assert f"Output: {expected_zip_name}" in result.stdout
 
-    zip_path = tmp_path / expected_zip_name
-    assert zipfile.is_zipfile(zip_path)
-    with zipfile.ZipFile(zip_path) as zf:
-        basenames = {Path(name).name for name in zf.namelist()}
-    assert "trajectory.json" in basenames
-    assert "review-output.md" in basenames
+                zip_path = tmp_path / expected_zip_name
+                assert zipfile.is_zipfile(zip_path)
+                with zipfile.ZipFile(zip_path) as zf:
+                    basenames = {Path(name).name for name in zf.namelist()}
+                assert "trajectory.json" in basenames
+                assert "review-output.md" in basenames
 
-    # The Python-shaped path was inert data; the embedded pathlib call never ran.
-    assert not (tmp_path / "python-source-ran").exists()
-    # The branch-derived name was used, not the run-ID fallback.
-    assert not (tmp_path / "run-id.zip").exists()
+                # The Python-shaped path was inert data; the embedded pathlib call never ran.
+                assert not (tmp_path / "python-source-ran").exists()
+                # The branch-derived name was used, not the run-ID fallback.
+                assert not (tmp_path / "run-id.zip").exists()

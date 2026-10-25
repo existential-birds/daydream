@@ -16,88 +16,118 @@ from daydream.review_result import (
 from tests.harness.review_result import review_coverage
 
 
-@pytest.mark.parametrize("case,expected", [
-    ("complete", "complete"), ("failed", "failed"), ("partial", "incomplete"),
-    ("sibling", "incomplete"), ("projection", "failed"), ("dynamic", "incomplete"),
-    ("cancelled", "incomplete"), ("alternatives", "incomplete"), ("partial-alternatives", "incomplete"),
-    ("no-diff", "complete"), ("unknown", "failed"), ("intent-only", "failed"), ("missing-projection", "failed"),
-])
-def test_terminal_state_requires_positive_usable_coverage(case: str, expected: str) -> None:
-    phases = {"no-diff": ("no_diff",), "unknown": (), "intent-only": ("intent",)}
-    c = review_coverage(scope_ids=() if case in phases else ("python", "structure"),
-                        phases=phases.get(case, ("merge",)))
-    failed_pipeline = case in {"sibling", "projection", "partial-alternatives", "missing-projection"}
-    pipeline = "failed" if failed_pipeline else "completed"
-    if case in {"complete", "projection", "dynamic"}:
-        for scope in c.scopes:
-            c.record_scope(scope, "complete")
-        c.record_phase("merge", "complete", noop=True)
-    elif case in {"failed", "partial"}:
-        c.record_scope("python", "incomplete" if case == "partial" else "failed",
-                       reasons=["host_wall_budget_exhaustion" if case == "partial" else "backend_failure"],
-                       partial_evidence=case == "partial")
-        c.record_phase("merge", "complete", noop=True)
-    elif case == "sibling":
-        c.record_scope("python", "complete")
-        c.record_scope("structure", "failed", reasons=["backend_failure"])
-        c.record_phase("merge", "failed", reasons=["synthesis_failure"])
-    elif case == "cancelled":
-        c.record_scope("python", "complete")
-        pipeline = "cancelled"
-    elif case == "alternatives":
-        for scope in c.scopes:
-            c.record_scope(scope, "failed", reasons=["backend_failure"])
-        c.record_phase("merge", "complete", noop=True)
-    if case == "dynamic":
-        c.require_phase("adjudication")
-    elif case in {"alternatives", "partial-alternatives"}:
-        c.require_phase("alternatives")
-        c.record_phase("alternatives", "incomplete" if case == "partial-alternatives" else "complete",
-                       reasons=["host_wall_budget_exhaustion"] if case == "partial-alternatives" else [],
-                       usable_evidence=True)
-    elif case == "no-diff":
-        c.record_phase("no_diff", "complete", noop=True)
-    elif case == "intent-only":
-        c.record_phase("intent", "complete")
-    elif case == "missing-projection":
-        c.require_phase("findings")
-        c.record_phase("findings", "failed", reasons=["missing_artifact"])
-    result = c.finalize(pipeline, projection_valid=case not in {"projection", "missing-projection"})
-    assert result["analysis_state"] == expected
-    assert [scope["scope_id"] for scope in result["stack_outcomes"]] == sorted(c.scopes)
-    if case == "complete":
-        assert result["reason_codes"] == []
-    elif case in {"failed", "partial"}:
-        assert result["uncovered_stacks"] == ["python", "structure"]
-    elif case == "cancelled":
-        assert "interruption" in result["reason_codes"]
-    elif case in {"unknown", "intent-only"}:
-        assert result["reason_codes"] == ["coverage_unknown"]
-    elif case == "missing-projection":
-        assert "missing_artifact" in result["reason_codes"] and "malformed_artifact" not in result["reason_codes"]
+def test_terminal_state_requires_positive_usable_coverage(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
+        ("complete", "complete"),
+        ("failed", "failed"),
+        ("partial", "incomplete"),
+        ("sibling", "incomplete"),
+        ("projection", "failed"),
+        ("dynamic", "incomplete"),
+        ("cancelled", "incomplete"),
+        ("alternatives", "incomplete"),
+        ("partial-alternatives", "incomplete"),
+        ("no-diff", "complete"),
+        ("unknown", "failed"),
+        ("intent-only", "failed"),
+        ("missing-projection", "failed"),
+    ]
+    for case, expected in cases:
+        with subtests.test(case=case):
+            phases = {"no-diff": ("no_diff",), "unknown": (), "intent-only": ("intent",)}
+            c = review_coverage(
+                scope_ids=() if case in phases else ("python", "structure"), phases=phases.get(case, ("merge",))
+            )
+            failed_pipeline = case in {"sibling", "projection", "partial-alternatives", "missing-projection"}
+            pipeline = "failed" if failed_pipeline else "completed"
+            if case in {"complete", "projection", "dynamic"}:
+                for scope in c.scopes:
+                    c.record_scope(scope, "complete")
+                c.record_phase("merge", "complete", noop=True)
+            elif case in {"failed", "partial"}:
+                c.record_scope(
+                    "python",
+                    "incomplete" if case == "partial" else "failed",
+                    reasons=["host_wall_budget_exhaustion" if case == "partial" else "backend_failure"],
+                    partial_evidence=case == "partial",
+                )
+                c.record_phase("merge", "complete", noop=True)
+            elif case == "sibling":
+                c.record_scope("python", "complete")
+                c.record_scope("structure", "failed", reasons=["backend_failure"])
+                c.record_phase("merge", "failed", reasons=["synthesis_failure"])
+            elif case == "cancelled":
+                c.record_scope("python", "complete")
+                pipeline = "cancelled"
+            elif case == "alternatives":
+                for scope in c.scopes:
+                    c.record_scope(scope, "failed", reasons=["backend_failure"])
+                c.record_phase("merge", "complete", noop=True)
+            if case == "dynamic":
+                c.require_phase("adjudication")
+            elif case in {"alternatives", "partial-alternatives"}:
+                c.require_phase("alternatives")
+                c.record_phase(
+                    "alternatives",
+                    "incomplete" if case == "partial-alternatives" else "complete",
+                    reasons=["host_wall_budget_exhaustion"] if case == "partial-alternatives" else [],
+                    usable_evidence=True,
+                )
+            elif case == "no-diff":
+                c.record_phase("no_diff", "complete", noop=True)
+            elif case == "intent-only":
+                c.record_phase("intent", "complete")
+            elif case == "missing-projection":
+                c.require_phase("findings")
+                c.record_phase("findings", "failed", reasons=["missing_artifact"])
+            result = c.finalize(pipeline, projection_valid=case not in {"projection", "missing-projection"})
+            assert result["analysis_state"] == expected
+            assert [scope["scope_id"] for scope in result["stack_outcomes"]] == sorted(c.scopes)
+            if case == "complete":
+                assert result["reason_codes"] == []
+            elif case in {"failed", "partial"}:
+                assert result["uncovered_stacks"] == ["python", "structure"]
+            elif case == "cancelled":
+                assert "interruption" in result["reason_codes"]
+            elif case in {"unknown", "intent-only"}:
+                assert result["reason_codes"] == ["coverage_unknown"]
+            elif case == "missing-projection":
+                assert (
+                    "missing_artifact" in result["reason_codes"] and "malformed_artifact" not in result["reason_codes"]
+                )
 
 
-@pytest.mark.parametrize("mutate", [
-    lambda r: r["stack_outcomes"].pop(),
-    lambda r: r["planned_scopes"].append(copy.deepcopy(r["planned_scopes"][0])),
-    lambda r: r.update(analysis_state="complete"),
-    lambda r: r["reason_codes"].append("invented_reason"),
-    lambda r: r.update(completed_stacks=["structure"]),
-    lambda r: r["stack_outcomes"][0].update(partial_evidence=True),
-])
-def test_terminal_rejects_inconsistent_or_unknown_evidence(mutate: Callable[[dict[str, Any]], None]) -> None:
-    c = review_coverage()
-    c.record_scope("python", "complete")
-    result = c.finalize("failed")
-    mutate(result)
-    with pytest.raises(ValueError):
-        validate_terminal_result(result)
+def test_terminal_rejects_inconsistent_or_unknown_evidence(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[Callable[[dict[str, Any]], None]] = [
+        lambda r: r["stack_outcomes"].pop(),
+        lambda r: r["planned_scopes"].append(copy.deepcopy(r["planned_scopes"][0])),
+        lambda r: r.update(analysis_state="complete"),
+        lambda r: r["reason_codes"].append("invented_reason"),
+        lambda r: r.update(completed_stacks=["structure"]),
+        lambda r: r["stack_outcomes"][0].update(partial_evidence=True),
+    ]
+    for mutate in cases:
+        with subtests.test(mutate=mutate):
+            c = review_coverage()
+            c.record_scope("python", "complete")
+            result = c.finalize("failed")
+            mutate(result)
+            with pytest.raises(ValueError):
+                validate_terminal_result(result)
 
 
-@pytest.mark.parametrize("bad", [None, [], {"schema_version": 1}, {"schema_version": True}])
-def test_corrupt_coverage_is_a_controlled_validation_failure(bad: Any) -> None:
-    with pytest.raises(ValueError):
-        ReviewCoverage.from_dict(bad)
+def test_corrupt_coverage_is_a_controlled_validation_failure(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[Any] = [None, [], {"schema_version": 1}, {"schema_version": True}]
+    for bad in cases:
+        with subtests.test(bad=bad):
+            with pytest.raises(ValueError):
+                ReviewCoverage.from_dict(bad)
 
 
 def test_checked_roundtrip_and_immutable_terminal() -> None:
@@ -153,70 +183,98 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
         restored.record_scope("python", "failed", reasons=["backend_failure"])
 
 
-@pytest.mark.parametrize('bound', ['references-bytes', 'target-count', 'scope-bytes', 'run-bytes'])
-def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bound: str) -> None:
+def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(
+    subtests: pytest.Subtests,
+) -> None:
     """Storage limits must reject overflow without losing already admitted decisions."""
-    c = review_coverage()
-    reference: dict[str, Any] = {
-        'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
-        'revision': c.revision.head_sha, 'path': 'a.py', 'side': 'new',
-        'source_range': {'start': 1, 'end': 1}, 'fragment': None,
-        'basis': 'supplied_diff', 'role': 'assigned',
-    }
-    valid: list[dict[str, Any]] = [
-        {'target_id': 'a.py:part:1', 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}]
-    if bound == 'references-bytes':
-        valid[0]['evidence_refs'] = [{**reference, 'path': 'context/' * 188 + f'source-{i}.py'}
-                                     for i in range(4)]
-    elif bound == 'target-count':
-        valid = [{'target_id': f'a.py:part:{i}', 'status': 'not_reviewed', 'reason': 'Deferred assignment',
-                  'evidence_refs': []} for i in range(512)]
-    elif bound == 'run-bytes':
-        valid[0]['reason'] = 'é\u2028' * 25000
-        c.record_scope('structure', 'incomplete', reasons=['evidence_incomplete'], partial_evidence=True,
-                       target_decisions=valid)
-    else:
-        valid[0]['reason'] = 'é' * 130000
-    c.record_scope('python', 'incomplete', reasons=['evidence_incomplete'], partial_evidence=True,
-                   target_decisions=valid)
-    before = c.to_dict()
-    invalid = copy.deepcopy(valid)
-    if bound == 'references-bytes':
-        for ref in invalid[0]['evidence_refs']:
-            ref['path'] += '/context' * 40
-        assert len(json.dumps(valid[0]['evidence_refs']).encode()) < 8192
-        assert len(json.dumps(invalid[0]['evidence_refs']).encode()) > 8192
-        expected = 'source references exceed retained byte limit'
-    elif bound == 'target-count':
-        invalid.append({**valid[-1], 'target_id': 'a.py:part:512'})
-        expected = 'invalid target decisions'
-    elif bound == 'run-bytes':
-        without_decisions = copy.deepcopy(before)
-        for scope in without_decisions['stack_outcomes']:
-            scope.pop('target_decisions', None)
-        def published_size(value: dict[str, Any]) -> int:
-            return len(json.dumps({'terminal_result': value}, indent=2, ensure_ascii=False).encode('utf-8'))
-        contribution = published_size(before) - published_size(without_decisions)
-        invalid[0]['reason'] += 'x' * (RUN_TARGET_DECISIONS_MAX_BYTES - contribution + 1)
-        assert sum(len(json.dumps(decisions, ensure_ascii=False).encode()) for decisions in [valid, invalid]) < (
-            RUN_TARGET_DECISIONS_MAX_BYTES), 'compact JSON misses the nested whitespace overflow'
-        corrupt = copy.deepcopy(before)
-        corrupt_scope = next(scope for scope in corrupt['stack_outcomes'] if scope['scope_id'] == 'python')
-        corrupt_scope['target_decisions'] = invalid
-        assert published_size(corrupt) - published_size(without_decisions) == RUN_TARGET_DECISIONS_MAX_BYTES + 1
-        with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
-            ReviewCoverage.from_dict(corrupt)
-        expected = 'run source attribution exceeds retained byte limit'
-    else:
-        invalid[0]['reason'] += 'é' * 1200
-        assert len(json.dumps(valid, ensure_ascii=False).encode()) < 256 * 1024
-        assert len(json.dumps(invalid, ensure_ascii=False).encode()) > 256 * 1024
-        expected = 'target decisions exceed retained byte limit'
-    with pytest.raises(ValueError, match=expected):
-        c.record_scope('python', 'incomplete', reasons=['backend_failure'], partial_evidence=True,
-                       target_decisions=invalid)
-    assert c.to_dict() == before
-    assert ReviewCoverage.from_dict(before).to_dict() == before
+    cases: list[str] = ["references-bytes", "target-count", "scope-bytes", "run-bytes"]
+    for bound in cases:
+        with subtests.test(bound=bound):
+            c = review_coverage()
+            reference: dict[str, Any] = {
+                "artifact_sha256": "a" * 64,
+                "part_sha256": "c" * 64,
+                "revision": c.revision.head_sha,
+                "path": "a.py",
+                "side": "new",
+                "source_range": {"start": 1, "end": 1},
+                "fragment": None,
+                "basis": "supplied_diff",
+                "role": "assigned",
+            }
+            valid: list[dict[str, Any]] = [
+                {"target_id": "a.py:part:1", "status": "reviewed", "reason": "", "evidence_refs": [reference]}
+            ]
+            if bound == "references-bytes":
+                valid[0]["evidence_refs"] = [
+                    {**reference, "path": "context/" * 188 + f"source-{i}.py"} for i in range(4)
+                ]
+            elif bound == "target-count":
+                valid = [
+                    {
+                        "target_id": f"a.py:part:{i}",
+                        "status": "not_reviewed",
+                        "reason": "Deferred assignment",
+                        "evidence_refs": [],
+                    }
+                    for i in range(512)
+                ]
+            elif bound == "run-bytes":
+                valid[0]["reason"] = "é\u2028" * 25000
+                c.record_scope(
+                    "structure",
+                    "incomplete",
+                    reasons=["evidence_incomplete"],
+                    partial_evidence=True,
+                    target_decisions=valid,
+                )
+            else:
+                valid[0]["reason"] = "é" * 130000
+            c.record_scope(
+                "python", "incomplete", reasons=["evidence_incomplete"], partial_evidence=True, target_decisions=valid
+            )
+            before = c.to_dict()
+            invalid = copy.deepcopy(valid)
+            if bound == "references-bytes":
+                for ref in invalid[0]["evidence_refs"]:
+                    ref["path"] += "/context" * 40
+                assert len(json.dumps(valid[0]["evidence_refs"]).encode()) < 8192
+                assert len(json.dumps(invalid[0]["evidence_refs"]).encode()) > 8192
+                expected = "source references exceed retained byte limit"
+            elif bound == "target-count":
+                invalid.append({**valid[-1], "target_id": "a.py:part:512"})
+                expected = "invalid target decisions"
+            elif bound == "run-bytes":
+                without_decisions = copy.deepcopy(before)
+                for scope in without_decisions["stack_outcomes"]:
+                    scope.pop("target_decisions", None)
+
+                def published_size(value: dict[str, Any]) -> int:
+                    return len(json.dumps({"terminal_result": value}, indent=2, ensure_ascii=False).encode("utf-8"))
+
+                contribution = published_size(before) - published_size(without_decisions)
+                invalid[0]["reason"] += "x" * (RUN_TARGET_DECISIONS_MAX_BYTES - contribution + 1)
+                assert sum(
+                    len(json.dumps(decisions, ensure_ascii=False).encode()) for decisions in [valid, invalid]
+                ) < (RUN_TARGET_DECISIONS_MAX_BYTES), "compact JSON misses the nested whitespace overflow"
+                corrupt = copy.deepcopy(before)
+                corrupt_scope = next(scope for scope in corrupt["stack_outcomes"] if scope["scope_id"] == "python")
+                corrupt_scope["target_decisions"] = invalid
+                assert published_size(corrupt) - published_size(without_decisions) == RUN_TARGET_DECISIONS_MAX_BYTES + 1
+                with pytest.raises(ValueError, match="run source attribution exceeds retained byte limit"):
+                    ReviewCoverage.from_dict(corrupt)
+                expected = "run source attribution exceeds retained byte limit"
+            else:
+                invalid[0]["reason"] += "é" * 1200
+                assert len(json.dumps(valid, ensure_ascii=False).encode()) < 256 * 1024
+                assert len(json.dumps(invalid, ensure_ascii=False).encode()) > 256 * 1024
+                expected = "target decisions exceed retained byte limit"
+            with pytest.raises(ValueError, match=expected):
+                c.record_scope(
+                    "python", "incomplete", reasons=["backend_failure"], partial_evidence=True, target_decisions=invalid
+                )
+            assert c.to_dict() == before
+            assert ReviewCoverage.from_dict(before).to_dict() == before
 
 
 def test_identity_and_invalid_recording_are_rejected() -> None:
@@ -231,13 +289,24 @@ def test_identity_and_invalid_recording_are_rejected() -> None:
         review_coverage().record_phase("merge", "failed", reasons=["synthesis_failure"], usable_evidence=True)
 
 
-@pytest.mark.parametrize("category,declared", [(None, None), ("AUTH_CONFIG", None),
-    (None, "provider-specific-error"), (None, 429), (None, {"provider": "error"})])
-def test_exception_classification_uses_host_attributes(category: str | None, declared: Any) -> None:
-    class ProviderError(RuntimeError):
-        reason_code = declared
-    error = ProviderError("invalid api key")
-    if category:
-        error.category = category  # type: ignore[attr-defined]
-    expected = ReasonCode.AUTHENTICATION_FAILURE if category else ReasonCode.BACKEND_FAILURE
-    assert reason_for_exception(error) == expected
+def test_exception_classification_uses_host_attributes(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str | None, Any]] = [
+        (None, None),
+        ("AUTH_CONFIG", None),
+        (None, "provider-specific-error"),
+        (None, 429),
+        (None, {"provider": "error"}),
+    ]
+    for category, declared in cases:
+        with subtests.test(category=category):
+
+            class ProviderError(RuntimeError):
+                reason_code = declared
+
+            error = ProviderError("invalid api key")
+            if category:
+                error.category = category  # type: ignore[attr-defined]
+            expected = ReasonCode.AUTHENTICATION_FAILURE if category else ReasonCode.BACKEND_FAILURE
+            assert reason_for_exception(error) == expected

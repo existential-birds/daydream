@@ -3,24 +3,25 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream.backends import AgentEvent, ResultEvent, ToolStartEvent
+from tests.conftest import make_multi_stack_target
 from tests.harness.review_result import merge_result, saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _run_deep
 
 
 def _merge_call(stub: StubBackend) -> dict[str, Any]:
     return next(c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower())
 
-@pytest.mark.parametrize("finalize", [False, True])
-async def test_merge_resumes_arbiter_session(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, finalize: bool,
+async def _case_merge_resumes_arbiter_session(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, finalize: bool
 ) -> None:
     """A resumed merge receives retained structural records, including during bounded finalization."""
     silence(monkeypatch)
@@ -72,6 +73,19 @@ async def test_merge_resumes_arbiter_session(
         assert saved_coverage(multi_stack_target / ".daydream/deep").phases["merge"]["status"] == "incomplete"
     else:
         assert finalization_calls == []
+
+
+async def test_merge_resumes_arbiter_session(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for finalize in cases_0:
+        with subtests.test(finalize=finalize), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_merge_resumes_arbiter_session(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, finalize=finalize
+            )
+
 
 async def test_merge_cold_when_arbiter_mints_no_token(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

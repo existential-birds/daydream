@@ -38,13 +38,24 @@ def _gold(**overrides: Any) -> Any:
     return base
 
 
-def test_candidate_rejects_bad_id_hex() -> None:
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(_cand(candidate_id="xyz"))
 
-def test_gold_rejects_bad_id_hex() -> None:
-    with pytest.raises(VerifierError):
-        parse_gold_finding(_gold(finding_id="not-hex"))
+def test_candidate_and_gold_identity_validation(subtests: pytest.Subtests) -> None:
+    """Native parser and reward-detail boundaries both reject malformed identities."""
+    for kind, raw in (("candidate", "xyz"), ("gold", "not-hex")):
+        with subtests.test(boundary="parser", kind=kind):
+            with pytest.raises(VerifierError):
+                if kind == "candidate":
+                    parse_candidate_finding(_cand(candidate_id=raw))
+                else:
+                    parse_gold_finding(_gold(finding_id=raw))
+    for kind in ("candidate", "gold"):
+        with subtests.test(boundary="reward-details", kind=kind):
+            with pytest.raises(VerifierError, match="must be a string"):
+                if kind == "candidate":
+                    reward_details([_gold()], [{"candidate_id": 456}], [], set())
+                else:
+                    reward_details([{"finding_id": 123}], [], [], set())
+
 
 def test_harbor_package_imports_stdlib_only() -> None:
     assert vc.MAX_GOLD_FINDINGS == 50
@@ -53,19 +64,24 @@ def test_harbor_package_imports_stdlib_only() -> None:
     assert vc.CONFIDENCE_THRESHOLD == 0.7
     assert issubclass(vc.VerifierError, Exception)
 
-def test_candidate_id_scoped_by_case_key() -> None:
-    a = derive_candidate_id("case-x", _cand(), 0)
-    b = derive_candidate_id("case-y", _cand(), 0)
-    assert a != b
 
-def test_same_content_same_key_same_ordinal_is_stable() -> None:
-    assert derive_candidate_id("case-x", _cand(), 0) == derive_candidate_id("case-x", _cand(), 0)
-
-def test_null_fields_normalize_to_empty_string() -> None:
-    raw = _cand(title=None, body=None, severity=None)
-    cid = derive_candidate_id("case-x", raw, 0)
-    raw2 = _cand(title="", body="", severity=None)
-    assert cid == derive_candidate_id("case-x", raw2, 0)
+def test_candidate_identity_is_scoped_stable_and_normalized(subtests: pytest.Subtests) -> None:
+    """Case/occurrence changes distinguish findings; absent text normalizes consistently."""
+    normal = _cand()
+    assert derive_candidate_id("case-x", normal, 0) == derive_candidate_id("case-x", normal, 0)
+    assert derive_candidate_id("case-x", normal, 0) != derive_candidate_id("case-y", normal, 0)
+    for name, left, right in (
+        ("null-text", _cand(title=None, body=None, severity=None), _cand(title="", body="", severity=None)),
+        (
+            "null-location",
+            _cand(path=None, start_line=None, end_line=None),
+            _cand(path="", start_line=None, end_line=None),
+        ),
+    ):
+        with subtests.test(normalization=name):
+            assert derive_candidate_id("case-x", left, 0) == derive_candidate_id("case-x", right, 0)
+    locationless = _cand(path=None, start_line=None, end_line=None)
+    assert derive_candidate_id("case-x", locationless, 0) != derive_candidate_id("case-x", locationless, 1)
 
 
 def _artifact(findings: Any, **overrides: Any) -> Any:
@@ -87,125 +103,168 @@ def _valid_findings(n: Any=1, key: Any="case-x") -> Any:
     return out
 
 
-def test_artifact_rejects_duplicate_candidate_id() -> None:
-    dup = _valid_findings(2)
-    dup[1] = dict(dup[0])  # same id, different title → not allowed
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(dup))
 
-def test_artifact_rejects_wrong_schema_version() -> None:
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact([], schema_version=2))
+def test_candidate_artifact_validation_rejects_invalid_envelopes(subtests: pytest.Subtests) -> None:
+    """Reject structural and identity corruption at the deployed artifact parser."""
+    for corruption in ("duplicate-id", "schema-version", "missing-ref", "top-level-key", "finding-key"):
+        with subtests.test(corruption=corruption):
+            findings = _valid_findings(2 if corruption == "duplicate-id" else 1)
+            artifact = _artifact(findings)
+            if corruption == "duplicate-id":
+                findings[1] = dict(findings[0])
+            elif corruption == "schema-version":
+                artifact["schema_version"] = 2
+            elif corruption == "missing-ref":
+                del artifact["head_ref"]
+            elif corruption == "top-level-key":
+                artifact["smuggled"] = "x"
+            else:
+                findings[0]["smuggled"] = "x"
+            with pytest.raises(VerifierError):
+                validate_candidate_artifact(artifact)
 
-def test_artifact_rejects_missing_refs() -> None:
-    art = _artifact([])
-    del art["head_ref"]
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(art)
 
-def test_gold_finding_id_is_case_scoped() -> None:
-    # gold finding_id must equal sha256(case_id, title, body, severity, path, start, end)
-    g = _gold()
-    g["finding_id"] = _canonical_gold_id("case-x", g)
-    validate_gold_set([g], case_id="case-x")                       # case-scoped digest accepted
-    legacy = _gold()
-    legacy["finding_id"] = "f" * 64  # valid 64-hex, case_id-less digest -> rejected
-    with pytest.raises(VerifierError):
-        validate_gold_set([legacy], case_id="case-x")
-    g2 = _gold()
-    g2["finding_id"] = _canonical_gold_id("case-y", g2)
-    with pytest.raises(VerifierError):
-        validate_gold_set([g2], case_id="case-x")
+def test_gold_set_requires_case_bound_unique_content(subtests: pytest.Subtests) -> None:
+    """Authored gold accepts canonical IDs and rejects incompatible or expanded records."""
+    valid = _gold()
+    valid["finding_id"] = _canonical_gold_id("case-x", valid)
+    validate_gold_set([valid], case_id="case-x")
+    for corruption in ("legacy-id", "other-case", "unknown-field", "duplicate-id"):
+        with subtests.test(corruption=corruption):
+            gold = _gold()
+            gold["finding_id"] = _canonical_gold_id("case-y" if corruption == "other-case" else "case-x", gold)
+            if corruption == "legacy-id":
+                gold["finding_id"] = "f" * 64
+            elif corruption == "unknown-field":
+                gold["provenance"] = {"kind": "authored", "source_ids": []}
+            records = [gold, dict(gold)] if corruption == "duplicate-id" else [gold]
+            with pytest.raises(VerifierError):
+                validate_gold_set(records, case_id="case-x")
 
-def test_verdict_parses_and_validates() -> None:
-    v = Verdict(gold_id="g", candidate_id="c", match=True, confidence=0.9, reasoning="same bug")
-    assert (v.match, v.confidence) == (True, 0.9)
 
-def test_verdict_rejects_out_of_range_confidence() -> None:
+def test_verdict_validation_and_edge_admission(subtests: pytest.Subtests) -> None:
+    """Confidence validity, match flags and the inclusive edge threshold are independent guards."""
+    valid = Verdict(gold_id="g", candidate_id="c", match=True, confidence=0.9, reasoning="same bug")
+    assert (valid.match, valid.confidence) == (True, 0.9)
     with pytest.raises(VerifierError):
         Verdict("g", "c", True, 1.5, "")
+    for confidence, match, expected in (
+        (0.9, True, True),
+        (0.69, True, False),
+        (0.95, False, False),
+        (0.7, True, True),
+    ):
+        with subtests.test(confidence=confidence, match=match):
+            verdict = Verdict("g", "c", match, confidence, "m")
+            kept = retained_edges([verdict], ["g"], ["c"])
+            assert {(v.gold_id, v.candidate_id) for v in kept} == ({("g", "c")} if expected else set())
 
-def test_retained_edges_threshold() -> None:
-    vs = [
-        Verdict("g1", "c1", True, 0.9, "m"),  # keep
-        Verdict("g2", "c2", True, 0.69, "m"),  # drop: below 0.7
-        Verdict("g3", "c3", False, 0.95, "m"),  # drop: match false
-        Verdict("g4", "c4", True, 0.7, "m"),  # keep: exactly 0.7
+
+def test_matching_maximizes_cardinality_without_reusing_either_side(subtests: pytest.Subtests) -> None:
+    """Maximum matching must beat greedy selection, retain exclusivity, and break ties stably."""
+    scenarios = [
+        (
+            "greedy-trap",
+            [Verdict("A", "1", True, 0.9, ""), Verdict("A", "2", True, 0.8, ""), Verdict("B", "1", True, 0.7, "")],
+            ["A", "B"],
+            ["1", "2"],
+            {("A", "2"), ("B", "1")},
+        ),
+        (
+            "shared-candidate",
+            [Verdict("g1", "c1", True, 0.9, ""), Verdict("g2", "c1", True, 0.8, "")],
+            ["g1", "g2"],
+            ["c1"],
+            {("g1", "c1")},
+        ),
+        (
+            "shared-gold",
+            [Verdict("g1", "c1", True, 0.9, ""), Verdict("g1", "c2", True, 0.8, "")],
+            ["g1"],
+            ["c1", "c2"],
+            {("g1", "c1")},
+        ),
+        (
+            "confidence-tie",
+            [
+                Verdict("g1", "c1", True, 0.8, ""),
+                Verdict("g1", "c2", True, 0.8, ""),
+                Verdict("g2", "c1", True, 0.8, ""),
+                Verdict("g2", "c2", True, 0.8, ""),
+            ],
+            ["g1", "g2"],
+            ["c1", "c2"],
+            {("g1", "c1"), ("g2", "c2")},
+        ),
     ]
-    kept = retained_edges(vs, ["g1", "g2", "g3", "g4"], ["c1", "c2", "c3", "c4"])
-    assert {(v.gold_id, v.candidate_id) for v in kept} == {("g1", "c1"), ("g4", "c4")}
+    for name, verdicts, gold_ids, candidate_ids, expected in scenarios:
+        with subtests.test(scenario=name):
+            assert maximum_matching(verdicts, gold_ids, candidate_ids) == expected
+            assert maximum_matching(verdicts, gold_ids, candidate_ids) == expected
 
-def test_max_cardinality_beats_greedy() -> None:
-    # A-1 (0.9), A-2 (0.8), B-1 (0.7) — greedy only matches A-1; max-cardinality matches 2.
-    vs = [Verdict("A", "1", True, 0.9, ""), Verdict("A", "2", True, 0.8, ""), Verdict("B", "1", True, 0.7, "")]
-    m = maximum_matching(vs, ["A", "B"], ["1", "2"])
-    assert m == {("A", "2"), ("B", "1")}
 
-def test_one_candidate_cannot_match_two_golds() -> None:
-    vs = [Verdict("g1", "c1", True, 0.9, ""), Verdict("g2", "c1", True, 0.8, "")]
-    m = maximum_matching(vs, ["g1", "g2"], ["c1"])
-    assert len(m) == 1
-    assert {c for _, c in m} == {"c1"}  # c1 used at most once
-
-def test_one_gold_cannot_match_two_candidates() -> None:
-    vs = [Verdict("g1", "c1", True, 0.9, ""), Verdict("g1", "c2", True, 0.8, "")]
-    m = maximum_matching(vs, ["g1"], ["c1", "c2"])
-    assert len(m) == 1 and {g for g, _ in m} == {"g1"}
-
-def test_matching_is_deterministic_across_runs() -> None:
-    # ties on confidence: ordering must still be stable run-to-run
-    vs = [Verdict("g1", "c1", True, 0.8, ""), Verdict("g1", "c2", True, 0.8, ""),
-          Verdict("g2", "c1", True, 0.8, ""), Verdict("g2", "c2", True, 0.8, "")]
-    gold, cand = ["g1", "g2"], ["c1", "c2"]
-    r1 = maximum_matching(vs, gold, cand)
-    r2 = maximum_matching(vs, gold, cand)
-    assert r1 == r2 == {("g1", "c1"), ("g2", "c2")}
-
-def test_score_clean_with_candidates() -> None:
-    art = _artifact(_valid_findings(2))
-    r = score_review([], art, [])
-    assert (r.reward, r.fp, r.clean_pass) == (0.0, 2, 0)
-    assert r.tp == 0 and r.fn == 0 and r.clean_task == 1
-
-def test_score_gold_no_candidates() -> None:
+def test_score_review_matches_content_counts_and_empty_sides(subtests: pytest.Subtests) -> None:
+    """False positives/negatives, F1, malformed output, and clean passes share one score boundary."""
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
-    r = score_review(gold, _artifact([]), [])
-    assert (r.reward, r.fn) == (0.0, 2)
-    assert r.fp == 0 and r.clean_task == 0
+    candidates = _valid_findings(2)
+    matched_gold = [*gold, _gold(finding_id="c" * 64, title="C")]
+    verdicts = [
+        Verdict("a" * 64, candidates[0]["candidate_id"], True, 0.9, "same"),
+        Verdict("b" * 64, candidates[1]["candidate_id"], True, 0.8, "same"),
+    ]
+    scenarios: list[tuple[str, list[Any], Any, list[Verdict], dict[str, Any]]] = [
+        (
+            "clean-false-positives",
+            [],
+            _artifact(candidates),
+            [],
+            {"reward": 0.0, "tp": 0, "fp": 2, "fn": 0, "clean_task": 1, "clean_pass": 0},
+        ),
+        ("missing-candidates", gold, _artifact([]), [], {"reward": 0.0, "fp": 0, "fn": 2, "clean_task": 0}),
+        (
+            "no-matches",
+            gold,
+            _artifact(candidates),
+            [],
+            {"tp": 0, "fp": 2, "fn": 2, "precision": 0.0, "recall": 0.0, "f1": 0.0, "reward": 0.0},
+        ),
+        (
+            "partial-recall",
+            matched_gold,
+            _artifact(candidates),
+            verdicts,
+            {
+                "tp": 2,
+                "fp": 0,
+                "fn": 1,
+                "precision": 1.0,
+                "recall": pytest.approx(2 / 3),
+                "f1": pytest.approx(0.8),
+                "reward": pytest.approx(0.8),
+            },
+        ),
+        (
+            "malformed-output",
+            [],
+            {
+                "schema_version": 1,
+                "case_id": "c",
+                "base_ref": "b",
+                "head_ref": "h",
+                "findings": [{"candidate_id": "not-hex"}],
+            },
+            [],
+            {"reward": 0.0, "verifier_error": 0},
+        ),
+        ("clean-empty", [], _artifact([]), [], {"reward": 1.0}),
+        ("gold-empty", [_gold()], _artifact([]), [], {"reward": 0.0, "fn": 1}),
+        ("empty-side-ignores-verdict", [], _artifact([]), [Verdict("g", "c", True, 0.9, "")], {"reward": 1.0}),
+    ]
+    for name, gold_rows, artifact, verdict_rows, expected in scenarios:
+        with subtests.test(scenario=name):
+            actual = score_review(gold_rows, artifact, verdict_rows).to_dict()
+            assert {key: actual[key] for key in expected} == expected
 
-def test_score_zero_match_reward_is_zero() -> None:
-    gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
-    art = _artifact(_valid_findings(2))
-    r = score_review(gold, art, [])
-    assert (r.tp, r.fp, r.fn) == (0, 2, 2)
-    assert r.precision == 0.0 and r.recall == 0.0
-    assert r.f1 == 0.0 and r.reward == 0.0
-
-def test_score_f1_example() -> None:
-    gold = [_gold(), _gold(finding_id="b" * 64, title="B"), _gold(finding_id="c" * 64, title="C")]
-    cands = _valid_findings(2)
-    art = _artifact(cands)
-    vs = [Verdict("a" * 64, cands[0]["candidate_id"], True, 0.9, "same"),
-          Verdict("b" * 64, cands[1]["candidate_id"], True, 0.8, "same")]
-    r = score_review(gold, art, vs)
-    assert (r.tp, r.fp, r.fn) == (2, 0, 1)
-    assert r.precision == 1.0
-    assert abs(r.recall - 0.6666666667) < 1e-9
-    assert abs(r.f1 - 0.8) < 1e-9 and abs(r.reward - 0.8) < 1e-9
-
-def test_score_malformed_artifact_is_scored_zero() -> None:
-    art = {"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
-           "findings": [{"candidate_id": "not-hex"}]}
-    r = score_review([], art, [])
-    assert r.reward == 0.0 and r.verifier_error == 0   # invalid agent output is scored zero
-
-def test_empty_side_resolves_with_zero_verdicts() -> None:
-    r0 = score_review([], _artifact([]), [])
-    assert r0.reward == 1.0
-    rn = score_review([_gold()], _artifact([]), [])
-    assert rn.reward == 0.0 and rn.fn == 1
-    # passing any verdict for an empty side must not change the result (ignored/not required)
-    assert score_review([], _artifact([]), [Verdict("g", "c", True, 0.9, "")]).reward == 1.0
 
 def test_reward_details_shape_and_no_source_leak() -> None:
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
@@ -224,33 +283,10 @@ def test_reward_details_shape_and_no_source_leak() -> None:
     assert "Cache key not scoped" not in blob  # finding body/title never leaks
     assert "f1" not in blob  # candidate content never leaks
 
-def test_gold_finding_id_rejects_non_string() -> None:
-    gold = [{"finding_id": 123}]
-    with pytest.raises(VerifierError, match="must be a string"):
-        reward_details(gold, [], [], set())
 
-def test_candidate_id_rejects_non_string() -> None:
-    cands = [{"candidate_id": 456}]
-    with pytest.raises(VerifierError, match="must be a string"):
-        reward_details([_gold()], cands, [], set())
 
-def test_artifact_rejects_unknown_top_level_key() -> None:
-    art = _artifact(_valid_findings(1))
-    art["smuggled"] = "x"
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(art)
 
-def test_artifact_rejects_unknown_finding_key() -> None:
-    fs = _valid_findings(1)
-    fs[0]["smuggled"] = "x"
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(fs))
 
-def test_gold_set_rejects_unknown_finding_key() -> None:
-    g = _gold()
-    g["provenance"] = {"kind": "authored", "source_ids": []}
-    with pytest.raises(VerifierError):
-        validate_gold_set([g], case_id="case-x")
 
 
 def _canonical_gold_id(case_id: str, f: dict[str, Any]) -> str:
@@ -262,15 +298,7 @@ def _canonical_gold_id(case_id: str, f: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def test_gold_set_rejects_duplicate_finding_ids() -> None:
-    fid = _canonical_gold_id("case-x", _gold())
-    with pytest.raises(VerifierError):
-        validate_gold_set([{**_gold(), "finding_id": fid}, {**_gold(), "finding_id": fid}], case_id="case-x")
 
-def test_null_location_normalizes_to_empty_in_canonical_tuple() -> None:
-    locless = _cand(path=None, start_line=None, end_line=None)
-    blank = _cand(path="", start_line=None, end_line=None)
-    assert derive_candidate_id("case-x", locless, 0) == derive_candidate_id("case-x", blank, 0)
 
 def test_locationless_canonical_digest_matches_schema_derive() -> None:
     raw = _gold(path=None, start_line=None, end_line=None)
@@ -283,9 +311,6 @@ def test_locationless_canonical_digest_matches_schema_derive() -> None:
         "location": None,}, case_id="case-x")
     assert verif == authoring
 
-def test_duplicate_locationless_get_distinct_occurrence_ids() -> None:
-    locless = _cand(path=None, start_line=None, end_line=None)
-    assert derive_candidate_id("case-x", locless, 0) != derive_candidate_id("case-x", locless, 1)
 
 def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     g_loc = _gold(title="Located", path="src/a.py", start_line=1, end_line=1)
@@ -309,36 +334,41 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
 
 
 
-def test_location_tier_classification() -> None:
-    assert vc.location_tier("a.py", 10, 12, "a.py", 10, 12, 3) == "exact"
-    assert vc.location_tier("a.py", 10, 12, "a.py", 15, 15, 3) == "near"
-    assert vc.location_tier("a.py", 10, 12, "a.py", 100, 100, 3) == "file"
-    assert vc.location_tier("a.py", 10, 12, "b.py", 10, 12, 3) == "miss"
 
-def test_location_tier_spans_overlap_counts_exact() -> None:
-    assert vc.location_tier("a.py", 10, 20, "a.py", 18, 25, 3) == "exact"
-    # non-overlapping span uses the nearer boundary distance
-    assert vc.location_tier("a.py", 10, 20, "a.py", 22, 24, 3) == "near"
-    assert vc.location_tier("a.py", 10, 20, "a.py", 30, 32, 3) == "file"
+def test_location_tier_uses_file_and_nearest_span_boundary(subtests: pytest.Subtests) -> None:
+    """Overlap is exact; otherwise the nearer span boundary determines tolerance."""
+    for gold_end, candidate_path, start, end, expected in (
+        (12, "a.py", 10, 12, "exact"),
+        (12, "a.py", 15, 15, "near"),
+        (12, "a.py", 100, 100, "file"),
+        (12, "b.py", 10, 12, "miss"),
+        (20, "a.py", 18, 25, "exact"),
+        (20, "a.py", 22, 24, "near"),
+        (20, "a.py", 30, 32, "file"),
+    ):
+        with subtests.test(gold_end=gold_end, path=candidate_path, start=start, end=end):
+            assert vc.location_tier("a.py", 10, gold_end, candidate_path, start, end, 3) == expected
 
-def test_severity_distance_and_credit() -> None:
-    assert vc.severity_distance("high", "high") == 0
-    assert vc.severity_distance("high", "low") == 2
-    assert vc.severity_distance("low", "medium") == 1
-    assert vc.severity_credit(0) == 1.0
-    assert vc.severity_credit(1) == 0.5
-    assert vc.severity_credit(2) == 0.0
 
-def test_severity_distance_none_is_absent() -> None:
-    assert vc.severity_distance(None, "high") is None
-    assert vc.severity_distance("high", None) is None
-    assert vc.severity_distance(None, None) is None
-
-def test_severity_distance_unknown_raises() -> None:
-    with pytest.raises(VerifierError):
-        vc.severity_distance("critical", "high")
-    with pytest.raises(VerifierError):
-        vc.severity_distance("high", "info")
+def test_severity_distance_distinguishes_absent_invalid_and_ordered_levels(subtests: pytest.Subtests) -> None:
+    """Only canonical pairs earn distance credit; absent inputs stay absent."""
+    for left, right, expected in (
+        ("high", "high", 0),
+        ("high", "low", 2),
+        ("low", "medium", 1),
+        (None, "high", None),
+        ("high", None, None),
+        (None, None, None),
+    ):
+        with subtests.test(left=left, right=right):
+            assert vc.severity_distance(left, right) == expected
+    for distance, expected_credit in ((0, 1.0), (1, 0.5), (2, 0.0)):
+        with subtests.test(distance=distance):
+            assert vc.severity_credit(distance) == expected_credit
+    for left, right in (("critical", "high"), ("high", "info")):
+        with subtests.test(invalid=(left, right)):
+            with pytest.raises(VerifierError):
+                vc.severity_distance(left, right)
 
 
 EXPECTED_24_KEYS = {"reward", "tp", "fp", "fn", "precision", "recall", "f1",
@@ -439,73 +469,157 @@ def test_reward_dict_early_returns_have_absent_axes() -> None:
     assert d["location_present"] == 0 and d["severity_present"] == 0
     assert d["location_exact"] == 0 and d["severity_mean_distance"] == 0.0
 
-def test_aggregate_metrics_pools_axis_keys() -> None:
-    rows: list[dict[str, object] | None] = [_metric_row(tp=1, clean_task=1, location_present=1, location_exact=1,
-                    location_credit=1.0, severity_present=1, severity_exact=1,
-                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
-        _metric_row(reward=0.0, tp=1, fp=1, clean_task=1, location_present=1, location_file=1),
+
+def test_aggregate_metrics_weights_axes_by_matched_pairs_and_preserves_absence(subtests: pytest.Subtests) -> None:
+    """Pair counts own axis denominators; historical/missing axes never synthesize scored pairs."""
+    scenarios: list[tuple[str, list[dict[str, object] | None], dict[str, Any]]] = [
+        (
+            "mixed-axes",
+            [
+                _metric_row(
+                    tp=1,
+                    clean_task=1,
+                    location_present=1,
+                    location_exact=1,
+                    location_credit=1.0,
+                    severity_present=1,
+                    severity_exact=1,
+                    severity_within_1=1,
+                    severity_credit=1.0,
+                    severity_pairs=1,
+                ),
+                _metric_row(reward=0.0, tp=1, fp=1, clean_task=1, location_present=1, location_file=1),
+            ],
+            {
+                "location_exact_rate": 0.5,
+                "location_pairs_scored": 2,
+                "severity_pairs_scored": 1,
+                "severity_credit": 1.0,
+                "severity_mean_distance": 0.0,
+            },
+        ),
+        (
+            "absent",
+            [],
+            {
+                "location_exact_rate": 0.0,
+                "location_near_rate": 0.0,
+                "location_file_rate": 0.0,
+                "location_miss_rate": 0.0,
+                "location_pairs_scored": 0,
+                "severity_pairs_scored": 0,
+                "severity_exact_rate": 0.0,
+                "severity_within_1_rate": 0.0,
+                "severity_mean_distance": 0.0,
+                "severity_credit": 0.0,
+                "total_location_exact": 0,
+                "total_severity_exact": 0,
+            },
+        ),
+        (
+            "severity-credit",
+            [
+                _metric_row(
+                    tp=1,
+                    clean_task=1,
+                    severity_present=1,
+                    severity_exact=1,
+                    severity_within_1=1,
+                    severity_credit=1.0,
+                    severity_pairs=1,
+                ),
+                _metric_row(
+                    reward=0.5,
+                    tp=1,
+                    fn=1,
+                    severity_present=1,
+                    severity_within_1=1,
+                    severity_mean_distance=1.0,
+                    severity_credit=0.5,
+                    severity_pairs=1,
+                ),
+            ],
+            {
+                "severity_pairs_scored": 2,
+                "total_severity_exact": 1,
+                "total_severity_within_1": 2,
+                "severity_exact_rate": 0.5,
+                "severity_within_1_rate": 1.0,
+                "severity_mean_distance": 0.5,
+                "severity_credit": 0.75,
+            },
+        ),
+        (
+            "multi-pair-bound",
+            [
+                _metric_row(
+                    tp=2,
+                    clean_task=1,
+                    severity_present=1,
+                    severity_exact=2,
+                    severity_within_1=2,
+                    severity_credit=1.0,
+                    severity_pairs=2,
+                )
+            ],
+            {
+                "severity_pairs_scored": 2,
+                "severity_exact_rate": 1.0,
+                "severity_within_1_rate": 1.0,
+                "severity_mean_distance": 0.0,
+                "severity_credit": 1.0,
+            },
+        ),
+        (
+            "weighted-severity",
+            [
+                _metric_row(
+                    tp=1,
+                    clean_task=1,
+                    severity_present=1,
+                    severity_exact=1,
+                    severity_within_1=1,
+                    severity_credit=1.0,
+                    severity_pairs=1,
+                ),
+                _metric_row(
+                    reward=0.5,
+                    tp=2,
+                    severity_present=1,
+                    severity_within_1=2,
+                    severity_mean_distance=1.0,
+                    severity_credit=0.5,
+                    severity_pairs=2,
+                ),
+            ],
+            {
+                "severity_pairs_scored": 3,
+                "severity_mean_distance": pytest.approx(2 / 3),
+                "severity_credit": pytest.approx(2 / 3),
+            },
+        ),
+        (
+            "weighted-location",
+            [
+                _metric_row(tp=1, clean_task=1, location_present=1, location_exact=1, location_credit=1.0),
+                _metric_row(
+                    reward=0.5, tp=2, location_present=1, location_near=1, location_file=1, location_credit=0.5
+                ),
+            ],
+            {"location_pairs_scored": 3, "location_credit": pytest.approx(2 / 3)},
+        ),
+        (
+            "historical",
+            [{"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "clean_task": 1}],
+            {
+                "location_pairs_scored": 0,
+                "severity_pairs_scored": 0,
+                "location_exact_rate": 0.0,
+                "severity_credit": 0.0,
+            },
+        ),
     ]
-    m = vc.aggregate_metrics(rows)
-    assert m["location_exact_rate"] == 0.5 and m["location_pairs_scored"] == 2
-    assert m["severity_pairs_scored"] == 1 and m["severity_credit"] == 1.0
-    assert m["severity_mean_distance"] == 0.0
-
-def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:
-    m = vc.aggregate_metrics([])
-    for tier in ("exact", "near", "file", "miss"):
-        assert m[f"location_{tier}_rate"] == 0.0
-    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
-    assert m["severity_exact_rate"] == 0.0
-    assert m["severity_within_1_rate"] == 0.0
-    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 0.0
-    assert m["total_location_exact"] == 0 and m["total_severity_exact"] == 0
-
-def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
-    rows: list[dict[str, object] | None] = [_metric_row(tp=1, clean_task=1, severity_present=1, severity_exact=1,
-                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
-        _metric_row(reward=0.5, tp=1, fn=1, severity_present=1,
-                    severity_within_1=1, severity_mean_distance=1.0, severity_credit=0.5, severity_pairs=1),
-    ]
-    m = vc.aggregate_metrics(rows)
-    assert m["severity_pairs_scored"] == 2
-    assert m["total_severity_exact"] == 1 and m["total_severity_within_1"] == 2
-    assert m["severity_exact_rate"] == 0.5 and m["severity_within_1_rate"] == 1.0
-    assert m["severity_mean_distance"] == 0.5 and m["severity_credit"] == 0.75
-
-def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
-    # Divide by matched pairs, not task rows, to keep rates bounded.
-    rows: list[dict[str, object] | None] = [_metric_row(tp=2, clean_task=1, severity_present=1, severity_exact=2,
-                    severity_within_1=2, severity_credit=1.0, severity_pairs=2),
-    ]
-    m = vc.aggregate_metrics(rows)
-    assert m["severity_pairs_scored"] == 2
-    assert m["severity_exact_rate"] == 1.0
-    assert m["severity_within_1_rate"] == 1.0
-    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 1.0
-
-def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
-    rows: list[dict[str, object] | None] = [_metric_row(tp=1, clean_task=1, severity_present=1, severity_exact=1,
-                    severity_within_1=1, severity_credit=1.0, severity_pairs=1),
-        _metric_row(reward=0.5, tp=2, severity_present=1, severity_within_1=2,
-                    severity_mean_distance=1.0, severity_credit=0.5, severity_pairs=2),
-    ]
-    m = vc.aggregate_metrics(rows)
-    assert m["severity_pairs_scored"] == 3
-    assert m["severity_mean_distance"] == pytest.approx(2.0 / 3)
-    assert m["severity_credit"] == pytest.approx(2.0 / 3)
-
-def test_aggregate_metrics_location_credit_weights_by_pair_count() -> None:
-    # Location pair count is the sum of tier counts.
-    rows: list[dict[str, object] | None] = [
-        _metric_row(tp=1, clean_task=1, location_present=1, location_exact=1, location_credit=1.0),
-        _metric_row(reward=0.5, tp=2, location_present=1, location_near=1, location_file=1, location_credit=0.5),
-    ]
-    m = vc.aggregate_metrics(rows)
-    assert m["location_pairs_scored"] == 3
-    # Pair-weighted credit is 2/3; averaging task means would yield 0.75.
-    assert m["location_credit"] == pytest.approx(2.0 / 3)
-
-def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:
-    m = vc.aggregate_metrics([{"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "clean_task": 1}])
-    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
-    assert m["location_exact_rate"] == 0.0 and m["severity_credit"] == 0.0
+    for name, rows, expected in scenarios:
+        with subtests.test(scenario=name):
+            actual = vc.aggregate_metrics(rows)
+            assert {key: actual[key] for key in expected} == expected

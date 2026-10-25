@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,16 +25,16 @@ from daydream.deep.orchestrator import (
 from daydream.deep.sharding import shard_stacks
 from daydream.review_budget import review_scale_for_diff
 from daydream.run_config import RunConfig
-from tests.conftest import ExtDir
+from tests.conftest import ExtDir, make_shard_many_python_target, make_sibling_frontier_target
 from tests.deep_orchestrator.test_review_completion import ReviewRun, scopes
 from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _profile_with_pipeline
 
 
-@pytest.mark.parametrize('shape', ['fitting', 'singleton', 'cap-coarsened', 'explicit-false'])
-def test_preparation_skips_native_graph_when_sharding_cannot_help(
-    sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str,
+def _case_preparation_skips_native_graph_when_sharding_cannot_help(
+    sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
 ) -> None:
     """Supplement runner ownership proofs with the independent graph-work contract."""
     repo = sibling_frontier_target
@@ -63,14 +64,27 @@ def test_preparation_skips_native_graph_when_sharding_cannot_help(
                    for path in scope.files) == Counter(changes)
 
 
-@pytest.mark.parametrize(('run_enabled', 'file_enabled', 'should_plan'), [
-    (False, True, False),
-    (None, False, False),
-    (True, False, True),
-], ids=['runconfig-false', 'file-false', 'runconfig-true-over-file-false'])
-def test_explicit_sharding_opt_out_skips_feasibility_packing(
-    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
-    run_enabled: bool | None, file_enabled: bool, should_plan: bool,
+def test_preparation_skips_native_graph_when_sharding_cannot_help(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["fitting", "singleton", "cap-coarsened", "explicit-false"]
+    case_index = 0
+    for shape in cases_0:
+        with subtests.test(shape=shape), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            sibling_frontier_target = make_sibling_frontier_target(scenario.tmp_path)
+            _case_preparation_skips_native_graph_when_sharding_cannot_help(
+                sibling_frontier_target=sibling_frontier_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                shape=shape,
+            )
+
+
+def _case_explicit_sharding_opt_out_skips_feasibility_packing(
+    sibling_frontier_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_enabled: bool | None,
+    file_enabled: bool,
+    should_plan: bool,
 ) -> None:
     """Supplement real runner precedence coverage with the independent packing-work contract."""
     repo = sibling_frontier_target
@@ -91,6 +105,29 @@ def test_explicit_sharding_opt_out_skips_feasibility_packing(
     assert any('#' in scope.stack_name for scope in assignments) is should_plan
     assert Counter(path for scope in assignments if scope.stack_name != 'structure'
                    for path in scope.files) == Counter(changes)
+
+
+def test_explicit_sharding_opt_out_skips_feasibility_packing(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[bool | None, bool, bool]] = [
+        (False, True, False),
+        (None, False, False),
+        (True, False, True),
+    ]
+    case_index = 0
+    for run_enabled, file_enabled, should_plan in cases_0:
+        with (
+            subtests.test(run_enabled=run_enabled, file_enabled=file_enabled, should_plan=should_plan),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            sibling_frontier_target = make_sibling_frontier_target(scenario.tmp_path)
+            _case_explicit_sharding_opt_out_skips_feasibility_packing(
+                sibling_frontier_target=sibling_frontier_target,
+                monkeypatch=scenario.monkeypatch,
+                run_enabled=run_enabled,
+                file_enabled=file_enabled,
+                should_plan=should_plan,
+            )
 
 
 def test_preparation_shares_native_graph_with_diagram_and_preserves_scopes_after_failure(
@@ -129,9 +166,8 @@ def test_preparation_shares_native_graph_with_diagram_and_preserves_scopes_after
     assert all(not scope.frontier_files for scope in recovered)
 
 
-@pytest.mark.parametrize('language', ['go', 'python'])
-async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str,
+async def _case_below_scale4_overloaded_stack_publishes_automatic_shards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
 ) -> None:
     """New and deleted tests stay primary review inputs in automatic language shards."""
     suffix = 'go' if language == 'go' else 'py'
@@ -182,31 +218,25 @@ async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
         (name, scope['files']) for name, scope in inventory.items()]
 
 
-@pytest.mark.parametrize(('overrides', 'expected_python'), [
-    ({}, ['python']),
-    ({'deep_shard_max_files': 1}, ['python#0', 'python#1', 'python#2']),
-    ({'deep_shard_max_files': 0}, ['python#0', 'python#1', 'python#2']),
-    ({'deep_shard_max_bytes': 0}, ['python#0', 'python#1', 'python#2']),
-    ({'deep_shard_max_files': 1, 'deep_shard_fanout_cap': 2}, ['python']),
-    ({'deep_shard_max_files': 1, 'deep_shard_fanout_cap': 0}, ['python']),
-    ({'deep_shard_max_files': 1, 'deep_shard_enabled': False,
-      'file_config': DaydreamFileConfig(deep_shard_enabled=True)}, ['python']),
-    ({'deep_shard_max_files': 1, 'file_config': DaydreamFileConfig(deep_shard_enabled=False)}, ['python']),
-    ({'deep_shard_max_files': 1, 'deep_shard_enabled': True,
-      'file_config': DaydreamFileConfig(deep_shard_enabled=False)}, ['python#0', 'python#1', 'python#2']),
-    ({'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python#0', 'python#1', 'python#2']),
-    ({'deep_shard_max_files': 5, 'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python']),
-    ({'deep_shard_max_files': -1, 'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python']),
-    ({'deep_shard_max_files': 1, 'shallow_fanout_threshold': 4}, ['python']),
-    ({'deep_shard_max_files': 1, 'shallow': True, 'output_mode': 'loop', 'findings_out': None}, ['python']),
-    ({'deep_shard_max_files': 1, 'review_profile': _profile_with_pipeline(structural_enabled=False)},
-     ['python#0', 'python#1', 'python#2']),
-], ids=['fitting', 'file-bound', 'zero-files', 'zero-bytes', 'cap-role-count', 'zero-cap',
-        'runconfig-false', 'file-false', 'runconfig-true', 'file-bound-config', 'runconfig-bound',
-        'invalid-bound-fallback', 'tiny-collapse', 'shallow', 'structure-disabled'])
-async def test_resolved_sharding_controls_publish_actual_review_scopes(
-    shard_many_python_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    overrides: dict[str, Any], expected_python: list[str],
+async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["go", "python"]
+    case_index = 0
+    for language in cases_0:
+        with subtests.test(language=language), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_below_scale4_overloaded_stack_publishes_automatic_shards(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, language=language
+            )
+
+
+async def _case_resolved_sharding_controls_publish_actual_review_scopes(
+    shard_many_python_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, Any],
+    expected_python: list[str],
 ) -> None:
     review = ReviewRun(shard_many_python_target, tmp_path, monkeypatch)
     assert await review.run(**overrides) == 0
@@ -229,6 +259,60 @@ async def test_resolved_sharding_controls_publish_actual_review_scopes(
             f'stack-{name}-review.md' for name in expected_python}
         assert {path.name for path in deep.glob('stack-python*-records.json')} == {
             f'stack-{name}-records.json' for name in expected_python}
+
+
+async def test_resolved_sharding_controls_publish_actual_review_scopes(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[dict[str, Any], list[str]]] = [
+        ({}, ["python"]),
+        ({"deep_shard_max_files": 1}, ["python#0", "python#1", "python#2"]),
+        ({"deep_shard_max_files": 0}, ["python#0", "python#1", "python#2"]),
+        ({"deep_shard_max_bytes": 0}, ["python#0", "python#1", "python#2"]),
+        ({"deep_shard_max_files": 1, "deep_shard_fanout_cap": 2}, ["python"]),
+        ({"deep_shard_max_files": 1, "deep_shard_fanout_cap": 0}, ["python"]),
+        (
+            {
+                "deep_shard_max_files": 1,
+                "deep_shard_enabled": False,
+                "file_config": DaydreamFileConfig(deep_shard_enabled=True),
+            },
+            ["python"],
+        ),
+        ({"deep_shard_max_files": 1, "file_config": DaydreamFileConfig(deep_shard_enabled=False)}, ["python"]),
+        (
+            {
+                "deep_shard_max_files": 1,
+                "deep_shard_enabled": True,
+                "file_config": DaydreamFileConfig(deep_shard_enabled=False),
+            },
+            ["python#0", "python#1", "python#2"],
+        ),
+        ({"file_config": DaydreamFileConfig(deep_shard_max_files=1)}, ["python#0", "python#1", "python#2"]),
+        ({"deep_shard_max_files": 5, "file_config": DaydreamFileConfig(deep_shard_max_files=1)}, ["python"]),
+        ({"deep_shard_max_files": -1, "file_config": DaydreamFileConfig(deep_shard_max_files=1)}, ["python"]),
+        ({"deep_shard_max_files": 1, "shallow_fanout_threshold": 4}, ["python"]),
+        ({"deep_shard_max_files": 1, "shallow": True, "output_mode": "loop", "findings_out": None}, ["python"]),
+        (
+            {"deep_shard_max_files": 1, "review_profile": _profile_with_pipeline(structural_enabled=False)},
+            ["python#0", "python#1", "python#2"],
+        ),
+    ]
+    case_index = 0
+    for overrides, expected_python in cases_0:
+        with (
+            subtests.test(overrides=overrides, expected_python=expected_python),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            shard_many_python_target = make_shard_many_python_target(scenario.tmp_path)
+            await _case_resolved_sharding_controls_publish_actual_review_scopes(
+                shard_many_python_target=shard_many_python_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                overrides=overrides,
+                expected_python=expected_python,
+            )
 
 
 async def test_oversized_singleton_retains_intact_primary_assignment(
@@ -347,12 +431,8 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
     assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']
 
 
-@pytest.mark.parametrize('fallback', [
-    'plain-typescript', 'malformed-package', 'conflicting-tsconfig', 'explicit-rule',
-    'python-plain-typescript', 'python-angular',
-])
-async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, fallback: str,
+async def _case_automatic_tiny_review_preserves_framework_and_explicit_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, fallback: str
 ) -> None:
     """Target evidence and fork ownership survive automatic tiny-diff handling."""
     repo = tmp_path / 'framework_routing'
@@ -404,3 +484,26 @@ async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
             observed.setdefault(stage['scope_id'], set()).update(stage['assigned_target_ids'])
     assert observed == {primary_stack: {component}, secondary_stack: {secondary}}
     assert all(scope['status'] == 'complete' for scope in inventory.values())
+
+
+async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "plain-typescript",
+        "malformed-package",
+        "conflicting-tsconfig",
+        "explicit-rule",
+        "python-plain-typescript",
+        "python-angular",
+    ]
+    case_index = 0
+    for fallback in cases_0:
+        with subtests.test(fallback=fallback), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_automatic_tiny_review_preserves_framework_and_explicit_scopes(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                fallback=fallback,
+            )

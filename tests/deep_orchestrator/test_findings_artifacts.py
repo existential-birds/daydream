@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,6 +17,7 @@ from daydream.deep.orchestrator import STEPS
 from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.runner import run
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
     _silence_gate_noise,
@@ -24,6 +26,7 @@ from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -70,9 +73,8 @@ def _spy_bound_deep_diff(
         return result
     monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
 
-@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'malformed-author-resume'])
-async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path, resume: bool,
+async def _case_deep_findings_out_emits_artifact_and_stops(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path, resume: bool
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings artifact from the canonical
     merged items and STOPS -- no PR post, no fix."""
@@ -126,6 +128,25 @@ async def test_deep_findings_out_emits_artifact_and_stops(
         assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
+
+
+async def test_deep_findings_out_emits_artifact_and_stops(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for resume in cases_0:
+        with subtests.test(resume=resume), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_deep_findings_out_emits_artifact_and_stops(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                tmp_path=scenario.tmp_path,
+                resume=resume,
+            )
+
 
 async def test_cleanup_keeps_report_on_findings_out_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -215,14 +236,14 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
         assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
     assert "Read the diff file at" not in intent_prompt
 
-@pytest.mark.parametrize("big_name,extra_lines,small_file,alternatives,oversize", [
-    pytest.param("0big.py", 0, None, True, True, id="leading-oversize-block-retained"),
-    pytest.param("zzz.py", 0, "aaa.py", True, False, id="trailing-block-dropped"),
-    pytest.param("big.py", 50, None, False, False, id="bounded-memory-full-disk"),
-])
-async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, big_name: str, extra_lines: int,
-    small_file: str | None, alternatives: bool, oversize: bool,
+async def _case_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    big_name: str,
+    extra_lines: int,
+    small_file: str | None,
+    alternatives: bool,
+    oversize: bool,
 ) -> None:
     """Whole-block bounding never lets a prompt silently inline only part of its required files."""
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10 + extra_lines))
@@ -278,6 +299,39 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']
 
 
+async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, int, str | None, bool, bool]] = [
+        ("0big.py", 0, None, True, True),
+        ("zzz.py", 0, "aaa.py", True, False),
+        ("big.py", 50, None, False, False),
+    ]
+    case_index = 0
+    for big_name, extra_lines, small_file, alternatives, oversize in cases_0:
+        with (
+            subtests.test(
+                big_name=big_name,
+                extra_lines=extra_lines,
+                small_file=small_file,
+                alternatives=alternatives,
+                oversize=oversize,
+            ),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                big_name=big_name,
+                extra_lines=extra_lines,
+                small_file=small_file,
+                alternatives=alternatives,
+                oversize=oversize,
+            )
+
+
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _silence(monkeypatch)
@@ -308,9 +362,8 @@ def test_extension_api_version_and_alternatives_step_removal() -> None:
     assert "alternatives" not in names
     assert "per-stack-reviews" in names
 
-@pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
-async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+async def _case_start_at_merge_refuses_stale_or_unverifiable_artifacts(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     """A resume stops before backend calls when its diff identity cannot be trusted."""
     _silence(monkeypatch)
@@ -334,18 +387,23 @@ async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
     if change != "missing-key":
         assert key_file.read_text().strip() == original_key
 
-@pytest.mark.parametrize(("stack", "description", "lens"),
-    [pytest.param(
-            "python", "extract the repeated --flag branch pairs into a focused callable", "per-stack", id="python",
-        ),
-        pytest.param(
-            "structure", "structural: the --flag branch pairs grow main() past the extraction threshold", "structural",
-            id="structure",
-        ),
-    ],
-)
-async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stack: str, description: str, lens: str,
+
+async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["committed", "worktree", "missing-key"]
+    case_index = 0
+    for change in cases_0:
+        with subtests.test(change=change), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_start_at_merge_refuses_stale_or_unverifiable_artifacts(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, change=change
+            )
+
+
+async def _case_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stack: str, description: str, lens: str
 ) -> None:
     _silence(monkeypatch)
     project = _eroded_main_repo(tmp_path)
@@ -361,3 +419,26 @@ async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
     assert len(matching) == 1, items
     assert matching[0]["severity"] == "medium"
     assert matching[0]["lens"] == lens
+
+
+async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str, str]] = [
+        ("python", "extract the repeated --flag branch pairs into a focused callable", "per-stack"),
+        ("structure", "structural: the --flag branch pairs grow main() past the extraction threshold", "structural"),
+    ]
+    case_index = 0
+    for stack, description, lens in cases_0:
+        with (
+            subtests.test(stack=stack, description=description, lens=lens),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                stack=stack,
+                description=description,
+                lens=lens,
+            )

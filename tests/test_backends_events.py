@@ -64,53 +64,61 @@ def _rejected_configs() -> list[tuple[type[Any], dict[str, Any], str]]:
         (OspreyRequestConfig, {"vars_count": 2**63}, "vars_count"),
     ]
 
-@pytest.mark.parametrize(("config_cls", "kwargs", "field_name"), _rejected_configs())
 def test_admission_contract_construction_rejects_wrong_types(
-    config_cls: type[Any], kwargs: dict[str, Any], field_name: str,
+    subtests: pytest.Subtests,
 ) -> None:
-    with pytest.raises(ValueError, match=field_name):
-        config_cls(**kwargs)
+    cases: list[tuple[type[Any], dict[str, Any], str]] = _rejected_configs()
+    for config_cls, kwargs, field_name in cases:
+        with subtests.test(field_name=field_name):
+            with pytest.raises(ValueError, match=field_name):
+                config_cls(**kwargs)
 
-@pytest.mark.parametrize(
-    ("config_cls", "kwargs"),
-    [
-        pytest.param(
+def test_admission_contract_accepts_exact_zero_and_boundaries(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[type[Any], dict[str, Any]]] = [
+        (
             EffectiveRequestConfig,
             {
-                "temperature": 0.0, "max_turns": 2**63 - 1, "read_only": False, "persist_session": True,
-                "continuation_mode": "resume", "model_mode": "multi_or_dynamic",
-            }, id="effective-boundaries-and-zero",
-        ), pytest.param(EffectiveRequestConfig, {"temperature": -0.5}, id="negative-temperature-is-a-finite-float"),
-        pytest.param(
+                "temperature": 0.0,
+                "max_turns": 2**63 - 1,
+                "read_only": False,
+                "persist_session": True,
+                "continuation_mode": "resume",
+                "model_mode": "multi_or_dynamic",
+            },
+        ),
+        (EffectiveRequestConfig, {"temperature": -0.5}),
+        (
             ClaudeRequestConfig,
             {
-                "permission_mode": "bypassPermissions", "allowed_tools_count": 0, "allowed_tools_present": False,
+                "permission_mode": "bypassPermissions",
+                "allowed_tools_count": 0,
+                "allowed_tools_present": False,
                 "buffer_limit_bytes": 0,
-            }, id="claude-zeros-retained",
+            },
         ),
-        pytest.param(
-            CodexRequestConfig,
-            {"sandbox_mode": "read-only", "native_output_schema": True, "read_only_isolation": True},
-            id="codex-closed-modes",
-        ),
-        pytest.param(
+        (CodexRequestConfig, {"sandbox_mode": "read-only", "native_output_schema": True, "read_only_isolation": True}),
+        (
             PiRequestConfig,
             {"selected_tools_count": 4, "selected_tools_present": True, "no_skills": True, "schema_emulated": True},
-            id="pi-effective-controls",
         ),
-        pytest.param(
+        (
             OspreyRequestConfig,
             {
-                "approval_mode": "deny-untrusted", "sandbox": True, "max_turns": 0, "empty_completion_threshold": 0,
+                "approval_mode": "deny-untrusted",
+                "sandbox": True,
+                "max_turns": 0,
+                "empty_completion_threshold": 0,
                 "observation_admission_bytes": 2 * 1024 * 1024,
-            }, id="osprey-zeros-and-closed-mode",
+            },
         ),
-    ],
-)
-def test_admission_contract_accepts_exact_zero_and_boundaries(config_cls: type[Any], kwargs: dict[str, Any]) -> None:
-    config = config_cls(**kwargs)
-    for name, value in kwargs.items():
-        assert getattr(config, name) == value
+    ]
+    for config_cls, kwargs in cases:
+        with subtests.test(config_cls=config_cls):
+            config = config_cls(**kwargs)
+            for name, value in kwargs.items():
+                assert getattr(config, name) == value
 
 def test_admission_contract_defaults_mean_absent_not_effective() -> None:
     config = EffectiveRequestConfig()

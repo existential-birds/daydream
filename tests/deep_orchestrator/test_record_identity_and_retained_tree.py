@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.phases.findings import _write_single_stack_merged_items
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.support import (
     _fresh_uid_run,
     _high_record,
@@ -34,6 +36,7 @@ from tests.harness.git_helpers import (
     work_context,
 )
 from tests.harness.review_result import saved_coverage
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -325,10 +328,8 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
         "1 of 2 merged item(s) now carry no record attribution." in out
     ), out
 
-@pytest.mark.parametrize("provenance", ["null", "missing", "string"])
-async def test_unattributable_merge_source_uids_require_current_schema(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    provenance: str,
+async def _case_unattributable_merge_source_uids_require_current_schema(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], provenance: str
 ) -> None:
     """Null attribution ships honestly as []; missing and wrong-typed keys reject synthesis."""
 
@@ -356,6 +357,25 @@ async def test_unattributable_merge_source_uids_require_current_schema(
     out = _panel_text(capsys)
     assert "match no record in this run" not in out, out
 
+
+async def test_unattributable_merge_source_uids_require_current_schema(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["null", "missing", "string"]
+    case_index = 0
+    for provenance in cases_0:
+        with subtests.test(provenance=provenance), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_unattributable_merge_source_uids_require_current_schema(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                capsys=capsys,
+                provenance=provenance,
+            )
+
+
 async def test_single_stack_bypass_attributes_items_to_their_own_records(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
@@ -378,9 +398,8 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
     for item in _merged_items(deep):
         assert item["source_uids"] == [item["uid"]], item
 
-@pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
-def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool,
+def _case_host_bypass_structural_fold_survivor_inherits_both_provenances(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool
 ) -> None:
     """Host-only bypass/salvage folding preserves both identities and structural severity."""
 
@@ -411,6 +430,21 @@ def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
     assert folded["folded_count"] == 1
     assert folded["folded"][0]["survivor"] == survivor
     assert folded["folded"][0]["source_uids"] == source_uids
+
+
+def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [True, False]
+    case_index = 0
+    for base_evidenced in cases_0:
+        with subtests.test(base_evidenced=base_evidenced), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            _case_host_bypass_structural_fold_survivor_inherits_both_provenances(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, base_evidenced=base_evidenced
+            )
+
 
 async def test_dropped_speculative_sidecar_records_item_provenance(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -462,9 +496,7 @@ async def test_merge_resume_rejects_structural_records_missing_host_identity(
     assert items and not any(item["lens"] == "structural" for item in items)
     assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
 
-@pytest.mark.parametrize("scratch_is_related", [False, True])
-def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, scratch_is_related: bool,
-) -> None:
+def _case_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, scratch_is_related: bool) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
 
     repo = tmp_path / "retained"
@@ -491,6 +523,18 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: P
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
+
+
+def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for scratch_is_related in cases_0:
+        with subtests.test(scratch_is_related=scratch_is_related), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_retained_tree_uses_full_delta_identity_but_authorized_patch(
+                tmp_path=scenario.tmp_path, scratch_is_related=scratch_is_related
+            )
+
 
 def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
     """Commit selection is HEAD-relative even though evidence stays run-relative."""

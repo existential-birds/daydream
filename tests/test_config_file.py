@@ -5,6 +5,7 @@ import pytest
 
 from daydream.config_file import DaydreamFileConfig, _coerce_non_negative_float, load_file_config
 from tests.harness.config import write_daydream_pyproject
+from tests.harness.table_cases import isolated_case
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -24,12 +25,22 @@ def test_improve_github_issue_publishing_accepts_kebab_case_fallback(tmp_path: P
 
     assert config.improve_github_publish_issues is True
 
-@pytest.mark.parametrize("raw", ['"yes"', "1", "[]"])
-def test_improve_github_issue_publishing_rejects_non_boolean_values(tmp_path: Path, raw: str,) -> None:
-    (tmp_path / ".daydream.toml").write_text(f"[improve.github]\npublish_issues = {raw}\n")
+def test_improve_github_issue_publishing_rejects_non_boolean_values(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ['"yes"', "1", "[]"]
+    for raw in cases:
+        row_index += 1
+        with subtests.test(raw=raw):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(f"[improve.github]\npublish_issues = {raw}\n")
 
-    assert load_file_config(tmp_path).improve_github_publish_issues is False
-    assert DaydreamFileConfig().improve_github_publish_issues is False
+                assert load_file_config(tmp_path).improve_github_publish_issues is False
+                assert DaydreamFileConfig().improve_github_publish_issues is False
 
 
 
@@ -68,81 +79,132 @@ def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixt
     # rejection.
     assert any("no longer a supported daydream config section" in rec.message for rec in caplog.records)
 
-@pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
-def test_bool_key_true_parses_as_bool(tmp_path: Path, key: str) -> None:
-    (tmp_path / ".daydream.toml").write_text(f"{key} = true\n")
-    cfg = load_file_config(tmp_path)
-    assert getattr(cfg, key) is True
+def test_bool_key_true_parses_as_bool(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["precision_mode", "approve_on_clean", "scope_issue_filing"]
+    for key in cases:
+        row_index += 1
+        with subtests.test(key=key):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(f"{key} = true\n")
+                cfg = load_file_config(tmp_path)
+                assert getattr(cfg, key) is True
 
-@pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
-def test_bool_key_non_bool_degrades_to_none(tmp_path: Path, key: str) -> None:
-    # Truthy integers stay unset under bool-only coercion.
-    (tmp_path / ".daydream.toml").write_text(f"{key} = 1\n")
-    cfg = load_file_config(tmp_path)
-    assert getattr(cfg, key) is None
+def test_bool_key_non_bool_degrades_to_none(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["precision_mode", "approve_on_clean", "scope_issue_filing"]
+    for key in cases:
+        row_index += 1
+        with subtests.test(key=key):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(f"{key} = 1\n")
+                cfg = load_file_config(tmp_path)
+                assert getattr(cfg, key) is None
 
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
     write_daydream_pyproject(tmp_path, trajectory_hub_repo="evil/repo")
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
-@pytest.mark.parametrize(("content", "expected"),
-    [pytest.param(
+def test_supervision_config(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, tuple[str | None, list[str], str | None, list[str]]]] = [
+        (
             'supervisor = "rules"\n'
             'supervisor_deny_globs = ["vendor/**"]\n'
             'tool_supervisor = "rules"\n'
             'tool_bash_deny = ["rm -rf"]\n',
-            ("rules", ["vendor/**"], "rules", ["rm -rf"]), id="valid",
+            ("rules", ["vendor/**"], "rules", ["rm -rf"]),
         ),
-        pytest.param(
+        (
             'supervisor = "unknown"\nsupervisor_deny_globs = [1]\ntool_supervisor = "unknown"\ntool_bash_deny = [1]\n',
-            (None, [], None, []), id="invalid-degrades-to-unset",
+            (None, [], None, []),
         ),
-    ],
-)
-def test_supervision_config(tmp_path: Path, content: str, expected: tuple[str | None, list[str], str | None, list[str]],
+    ]
+    for content, expected in cases:
+        row_index += 1
+        with subtests.test(content=content):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(content)
+                cfg = load_file_config(tmp_path)
+
+                assert (
+                    cfg.supervisor,
+                    cfg.supervisor_deny_globs,
+                    cfg.tool_supervisor,
+                    cfg.tool_bash_deny,
+                ) == expected
+
+
+def test_quality_gate_threshold_coercion(
+    subtests: pytest.Subtests,
 ) -> None:
-    (tmp_path / ".daydream.toml").write_text(content)
-    cfg = load_file_config(tmp_path)
-
-    assert (cfg.supervisor, cfg.supervisor_deny_globs, cfg.tool_supervisor, cfg.tool_bash_deny,) == expected
-
-
-@pytest.mark.parametrize(("raw", "expected"),
-    [pytest.param(float("-inf"), None, id="negative-inf"), pytest.param("0.05", None, id="string"),
-        pytest.param([0.05], None, id="list"), pytest.param(None, None, id="absent"), pytest.param(0, 0.0, id="zero"),
-        pytest.param(0.05, 0.05, id="valid"), pytest.param(100, 100.0, id="int-coerced"),
-    ],
-)
-def test_quality_gate_threshold_coercion(raw: object, expected: float | None) -> None:
     """Thresholds require finite nonnegative numbers; invalid values defer to defaults.
 
     Negative floors flag unchanged files, while NaN/inf disable comparisons. Reject
     booleans, strings, and lists as well as invalid numeric values.
     """
-    value = _coerce_non_negative_float(raw)
-    if expected is None:
-        assert value is None
-    else:
-        assert value == expected
+    cases: list[tuple[object, float | None]] = [
+        (float("-inf"), None),
+        ("0.05", None),
+        ([0.05], None),
+        (None, None),
+        (0, 0.0),
+        (0.05, 0.05),
+        (100, 100.0),
+    ]
+    for raw, expected in cases:
+        with subtests.test(expected=expected):
+            value = _coerce_non_negative_float(raw)
+            if expected is None:
+                assert value is None
+            else:
+                assert value == expected
 
-@pytest.mark.parametrize("value",
-    [pytest.param("-0.1", id="negative"), pytest.param("nan", id="nan"), pytest.param("inf", id="inf"),
-        pytest.param("true", id="bool"), pytest.param('"0.25"', id="string"),
-    ],
-)
-def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, value: str) -> None:
-    (tmp_path / ".daydream.toml").write_text(
-        f"quality_gate_erosion_delta = {value}\n"
-        f"quality_gate_verbosity_delta = {value}\n"
-        f"quality_gate_erosion_absolute = {value}\n"
-        f"quality_gate_verbosity_absolute = {value}\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.quality_gate_erosion_delta is None
-    assert cfg.quality_gate_verbosity_delta is None
-    assert cfg.quality_gate_erosion_absolute is None
-    assert cfg.quality_gate_verbosity_absolute is None
+def test_quality_gate_thresholds_in_file_config_degrade_to_none(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = [
+        "-0.1",
+        "nan",
+        "inf",
+        "true",
+        '"0.25"',
+    ]
+    for value in cases:
+        row_index += 1
+        with subtests.test(value=value):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(
+                    f"quality_gate_erosion_delta = {value}\n"
+                    f"quality_gate_verbosity_delta = {value}\n"
+                    f"quality_gate_erosion_absolute = {value}\n"
+                    f"quality_gate_verbosity_absolute = {value}\n"
+                )
+                cfg = load_file_config(tmp_path)
+                assert cfg.quality_gate_erosion_delta is None
+                assert cfg.quality_gate_verbosity_delta is None
+                assert cfg.quality_gate_erosion_absolute is None
+                assert cfg.quality_gate_verbosity_absolute is None
 
 
 

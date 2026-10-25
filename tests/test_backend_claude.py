@@ -45,6 +45,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
     scripted_client,
 )
+from tests.harness.table_cases import isolated_case
 
 
 async def test_artifact_visibility_protocol_sdk_query_observes_exact_options_and_prompt(
@@ -291,66 +292,87 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     assert excinfo.value.subtype == "error_max_turns"
     assert isinstance(excinfo.value, ClaudeAgentError)
 
-@pytest.mark.parametrize("cmd,allowed", [
-    ("git log --oneline -5", True), ("git blame -L 10,10 daydream/phases.py", True),
-    ("git show 648a327 -- daydream/phases.py", True), ("git diff main..HEAD -- daydream/phases.py", True),
-    ("daydream search symbol src .github", True),
-    ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
-    ("git ls-files -z --cached --others --exclude-standard -- src", True),
-    ("daydream search symbol src > evidence.json", False),
-    ("daydream search symbol src && daydream setup", False),
-    ("daydream setup", False),
-    ("daydream search-other symbol src", False),
-    ("cat README.md", True), ("git status", True), ("ls -la", True), ("git commit -m x", False), ("git add -A", False),
-    ("git checkout -- f.py", False), ("rm -rf build", False), ("touch newfile", False),
-    ("git status && rm x", False),       # chain into mutating token
-    ("cat f | tee g", False),            # pipe into non-allowlisted
-    ("git log; rm x", False),            # semicolon chain
-    ("echo $(rm x)", False),             # command substitution
-    ("git logfoo", False),               # prefix must be word-bounded
-    ("git status > status.txt", False),  # output redirection creates/truncates a file
-    ("cat README.md >> copy.txt", False),# append redirection
-    ("cat < README.md", False),          # input redirection
-    ("git log foo# > status.txt", False),# mid-word '#' must not blind the redirect scan
-    ("cat a#b > f", False),               # mid-word '#' hidden in an arg, then redirect
-    ("git log foo#; rm x", False),        # mid-word '#' then a chaining operator
-    ("git diff --output=diff.patch", False),  # git output-file option, equals form
-    ("git log --output log.txt", False), # git output-file option, separated form
-    ("( rm x )", False),                 # command-leading subshell group executes
-    ("(rm x)", False),                   # spacing-free subshell at command start still denies
-    ("(git status > out.txt)", False),   # subshell wrapping a redirect still denies
-    ("ls -la ( x )", True),              # mid-command parens: bash syntax error, nothing runs
-    ("git log --format=%C(red)%h", True),# git color placeholder: parens glued to a word
-    ("cat foo(1).txt", True),            # parens glued into a filename word
-    ("git log\nrm x", False),           # newline command separator -> fail closed
-    ("git log 'unclosed", False),        # malformed quoting -> fail closed
-    ("git log --grep='fix|bug'", True),  # quoted | is argument content, not an operator
-    ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
-    ("", False),                          # empty → fail closed
-])
-def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
-    assert _is_read_only_command(cmd) is allowed
+def test_read_only_bash_guard_decision(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any]] = [
+        ("git log --oneline -5", True),
+        ("git blame -L 10,10 daydream/phases.py", True),
+        ("git show 648a327 -- daydream/phases.py", True),
+        ("git diff main..HEAD -- daydream/phases.py", True),
+        ("daydream search symbol src .github", True),
+        ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
+        ("git ls-files -z --cached --others --exclude-standard -- src", True),
+        ("daydream search symbol src > evidence.json", False),
+        ("daydream search symbol src && daydream setup", False),
+        ("daydream setup", False),
+        ("daydream search-other symbol src", False),
+        ("cat README.md", True),
+        ("git status", True),
+        ("ls -la", True),
+        ("git commit -m x", False),
+        ("git add -A", False),
+        ("git checkout -- f.py", False),
+        ("rm -rf build", False),
+        ("touch newfile", False),
+        ("git status && rm x", False),  # chain into mutating token
+        ("cat f | tee g", False),  # pipe into non-allowlisted
+        ("git log; rm x", False),  # semicolon chain
+        ("echo $(rm x)", False),  # command substitution
+        ("git logfoo", False),  # prefix must be word-bounded
+        ("git status > status.txt", False),  # output redirection creates/truncates a file
+        ("cat README.md >> copy.txt", False),  # append redirection
+        ("cat < README.md", False),  # input redirection
+        ("git log foo# > status.txt", False),  # mid-word '#' must not blind the redirect scan
+        ("cat a#b > f", False),  # mid-word '#' hidden in an arg, then redirect
+        ("git log foo#; rm x", False),  # mid-word '#' then a chaining operator
+        ("git diff --output=diff.patch", False),  # git output-file option, equals form
+        ("git log --output log.txt", False),  # git output-file option, separated form
+        ("( rm x )", False),  # command-leading subshell group executes
+        ("(rm x)", False),  # spacing-free subshell at command start still denies
+        ("(git status > out.txt)", False),  # subshell wrapping a redirect still denies
+        ("ls -la ( x )", True),  # mid-command parens: bash syntax error, nothing runs
+        ("git log --format=%C(red)%h", True),  # git color placeholder: parens glued to a word
+        ("cat foo(1).txt", True),  # parens glued into a filename word
+        ("git log\nrm x", False),  # newline command separator -> fail closed
+        ("git log 'unclosed", False),  # malformed quoting -> fail closed
+        ("git log --grep='fix|bug'", True),  # quoted | is argument content, not an operator
+        ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
+        ("", False),  # empty → fail closed
+    ]
+    for cmd, allowed in cases:
+        with subtests.test(cmd=cmd):
+            assert _is_read_only_command(cmd) is allowed
 
-@pytest.mark.parametrize("cmd, dangerous", [
-    ("find / -path '*x*'", True), ("find / -name y", True), ("grep -r pattern /", True), ("rm -rf /", True),
-    ("rm -fr /", True),                       # reversed flags
-    ("rm -rf /*", True),                      # root glob
-    ("rm --recursive --force /", True),       # long-form flags
-    ("rm -Rf /", True),                       # capital-R recursive
-    ("rm -rf foo /", True),                   # trailing root arg
-    # Reordering recursive flags must not evade the ownership guard.
-    ("rm --force --recursive /", True),       # long-form, recursive second
-    ("rm -f -r /", True),                     # short-form, recursive second
-    ("rm -i -r /*", True),                    # recursive second, root glob
-    ("rm -rf /home/user/tmp", False),         # subpath under / is left alone
-    ("rm -rf build", False),                  # relative path
-    # F12: `/` as the grep pattern (not a root path) is no longer a false positive.
-    ("grep / file.txt", False),               # searching for a literal slash
-    ("find core/osprey-tui -name agent.rs", False), ("ls", False), ("rg foo src/", False),
-])
-def test_is_dangerous_command(cmd: Any, dangerous: Any) -> None:
+def test_is_dangerous_command(
+    subtests: pytest.Subtests,
+) -> None:
     """The always-on dangerous-command predicate flags root-scans and catastrophic deletes."""
-    assert _is_dangerous_command(cmd) is dangerous
+    cases: list[tuple[Any, Any]] = [
+        ("find / -path '*x*'", True),
+        ("find / -name y", True),
+        ("grep -r pattern /", True),
+        ("rm -rf /", True),
+        ("rm -fr /", True),  # reversed flags
+        ("rm -rf /*", True),  # root glob
+        ("rm --recursive --force /", True),  # long-form flags
+        ("rm -Rf /", True),  # capital-R recursive
+        ("rm -rf foo /", True),  # trailing root arg
+        # Reordering recursive flags must not evade the ownership guard.
+        ("rm --force --recursive /", True),  # long-form, recursive second
+        ("rm -f -r /", True),  # short-form, recursive second
+        ("rm -i -r /*", True),  # recursive second, root glob
+        ("rm -rf /home/user/tmp", False),  # subpath under / is left alone
+        ("rm -rf build", False),  # relative path
+        # F12: `/` as the grep pattern (not a root path) is no longer a false positive.
+        ("grep / file.txt", False),  # searching for a literal slash
+        ("find core/osprey-tui -name agent.rs", False),
+        ("ls", False),
+        ("rg foo src/", False),
+    ]
+    for cmd, dangerous in cases:
+        with subtests.test(cmd=cmd):
+            assert _is_dangerous_command(cmd) is dangerous
 
 async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> None:
     """Drive registered guards: bypassPermissions needs all-tool, deny-by-default enforcement.
@@ -685,59 +707,99 @@ def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch: p
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
     assert effective_fanout_concurrency(2, ClaudeBackend(model="opus")) == 2
 
-@pytest.mark.parametrize(("env_value", "expected"), [ ("6", 6), ("0", 8), ("-1", 8), ("notanint", 8), ("", 8), ])
 def test_claude_fanout_concurrency_env_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: Any, expected: int,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
-    if expected == 8:
-        assert "using default 8" in caplog.text
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[Any, int]] = [
+        ("6", 6),
+        ("0", 8),
+        ("-1", 8),
+        ("notanint", 8),
+        ("", 8),
+    ]
+    for env_value, expected in cases:
+        row_index += 1
+        with subtests.test(expected=expected):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                caplog.clear()
+                monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
+                assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
+                if expected == 8:
+                    assert "using default 8" in caplog.text
 
 # --- Session continuation via SDK resume --------------------------------------
 
-@pytest.mark.parametrize(
-    ("token", "expected_resume"),
-    [
-        (ContinuationToken(backend="claude", data={"session_id": "sess-123"}), "sess-123"),
-        (ContinuationToken(backend="codex", data={"thread_id": "th-1"}), None),
-    ], ids=["claude-minted", "foreign-backend"],
-)
 async def test_continuation_token_controls_resume(
-    monkeypatch: pytest.MonkeyPatch, token: ContinuationToken, expected_resume: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A claude-minted token becomes ``options.resume``; a foreign token starts cold."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-123")], captured=captured),
-    )
-    backend = ClaudeBackend(model="opus")
-    async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
-        pass
-    assert captured["options"].resume == expected_resume
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[ContinuationToken, str | None]] = [
+        (ContinuationToken(backend="claude", data={"session_id": "sess-123"}), "sess-123"),
+        (ContinuationToken(backend="codex", data={"thread_id": "th-1"}), None),
+    ]
+    for token, expected_resume in cases:
+        row_index += 1
+        with subtests.test(expected_resume=expected_resume):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                captured: dict[str, Any] = {}
+                patch_claude_sdk(
+                    monkeypatch,
+                    scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-123")], captured=captured),
+                )
+                backend = ClaudeBackend(model="opus")
+                async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
+                    pass
+                assert captured["options"].resume == expected_resume
 
-@pytest.mark.parametrize("persist_session", [False, True])
-@pytest.mark.parametrize("session_id", [None, "sess-9"])
 async def test_result_continuation_requires_persisted_native_session(
-    monkeypatch: pytest.MonkeyPatch, persist_session: bool, session_id: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id=session_id)], captured=captured),
-    )
-    backend = ClaudeBackend(model="opus")
-    results = [event async for event in backend.execute(Path("/tmp"), "p", persist_session=persist_session)
-               if isinstance(event, ResultEvent)]
-    assert len(results) == 1
-    assert captured["options"].extra_args == ({} if persist_session else {"no-session-persistence": None})
-    if persist_session and session_id:
-        assert results[0].continuation is not None
-        assert results[0].continuation.backend == "claude"
-        assert results[0].continuation.data["session_id"] == session_id
-    else:
-        assert results[0].continuation is None
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[str | None] = [None, "sess-9"]
+    for session_id in cases_1:
+        cases_2: list[bool] = [False, True]
+        for persist_session in cases_2:
+            row_index += 1
+            with subtests.test(session_id=session_id, persist_session=persist_session):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    monkeypatch = case.monkeypatch
+                    captured: dict[str, Any] = {}
+                    patch_claude_sdk(
+                        monkeypatch,
+                        scripted_client(
+                            [MockResultMessage(total_cost_usd=0.01, session_id=session_id)], captured=captured
+                        ),
+                    )
+                    backend = ClaudeBackend(model="opus")
+                    results = [
+                        event
+                        async for event in backend.execute(Path("/tmp"), "p", persist_session=persist_session)
+                        if isinstance(event, ResultEvent)
+                    ]
+                    assert len(results) == 1
+                    assert captured["options"].extra_args == (
+                        {} if persist_session else {"no-session-persistence": None}
+                    )
+                    if persist_session and session_id:
+                        assert results[0].continuation is not None
+                        assert results[0].continuation.backend == "claude"
+                        assert results[0].continuation.data["session_id"] == session_id
+                    else:
+                        assert results[0].continuation is None
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -773,20 +835,23 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
     )
     assert "background Bash blocked" not in str(other_tool)
 
-@pytest.mark.parametrize(
-    ("payload", "background"),
-    [
+def test_is_background_bash(
+    subtests: pytest.Subtests,
+) -> None:
+    """Only a Bash payload with a truthy ``run_in_background`` is a background call."""
+    cases: list[tuple[Any, bool]] = [
         ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": True}}, True),
         ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": False}}, False),
         ({"tool_name": "Bash", "tool_input": {"command": "make test"}}, False),
         ({"tool_name": "Bash", "tool_input": {"run_in_background": True}}, True),
         ({"tool_name": "Read", "tool_input": {"run_in_background": True}}, False),
-        ({"tool_name": "Bash", "tool_input": "not-a-dict"}, False), ("garbage", False), (None, False),
-    ],
-)
-def test_is_background_bash(payload: Any, background: bool) -> None:
-    """Only a Bash payload with a truthy ``run_in_background`` is a background call."""
-    assert _is_background_bash(payload) is background
+        ({"tool_name": "Bash", "tool_input": "not-a-dict"}, False),
+        ("garbage", False),
+        (None, False),
+    ]
+    for payload, background in cases:
+        with subtests.test(background=background):
+            assert _is_background_bash(payload) is background
 
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
 

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ from daydream.deep.render import render_report
 from daydream.phases import build_commit_message
 from daydream.review_profile import resolve_profile
 from daydream.runner import run
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import (
@@ -30,13 +32,14 @@ from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
 )
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.review_profile import (
     independent_alternatives_profile,
     independent_exploration_profile,
 )
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import install_stub_backend
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import MakeConfig, _merge_item
 
 
@@ -135,13 +138,8 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
     return surface
 
 
-@pytest.mark.parametrize("unit", [
-    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
-    "rationale-directory", "rationale-permission",
-    "author-present", "author-absent", "split-inputs",
-])
-async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh,
+async def _case_identical_rerun_restores_completed_units_and_current_run_evidence(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh
 ) -> None:
     """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
     if unit == 'split-inputs':
@@ -299,6 +297,36 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
         resumed = saved_coverage(deep)
         assert {name: outcome['target_decisions'] for name, outcome in resumed.scopes.items()} == attribution
         assert _count_review_prompts(stub.calls) == 0, 'resume must use the retained source attribution'
+
+
+async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "all-units",
+        "independent",
+        "arbiter",
+        "rationale-missing",
+        "rationale-corrupt",
+        "rationale-nested",
+        "rationale-directory",
+        "rationale-permission",
+        "author-present",
+        "author-absent",
+        "split-inputs",
+    ]
+    case_index = 0
+    for unit in cases_0:
+        with subtests.test(unit=unit), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_identical_rerun_restores_completed_units_and_current_run_evidence(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                unit=unit,
+                fake_gh=install_fake_gh(scenario.tmp_path / "fake-gh-state", scenario.monkeypatch),
+            )
 
 
 async def test_obsolete_completed_synthesis_is_replaced_and_current_output_reused(
@@ -671,15 +699,8 @@ def _damage_source_attribution(decisions: list[dict[str, Any]], damage: str) -> 
     return True
 
 
-@pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
-                                     "partial_payload", "malformed_payload", "unstaged", "prior-staged",
-                                     "contract-3", "contract-4", "contract-5", "contract-6", "contract-8",
-                                     "contract-9", "contract-10", "contract-11",
-                                     "missing-attribution", "invalid-attribution", "aggregate-attribution",
-                                     *_ATTRIBUTION_DAMAGE])
-async def test_legacy_cache_without_coverage_proof_recomputes_review(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    damage: str,
+async def _case_legacy_cache_without_coverage_proof_recomputes_review(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str
 ) -> None:
     """Pre-v2 completed bytes cannot establish complete current review coverage."""
     if damage == "attribution-missing-target":
@@ -791,11 +812,49 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
         assert len(full) - len(core) <= 256 * 1024
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",
-                                    "missing-attribution", "invalid-attribution", "aggregate-attribution",
-                                     *_ATTRIBUTION_DAMAGE])
-async def test_resume_rejects_missing_or_mismatched_coverage(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
+async def test_legacy_cache_without_coverage_proof_recomputes_review(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "legacy",
+        "corrupt",
+        "incomplete",
+        "head",
+        "diff",
+        "scope",
+        "origin",
+        "partial_payload",
+        "malformed_payload",
+        "unstaged",
+        "prior-staged",
+        "contract-3",
+        "contract-4",
+        "contract-5",
+        "contract-6",
+        "contract-8",
+        "contract-9",
+        "contract-10",
+        "contract-11",
+        "missing-attribution",
+        "invalid-attribution",
+        "aggregate-attribution",
+        *_ATTRIBUTION_DAMAGE,
+    ]
+    case_index = 0
+    for damage in cases_0:
+        with subtests.test(damage=damage), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_legacy_cache_without_coverage_proof_recomputes_review(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                damage=damage,
+            )
+
+
+async def _case_resume_rejects_missing_or_mismatched_coverage(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path
 ) -> None:
     """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
@@ -845,10 +904,37 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     assert initial.is_file()
 
 
-@pytest.mark.parametrize("recovery", ["resume", "cache"])
-@pytest.mark.parametrize("scope", ["python", "structure"])
-async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str, scope: str,
+async def test_resume_rejects_missing_or_mismatched_coverage(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "missing",
+        "corrupt",
+        "head",
+        "diff",
+        "scope",
+        "phase",
+        "missing-attribution",
+        "invalid-attribution",
+        "aggregate-attribution",
+        *_ATTRIBUTION_DAMAGE,
+    ]
+    case_index = 0
+    for damage in cases_0:
+        with subtests.test(damage=damage), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_resume_rejects_missing_or_mismatched_coverage(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                damage=damage,
+                tmp_path=scenario.tmp_path,
+            )
+
+
+async def _case_successful_scope_rerun_clears_prior_failure_for_same_revision(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str, scope: str
 ) -> None:
     """Unfinished scopes require successful investigation before resume or cache reuse."""
     from daydream.backends import AgentEvent, ResultEvent
@@ -959,3 +1045,23 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert _count_review_prompts(backend.calls) == 0
         assert _reused_stacks(deep) == {"python", "react", "generic", "structure"}
         assert saved_coverage(deep).unfinished_scopes == {}
+
+
+async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["resume", "cache"]
+    cases_1: Sequence[str] = ["python", "structure"]
+    case_index = 0
+    for recovery in cases_0:
+        for scope in cases_1:
+            with subtests.test(recovery=recovery, scope=scope), isolated_case(tmp_path, str(case_index)) as scenario:
+                case_index += 1
+                multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+                await _case_successful_scope_rerun_clears_prior_failure_for_same_revision(
+                    multi_stack_target=multi_stack_target,
+                    monkeypatch=scenario.monkeypatch,
+                    tmp_path=scenario.tmp_path,
+                    recovery=recovery,
+                    scope=scope,
+                )

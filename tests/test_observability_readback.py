@@ -16,6 +16,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any, Callable, Iterator, Mapping, cast
 import pytest
 
 from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.table_cases import isolated_case
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -574,56 +576,62 @@ class _LoopbackPeer:
         except OSError:
             pass
 
-@pytest.mark.parametrize("trickle", [False, True])
-def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
+def test_immutable_budget_truncates_slow_peers(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
-    receipt = _write_receipt(tmp_path)
-    peer = _LoopbackPeer(trickle=trickle)
-    # Cold HTTPX transport imports and TLS context construction are synchronous
-    # and can exhaust the tiny budget under parallel coverage before any socket
-    # opens. Prepare that real transport outside the measured slow-peer interval;
-    # keep real HTTPX streaming, deadline cancellation, and connection closure.
-    transport = _verifier.httpx.AsyncHTTPTransport(trust_env=False)
-    client_type = _verifier.httpx.AsyncClient
+    case_root = tmp_path
+    cases: Sequence[bool] = [False, True]
+    for case_index, trickle in enumerate(cases):
+        with subtests.test(trickle=trickle):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                receipt = _write_receipt(tmp_path)
+                peer = _LoopbackPeer(trickle=trickle)
+                # Cold HTTPX transport imports and TLS context construction are synchronous
+                # and can exhaust the tiny budget under parallel coverage before any socket
+                # opens. Prepare that real transport outside the measured slow-peer interval;
+                # keep real HTTPX streaming, deadline cancellation, and connection closure.
+                transport = _verifier.httpx.AsyncHTTPTransport(trust_env=False)
+                client_type = _verifier.httpx.AsyncClient
 
-    def prepared_client(**kwargs: Any) -> Any:
-        return client_type(transport=transport, **kwargs)
+                def prepared_client(**kwargs: Any) -> Any:
+                    return client_type(transport=transport, **kwargs)
 
-    monkeypatch.setattr(_verifier.httpx, "AsyncClient", prepared_client)
-    try:
-        monkeypatch.setenv("HH_API_URL", peer.base_url)
-        monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
-        monkeypatch.setenv("DAYDREAM_TRACE_TO", "honeyhive")
-        receipt_data = json.loads(receipt.read_text())
-        receipt_data["destinations"] = ["honeyhive"]
-        receipt.write_text(json.dumps(receipt_data), encoding="utf-8")
-        result_path = tmp_path / "result.json"
-        started = time.monotonic()
-        exit_code = _run_verify(receipt, result_path, budget_s=0.12)
-        elapsed = time.monotonic() - started
-        assert elapsed < 0.35, f"verifier took {elapsed:.3f}s with a 0.12s budget"
-        assert exit_code != 0
-        result = json.loads(result_path.read_text())
-        assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
-        # Bound peer-observed closure independently of verifier return.
-        peer.close()
-        deadline = time.monotonic() + 2.0
-        while not peer.connections and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert peer.connections, "peer never accepted a connection"
-        accepted_at, closed_at = peer.connections[0]
-        assert closed_at - accepted_at < 1.0, (
-            f"peer observed closure {closed_at - accepted_at:.3f}s after accept (must be < 1s)"
-        )
-        # Request log proves no later page or stability poll began.
-        ops = [entry["op"] for entry in result["request_log"]]
-        assert ops == ["search"], f"unexpected request log: {ops}"
-        assert all(entry["op"] != "poll" for entry in result["request_log"])
-        # Every logged request began strictly before the immutable deadline.
-        for entry in result["request_log"]:
-            assert entry["offset_ms"] < 120, f"request began after the 0.12s budget: {entry}"
-    finally:
-        peer.close()
+                monkeypatch.setattr(_verifier.httpx, "AsyncClient", prepared_client)
+                try:
+                    monkeypatch.setenv("HH_API_URL", peer.base_url)
+                    monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
+                    monkeypatch.setenv("DAYDREAM_TRACE_TO", "honeyhive")
+                    receipt_data = json.loads(receipt.read_text())
+                    receipt_data["destinations"] = ["honeyhive"]
+                    receipt.write_text(json.dumps(receipt_data), encoding="utf-8")
+                    result_path = tmp_path / "result.json"
+                    started = time.monotonic()
+                    exit_code = _run_verify(receipt, result_path, budget_s=0.12)
+                    elapsed = time.monotonic() - started
+                    assert elapsed < 0.35, f"verifier took {elapsed:.3f}s with a 0.12s budget"
+                    assert exit_code != 0
+                    result = json.loads(result_path.read_text())
+                    assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
+                    # Bound peer-observed closure independently of verifier return.
+                    peer.close()
+                    deadline = time.monotonic() + 2.0
+                    while not peer.connections and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    assert peer.connections, "peer never accepted a connection"
+                    accepted_at, closed_at = peer.connections[0]
+                    assert closed_at - accepted_at < 1.0, (
+                        f"peer observed closure {closed_at - accepted_at:.3f}s after accept (must be < 1s)"
+                    )
+                    # Request log proves no later page or stability poll began.
+                    ops = [entry["op"] for entry in result["request_log"]]
+                    assert ops == ["search"], f"unexpected request log: {ops}"
+                    assert all(entry["op"] != "poll" for entry in result["request_log"])
+                    # Every logged request began strictly before the immutable deadline.
+                    for entry in result["request_log"]:
+                        assert entry["offset_ms"] < 120, f"request began after the 0.12s budget: {entry}"
+                finally:
+                    peer.close()
 
 
 # Redaction

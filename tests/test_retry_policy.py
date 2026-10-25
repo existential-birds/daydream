@@ -74,12 +74,20 @@ def test_category_only_transient_failure_without_retryable_flag_is_retryable() -
     assert decision.retries_allowed is True
 
 
-@pytest.mark.parametrize("category", ["TIMEOUT", "TRANSPORT"])
-def test_explicit_retry_prohibition_beats_transient_category(category: str) -> None:
-    decision = classify_failure(CodexError(
-        "Completed mutating turn could not drain", category=category, retryable=False,
-    ))
-    assert decision.retries_allowed is False
+def test_explicit_retry_prohibition_beats_transient_category(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["TIMEOUT", "TRANSPORT"]
+    for category in cases:
+        with subtests.test(category=category):
+            decision = classify_failure(
+                CodexError(
+                    "Completed mutating turn could not drain",
+                    category=category,
+                    retryable=False,
+                )
+            )
+            assert decision.retries_allowed is False
 
 
 def test_derive_retry_summary_ignores_deadline_only_stops() -> None:
@@ -125,15 +133,29 @@ def test_classify_failure_never_raises_on_non_string_category_or_message() -> No
     assert decision.failure_class is FailureClass.NOT_RETRYABLE
     assert decision.retries_allowed is False
 
-@pytest.mark.parametrize(("raw", "expected"),
-    [(5, 5.0), (0, 0.0), (42.5, 42.5), ("42", 42.0), ("0", 0.0), (True, None), (False, None), (-1, None),
-        ("-1", None), ("nonsense", None), (float("nan"), None), (float("inf"), None), (None, None), ([], None),
-    ],
-)
-def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | None) -> None:
+def test_the_shared_allowance_decoder_is_one_rule(
+    subtests: pytest.Subtests,
+) -> None:
     """One decode rule: numeric strings accepted, everything invalid refused."""
-
-    assert decode_retry_recovery_allowance(raw) == expected
+    cases: list[tuple[Any, float | None]] = [
+        (5, 5.0),
+        (0, 0.0),
+        (42.5, 42.5),
+        ("42", 42.0),
+        ("0", 0.0),
+        (True, None),
+        (False, None),
+        (-1, None),
+        ("-1", None),
+        ("nonsense", None),
+        (float("nan"), None),
+        (float("inf"), None),
+        (None, None),
+        ([], None),
+    ]
+    for raw, expected in cases:
+        with subtests.test(expected=expected):
+            assert decode_retry_recovery_allowance(raw) == expected
 
 def test_the_shared_allowance_helper_is_the_one_declared_value_rule() -> None:
     """One declared-value rule: what is admitted, and what falls through to the default."""
@@ -169,42 +191,35 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pyte
     assert "retry_recovery_allowance_s=-1" in message
     assert "stays undeclared" in message
 
-@pytest.mark.parametrize(
-    ("message", "expected"),
-    [
+def test_parse_message_retry_hint_reads_structured_headers(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, float | None]] = [
         # Structured, status-prefixed (the issue's sanitized payload).
-        pytest.param(
-            '429: {"message":"Temporary admission failure","code":429,'
-            '"metadata":{"headers":{"Retry-After":"10"}}}', 10.0, id="issue-429",
-        ),
-        pytest.param('429: {"metadata":{"headers":{"retry-after":"7"}}}', 7.0, id="lowercase-key"),
-        pytest.param('429: {"metadata":{"headers":{"RETRY-AFTER":"7"}}}', 7.0, id="upper-key"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":2.5}}}', 2.5, id="fractional-number"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":10}}}', 10.0, id="bare-number"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0, id="zero-string"),
+        ('429: {"message":"Temporary admission failure","code":429,"metadata":{"headers":{"Retry-After":"10"}}}', 10.0),
+        ('429: {"metadata":{"headers":{"retry-after":"7"}}}', 7.0),
+        ('429: {"metadata":{"headers":{"RETRY-AFTER":"7"}}}', 7.0),
+        ('429: {"metadata":{"headers":{"Retry-After":2.5}}}', 2.5),
+        ('429: {"metadata":{"headers":{"Retry-After":10}}}', 10.0),
+        ('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0),
         # Refusal: the shared decoder governs; never a second numeric rule.
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"-5"}}}', None, id="negative"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":true}}}', None, id="boolean"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"nonsense"}}}', None, id="text"),
-        pytest.param(
-            '429: {"metadata":{"headers":{"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}}}',
-            None, id="http-date-out-of-scope",
-        ),
+        ('429: {"metadata":{"headers":{"Retry-After":"-5"}}}', None),
+        ('429: {"metadata":{"headers":{"Retry-After":true}}}', None),
+        ('429: {"metadata":{"headers":{"Retry-After":"nonsense"}}}', None),
+        ('429: {"metadata":{"headers":{"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}}}', None),
         # Guarded shapes: no hint, no raise, text fallback stays live.
-        pytest.param('429: {"metadata":{"headers":"nope"}}', None, id="headers-not-mapping"),
-        pytest.param('429: {"metadata":"nope"}', None, id="metadata-not-mapping"),
-        pytest.param('429: {"code":429}', None, id="no-headers"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"10"}', None, id="malformed-json"),
+        ('429: {"metadata":{"headers":"nope"}}', None),
+        ('429: {"metadata":"nope"}', None),
+        ('429: {"code":429}', None),
+        ('429: {"metadata":{"headers":{"Retry-After":"10"}', None),
         # Preserved plain-text format (req 6): regex fallback.
-        pytest.param("503 Service Unavailable; retry-after: 30", 30.0, id="plain-text"),
-        pytest.param("503 retry-after 45", 45.0, id="plain-whitespace"),
-        pytest.param("503 Service Unavailable", None, id="no-hint-plain"),
-        pytest.param("", None, id="empty"),
+        ("503 Service Unavailable; retry-after: 30", 30.0),
+        ("503 retry-after 45", 45.0),
+        ("503 Service Unavailable", None),
+        ("", None),
         # Structured precedence (Should-Have 2): structured wins over text, deterministically.
-        pytest.param(
-            '429: {"metadata":{"headers":{"Retry-After":"10"}}} retry-after: 99', 10.0, id="structured-wins",
-        ),
-    ],
-)
-def test_parse_message_retry_hint_reads_structured_headers(message: str, expected: float | None) -> None:
-    assert parse_message_retry_hint(message) == expected
+        ('429: {"metadata":{"headers":{"Retry-After":"10"}}} retry-after: 99', 10.0),
+    ]
+    for message, expected in cases:
+        with subtests.test(message=message):
+            assert parse_message_retry_hint(message) == expected

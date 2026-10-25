@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from tests.harness.table_cases import isolated_case
 from tests.test_workflow_templates import _wf_triggers, job_steps, load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -124,36 +125,54 @@ def _execute_shard_plan(
     return result, dict(line.split("=", 1) for line in output.read_text().splitlines())
 
 
-@pytest.mark.parametrize(("dispatch", "requested_count", "count", "workers"), [
-    (False, None, 8, 4),
-    (True, None, 8, 4),
-    (True, "1", 1, 8),
-    (True, "2", 2, 4),
-    (True, "4", 4, 4),
-    (True, "20", 20, 4),
-], ids=["automatic-default", "dispatch-default", "baseline", "legacy-two", "legacy-four", "maximum"])
 def test_ci_shard_planner_emits_complete_supported_matrices(
-    tmp_path: Path, dispatch: bool, requested_count: str | None, count: int, workers: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A working CLI alone cannot prove CI's default, input binding or emitted matrix."""
-    result, outputs = _execute_shard_plan(tmp_path, dispatch=dispatch, requested_count=requested_count)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert outputs["count"] == str(count)
-    assert outputs["workers"] == str(workers)
-    assert json.loads(outputs["matrix"]) == {"index": list(range(count))}
-    input_spec = _wf_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
-    if dispatch and requested_count is not None and input_spec["type"] == "choice":
-        assert requested_count in input_spec["options"], "the workflow UI must offer the supported treatment"
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[bool, str | None, int, int]] = [
+        (False, None, 8, 4),
+        (True, None, 8, 4),
+        (True, "1", 1, 8),
+        (True, "2", 2, 4),
+        (True, "4", 4, 4),
+        (True, "20", 20, 4),
+    ]
+    for dispatch, requested_count, count, workers in cases:
+        row_index += 1
+        with subtests.test(dispatch=dispatch):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result, outputs = _execute_shard_plan(tmp_path, dispatch=dispatch, requested_count=requested_count)
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert outputs["count"] == str(count)
+                assert outputs["workers"] == str(workers)
+                assert json.loads(outputs["matrix"]) == {"index": list(range(count))}
+                input_spec = _wf_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
+                if dispatch and requested_count is not None and input_spec["type"] == "choice":
+                    assert requested_count in input_spec["options"], (
+                        "the workflow UI must offer the supported treatment"
+                    )
 
 
-@pytest.mark.parametrize("requested_count", ["0", "21", "1.5"], ids=["below-minimum", "above-cap", "fractional"])
 def test_ci_shard_planner_rejects_counts_without_publishing_a_partial_matrix(
-    tmp_path: Path, requested_count: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Direct dispatch values cannot create empty, over-cap or fractional matrices."""
-    result, outputs = _execute_shard_plan(tmp_path, dispatch=True, requested_count=requested_count)
-    assert result.returncode != 0
-    assert outputs == {}
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["0", "21", "1.5"]
+    for requested_count in cases:
+        row_index += 1
+        with subtests.test(requested_count=requested_count):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result, outputs = _execute_shard_plan(tmp_path, dispatch=True, requested_count=requested_count)
+                assert result.returncode != 0
+                assert outputs == {}
 
 # CI check-job steps that are deliberately not local gate steps: step name ->
 # the one-line reason. Keep this list small and reasoned; a step that is
@@ -245,19 +264,32 @@ def _gate_violations(
             violations.append(f"{name}: neither an invocation of a declared gate step nor a declared CI-only step")
     return violations
 
-@pytest.mark.parametrize("makeflags", ["", "-w"], ids=["plain", "directory-logging"])
-def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch, makeflags: str) -> None:
+def test_ci_check_job_is_represented_by_the_declared_gate(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """The real check job invokes declared gate steps, plus stated CI-only ones."""
-    monkeypatch.setenv("MAKEFLAGS", makeflags)
-    monkeypatch.setenv("MFLAGS", makeflags)
-    workflow = load_workflow(_CI_WORKFLOW)
-    steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
-    # Script tests are a component of make test, shared with the static CI job.
-    script_recipe = _dry_run_recipe("test-scripts").strip()
-    assert script_recipe in _dry_run_recipe("test")
-    violations = _gate_violations(steps, {*_gate_steps(), "test-scripts"}, _observed_gate_commands(), _CI_ONLY_STEPS)
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["", "-w"]
+    for makeflags in cases:
+        row_index += 1
+        with subtests.test(makeflags=makeflags):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setenv("MAKEFLAGS", makeflags)
+                monkeypatch.setenv("MFLAGS", makeflags)
+                workflow = load_workflow(_CI_WORKFLOW)
+                steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
+                # Script tests are a component of make test, shared with the static CI job.
+                script_recipe = _dry_run_recipe("test-scripts").strip()
+                assert script_recipe in _dry_run_recipe("test")
+                violations = _gate_violations(
+                    steps, {*_gate_steps(), "test-scripts"}, _observed_gate_commands(), _CI_ONLY_STEPS
+                )
 
-    assert violations == [], "\n".join(violations)
+                assert violations == [], "\n".join(violations)
 
 def test_guard_rejects_a_restated_gate_command() -> None:
     """An inlined gate command is caught, and names the step that owns it."""

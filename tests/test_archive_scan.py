@@ -1,5 +1,6 @@
 """Fail-closed bundle secret scanner (issue #981 M9/M11/M13)."""
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,7 @@ def test_scan_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # whole run. These two corpora pin the split: ordinary config/template code
 # may report, but must never refuse egress; real credential values must.
 
-# Mirrors #455's exemplar (test_env_var_pattern_does_not_match_substring_lookalikes).
+# Mirrors #455's non-secret name examples in test_redaction_preserves_non_secret_prose_names_and_certificates.
 _FALSE_POSITIVES = (
     'SORT_KEY = "created_at"', "PRIMARY_KEY = 'id'", "CACHE_KEY = 'v1'", "AUTH=none", "API_TOKEN=${API_TOKEN}",
     "PARTITION_KEY = event.get('pk')",
@@ -82,17 +83,23 @@ _TRUE_POSITIVES = (('token = "ghp_canaryfake123"', "api_key"), ('aws_key = "AKIA
     ("postgresql://real:s3cr3tvalue@db.example.com:5432/app", "url_credential"),
 )
 
-@pytest.mark.parametrize("text", _FALSE_POSITIVES)
-def test_ordinary_code_never_blocks_egress(text: str) -> None:
-    findings = scan._scan_file("sample.py", text)
-    blocking = [f for f in findings if f.severity == scan.SEVERITY_BLOCKING]
-    assert blocking == [], [(f.category, f.location) for f in blocking]
+def test_ordinary_code_never_blocks_egress(subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = _FALSE_POSITIVES
+    for case_index, text in enumerate(cases):
+        with subtests.test(text=text):
+            findings = scan._scan_file("sample.py", text)
+            blocking = [f for f in findings if f.severity == scan.SEVERITY_BLOCKING]
+            assert blocking == [], [(f.category, f.location) for f in blocking]
 
-@pytest.mark.parametrize(("text", "category"), _TRUE_POSITIVES)
-def test_real_credential_shapes_block_egress(text: str, category: str) -> None:
-    findings = scan._scan_file("sample.txt", text)
-    blocking = {f.category for f in findings if f.severity == scan.SEVERITY_BLOCKING}
-    assert category in blocking, [(f.category, f.severity) for f in findings]
+
+def test_real_credential_shapes_block_egress(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[str, str]] = _TRUE_POSITIVES
+    for case_index, (text, category) in enumerate(cases):
+        with subtests.test(text=text, category=category):
+            findings = scan._scan_file("sample.txt", text)
+            blocking = {f.category for f in findings if f.severity == scan.SEVERITY_BLOCKING}
+            assert category in blocking, [(f.category, f.severity) for f in findings]
+
 
 def test_overlapping_userinfo_rules_dedupe_to_strictest_severity() -> None:
     """Rules 1 and 2 both fire on ``scheme://user:pass@`` with the same match.

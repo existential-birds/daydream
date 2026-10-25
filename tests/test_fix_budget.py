@@ -11,6 +11,7 @@ import pytest
 from daydream.config_file import load_file_config
 from daydream.file_group_budget import FileGroupBudget
 from tests.harness.fake_clock import FakeClock
+from tests.harness.table_cases import isolated_case
 
 # -- FileGroupBudget -------------------------------------------------------
 
@@ -45,7 +46,18 @@ def test_group_budget_junk_values_degrade_to_none(tmp_path: Path) -> None:
     assert cfg.group_max_wall_s is None
     assert cfg.group_max_serial_items is None
 
-@pytest.mark.parametrize("raw", ["nan", "inf", "-1", "-0.5"])
-def test_group_max_wall_s_rejects_negative_and_non_finite(tmp_path: Path, raw: str) -> None:
-    (tmp_path / ".daydream.toml").write_text(f"group_max_wall_s = {raw}\n")
-    assert load_file_config(tmp_path).group_max_wall_s is None  # default applies
+def test_group_max_wall_s_rejects_negative_and_non_finite(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["nan", "inf", "-1", "-0.5"]
+    for raw in cases:
+        row_index += 1
+        with subtests.test(raw=raw):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                (tmp_path / ".daydream.toml").write_text(f"group_max_wall_s = {raw}\n")
+                assert load_file_config(tmp_path).group_max_wall_s is None  # default applies
+  # default applies

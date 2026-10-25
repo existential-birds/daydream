@@ -8,15 +8,19 @@ from daydream.deep.risk_categories import (
 )
 
 
-@pytest.mark.parametrize(("category", "text"),
-    [("security", "the handler must authenticate the caller's token"),
+def test_each_mandatory_category_matches_its_declared_triggers(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
+        ("security", "the handler must authenticate the caller's token"),
         ("concurrency", "this path can deadlock while holding the mutex"),
-        ("persistence", "the change runs `alter table users`"), ("public-interface", "the grpc endpoint gains a field"),
+        ("persistence", "the change runs `alter table users`"),
+        ("public-interface", "the grpc endpoint gains a field"),
         ("migration", "see migrations/0042_add_flag.py"),
-    ],
-)
-def test_each_mandatory_category_matches_its_declared_triggers(category: str, text: str) -> None:
-    assert category in categories_in(text)
+    ]
+    for category, text in cases:
+        with subtests.test(category=category):
+            assert category in categories_in(text)
 
 def test_configured_extra_categories_are_validated_and_cannot_widen() -> None:
     """The declared vocabulary is the mandatory set, so a valid extra is a no-op."""

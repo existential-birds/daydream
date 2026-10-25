@@ -1,5 +1,6 @@
 """Offline pinned membership, deterministic bytes, and chronological evidence eligibility."""
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tests.harness.record_projection import (
     projection_config,
     seed_projection_store,
 )
+from tests.harness.table_cases import isolated_case
 from tests.test_corpus_projection import _read_jsonl
 
 
@@ -30,29 +32,44 @@ def test_assign_split_is_deterministic_and_salted() -> None:
     assert assign_split(rid, holdout_rate=1, val_rate=0, salt="s") == "holdout"
 
 
-@pytest.mark.parametrize("capped", [False, True])
-def test_reprojection_is_byte_identical_with_frozen_disjoint_membership(tmp_path: Path, capped: bool) -> None:
-    store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"), siblings=4)
-    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "rejected"), stack="rust",
-                       profile="quick-review", repo_slug="owner/repo-b")
-    caps = {"max_stack_share": 0.5, "max_repo_share": 0.5, "max_profile_share": 0.5} if capped else {}
-    config = projection_config(store, tmp_path, **caps)
-    build_frozen_corpus(config)
-    first = {path.name: path.read_bytes() for path in config.out_dir.iterdir()}
-    # Later records are outside the selected immutable snapshot and must not alter any byte.
-    add_projection_run(store, run_id="later", repo_slug="owner/later")
-    build_frozen_corpus(replace(config, out_dir=tmp_path / "replay"))
-    assert {path.name: path.read_bytes() for path in (tmp_path / "replay").iterdir()} == first
-    build_frozen_corpus(config)
-    assert {path.name: path.read_bytes() for path in config.out_dir.iterdir()} == first
-    memberships = _memberships(config.out_dir)
-    assert memberships["train"].isdisjoint(memberships["validation"])
-    assert memberships["train"].isdisjoint(memberships["holdout"])
-    assert memberships["validation"].isdisjoint(memberships["holdout"])
-    assert set.union(*memberships.values()) == {
-        row["record_id"] for row in _read_jsonl(config.out_dir / "corpus.jsonl")}
-    for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
-        assert row["record_id"] in memberships[row["lineage"]["split"]]
+def test_reprojection_is_byte_identical_with_frozen_disjoint_membership(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    case_root = tmp_path
+    cases: Sequence[bool] = [False, True]
+    for case_index, capped in enumerate(cases):
+        with subtests.test(capped=capped):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"), siblings=4)
+                add_projection_run(
+                    store,
+                    run_id="sess-b",
+                    dispositions=("accepted", "rejected"),
+                    stack="rust",
+                    profile="quick-review",
+                    repo_slug="owner/repo-b",
+                )
+                caps = {"max_stack_share": 0.5, "max_repo_share": 0.5, "max_profile_share": 0.5} if capped else {}
+                config = projection_config(store, tmp_path, **caps)
+                build_frozen_corpus(config)
+                first = {path.name: path.read_bytes() for path in config.out_dir.iterdir()}
+                # Later records are outside the selected immutable snapshot and must not alter any byte.
+                add_projection_run(store, run_id="later", repo_slug="owner/later")
+                build_frozen_corpus(replace(config, out_dir=tmp_path / "replay"))
+                assert {path.name: path.read_bytes() for path in (tmp_path / "replay").iterdir()} == first
+                build_frozen_corpus(config)
+                assert {path.name: path.read_bytes() for path in config.out_dir.iterdir()} == first
+                memberships = _memberships(config.out_dir)
+                assert memberships["train"].isdisjoint(memberships["validation"])
+                assert memberships["train"].isdisjoint(memberships["holdout"])
+                assert memberships["validation"].isdisjoint(memberships["holdout"])
+                assert set.union(*memberships.values()) == {
+                    row["record_id"] for row in _read_jsonl(config.out_dir / "corpus.jsonl")
+                }
+                for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
+                    assert row["record_id"] in memberships[row["lineage"]["split"]]
 
 
 def test_observation_temporal_eligibility_and_embedded_posterior_leak_are_distinct(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -13,12 +14,11 @@ import pytest
 from daydream.backends.claude import _build_audit_root_guard
 from daydream.improve import manifests
 from daydream.improve.partition import Partition, PartitionGroup
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("file_count", [1, 140])
-async def test_primary_manifest_round_trip_and_rerun_replace_without_stale_pointers(
-    tmp_path: Path, file_count: int,
+async def _case_primary_manifest_round_trip_and_rerun_replace_without_stale_pointers(
+    tmp_path: Path, file_count: int
 ) -> None:
     # A private artifact pointer is unreadable in strict Improve. Exercise the
     # real guard for spill files, JSON escaping, and replacement of prior output.
@@ -70,8 +70,21 @@ async def test_primary_manifest_round_trip_and_rerun_replace_without_stale_point
         assert outside.read_text() == "keep these bytes"
 
 
-@pytest.mark.parametrize("unsafe", ["../outside.py", "/outside.py", "C:/outside.py", "link.py"])
-def test_primary_manifest_rejects_unsafe_or_outward_paths(tmp_path: Path, unsafe: str) -> None:
+@pytest.mark.anyio
+async def test_primary_manifest_round_trip_and_rerun_replace_without_stale_pointers(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[int] = [1, 140]
+    case_index = 0
+    for file_count in cases_0:
+        with subtests.test(file_count=file_count), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_primary_manifest_round_trip_and_rerun_replace_without_stale_pointers(
+                tmp_path=scenario.tmp_path, file_count=file_count
+            )
+
+
+def _case_primary_manifest_rejects_unsafe_or_outward_paths(tmp_path: Path, unsafe: str) -> None:
     # Repository filenames and tracked symlinks must never grant an outside read.
     repo = tmp_path / "snapshot"
     repo.mkdir()
@@ -82,6 +95,15 @@ def test_primary_manifest_rejects_unsafe_or_outward_paths(tmp_path: Path, unsafe
     with pytest.raises(ValueError, match="unreadable repository path"):
         manifests.prepare_primary_manifest(repo, tmp_path / "artifacts", repo, group)
     assert not (tmp_path / "artifacts").exists()
+
+
+def test_primary_manifest_rejects_unsafe_or_outward_paths(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["../outside.py", "/outside.py", "C:/outside.py", "link.py"]
+    case_index = 0
+    for unsafe in cases_0:
+        with subtests.test(unsafe=unsafe), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_primary_manifest_rejects_unsafe_or_outward_paths(tmp_path=scenario.tmp_path, unsafe=unsafe)
 
 
 def test_oversized_primary_manifest_is_rejected_whole_before_publication(

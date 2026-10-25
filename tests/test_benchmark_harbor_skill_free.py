@@ -5,6 +5,7 @@ Full Python and mixed-stack Harbor runs are tested separately.
 import asyncio
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import entrypoint, package as pkg, run as run_mod, verifier_core as vc
+from tests.harness.table_cases import isolated_case
 
 
 def test_parse_reviewer_environment_maps_pi_without_mutating_parent(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -91,15 +93,22 @@ def test_parse_reviewer_environment_maps_claude_without_openrouter_requirement()
     assert not any(key.startswith("DAYDREAM_JUDGE_") for key in child)
     assert parent["PI_API_KEY"] == "stale-pi"
 
-@pytest.mark.parametrize("environment", [{"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "http://api.anthropic.com"},
-    # an empty userinfo (https://@host) is still embedded credentials, not absent
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
-     "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"},
-])
-def test_parse_reviewer_environment_rejects_invalid_claude_credentials(environment: dict[str, str],) -> None:
-    with pytest.raises(entrypoint.EntrypointError, match="ANTHROPIC"):
-        entrypoint.parse_reviewer_environment(environment)
+def test_parse_reviewer_environment_rejects_invalid_claude_credentials(subtests: pytest.Subtests) -> None:
+    cases: Sequence[dict[str, str]] = [
+        {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
+        {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "http://api.anthropic.com"},
+        # an empty userinfo (https://@host) is still embedded credentials, not absent
+        {
+            "DAYDREAM_REVIEW_BACKEND": "claude",
+            "ANTHROPIC_API_KEY": "sk-ant",
+            "ANTHROPIC_BASE_URL": "https://@api.anthropic.com",
+        },
+    ]
+    for case_index, environment in enumerate(cases):
+        with subtests.test(environment=environment):
+            with pytest.raises(entrypoint.EntrypointError, match="ANTHROPIC"):
+                entrypoint.parse_reviewer_environment(environment)
+
 
 def test_parse_reviewer_environment_accepts_claude_proxy() -> None:
     parsed = entrypoint.parse_reviewer_environment({
@@ -150,31 +159,45 @@ def _seed_host_ws(tmp_path: Path, reviewer_hosts: list[str]) -> Path:
     return ws
 
 
-@pytest.mark.parametrize(("reviewer_hosts", "blocked"),
-    [pytest.param(["claude-proxy.internal"], False, id="allowlisted"),
-        pytest.param(["review.example"], True, id="non-allowlisted"),
-    ],
-)
 def test_host_preflight_resolves_claude_proxy_against_reviewer_allowlist(
-    tmp_path: Path, reviewer_hosts: list[str], blocked: bool
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    # Reject non-allowlisted Claude proxies on the host, before a paid review.
-    ws = _seed_host_ws(tmp_path, reviewer_hosts)
+    case_root = tmp_path
+    cases: Sequence[tuple[list[str], bool]] = [
+        (["claude-proxy.internal"], False),
+        (["review.example"], True),
+    ]
+    case_ids_0 = ["allowlisted", "non-allowlisted"]
+    for case_index, (reviewer_hosts, blocked) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], reviewer_hosts=reviewer_hosts, blocked=blocked):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                # Reject non-allowlisted Claude proxies on the host, before a paid review.
+                ws = _seed_host_ws(tmp_path, reviewer_hosts)
 
-    def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
-        return pkg.DockerNetworkPolicyCapability(supported=True)
+                def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
+                    return pkg.DockerNetworkPolicyCapability(supported=True)
 
-    errs = run_mod._preflight(ws, oracle=True, env={
-        "DAYDREAM_REVIEW_BACKEND": "claude", "DAYDREAM_REVIEW_CASE_ID": "case-parser-proxy",
-        "ANTHROPIC_API_KEY": "sk-ant", "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
-        "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
-    }, docker_ok=_docker_ok)
-    reviewer_errs = [e for e in errs if "reviewer host" in e]
-    if blocked:
-        assert any("claude-proxy.internal" in e for e in reviewer_errs)
-    else:
-        assert not reviewer_errs
-    assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
+                errs = run_mod._preflight(
+                    ws,
+                    oracle=True,
+                    env={
+                        "DAYDREAM_REVIEW_BACKEND": "claude",
+                        "DAYDREAM_REVIEW_CASE_ID": "case-parser-proxy",
+                        "ANTHROPIC_API_KEY": "sk-ant",
+                        "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
+                        "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9",
+                    },
+                    docker_ok=_docker_ok,
+                )
+                reviewer_errs = [e for e in errs if "reviewer host" in e]
+                if blocked:
+                    assert any("claude-proxy.internal" in e for e in reviewer_errs)
+                else:
+                    assert not reviewer_errs
+                assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
+
 
 def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

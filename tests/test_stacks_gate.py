@@ -12,6 +12,7 @@ from daydream.training.admission import (
     REASON_CODE_C5_EXCLUDED_REPO,
 )
 from daydream.training.stacks import load_dataset_v2
+from tests.harness.table_cases import isolated_case
 
 
 def _record(**overrides: object) -> dict[str, object]:
@@ -74,19 +75,43 @@ def test_load_v2_enforces_c5_over_loaded_records(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=REASON_CODE_C5_EXCLUDED_REPO):
         load_dataset_v2(tmp_path / "proj")
 
-@pytest.mark.parametrize("slug", ["GRAFANA/GRAFANA", "https://github.com/grafana/grafana.git",
-                                  "git@github.com:grafana/grafana.git", " grafana/grafana.git "])
-def test_loader_canonicalizes_before_benchmark_comparison(tmp_path: Path, slug: str) -> None:
-    out = _write_projection(tmp_path, [_record(repo_slug=slug)])
-    with pytest.raises(ValueError, match=REASON_CODE_C5_EXCLUDED_REPO):
-        load_dataset_v2(out)
+def test_loader_canonicalizes_before_benchmark_comparison(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = [
+        "GRAFANA/GRAFANA",
+        "https://github.com/grafana/grafana.git",
+        "git@github.com:grafana/grafana.git",
+        " grafana/grafana.git ",
+    ]
+    for slug in cases:
+        row_index += 1
+        with subtests.test(slug=slug):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                out = _write_projection(tmp_path, [_record(repo_slug=slug)])
+                with pytest.raises(ValueError, match=REASON_CODE_C5_EXCLUDED_REPO):
+                    load_dataset_v2(out)
 
 
-@pytest.mark.parametrize("slug", [None, "", 17, "owner/repo/extra"])
-def test_loader_refuses_malformed_identity(tmp_path: Path, slug: object) -> None:
-    out = _write_projection(tmp_path, [_record(repo_slug=slug)])
-    with pytest.raises(ValueError, match="repo_slug"):
-        load_dataset_v2(out)
+def test_loader_refuses_malformed_identity(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[object] = [None, "", 17, "owner/repo/extra"]
+    for slug in cases:
+        row_index += 1
+        with subtests.test(slug=slug):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                out = _write_projection(tmp_path, [_record(repo_slug=slug)])
+                with pytest.raises(ValueError, match="repo_slug"):
+                    load_dataset_v2(out)
 
 
 def test_loader_admits_formerly_blocked_repository_without_decision(tmp_path: Path) -> None:

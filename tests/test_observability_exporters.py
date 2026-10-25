@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -29,6 +31,7 @@ from daydream.observability.exporters import (
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from tests.harness.otlp import attributes, exporting_provider, grpc_trace_server, otlp_collector
+from tests.harness.table_cases import isolated_case
 
 
 def _emit(exporter: SpanExporter) -> None:
@@ -56,50 +59,67 @@ def _emit_spans() -> list[ReadableSpan]:
         )
     ]
 
-@pytest.mark.parametrize("destination", ["langsmith", "honeyhive", "otlp"])
-def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "langsmith-opaque-key")
-        monkeypatch.setenv("LANGSMITH_PROJECT", "my project")
-        monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "workspace-id")
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "honeyhive-opaque-key")
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url)
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-custom=generic-key")
-        factory = {"langsmith": langsmith_exporter, "honeyhive": honeyhive_exporter, "otlp": otlp_exporter}[destination]
-        _emit(factory(ObservabilityConfig()))
-        assert len(receiver.spans) == 1
-        span = attributes(receiver.spans[0])
-        assert span["gen_ai.usage.input_tokens"] == 100
-        assert span["gen_ai.usage.cost"] == 0.123
-        assert "hello" in span["gen_ai.input.messages"]
-        request = receiver.requests[0]
-        expected_paths = {"langsmith": "/otel/v1/traces", "honeyhive": "/opentelemetry/v1/traces", "otlp": "/v1/traces"}
-        assert request["path"] == expected_paths[destination]
-        assert attributes(request["body"]["resourceSpans"][0]["resource"])["service.name"] == "daydream-test"
-        headers = request["headers"]
-        if destination == "langsmith":
-            assert headers["x-api-key"] == "langsmith-opaque-key"
-            assert headers["langsmith-project"] == "my project"
-            assert headers["x-tenant-id"] == "workspace-id"
-            assert span["langsmith.span.kind"] == "chain"
-            assert json.loads(span["langsmith.usage_metadata"]) == {
-                "input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "total_cost": 0.123,
-                "input_token_details": {"cache_read": 40, "cache_creation": 20},
-                "output_token_details": {"reasoning": 5},
-            }
-        elif destination == "honeyhive":
-            assert headers["authorization"] == "Bearer honeyhive-opaque-key"
-            assert span["honeyhive_event_type"] == "chain"
-            assert span["honeyhive_metadata.cost"] == 0.123
-            assert span["honeyhive_metadata.cache_read_input_tokens"] == 40
-            assert span["honeyhive_metadata.cache_write_input_tokens"] == 20
-            assert span["honeyhive_metadata.reasoning_tokens"] == 5
-        else:
-            assert headers["x-custom"] == "generic-key"
-        if destination != "otlp":
-            assert "x-custom" not in headers
+def test_destinations_emit_portable_otlp(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["langsmith", "honeyhive", "otlp"]
+    for case_index, destination in enumerate(cases):
+        with subtests.test(destination=destination):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                with otlp_collector() as receiver:
+                    monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
+                    monkeypatch.setenv("LANGSMITH_API_KEY", "langsmith-opaque-key")
+                    monkeypatch.setenv("LANGSMITH_PROJECT", "my project")
+                    monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "workspace-id")
+                    monkeypatch.setenv("HH_API_URL", receiver.base_url)
+                    monkeypatch.setenv("HH_API_KEY", "honeyhive-opaque-key")
+                    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url)
+                    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-custom=generic-key")
+                    factory = {"langsmith": langsmith_exporter, "honeyhive": honeyhive_exporter, "otlp": otlp_exporter}[
+                        destination
+                    ]
+                    _emit(factory(ObservabilityConfig()))
+                    assert len(receiver.spans) == 1
+                    span = attributes(receiver.spans[0])
+                    assert span["gen_ai.usage.input_tokens"] == 100
+                    assert span["gen_ai.usage.cost"] == 0.123
+                    assert "hello" in span["gen_ai.input.messages"]
+                    request = receiver.requests[0]
+                    expected_paths = {
+                        "langsmith": "/otel/v1/traces",
+                        "honeyhive": "/opentelemetry/v1/traces",
+                        "otlp": "/v1/traces",
+                    }
+                    assert request["path"] == expected_paths[destination]
+                    assert (
+                        attributes(request["body"]["resourceSpans"][0]["resource"])["service.name"] == "daydream-test"
+                    )
+                    headers = request["headers"]
+                    if destination == "langsmith":
+                        assert headers["x-api-key"] == "langsmith-opaque-key"
+                        assert headers["langsmith-project"] == "my project"
+                        assert headers["x-tenant-id"] == "workspace-id"
+                        assert span["langsmith.span.kind"] == "chain"
+                        assert json.loads(span["langsmith.usage_metadata"]) == {
+                            "input_tokens": 100,
+                            "output_tokens": 10,
+                            "total_tokens": 110,
+                            "total_cost": 0.123,
+                            "input_token_details": {"cache_read": 40, "cache_creation": 20},
+                            "output_token_details": {"reasoning": 5},
+                        }
+                    elif destination == "honeyhive":
+                        assert headers["authorization"] == "Bearer honeyhive-opaque-key"
+                        assert span["honeyhive_event_type"] == "chain"
+                        assert span["honeyhive_metadata.cost"] == 0.123
+                        assert span["honeyhive_metadata.cache_read_input_tokens"] == 40
+                        assert span["honeyhive_metadata.cache_write_input_tokens"] == 20
+                        assert span["honeyhive_metadata.reasoning_tokens"] == 5
+                    else:
+                        assert headers["x-custom"] == "generic-key"
+                    if destination != "otlp":
+                        assert "x-custom" not in headers
+
 
 def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage() -> None:
     sink = InMemorySpanExporter()
@@ -130,92 +150,140 @@ def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage(
     assert exporter.force_flush()
     exporter.shutdown()
 
-@pytest.mark.parametrize("known_usage", [False, True])
-@pytest.mark.parametrize("has_session", [False, True])
 def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
-    known_usage: bool, has_session: bool, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    originals = InMemorySpanExporter()
-    run_id = "8dc328f9-f3af-4293-a8c3-19f8627999cd"
-    session_id = "f55b21e4-4693-4795-a625-64b1a2d969ee"
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter, originals) as provider:
-            for kind in ("run", "step", "agent", "tool"):
-                span_attributes: dict[str, Any] = {
-                    "daydream.span.kind": kind, "daydream.run.id": run_id, "daydream.flow": "review",
-                }
-                if has_session:
-                    span_attributes["traceloop.association.properties.session_id"] = session_id
-                if known_usage:
-                    span_attributes.update({
-                        "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
-                        "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
-                        "gen_ai.usage.reasoning.output_tokens": 0,
-                    })
-                with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=span_attributes):
-                    pass
-            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
-                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
-                    "daydream.run.id": run_id, "daydream.flow": "review",
-                    **({"traceloop.association.properties.session_id": session_id} if has_session else {}),
-                    **({"gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
-                            "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
-                            "gen_ai.usage.reasoning.output_tokens": 0,
-                        }
-                        if known_usage
-                        else {}
-                    ),
-                },
-            ):
-                pass
-            assert provider.force_flush()
-            recorded = originals.get_finished_spans()
-    assert len(receiver.spans) == len(recorded) == 5
-    assert [attributes(span)["honeyhive_event_type"] for span in receiver.spans] == [
-        "chain", "chain", "chain", "tool", "chain"
-    ]
-    for original, mapped in zip(recorded, receiver.spans, strict=True):
-        assert original.attributes is not None and original.context is not None
-        native = attributes(mapped)
-        assert base64.b64decode(mapped["spanId"]).hex() == f"{original.context.span_id:016x}"
-        assert all(native[key] == value for key, value in original.attributes.items())
-        assert not any(key.startswith("honeyhive") for key in original.attributes)
-        assert native["honeyhive.session_id"] == (session_id if has_session else run_id)
-        assert native["honeyhive.session_auto_create"] is True
-        assert native["honeyhive.session_name"] == "daydream.review"
-        expected = known_usage and original.attributes["daydream.span.kind"] == "attempt"
-        for key in ("prompt_tokens", "completion_tokens", "cost", "cache_read_input_tokens",
-            "cache_write_input_tokens", "reasoning_tokens",
-        ):
-            assert (f"honeyhive_metadata.{key}" in native) == expected
-            if expected:
-                assert native[f"honeyhive_metadata.{key}"] == 0
+    case_root = tmp_path
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[bool] = [False, True]
+    for case_index_0, has_session in enumerate(cases_0):
+        for case_index_1, known_usage in enumerate(cases_1):
+            with subtests.test(has_session=has_session, known_usage=known_usage):
+                with isolated_case(case_root, str((case_index_0 * 1) + (case_index_1 * 1000))) as sandbox:
+                    monkeypatch = sandbox.monkeypatch
+                    originals = InMemorySpanExporter()
+                    run_id = "8dc328f9-f3af-4293-a8c3-19f8627999cd"
+                    session_id = "f55b21e4-4693-4795-a625-64b1a2d969ee"
+                    with otlp_collector() as receiver:
+                        monkeypatch.setenv("HH_API_URL", receiver.base_url)
+                        monkeypatch.setenv("HH_API_KEY", "opaque-key")
+                        exporter = honeyhive_exporter(ObservabilityConfig())
+                        with exporting_provider(exporter, originals) as provider:
+                            for kind in ("run", "step", "agent", "tool"):
+                                span_attributes: dict[str, Any] = {
+                                    "daydream.span.kind": kind,
+                                    "daydream.run.id": run_id,
+                                    "daydream.flow": "review",
+                                }
+                                if has_session:
+                                    span_attributes["traceloop.association.properties.session_id"] = session_id
+                                if known_usage:
+                                    span_attributes.update(
+                                        {
+                                            "gen_ai.usage.input_tokens": 0,
+                                            "gen_ai.usage.output_tokens": 0,
+                                            "gen_ai.usage.cost": 0.0,
+                                            "gen_ai.usage.cache_read.input_tokens": 0,
+                                            "gen_ai.usage.cache_creation.input_tokens": 0,
+                                            "gen_ai.usage.reasoning.output_tokens": 0,
+                                        }
+                                    )
+                                with provider.get_tracer("daydream-test").start_as_current_span(
+                                    kind, attributes=span_attributes
+                                ):
+                                    pass
+                            with provider.get_tracer("daydream-test").start_as_current_span(
+                                "attempt",
+                                attributes={
+                                    "daydream.span.kind": "attempt",
+                                    "daydream.billing.owner": "structural_attempt",
+                                    "daydream.run.id": run_id,
+                                    "daydream.flow": "review",
+                                    **(
+                                        {"traceloop.association.properties.session_id": session_id}
+                                        if has_session
+                                        else {}
+                                    ),
+                                    **(
+                                        {
+                                            "gen_ai.usage.input_tokens": 0,
+                                            "gen_ai.usage.output_tokens": 0,
+                                            "gen_ai.usage.cost": 0.0,
+                                            "gen_ai.usage.cache_read.input_tokens": 0,
+                                            "gen_ai.usage.cache_creation.input_tokens": 0,
+                                            "gen_ai.usage.reasoning.output_tokens": 0,
+                                        }
+                                        if known_usage
+                                        else {}
+                                    ),
+                                },
+                            ):
+                                pass
+                            assert provider.force_flush()
+                            recorded = originals.get_finished_spans()
+                    assert len(receiver.spans) == len(recorded) == 5
+                    assert [attributes(span)["honeyhive_event_type"] for span in receiver.spans] == [
+                        "chain",
+                        "chain",
+                        "chain",
+                        "tool",
+                        "chain",
+                    ]
+                    for original, mapped in zip(recorded, receiver.spans, strict=True):
+                        assert original.attributes is not None and original.context is not None
+                        native = attributes(mapped)
+                        assert base64.b64decode(mapped["spanId"]).hex() == f"{original.context.span_id:016x}"
+                        assert all(native[key] == value for key, value in original.attributes.items())
+                        assert not any(key.startswith("honeyhive") for key in original.attributes)
+                        assert native["honeyhive.session_id"] == (session_id if has_session else run_id)
+                        assert native["honeyhive.session_auto_create"] is True
+                        assert native["honeyhive.session_name"] == "daydream.review"
+                        expected = known_usage and original.attributes["daydream.span.kind"] == "attempt"
+                        for key in (
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "cost",
+                            "cache_read_input_tokens",
+                            "cache_write_input_tokens",
+                            "reasoning_tokens",
+                        ):
+                            assert (f"honeyhive_metadata.{key}" in native) == expected
+                            if expected:
+                                assert native[f"honeyhive_metadata.{key}"] == 0
 
-@pytest.mark.parametrize("factory,env",
-    [(langsmith_exporter, {}), (honeyhive_exporter, {}), (honeyhive_exporter, {"HH_API_KEY": "opaque-secret"}),
-        (langsmith_exporter,
+
+def test_setup_errors_are_actionable_and_do_not_echo_credentials(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[Any, dict[str, str]]] = [
+        (langsmith_exporter, {}),
+        (honeyhive_exporter, {}),
+        (honeyhive_exporter, {"HH_API_KEY": "opaque-secret"}),
+        (
+            langsmith_exporter,
             {"LANGSMITH_API_KEY": "opaque-secret", "LANGSMITH_ENDPOINT": "https://user:opaque-secret@host"},
-        ), (langsmith_exporter,
+        ),
+        (
+            langsmith_exporter,
             {"LANGSMITH_API_KEY": "opaque-secret", "LANGSMITH_ENDPOINT": "https://host?opaque-secret"},
         ),
         (langsmith_exporter, {"LANGSMITH_API_KEY": "opaque-secret\nforged: header"}),
         (otlp_exporter, {"OTEL_EXPORTER_OTLP_PROTOCOL": "unsupported-opaque-secret"}),
-        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "nan"}), (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "0"}),
+        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "nan"}),
+        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "0"}),
         (otlp_exporter, {"OTEL_EXPORTER_OTLP_ENDPOINT": "https://user:opaque-secret@host"}),
-    ],
-)
-def test_setup_errors_are_actionable_and_do_not_echo_credentials(
-    factory: Any, env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    with pytest.raises(ObservabilityError) as exc:
-        factory(ObservabilityConfig())
-    assert "opaque-secret" not in str(exc.value)
-    assert str(exc.value)
+    ]
+    for case_index, (factory, env) in enumerate(cases):
+        with subtests.test(factory=factory, env=env):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                for key, value in env.items():
+                    monkeypatch.setenv(key, value)
+                with pytest.raises(ObservabilityError) as exc:
+                    factory(ObservabilityConfig())
+                assert "opaque-secret" not in str(exc.value)
+                assert str(exc.value)
+
 
 def test_generic_trace_specific_environment_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
@@ -254,89 +322,115 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
         )
         assert ("x-custom", "grpc-credential") in headers
 
-@pytest.mark.parametrize("drift", ["1.45.2", "1.440.0", "missing-surface"])
-def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.MonkeyPatch, drift: str) -> None:
+def test_grpc_bridge_drift_refuses_send_and_closes_channel(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """Unreviewed SDK versions or missing private fields must release the real channel before failing."""
-    delegates: list[GrpcExporter] = []
-    received: list[ExportTraceServiceRequest] = []
+    case_root = tmp_path
+    cases: Sequence[str] = ["1.45.2", "1.440.0", "missing-surface"]
+    for case_index, drift in enumerate(cases):
+        with subtests.test(drift=drift):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                delegates: list[GrpcExporter] = []
+                received: list[ExportTraceServiceRequest] = []
 
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
-        received.append(request)
-        return ExportTraceServiceResponse()
+                def receive(
+                    request: ExportTraceServiceRequest, context: grpc.ServicerContext
+                ) -> ExportTraceServiceResponse:
+                    received.append(request)
+                    return ExportTraceServiceResponse()
 
-    def create_delegate(**kwargs: Any) -> GrpcExporter:
-        delegate = GrpcExporter(**kwargs)
-        delegates.append(delegate)
-        if drift == "missing-surface":
-            delattr(delegate, "_timeout")
-        return delegate
+                def create_delegate(**kwargs: Any) -> GrpcExporter:
+                    delegate = GrpcExporter(**kwargs)
+                    delegates.append(delegate)
+                    if drift == "missing-surface":
+                        delattr(delegate, "_timeout")
+                    return delegate
 
-    monkeypatch.setattr("daydream.observability.exporters.GrpcExporter", create_delegate)
-    if drift != "missing-surface":
-        monkeypatch.setattr("importlib.metadata.version", lambda _distribution: drift)
-    with grpc_trace_server(receive) as port:
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
-        try:
-            with pytest.raises(ObservabilityError, match="OpenTelemetry"):
-                otlp_exporter(ObservabilityConfig())
-            assert len(delegates) == 1
-            client = delegates[0]._client
-            assert client is not None
-            with pytest.raises(ValueError, match="closed"):
-                client.Export(request=ExportTraceServiceRequest(), timeout=1)
-            assert received == []
-        finally:
-            for delegate in delegates:
-                delegate.shutdown()
+                monkeypatch.setattr("daydream.observability.exporters.GrpcExporter", create_delegate)
+                if drift != "missing-surface":
+                    monkeypatch.setattr("importlib.metadata.version", lambda _distribution: drift)
+                with grpc_trace_server(receive) as port:
+                    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+                    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
+                    try:
+                        with pytest.raises(ObservabilityError, match="OpenTelemetry"):
+                            otlp_exporter(ObservabilityConfig())
+                        assert len(delegates) == 1
+                        client = delegates[0]._client
+                        assert client is not None
+                        with pytest.raises(ValueError, match="closed"):
+                            client.Export(request=ExportTraceServiceRequest(), timeout=1)
+                        assert received == []
+                    finally:
+                        for delegate in delegates:
+                            delegate.shutdown()
 
-@pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
+
 def test_presets_do_not_forward_redirected_payloads_or_credentials(
-    destination: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    with otlp_collector() as second:
-        with otlp_collector(status=302, response_headers={"Location": second.base_url + "/stolen"}) as first:
-            monkeypatch.setenv("LANGSMITH_ENDPOINT", first.base_url)
-            monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-            monkeypatch.setenv("HH_API_URL", first.base_url)
-            monkeypatch.setenv("HH_API_KEY", "opaque-key")
-            factory = langsmith_exporter if destination == "langsmith" else honeyhive_exporter
-            exporter = factory(ObservabilityConfig())
-            with diagnostic_scope(PrivacyPolicy()):
-                assert exporter.export(_emit_spans()) != SpanExportResult.SUCCESS
-                exporter.shutdown()
-            assert len(first.requests) == 1
-            assert second.requests == []
-            assert "redirected" in caplog.text
+    case_root = tmp_path
+    cases: Sequence[str] = ["langsmith", "honeyhive"]
+    for case_index, destination in enumerate(cases):
+        with subtests.test(destination=destination):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                caplog.clear()
+                with otlp_collector() as second:
+                    with otlp_collector(
+                        status=302, response_headers={"Location": second.base_url + "/stolen"}
+                    ) as first:
+                        monkeypatch.setenv("LANGSMITH_ENDPOINT", first.base_url)
+                        monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
+                        monkeypatch.setenv("HH_API_URL", first.base_url)
+                        monkeypatch.setenv("HH_API_KEY", "opaque-key")
+                        factory = langsmith_exporter if destination == "langsmith" else honeyhive_exporter
+                        exporter = factory(ObservabilityConfig())
+                        with diagnostic_scope(PrivacyPolicy()):
+                            assert exporter.export(_emit_spans()) != SpanExportResult.SUCCESS
+                            exporter.shutdown()
+                        assert len(first.requests) == 1
+                        assert second.requests == []
+                        assert "redirected" in caplog.text
 
-@pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
-def test_presets_ignore_ambient_auth_and_generic_transport_settings(destination: str, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def forbidden_netrc(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("preset must never consult ambient netrc authentication")
-    monkeypatch.setattr("requests.sessions.get_netrc_auth", forbidden_netrc)
-    monkeypatch.setenv("_OTEL_PYTHON_EXPORTER_OTLP_HTTP_TRACES_CREDENTIAL_PROVIDER", "nonexistent-provider")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE", "/does-not-exist.pem")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE", "/does-not-exist-client.pem")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY", "/does-not-exist-key.pem")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "not-a-number")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "invalid-compression")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://invalid.local")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=wrong")
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "real-key")
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "real-key")
-        factory = langsmith_exporter if destination == "langsmith" else honeyhive_exporter
-        _emit(factory(ObservabilityConfig()))
-        headers = receiver.requests[0]["headers"]
-        if destination == "langsmith":
-            assert headers["x-api-key"] == "real-key"
-            assert "authorization" not in headers
-        else:
-            assert headers["authorization"] == "Bearer real-key"
-        assert "content-encoding" not in headers
+
+def test_presets_ignore_ambient_auth_and_generic_transport_settings(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["langsmith", "honeyhive"]
+    for case_index, destination in enumerate(cases):
+        with subtests.test(destination=destination):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+
+                def forbidden_netrc(*args: Any, **kwargs: Any) -> Any:
+                    raise AssertionError("preset must never consult ambient netrc authentication")
+
+                monkeypatch.setattr("requests.sessions.get_netrc_auth", forbidden_netrc)
+                monkeypatch.setenv("_OTEL_PYTHON_EXPORTER_OTLP_HTTP_TRACES_CREDENTIAL_PROVIDER", "nonexistent-provider")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE", "/does-not-exist.pem")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CLIENT_CERTIFICATE", "/does-not-exist-client.pem")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY", "/does-not-exist-key.pem")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "not-a-number")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "invalid-compression")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://invalid.local")
+                monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "authorization=wrong")
+                with otlp_collector() as receiver:
+                    monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
+                    monkeypatch.setenv("LANGSMITH_API_KEY", "real-key")
+                    monkeypatch.setenv("HH_API_URL", receiver.base_url)
+                    monkeypatch.setenv("HH_API_KEY", "real-key")
+                    factory = langsmith_exporter if destination == "langsmith" else honeyhive_exporter
+                    _emit(factory(ObservabilityConfig()))
+                    headers = receiver.requests[0]["headers"]
+                    if destination == "langsmith":
+                        assert headers["x-api-key"] == "real-key"
+                        assert "authorization" not in headers
+                    else:
+                        assert headers["authorization"] == "Bearer real-key"
+                    assert "content-encoding" not in headers
+
 
 def test_malformed_otlp_headers_never_log_credential_fragments(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -359,39 +453,49 @@ def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
         assert "opaque-http-response-secret" not in caplog.text
         assert "Failed to export" in caplog.text
 
-@pytest.mark.parametrize("kind,expected_hh,expected_ls",
-    [("agent", "chain", "chain"), ("attempt", "chain", "chain"), ("generation", "model", "llm"),
+def test_vendor_chain_model_tool_classification(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[str, str, str]] = [
+        ("agent", "chain", "chain"),
+        ("attempt", "chain", "chain"),
+        ("generation", "model", "llm"),
         ("tool", "tool", "tool"),
-    ],
-)
-def test_vendor_chain_model_tool_classification(
-    kind: str, expected_hh: str, expected_ls: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with otlp_collector() as honeyhive, otlp_collector() as langsmith:
-        monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-        for exporter in (honeyhive_exporter(ObservabilityConfig()), langsmith_exporter(ObservabilityConfig())):
-            sink = InMemorySpanExporter()
-            with exporting_provider(exporter, sink) as provider:
-                group: list[dict[str, Any]] = [
-                    {"daydream.span.kind": kind, "daydream.run.id": "run-1", "daydream.flow": "review"},
-                    {"daydream.span.kind": "tool", "daydream.run.id": "run-1", "daydream.flow": "review"},
-                ]
-                if kind == "attempt":
-                    group[0]["daydream.billing.owner"] = "structural_attempt"
-                elif kind == "generation":
-                    group[0]["daydream.generation.billed"] = True
-                for attributes0 in group:
-                    with provider.get_tracer("daydream-test").start_as_current_span("span", attributes=attributes0):
-                        pass
-        hh_spans = [attributes(span) for span in honeyhive.spans if span["name"] == "span"]
-        ls_spans = [attributes(span) for span in langsmith.spans if span["name"] == "span"]
-        assert hh_spans[0]["honeyhive_event_type"] == expected_hh
-        assert ls_spans[0]["langsmith.span.kind"] == expected_ls
-        assert hh_spans[1]["honeyhive_event_type"] == "tool"
-        assert ls_spans[1]["langsmith.span.kind"] == "tool"
+    ]
+    for case_index, (kind, expected_hh, expected_ls) in enumerate(cases):
+        with subtests.test(kind=kind, expected_hh=expected_hh, expected_ls=expected_ls):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                with otlp_collector() as honeyhive, otlp_collector() as langsmith:
+                    monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
+                    monkeypatch.setenv("HH_API_KEY", "opaque-key")
+                    monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
+                    monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
+                    for exporter in (
+                        honeyhive_exporter(ObservabilityConfig()),
+                        langsmith_exporter(ObservabilityConfig()),
+                    ):
+                        sink = InMemorySpanExporter()
+                        with exporting_provider(exporter, sink) as provider:
+                            group: list[dict[str, Any]] = [
+                                {"daydream.span.kind": kind, "daydream.run.id": "run-1", "daydream.flow": "review"},
+                                {"daydream.span.kind": "tool", "daydream.run.id": "run-1", "daydream.flow": "review"},
+                            ]
+                            if kind == "attempt":
+                                group[0]["daydream.billing.owner"] = "structural_attempt"
+                            elif kind == "generation":
+                                group[0]["daydream.generation.billed"] = True
+                            for attributes0 in group:
+                                with provider.get_tracer("daydream-test").start_as_current_span(
+                                    "span", attributes=attributes0
+                                ):
+                                    pass
+                    hh_spans = [attributes(span) for span in honeyhive.spans if span["name"] == "span"]
+                    ls_spans = [attributes(span) for span in langsmith.spans if span["name"] == "span"]
+                    assert hh_spans[0]["honeyhive_event_type"] == expected_hh
+                    assert ls_spans[0]["langsmith.span.kind"] == expected_ls
+                    assert hh_spans[1]["honeyhive_event_type"] == "tool"
+                    assert ls_spans[1]["langsmith.span.kind"] == "tool"
+
 
 def test_generation_billed_owner_carries_native_usage_only_on_resolved_owner(monkeypatch: pytest.MonkeyPatch,) -> None:
     with otlp_collector() as honeyhive, otlp_collector() as langsmith:

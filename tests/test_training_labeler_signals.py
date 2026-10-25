@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from daydream.training.labeler_signals import (
     reviewer_logins_signal,
 )
 from tests.harness.review_payload import payload_for
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import diff_adding
 
 
@@ -71,56 +73,72 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
 
 
 
-@pytest.mark.parametrize(
-    ("added_line", "post_content", "verdict", "hunks_applied"),
-    [
-        pytest.param("foo = 1", "foo = 1\n", "applied", 1, id="ordinary"),
-        pytest.param("left\u2028right", "left\u2028right\n", "applied", 1, id="line-separator"),
-        pytest.param("left\u2029right", "left\u2029right\n", "applied", 1, id="paragraph-separator"),
-        pytest.param("left\x85right", "left\x85right\n", "applied", 1, id="next-line"),
-        pytest.param("left\rright", "left\rright\n", "applied", 1, id="carriage-return"),
-        pytest.param("foo = 1", "foo = 1\rbar = 2\n", "not_applied", 0, id="carriage-return-prefix"),
-        pytest.param("", "", "not_applied", 0, id="empty-source"),
-        pytest.param("", "\n", "applied", 1, id="blank-line"),
-    ],
-)
-def test_fix_applied_signal_matches_captured_recommendation_verbatim(
-    tmp_path: Path, added_line: str, post_content: str, verdict: str, hunks_applied: int,
-) -> None:
+def test_fix_applied_signal_matches_captured_recommendation_verbatim(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """Git LF lines retain embedded separators; a matching prefix alone has not landed."""
-    row = _row(recommended_patch=diff_adding(added_line), base_branch="main")
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["commit1"],
-        file_at_fetcher=lambda repo, path, sha: post_content,
-    )
-    assert isinstance(sig, FixAppliedSignal)
-    assert sig.verdict == verdict
-    assert sig.hunks_applied == hunks_applied
-    assert sig.hunks_total == 1
+    case_root = tmp_path
+    cases: Sequence[tuple[str, str, str, int]] = [
+        ("foo = 1", "foo = 1\n", "applied", 1),
+        ("left\u2028right", "left\u2028right\n", "applied", 1),
+        ("left\u2029right", "left\u2029right\n", "applied", 1),
+        ("left\x85right", "left\x85right\n", "applied", 1),
+        ("left\rright", "left\rright\n", "applied", 1),
+        ("foo = 1", "foo = 1\rbar = 2\n", "not_applied", 0),
+        ("", "", "not_applied", 0),
+        ("", "\n", "applied", 1),
+    ]
+    case_ids_0 = [
+        "ordinary",
+        "line-separator",
+        "paragraph-separator",
+        "next-line",
+        "carriage-return",
+        "carriage-return-prefix",
+        "empty-source",
+        "blank-line",
+    ]
+    for case_index, (added_line, post_content, verdict, hunks_applied) in enumerate(cases):
+        with subtests.test(
+            msg=case_ids_0[case_index],
+            added_line=added_line,
+            post_content=post_content,
+            verdict=verdict,
+            hunks_applied=hunks_applied,
+        ):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                row = _row(recommended_patch=diff_adding(added_line), base_branch="main")
+                sig = fix_applied_signal(
+                    row,
+                    changed_files=["app.py"],
+                    repo_clone=tmp_path,
+                    diff_fetcher=lambda repo, base, head: ["app.py"],
+                    commits_in_window_fetcher=lambda repo, base, head: ["commit1"],
+                    file_at_fetcher=lambda repo, path, sha: post_content,
+                )
+                assert isinstance(sig, FixAppliedSignal)
+                assert sig.verdict == verdict
+                assert sig.hunks_applied == hunks_applied
+                assert sig.hunks_total == 1
 
 
-@pytest.mark.parametrize(
-    ("files", "commits", "verdict"),
-    [([], [], "unknown"), (["unrelated.py"], ["c1"], "not_applied")],
-    ids=["empty-window", "no-file-overlap"],
-)
-def test_fix_applied_signal_without_matching_changes(
-    tmp_path: Path, files: list[str], commits: list[str], verdict: str
-) -> None:
-    row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: files,
-        commits_in_window_fetcher=lambda repo, base, head: commits,
-        file_at_fetcher=lambda repo, path, sha: "",
-    )
-    assert sig.verdict == verdict
+def test_fix_applied_signal_without_matching_changes(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[list[str], list[str], str]] = [([], [], "unknown"), (["unrelated.py"], ["c1"], "not_applied")]
+    case_ids_0 = ["empty-window", "no-file-overlap"]
+    for case_index, (files, commits, verdict) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], files=files, commits=commits, verdict=verdict):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
+                sig = fix_applied_signal(
+                    row,
+                    changed_files=["app.py"],
+                    repo_clone=tmp_path,
+                    diff_fetcher=lambda repo, base, head: files,
+                    commits_in_window_fetcher=lambda repo, base, head: commits,
+                    file_at_fetcher=lambda repo, path, sha: "",
+                )
+                assert sig.verdict == verdict
 
 
 def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
@@ -278,34 +296,33 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
 
-@pytest.mark.parametrize(
-    ("available_ref", "expected_refs"),
-    [
-        pytest.param("origin/main", ["origin/main"], id="deleted-branch-remote-tip"),
-        pytest.param("main", ["origin/main", "main"], id="remote-missing-local-fallback"),
-    ],
-)
-def test_local_commit_applied_signal_base_branch_fallback(
-    tmp_path: Path,
-    available_ref: str,
-    expected_refs: list[str],
-) -> None:
+def test_local_commit_applied_signal_base_branch_fallback(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """A deleted branch uses the remote base before the possibly stale local tip."""
-    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/squashed-away", base_branch="main")
-    seen_refs: list[str] = []
+    case_root = tmp_path
+    cases: Sequence[tuple[str, list[str]]] = [
+        ("origin/main", ["origin/main"]),
+        ("main", ["origin/main", "main"]),
+    ]
+    case_ids_0 = ["deleted-branch-remote-tip", "remote-missing-local-fallback"]
+    for case_index, (available_ref, expected_refs) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], available_ref=available_ref, expected_refs=expected_refs):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/squashed-away", base_branch="main")
+                seen_refs: list[str] = []
 
-    def _file_at(repo: Path, path: str, ref: str) -> str:
-        seen_refs.append(ref)
-        return "existing\nfoo = 1\n" if ref == available_ref else ""
+                def _file_at(repo: Path, path: str, ref: str) -> str:
+                    seen_refs.append(ref)
+                    return "existing\nfoo = 1\n" if ref == available_ref else ""
 
-    sig = local_commit_applied_signal(
-        row,
-        repo_clone=tmp_path,
-        commits_since_fetcher=lambda _repo, _branch, _since_sha: None,
-        file_at_fetcher=_file_at,
-    )
-    assert sig == LocalCommitAppliedSignal(verdict="applied")
-    assert seen_refs == expected_refs
+                sig = local_commit_applied_signal(
+                    row,
+                    repo_clone=tmp_path,
+                    commits_since_fetcher=lambda _repo, _branch, _since_sha: None,
+                    file_at_fetcher=_file_at,
+                )
+                assert sig == LocalCommitAppliedSignal(verdict="applied")
+                assert seen_refs == expected_refs
 
 
 def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_path: Path) -> None:
@@ -329,20 +346,17 @@ def _fake_commits_pulls(pulls: Any) -> Any:
     return responder
 
 
-@pytest.mark.parametrize(
-    "pulls",
-    [
-        pytest.param([{"number": 7, "head": {"sha": "abc123"}}], id="single-match"),
-        pytest.param(
-            [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}],
-            id="disambiguated-match",
-        ),
-    ],
-)
-def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict[str, Any]]) -> None:
-    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
-    gh = _fake_commits_pulls(pulls)
-    assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
+def test_pr_link_signal_matches_pr_by_head_sha(subtests: pytest.Subtests) -> None:
+    cases: Sequence[list[dict[str, Any]]] = [
+        [{"number": 7, "head": {"sha": "abc123"}}],
+        [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}],
+    ]
+    case_ids_0 = ["single-match", "disambiguated-match"]
+    for case_index, pulls in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], pulls=pulls):
+            row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
+            gh = _fake_commits_pulls(pulls)
+            assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
 
 
 def test_pr_link_signal_returns_none_when_no_head_sha_match() -> None:

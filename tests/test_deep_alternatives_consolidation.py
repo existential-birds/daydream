@@ -1,6 +1,6 @@
 """Default design review shares the structural pass without losing coverage."""
-
 import json
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,13 +16,16 @@ from daydream.flows.engine import FlowContext
 from daydream.review_budget import review_warnings
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from tests.harness.review_result import review_coverage
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize("start_at", ["review", "per-stack"])
-@pytest.mark.parametrize("custom_structure", [False, True])
-async def test_default_alternatives_share_structural_review_and_resume(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-    start_at: str, custom_structure: bool,
+async def _case_default_alternatives_share_structural_review_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Any,
+    make_work: Any,
+    start_at: str,
+    custom_structure: bool,
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work, start_at=start_at,
                           custom_structure=custom_structure)
@@ -42,10 +45,37 @@ async def test_default_alternatives_share_structural_review_and_resume(
         assert "retained prior finding" in ctx.data["alts_path"].read_text()
         assert calls["reviews"][0]["include_alternatives"]
 
-@pytest.mark.parametrize("custom_alternatives,structural", [(True, True), (False, False)])
-async def test_custom_alternatives_and_structural_disabled_keep_independent_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-    custom_alternatives: bool, structural: bool,
+
+async def test_default_alternatives_share_structural_review_and_resume(
+    make_config: Any, make_work: Any, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["review", "per-stack"]
+    cases_1: Sequence[bool] = [False, True]
+    case_index = 0
+    for start_at in cases_0:
+        for custom_structure in cases_1:
+            with (
+                subtests.test(start_at=start_at, custom_structure=custom_structure),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_default_alternatives_share_structural_review_and_resume(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    make_config=make_config,
+                    make_work=make_work,
+                    start_at=start_at,
+                    custom_structure=custom_structure,
+                )
+
+
+async def _case_custom_alternatives_and_structural_disabled_keep_independent_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Any,
+    make_work: Any,
+    custom_alternatives: bool,
+    structural: bool,
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work,
                           custom_alternatives=custom_alternatives, structural=structural)
@@ -53,6 +83,28 @@ async def test_custom_alternatives_and_structural_disabled_keep_independent_revi
     assert len(calls["alternatives"]) == 1
     assert len(calls["reviews"]) == 1
     assert ctx.data["alts_path"].read_text() == "[]"
+
+
+async def test_custom_alternatives_and_structural_disabled_keep_independent_review(
+    make_config: Any, make_work: Any, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, bool]] = [(True, True), (False, False)]
+    case_index = 0
+    for custom_alternatives, structural in cases_0:
+        with (
+            subtests.test(custom_alternatives=custom_alternatives, structural=structural),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_custom_alternatives_and_structural_disabled_keep_independent_review(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                make_work=make_work,
+                custom_alternatives=custom_alternatives,
+                structural=structural,
+            )
+
 
 async def test_folded_structural_budget_failure_remains_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
@@ -118,9 +170,8 @@ def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, 
     monkeypatch.setattr("daydream.deep.review_steps.phase_per_stack_reviews", reviews)
     return ctx, calls
 
-@pytest.mark.parametrize("start_at", ["review", "per-stack"])
-async def test_custom_structural_builder_preserves_independent_alternatives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str,
+async def _case_custom_structural_builder_preserves_independent_alternatives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work, start_at=start_at)
     ctx.registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
@@ -145,3 +196,20 @@ async def test_custom_structural_builder_preserves_independent_alternatives(
     if start_at == "per-stack":
         assert calls["reviews"][0]["include_alternatives"]
         assert calls["reviews"][0]["alternatives_path"] == ctx.data["alts_path"]
+
+
+async def test_custom_structural_builder_preserves_independent_alternatives(
+    make_config: Any, make_work: Any, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["review", "per-stack"]
+    case_index = 0
+    for start_at in cases_0:
+        with subtests.test(start_at=start_at), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_custom_structural_builder_preserves_independent_alternatives(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                make_work=make_work,
+                start_at=start_at,
+            )

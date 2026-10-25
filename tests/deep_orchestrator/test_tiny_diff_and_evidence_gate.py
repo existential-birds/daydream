@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from daydream import runner
 from daydream.atif import validate as atif_validate
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.runner import run
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
@@ -20,6 +22,7 @@ from tests.deep_orchestrator.support import (
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -363,9 +366,8 @@ async def test_ac_merge_resume_on_tiny_diff(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural[0]["source_uids"] == ["structure:1"]
 
-@pytest.mark.parametrize("confidence", ["HIGH", "MEDIUM"])
-async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    confidence: str,
+async def _case_evidence_gate_drops_speculative_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, confidence: str
 ) -> None:
     """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced finding but drops a speculative
     one before it reaches merged-items.json."""
@@ -401,6 +403,19 @@ async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path,
     assert dropped["dropped_count"] >= 1
     assert "Speculative unfounded finding" in json.dumps(dropped["dropped_items"])
     assert 2 in dropped["dropped_ids"]
+
+
+async def test_evidence_gate_drops_speculative_finding(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["HIGH", "MEDIUM"]
+    case_index = 0
+    for confidence in cases_0:
+        with subtests.test(confidence=confidence), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_evidence_gate_drops_speculative_finding(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, confidence=confidence
+            )
+
 
 async def test_evidence_gate_all_speculative_yields_empty(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

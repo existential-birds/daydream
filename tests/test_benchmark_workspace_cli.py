@@ -3,6 +3,7 @@ import importlib.metadata
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from daydream.benchmark.harbor.build import task_spec_approval, task_spec_digest
 from daydream.benchmark.schema import derive_finding_id, derive_workspace_state
 from daydream.benchmark.storage import load_yaml_strict
 from daydream.benchmark.workspace import validate_workspace
+from tests.harness.table_cases import isolated_case
 from tests.test_benchmark_calibrate import _env, _scripted_http, _scripted_responses
 from tests.test_benchmark_curate_tui import _scripted
 from tests.test_benchmark_curation import _seed_ready_case
@@ -196,39 +198,50 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
     assert _git_states(parent) == git_before
     assert not (ws / "cache" / "harbor-build-stage").exists()
 
-@pytest.mark.parametrize("digest", [None, "PRIVATE_DIGEST_SENTINEL"])
 def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], digest: str | None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    ws = _write_curated_workspace(tmp_path / "malformed approval workspace", "ready")
-    wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
-    with pytest.raises(SystemExit) as built:
-        top_cli.main(["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)])
-    assert built.value.code == 0
-    assert _tree_bytes(ws / "harbor")
-    capsys.readouterr()
+    case_root = tmp_path
+    cases: Sequence[str | None] = [None, "PRIVATE_DIGEST_SENTINEL"]
+    for case_index, digest in enumerate(cases):
+        with subtests.test(digest=digest):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                capsys.readouterr()
+                ws = _write_curated_workspace(tmp_path / "malformed approval workspace", "ready")
+                wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
+                wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+                with pytest.raises(SystemExit) as built:
+                    top_cli.main(["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)])
+                assert built.value.code == 0
+                assert _tree_bytes(ws / "harbor")
+                capsys.readouterr()
 
-    case_path = next((ws / "cases").glob("*.yaml"))
-    raw = load_yaml_strict(case_path)
-    raw["curation"]["task_spec_sha256"] = digest
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    before = _tree_bytes(ws)
-    git_before = _git_states(tmp_path)
+                case_path = next((ws / "cases").glob("*.yaml"))
+                raw = load_yaml_strict(case_path)
+                raw["curation"]["task_spec_sha256"] = digest
+                case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+                before = _tree_bytes(ws)
+                git_before = _git_states(tmp_path)
 
-    commands = [["benchmark", "status", str(ws)], ["benchmark", "validate", str(ws)],
-        ["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)],
-    ]
-    for command in commands:
-        with pytest.raises(SystemExit) as result:
-            top_cli.main(command)
-        assert result.value.code == 1
-        captured = capsys.readouterr()
-        output = captured.out + captured.err
-        assert "PRIVATE_DIGEST_SENTINEL" not in output
-        assert "Traceback" not in output
-        assert _tree_bytes(ws) == before
-        assert _git_states(tmp_path) == git_before
+                commands = [
+                    ["benchmark", "status", str(ws)],
+                    ["benchmark", "validate", str(ws)],
+                    ["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)],
+                ]
+                for command in commands:
+                    with pytest.raises(SystemExit) as result:
+                        top_cli.main(command)
+                    assert result.value.code == 1
+                    captured = capsys.readouterr()
+                    output = captured.out + captured.err
+                    assert "PRIVATE_DIGEST_SENTINEL" not in output
+                    assert "Traceback" not in output
+                    assert _tree_bytes(ws) == before
+                    assert _git_states(tmp_path) == git_before
+
 
 def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],

@@ -1,7 +1,7 @@
 """phase_per_stack_reviews concurrency + correctness tests (D-17, D-18, D-38)."""
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +13,13 @@ from daydream.deep import sharding
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.hunk_index import write_hunk_index
 from daydream.workspace import WorkContext
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.git_helpers import commit, git, seed_feature_branch, write_and_stage
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.review_result import review_scopes, saved_coverage
 from tests.harness.stub_backend import review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -96,14 +98,13 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
-@pytest.mark.parametrize(
-    ("fanout_concurrency", "expected", "automatic_shards"),
-    [(None, 4, False), (2, 2, False), (2, 2, True), (100, 10, True)],
-    ids=["default_concurrency", "low_concurrency", "automatic_shards", "automatic_shards_host_ceiling"],
-)
-async def test_fanout_concurrency_limiter(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    fanout_concurrency: int | None, expected: int, automatic_shards: bool,
+async def _case_fanout_concurrency_limiter(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fanout_concurrency: int | None,
+    expected: int,
+    automatic_shards: bool,
 ) -> None:
     """The real runner enforces the backend's ceiling while completing every scope."""
     from daydream.runner import run
@@ -174,6 +175,27 @@ async def test_fanout_concurrency_limiter(
         assert set(coverage.scopes) == {"python", "react", "go", "generic", "structure"}
     assert backend.started_scopes == set(coverage.scopes)
     assert all(scope["status"] == "complete" for scope in coverage.scopes.values())
+
+
+async def test_fanout_concurrency_limiter(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[int | None, int, bool]] = [(None, 4, False), (2, 2, False), (2, 2, True), (100, 10, True)]
+    case_index = 0
+    for fanout_concurrency, expected, automatic_shards in cases_0:
+        with (
+            subtests.test(fanout_concurrency=fanout_concurrency, expected=expected, automatic_shards=automatic_shards),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_fanout_concurrency_limiter(
+                multi_stack_target=multi_stack_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                fanout_concurrency=fanout_concurrency,
+                expected=expected,
+                automatic_shards=automatic_shards,
+            )
+
 
 def test_shards_carry_scope_not_skill() -> None:
     """M2: shards inherit stack name / files / frontier, never a skill field."""

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -16,15 +17,16 @@ from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, TextEvent,
 from daydream.dataset import LocalRecordStore
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases.review import ReviewOutputError
-from tests.conftest import ExtDir
+from tests.conftest import ExtDir, make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import git
 from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
@@ -73,15 +75,9 @@ class AuthError(RuntimeError):
     category = 'AUTH_CONFIG'
 
 
-@pytest.mark.parametrize(('case', 'state', 'reason'), [
-    ('empty', 'complete', None), ('backend', 'incomplete', 'backend_failure'),
-    ('auth', 'incomplete', 'authentication_failure'), ('model', 'incomplete', 'model_budget_exhaustion'),
-    ('structural', 'complete', None), ('mixed', 'incomplete', 'backend_failure'),
-    ('total', 'failed', 'backend_failure'), ('demoted', 'complete', None),
-    ('language', 'complete', None), ('archive', 'incomplete', 'backend_failure'),
-])
-async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
-                        case: str, state: str, reason: str | None) -> None:
+async def _case_outcomes(
+    review: ReviewRun, archive_dir: Path, fake_gh: FakeGh, case: str, state: str, reason: str | None
+) -> None:
     nonempty = case in {'structural', 'mixed', 'demoted', 'language'}
     errors = {'auth': AuthError('rejected'), 'model': MaxTurnsError('spent turns')}
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
@@ -181,6 +177,34 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
         assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
 
 
+async def test_outcomes(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str, str | None]] = [
+        ("empty", "complete", None),
+        ("backend", "incomplete", "backend_failure"),
+        ("auth", "incomplete", "authentication_failure"),
+        ("model", "incomplete", "model_budget_exhaustion"),
+        ("structural", "complete", None),
+        ("mixed", "incomplete", "backend_failure"),
+        ("total", "failed", "backend_failure"),
+        ("demoted", "complete", None),
+        ("language", "complete", None),
+        ("archive", "incomplete", "backend_failure"),
+    ]
+    case_index = 0
+    for case, state, reason in cases_0:
+        with subtests.test(case=case, state=state, reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_outcomes(
+                review=review,
+                archive_dir=scenario.archive_dir,
+                fake_gh=install_fake_gh(scenario.tmp_path / "fake-gh-state", scenario.monkeypatch),
+                case=case,
+                state=state,
+                reason=reason,
+            )
+
+
 async def test_automatic_shard_failure_preserves_successful_sibling_findings_and_revision(
     sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     review = ReviewRun(sibling_frontier_target, tmp_path, monkeypatch)
@@ -211,13 +235,7 @@ async def test_automatic_shard_failure_preserves_successful_sibling_findings_and
     assert {'shard:python#0', 'shard:python#2', 'shard:structure'} <= units
 
 
-@pytest.mark.parametrize(('mode', 'reason', 'payload'), [
-    ('missing', 'missing_output', None), ('malformed', 'malformed_output', {'unexpected': []}),
-    ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),
-    ('rejected-native', 'malformed_output', {'unexpected': []}), ('text-only', None, None),
-    *[('invalid-envelope', 'malformed_output', payload) for payload in
-      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})]])
-async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
+async def _case_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
 
     def response(prompt: str) -> list[AgentEvent] | None:
         state = review_stage_state(prompt)
@@ -235,6 +253,29 @@ async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, p
     assert data['findings'] == []
     saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
     assert saved['issues'] == [] and bool(saved.get('incomplete')) is (reason is not None)
+
+
+async def test_schema_output(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str | None, Any]] = [
+        ("missing", "missing_output", None),
+        ("malformed", "malformed_output", {"unexpected": []}),
+        ("invalid", "malformed_output", {"issues": [{"id": 1}, "invalid"]}),
+        ("rejected-native", "malformed_output", {"unexpected": []}),
+        ("text-only", None, None),
+        *[
+            ("invalid-envelope", "malformed_output", payload)
+            for payload in ({}, {"issues": "bad"}, {"issues": [{"description": "unfinished"}]})
+        ],
+    ]
+    case_index = 0
+    for mode, reason, payload in cases_0:
+        with (
+            subtests.test(mode=mode, reason=reason, payload=payload),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_schema_output(review=review, mode=mode, reason=reason, payload=payload)
 
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
@@ -347,12 +388,8 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
 
 
-@pytest.mark.parametrize(('budget', 'nonempty', 'structure_only'), [
-    *[(budget, nonempty, False) for budget in ('tool', 'wall', 'model') for nonempty in (False, True, None)],
-    *[(budget, nonempty, True) for budget in ('tool', 'backend') for nonempty in (False, True)],
-])
-async def test_unsuccessful_stage_discards_checkpoints(
-    review: ReviewRun, budget: str, nonempty: bool | None, structure_only: bool,
+async def _case_unsuccessful_stage_discards_checkpoints(
+    review: ReviewRun, budget: str, nonempty: bool | None, structure_only: bool
 ) -> None:
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 
@@ -430,11 +467,25 @@ async def test_unsuccessful_stage_discards_checkpoints(
         assert scope['reason_codes'] == [reason]
 
 
-@pytest.mark.parametrize(('fault', 'owner'), [
-    *[(fault, 'python') for fault in ('missing', 'corrupt', 'shape', 'revision', 'scope', 'origin')],
-    *[(fault, 'structure') for fault in ('missing', 'corrupt', 'shape', 'duplicate')],
-])
-async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str) -> None:
+async def test_unsuccessful_stage_discards_checkpoints(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, bool | None, bool]] = [
+        *[(budget, nonempty, False) for budget in ("tool", "wall", "model") for nonempty in (False, True, None)],
+        *[(budget, nonempty, True) for budget in ("tool", "backend") for nonempty in (False, True)],
+    ]
+    case_index = 0
+    for budget, nonempty, structure_only in cases_0:
+        with (
+            subtests.test(budget=budget, nonempty=nonempty, structure_only=structure_only),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_unsuccessful_stage_discards_checkpoints(
+                review=review, budget=budget, nonempty=nonempty, structure_only=structure_only
+            )
+
+
+async def _case_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str) -> None:
     source = git(review.repo, 'diff', 'HEAD')
     artifact_name = f'stack-{owner}-records.json'
     write, read = Path.write_text, Path.read_text
@@ -507,11 +558,20 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str)
                        or 'evaluate the implementation' in c['prompt'].lower() for c in review.backend.calls)
 
 
-@pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('intent-empty', 'missing_output'),
-    ('alternatives', 'backend_failure'), ('merge', 'synthesis_failure'), ('merge-low', 'synthesis_failure'),
-    ('missing', 'missing_output'), ('malformed', 'malformed_output'),
-    ('omitted', 'evidence_incomplete')])
-async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
+async def test_loaded_artifact_faults(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str]] = [
+        *[(fault, "python") for fault in ("missing", "corrupt", "shape", "revision", "scope", "origin")],
+        *[(fault, "structure") for fault in ("missing", "corrupt", "shape", "duplicate")],
+    ]
+    case_index = 0
+    for fault, owner in cases_0:
+        with subtests.test(fault=fault, owner=owner), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_loaded_artifact_faults(review=review, fault=fault, owner=owner)
+
+
+async def _case_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
     from tests.harness.review_profile import independent_alternatives_profile
     from tests.harness.review_result import merge_result
     intent_fault = phase.startswith('intent')
@@ -562,10 +622,28 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
 
 
-@pytest.mark.parametrize('late_event', ['legacy-result', 'native-start'])
-@pytest.mark.parametrize('offset', [0, 1], ids=['at-deadline', 'after-deadline'])
-async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
-    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
+async def test_required_phase_faults(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str]] = [
+        ("intent", "backend_failure"),
+        ("intent-empty", "missing_output"),
+        ("alternatives", "backend_failure"),
+        ("merge", "synthesis_failure"),
+        ("merge-low", "synthesis_failure"),
+        ("missing", "missing_output"),
+        ("malformed", "malformed_output"),
+        ("omitted", "evidence_incomplete"),
+    ]
+    case_index = 0
+    for phase, reason in cases_0:
+        with subtests.test(phase=phase, reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_required_phase_faults(review=review, phase=phase, reason=reason)
+
+
+async def _case_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
+    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int
+) -> None:
     import re
 
     from daydream.backends import PiRequestConfig, RequestEvent
@@ -631,8 +709,29 @@ async def test_late_supervision_events_cannot_supply_reserved_finalization_or_re
         assert starts.count('expired-native-submit') == 1
 
 
-@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
-async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
+async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["legacy-result", "native-start"]
+    cases_1: Sequence[int] = [0, 1]
+    case_index = 0
+    for late_event in cases_0:
+        for offset in cases_1:
+            with (
+                subtests.test(late_event=late_event, offset=offset),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+                await _case_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
+                    review=review,
+                    ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                    late_event=late_event,
+                    offset=offset,
+                )
+
+
+async def _case_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None
@@ -664,10 +763,18 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-@pytest.mark.parametrize('fault', ['markdown-read', 'context-write', 'report-write'])
-@pytest.mark.parametrize('export', [True, False], ids=['export', 'no-export'])
-async def test_optional_presentation_failure_preserves_canonical_export(
-    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str, export: bool,
+async def test_atomic_public_failure(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["absent-install", "prior-install", "staging"]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_atomic_public_failure(review=review, fault=fault)
+
+
+async def _case_optional_presentation_failure_preserves_canonical_export(
+    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str, export: bool
 ) -> None:
     stage, read = json_utils._stage_bytes, Path.read_text
     refreshing = False
@@ -712,8 +819,24 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert 'Review report unavailable:' in collapse_panel_text(capsys)
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])
-async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
+async def test_optional_presentation_failure_preserves_canonical_export(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["markdown-read", "context-write", "report-write"]
+    cases_1: Sequence[bool] = [True, False]
+    case_index = 0
+    for fault in cases_0:
+        for export in cases_1:
+            with subtests.test(fault=fault, export=export), isolated_case(tmp_path, str(case_index)) as scenario:
+                case_index += 1
+                capsys.readouterr()
+                review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+                await _case_optional_presentation_failure_preserves_canonical_export(
+                    review=review, capsys=capsys, fault=fault, export=export
+                )
+
+
+async def _case_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
     state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
@@ -795,3 +918,16 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
         assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
             ['backend_failure'], ['malformed_artifact'])
+
+
+async def test_finalization_boundary(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["coverage", "fix", "salvage", "presentation"]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            review = ReviewRun(make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch)
+            await _case_finalization_boundary(review=review, capsys=capsys, fault=fault)

@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -98,29 +98,37 @@ def test_build_canonical_record_rejects_missing_digest() -> None:
         build_canonical_record(session, _resolution(digest=""), evidence_observed_at="2026-01-01")
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("fingerprint", None), ("fingerprint", ""), ("fingerprint", []),
-     ("disposition", None), ("disposition", "other"), ("disposition", []),
-     pytest.param("fingerprint", ..., id="fingerprint-absent"),
-     pytest.param("disposition", ..., id="disposition-absent")],
-)
-def test_build_canonical_record_rejects_invalid_required_resolution_fields(field: str, value: Any) -> None:
-    resolution = _resolution()
-    if value is ...:
-        del resolution[field]
-    else:
-        resolution[field] = value
-    with pytest.raises(ValueError, match=field):
-        build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
+def test_build_canonical_record_rejects_invalid_required_resolution_fields(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[str, Any]] = [
+        ("fingerprint", None),
+        ("fingerprint", ""),
+        ("fingerprint", []),
+        ("disposition", None),
+        ("disposition", "other"),
+        ("disposition", []),
+        ("fingerprint", ...),
+        ("disposition", ...),
+    ]
+    case_ids_0 = ["0", "1", "2", "3", "4", "5", "fingerprint-absent", "disposition-absent"]
+    for case_index, (field, value) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], field=field, value=value):
+            resolution = _resolution()
+            if value is ...:
+                del resolution[field]
+            else:
+                resolution[field] = value
+            with pytest.raises(ValueError, match=field):
+                build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
 
 
-@pytest.mark.parametrize("rows", [[], [{"fingerprint": "fp-1"}] * 2])
-def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[dict[str, object]]) -> None:
-    # Keep the digest valid to isolate the row-count guard.
-    session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": rows}
-    with pytest.raises(ValueError, match="expected exactly 1"):
-        build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01")
+def test_build_canonical_record_rejects_wrong_resolution_row_count(subtests: pytest.Subtests) -> None:
+    cases: Sequence[list[dict[str, object]]] = [[], [{"fingerprint": "fp-1"}] * 2]
+    for case_index, rows in enumerate(cases):
+        with subtests.test(rows=rows):
+            # Keep the digest valid to isolate the row-count guard.
+            session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": rows}
+            with pytest.raises(ValueError, match="expected exactly 1"):
+                build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01")
 
 
 def test_build_canonical_record_as_of_passthrough() -> None:

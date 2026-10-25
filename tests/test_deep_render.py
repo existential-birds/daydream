@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -90,9 +91,7 @@ def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through
     assert 'Review warning' in once and held in once and 'Existing coverage' in once
 
 
-@pytest.mark.parametrize('outcome', ['failed', ['failed'], {'unexpected': 'failed'}],
-                         ids=['outcome-string', 'outcome-array', 'outcome-object'])
-def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(outcome: Any) -> None:
+def _case_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(outcome: Any) -> None:
     """Artifact prose cannot supply execution identity or trustworthy source attribution."""
     terminal = terminal_result('incomplete')
     context = {'scopes': [{'scope_id': 'python', 'originating_run_id': None,
@@ -114,6 +113,13 @@ def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(
     assert 'does not refresh GitHub status' in report
     assert 'Source rationale unavailable' in render_report([], review_context={})
     assert 'Terminal completion is not yet available' in render_report([], review_context={})
+
+
+def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[Any] = ["failed", ["failed"], {"unexpected": "failed"}]
+    for outcome in cases_0:
+        with subtests.test(outcome=outcome):
+            _case_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(outcome=outcome)
 
 
 def test_rich_report_has_a_total_bound_and_balanced_details_without_losing_check_identity() -> None:

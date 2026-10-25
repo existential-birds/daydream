@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import stat
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_
 from daydream.benchmark.workspace import InitError, init_workspace, validate_workspace, workspace_status
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
+from tests.harness.table_cases import isolated_case
 from tests.test_benchmark_import_prs import _curate_case, _seed_preflight
 
 
@@ -432,26 +434,32 @@ def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path
     shutil.rmtree(root / "cache" / "repository.git")
     assert validate_workspace(root) == (0, "ready")
 
-@pytest.mark.parametrize("tamper", ["base", "source", "source_file", "inventory"])
-def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, tamper: str) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    shutil.rmtree(root / "cache" / "repository.git")
-    case_path = next((root / "cases").glob("*.yaml"))
-    raw = load_yaml_strict(case_path)
-    if tamper == "base":
-        raw["pull_request"]["base"]["sha"] = "f" * 40
-        raw["snapshot"]["requested_base_sha"] = "f" * 40
-    elif tamper == "source":
-        raw["source"]["import_sha256"] = "f" * 64
-    elif tamper == "source_file":
-        raw["source"]["import_file"] = "imports/other.json"
-    else:
-        raw["pull_request"]["changed_files"] = []
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["base", "source", "source_file", "inventory"]
+    for case_index, tamper in enumerate(cases):
+        with subtests.test(tamper=tamper):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                root = _write_curated_workspace(tmp_path, "ready")
+                shutil.rmtree(root / "cache" / "repository.git")
+                case_path = next((root / "cases").glob("*.yaml"))
+                raw = load_yaml_strict(case_path)
+                if tamper == "base":
+                    raw["pull_request"]["base"]["sha"] = "f" * 40
+                    raw["snapshot"]["requested_base_sha"] = "f" * 40
+                elif tamper == "source":
+                    raw["source"]["import_sha256"] = "f" * 64
+                elif tamper == "source_file":
+                    raw["source"]["import_file"] = "imports/other.json"
+                else:
+                    raw["pull_request"]["changed_files"] = []
+                case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
-    code, label = validate_workspace(root)
-    assert code == 1
-    assert "import provenance" in label
+                code, label = validate_workspace(root)
+                assert code == 1
+                assert "import provenance" in label
+
 
 def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")

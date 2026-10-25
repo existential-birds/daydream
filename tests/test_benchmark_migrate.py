@@ -2,6 +2,7 @@ import hashlib
 import os
 import shutil
 import uuid
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from daydream.benchmark import migrate, schema, storage
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.schema import _schema_ready
 from tests.harness.git_helpers import commit as _commit, git as _git, write_and_stage
+from tests.harness.table_cases import isolated_case
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
@@ -218,51 +220,66 @@ def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -
     assert case_path.read_bytes() == before
     assert "requested_base_sha" not in after["snapshot"]
 
-@pytest.mark.parametrize("legacy_version", [1, 2])
-def test_migrate_repairs_legacy_draft_unreplayable_curation(tmp_path: Path, legacy_version: int) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=legacy_version)
-    before = storage.load_yaml_strict(case_path)
-    immutable_before = {key: deepcopy(before[key])
-        for key in ("pull_request", "snapshot", "source", "candidates", "prioritization")
-        if key in before
-    }
-    findings_before = deepcopy(before["curation"]["findings"])
-    exclusions_before = deepcopy(before["curation"]["exclusions"])
+def test_migrate_repairs_legacy_draft_unreplayable_curation(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[int] = [1, 2]
+    for case_index, legacy_version in enumerate(cases):
+        with subtests.test(legacy_version=legacy_version):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                ws, case_id, _ = _seed_v1_workspace(tmp_path)
+                case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=legacy_version)
+                before = storage.load_yaml_strict(case_path)
+                immutable_before = {
+                    key: deepcopy(before[key])
+                    for key in ("pull_request", "snapshot", "source", "candidates", "prioritization")
+                    if key in before
+                }
+                findings_before = deepcopy(before["curation"]["findings"])
+                exclusions_before = deepcopy(before["curation"]["exclusions"])
 
-    report = migrate.migrate_workspace(ws)
+                report = migrate.migrate_workspace(ws)
 
-    assert report.errors == []
-    assert [case.case_id for case in report.cases] == [case_id]
-    migrated = storage.load_yaml_strict(case_path)
-    assert migrated["schema_version"] == 2
-    assert migrated["curation"]["state"] == "unreplayable"
-    assert migrated["curation"]["snapshot_attested"] is False
-    assert migrated["curation"]["clean_attested"] is False
-    assert migrated["curation"]["gold_status"] == "findings"
-    assert migrated["curation"]["exclusions"] == exclusions_before
-    if legacy_version == 1:
-        expected_findings = deepcopy(findings_before)
-        expected_findings[0]["finding_id"] = schema.derive_finding_id(expected_findings[0], case_id=case_id)
-        assert migrated["curation"]["findings"] == expected_findings
-    else:
-        assert migrated["curation"]["findings"] == findings_before
-    for key, expected in immutable_before.items():
-        assert migrated[key] == expected
-    schema.CaseDocument.model_validate(schema._schema_ready(migrated))
+                assert report.errors == []
+                assert [case.case_id for case in report.cases] == [case_id]
+                migrated = storage.load_yaml_strict(case_path)
+                assert migrated["schema_version"] == 2
+                assert migrated["curation"]["state"] == "unreplayable"
+                assert migrated["curation"]["snapshot_attested"] is False
+                assert migrated["curation"]["clean_attested"] is False
+                assert migrated["curation"]["gold_status"] == "findings"
+                assert migrated["curation"]["exclusions"] == exclusions_before
+                if legacy_version == 1:
+                    expected_findings = deepcopy(findings_before)
+                    expected_findings[0]["finding_id"] = schema.derive_finding_id(expected_findings[0], case_id=case_id)
+                    assert migrated["curation"]["findings"] == expected_findings
+                else:
+                    assert migrated["curation"]["findings"] == findings_before
+                for key, expected in immutable_before.items():
+                    assert migrated[key] == expected
+                schema.CaseDocument.model_validate(schema._schema_ready(migrated))
 
-@pytest.mark.parametrize("curation_state", ["ready", "stale", "excluded"])
-def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(tmp_path: Path, curation_state: str) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2, curation_state=curation_state)
-    before = case_path.read_bytes()
 
-    report = migrate.migrate_workspace(ws)
+def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["ready", "stale", "excluded"]
+    for case_index, curation_state in enumerate(cases):
+        with subtests.test(curation_state=curation_state):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                ws, case_id, _ = _seed_v1_workspace(tmp_path)
+                case_path = _write_legacy_unreplayable_case(
+                    ws, case_id, schema_version=2, curation_state=curation_state
+                )
+                before = case_path.read_bytes()
 
-    assert report.cases == []
-    assert len(report.errors) == 1
-    assert "unreplayable snapshot and curation states must match" in report.errors[0]
-    assert case_path.read_bytes() == before
+                report = migrate.migrate_workspace(ws)
+
+                assert report.cases == []
+                assert len(report.errors) == 1
+                assert "unreplayable snapshot and curation states must match" in report.errors[0]
+                assert case_path.read_bytes() == before
+
 
 def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -325,24 +342,30 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None
     assert any("duplicate" in e for e in report.errors)
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1  # untouched
 
-@pytest.mark.parametrize("failure", ["missing_mirror", "tree_mismatch"])
-def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, failure: str) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    if failure == "missing_mirror":
-        shutil.rmtree(ws / "cache" / "repository.git")
-    else:
-        raw = storage.load_yaml_strict(case_path)
-        raw["snapshot"]["base_tree_sha"] = "f" * 40
-        storage.atomic_write_yaml(case_path, raw)
-    before = case_path.read_bytes()
+def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["missing_mirror", "tree_mismatch"]
+    for case_index, failure in enumerate(cases):
+        with subtests.test(failure=failure):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                ws, case_id, _ = _seed_v1_workspace(tmp_path)
+                case_path = ws / "cases" / f"{case_id}.yaml"
+                if failure == "missing_mirror":
+                    shutil.rmtree(ws / "cache" / "repository.git")
+                else:
+                    raw = storage.load_yaml_strict(case_path)
+                    raw["snapshot"]["base_tree_sha"] = "f" * 40
+                    storage.atomic_write_yaml(case_path, raw)
+                before = case_path.read_bytes()
 
-    report = migrate.migrate_workspace(ws)
+                report = migrate.migrate_workspace(ws)
 
-    assert report.cases == []
-    assert len(report.errors) == 1
-    assert "provenance" in report.errors[0] or "source trees" in report.errors[0]
-    assert case_path.read_bytes() == before
+                assert report.cases == []
+                assert len(report.errors) == 1
+                assert "provenance" in report.errors[0] or "source trees" in report.errors[0]
+                assert case_path.read_bytes() == before
+
 
 def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: Path) -> None:
     """Imported legacy snapshots have no trees to verify and keep their candidate."""

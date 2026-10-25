@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.diff import _diff_changed_files
 from daydream.findings import load_findings_artifact
 from daydream.phases.review import ReviewOutputError
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import (
@@ -32,9 +33,10 @@ from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
     _install_post_recorder,
 )
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import merge_result, saved_coverage
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -79,19 +81,13 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
         assert lifecycle[-1]["status"] == "succeeded"
 
 
-@pytest.mark.parametrize(('resume', 'presentation_fault'), [
-    pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-resume'),
-    pytest.param(False, 'context', id='unavailable-report-fresh'),
-    pytest.param(True, 'context', id='unavailable-report-resume'),
-    pytest.param(False, 'missing-items', id='missing-items'),
-    pytest.param(False, 'corrupt-items', id='corrupt-items'),
-    pytest.param(False, 'permission-items', id='permission-items'),
-    pytest.param(False, 'render', id='summary-render'),
-    pytest.param(False, 'post', id='post-failure'),
-])
-async def test_synthesis_receives_retained_structural_records_and_owns_publication(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, resume: bool,
-    presentation_fault: str, fake_gh: FakeGh,
+async def _case_synthesis_receives_retained_structural_records_and_owns_publication(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resume: bool,
+    presentation_fault: str,
+    fake_gh: FakeGh,
 ) -> None:
     """Complete input delivery and exact published output prevent structural resurrection.
 
@@ -225,6 +221,38 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     assert items == published
 
 
+async def test_synthesis_receives_retained_structural_records_and_owns_publication(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, str]] = [
+        (False, "none"),
+        (True, "none"),
+        (False, "context"),
+        (True, "context"),
+        (False, "missing-items"),
+        (False, "corrupt-items"),
+        (False, "permission-items"),
+        (False, "render"),
+        (False, "post"),
+    ]
+    case_index = 0
+    for resume, presentation_fault in cases_0:
+        with (
+            subtests.test(resume=resume, presentation_fault=presentation_fault),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_synthesis_receives_retained_structural_records_and_owns_publication(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                resume=resume,
+                presentation_fault=presentation_fault,
+                fake_gh=install_fake_gh(scenario.tmp_path / "fake-gh-state", scenario.monkeypatch),
+            )
+
+
 async def test_synthesis_structural_privilege_requires_retained_source(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -304,9 +332,8 @@ async def test_cold_structural_only_merge_preserves_identity_and_supervises_find
     assert structural["description"] in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
 
 
-@pytest.mark.parametrize("first", ["arbiter", "suppression"])
-async def test_precision_adjudication_overlaps_and_joins_before_reconciling_original_records(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first: str,
+async def _case_precision_adjudication_overlaps_and_joins_before_reconciling_original_records(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first: str
 ) -> None:
     """Serial dispatch deadlocks these provider barriers; stale offsets corrupt the later survivors.
 
@@ -388,10 +415,25 @@ async def test_precision_adjudication_overlaps_and_joins_before_reconciling_orig
         assert lifecycle[-1]["status"] == "succeeded"
 
 
-@pytest.mark.parametrize("failed", ["arbiter", "suppression"])
-@pytest.mark.parametrize("fault", ["raise", "malformed", "omitted", "foreign-id"])
-async def test_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: str, fault: str,
+async def test_precision_adjudication_overlaps_and_joins_before_reconciling_original_records(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["arbiter", "suppression"]
+    case_index = 0
+    for first in cases_0:
+        with subtests.test(first=first), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_adjudication_overlaps_and_joins_before_reconciling_original_records(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                first=first,
+            )
+
+
+async def _case_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: str, fault: str
 ) -> None:
     """Acquisition errors stop after joining; unbound verdicts retain each pass's policy.
 
@@ -461,9 +503,28 @@ async def test_precision_overlap_keeps_independent_failure_policies_and_incomple
     assert all(json.loads(path.read_text())["unit"] != "arbiter" for path in manifests)
 
 
-@pytest.mark.parametrize("shape", ["empty", "nonprecision", "arbiter-only", "suppression-only"])
-async def test_precision_overlap_adds_no_calls_for_absent_or_disabled_populations(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str,
+async def test_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["arbiter", "suppression"]
+    cases_1: Sequence[str] = ["raise", "malformed", "omitted", "foreign-id"]
+    case_index = 0
+    for failed in cases_0:
+        for fault in cases_1:
+            with subtests.test(failed=failed, fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+                case_index += 1
+                multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+                await _case_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
+                    multi_stack_target=multi_stack_target,
+                    monkeypatch=scenario.monkeypatch,
+                    tmp_path=scenario.tmp_path,
+                    failed=failed,
+                    fault=fault,
+                )
+
+
+async def _case_precision_overlap_adds_no_calls_for_absent_or_disabled_populations(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
 ) -> None:
     """The parallel scheduler must not dispatch a provider for an empty population."""
     backend = PrecisionOverlapBackend(multi_stack_target)
@@ -483,9 +544,25 @@ async def test_precision_overlap_adds_no_calls_for_absent_or_disabled_population
     assert len(backend.completed) == len(expected)
 
 
-@pytest.mark.parametrize("capacity", [1, 2])
-async def test_precision_shards_and_suppression_share_capacity_without_holding_a_parent_slot(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capacity: int,
+async def test_precision_overlap_adds_no_calls_for_absent_or_disabled_populations(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["empty", "nonprecision", "arbiter-only", "suppression-only"]
+    case_index = 0
+    for shape in cases_0:
+        with subtests.test(shape=shape), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_overlap_adds_no_calls_for_absent_or_disabled_populations(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                shape=shape,
+            )
+
+
+async def _case_precision_shards_and_suppression_share_capacity_without_holding_a_parent_slot(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capacity: int
 ) -> None:
     """Separate limiters exceed the ceiling; a parent slot deadlocks capacity one.
 
@@ -545,12 +622,30 @@ async def test_precision_shards_and_suppression_share_capacity_without_holding_a
     assert DeepArtifact.ADJUDICATION_COMPLETE.at(deep).is_file()
 
 
-@pytest.mark.parametrize("budget_stop,diagnostic_fault", [
-    (False, None), (True, None), (False, "foreign"), (False, "raises"), (False, "subclass"),
-], ids=["provider-failure", "incomplete-coverage", "foreign-diagnostic", "raising-diagnostic", "error-subclass"])
-async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    capsys: pytest.CaptureFixture[str], budget_stop: bool, diagnostic_fault: str | None,
+async def test_precision_shards_and_suppression_share_capacity_without_holding_a_parent_slot(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[int] = [1, 2]
+    case_index = 0
+    for capacity in cases_0:
+        with subtests.test(capacity=capacity), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_shards_and_suppression_share_capacity_without_holding_a_parent_slot(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                capacity=capacity,
+            )
+
+
+async def _case_cold_empty_merge_preserves_failed_stack_diagnostics(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    budget_stop: bool,
+    diagnostic_fault: str | None,
 ) -> None:
     backend = EmptyReviewBackend(multi_stack_target, fail_stack=None if budget_stop else "python",
                                  incomplete_stack="python" if budget_stop else None)
@@ -609,9 +704,37 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
             assert failures["python"].startswith(f"{type(failure).__name__}: review invocation failed")
 
 
-@pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])
-async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, input_kind: str,
+async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, str | None]] = [
+        (False, None),
+        (True, None),
+        (False, "foreign"),
+        (False, "raises"),
+        (False, "subclass"),
+    ]
+    case_index = 0
+    for budget_stop, diagnostic_fault in cases_0:
+        with (
+            subtests.test(budget_stop=budget_stop, diagnostic_fault=diagnostic_fault),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            capsys.readouterr()
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_cold_empty_merge_preserves_failed_stack_diagnostics(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                capsys=capsys,
+                budget_stop=budget_stop,
+                diagnostic_fault=diagnostic_fault,
+            )
+
+
+async def _case_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, input_kind: str
 ) -> None:
     backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
     config_overrides: dict[str, Any] = {}
@@ -644,6 +767,23 @@ async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
         assert supervisors == 1
     if input_kind == "alternatives":
         assert json.loads((deep / "alternatives.json").read_text()) == backend.alternatives
+
+
+async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["language", "alternatives", "custom"]
+    case_index = 0
+    for input_kind in cases_0:
+        with subtests.test(input_kind=input_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                input_kind=input_kind,
+            )
 
 
 def _install_merge_captures(
@@ -907,9 +1047,8 @@ async def test_orchestrator_passes_structural_records_separately_to_merge_fresh_
     assert "structure" not in captured_record_dedup["sources"]
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
-@pytest.mark.parametrize("structural_line", [1, 0], ids=["same-line", "whole-file"])
-async def test_structural_language_twin_is_arbitrated_and_reported_once(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, structural_line: int,
+async def _case_structural_language_twin_is_arbitrated_and_reported_once(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, structural_line: int
 ) -> None:
     """Same-line and whole-file structural twins collapse to one high-severity finding."""
     _silence(monkeypatch)
@@ -936,6 +1075,21 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     assert len(twins) == 1, twins
     assert twins[0]["severity"] == "high"
     assert {item["file"] for item in items} == {"api.py", "App.tsx", "README.md"}
+
+
+async def test_structural_language_twin_is_arbitrated_and_reported_once(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[int] = [1, 0]
+    case_index = 0
+    for structural_line in cases_0:
+        with subtests.test(structural_line=structural_line), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_structural_language_twin_is_arbitrated_and_reported_once(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, structural_line=structural_line
+            )
+
 
 async def test_precision_mode_suppression_never_sees_structural_records(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

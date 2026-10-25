@@ -171,15 +171,24 @@ def test_permitted_callers_still_reference_the_helper() -> None:
         source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
         assert _strip_reference_lines(source), f"{rel} is allowlisted but no longer references {_FORBIDDEN_NAME}"
 
-@pytest.mark.parametrize("module", ["daydream/ui/new_surface.py", "daydream/ui/tools.py"])
-def test_new_command_renderer_cannot_redact_a_capped_command(module: str) -> None:
-    source = ("def render(args):\n" "    return redact_structured_text(args['command'][:200])\n")
-    assert _strip_reference_lines(source) == []  # the previous guard missed this exact shortcut
-    assert _command_pipeline_violations(source, module) == [2]
+def test_new_command_renderer_cannot_redact_a_capped_command(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["daydream/ui/new_surface.py", "daydream/ui/tools.py"]
+    for module in cases:
+        with subtests.test(module=module):
+            source = "def render(args):\n    return redact_structured_text(args['command'][:200])\n"
+            assert _strip_reference_lines(source) == []  # the previous guard missed this exact shortcut
+            assert _command_pipeline_violations(source, module) == [2]
 
-@pytest.mark.parametrize("source, expected_lines",
-    [
-        ("def render(args):\n" "    return redact_structured_text(args['command'])\n", [2],),
+def test_command_pipeline_shortcuts_are_reported(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, list[int]]] = [
+        (
+            "def render(args):\n    return redact_structured_text(args['command'])\n",
+            [2],
+        ),
         (
             "def render(args):\n"
             "    command = args.get('command', '')[:200]\n"
@@ -199,10 +208,10 @@ def test_new_command_renderer_cannot_redact_a_capped_command(module: str) -> Non
             "    return redact_structured_text(command[:200])\n",
             [2, 3],
         ),
-    ], ids=["direct-redaction", "cap-before-redact-alias", "copied-strip-call", "copied-strip-regex"],
-)
-def test_command_pipeline_shortcuts_are_reported(source: str, expected_lines: list[int]) -> None:
-    assert _command_pipeline_violations(source, "daydream/ui/tools.py") == expected_lines
+    ]
+    for source, expected_lines in cases:
+        with subtests.test(source=source):
+            assert _command_pipeline_violations(source, "daydream/ui/tools.py") == expected_lines
 
 def test_unrelated_redaction_and_strip_only_supervisor_are_outside_guard() -> None:
     source = (

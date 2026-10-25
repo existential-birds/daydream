@@ -64,6 +64,7 @@ from tests.harness.fake_cli_process import (
 from tests.harness.git_helpers import git as _git
 from tests.harness.process_replay import replay_process
 from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.table_cases import isolated_case
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -129,25 +130,37 @@ async def test_tool_use_events() -> None:
     assert any("main.py" in tr.output for tr in tool_results)
     assert any(t.text == "Done!" for t in texts)
 
-@pytest.mark.parametrize("tool_name", [None, 42, False, [], {"token": "private-value"}])
-async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Path, tool_name: Any) -> None:
-    item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
-    process = make_mock_process([
-        json.dumps({"type": "item.started", "item": item}),
-        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
-        json.dumps({"type": "turn.completed", "usage": {}}),
-    ])
-    events, _ = await replay_process(CodexBackend(model="fixture-model"), process, tmp_path, "review")
-    starts = [event for event in events if isinstance(event, ToolStartEvent)]
-    results = [event for event in events if isinstance(event, ToolResultEvent)]
-    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
-    assert len(starts) == len(results) == 1
-    assert starts[0].name == "unknown"
-    assert starts[0].id == results[0].id == "mcp-1"
-    assert diagnostics[0].code == "codex_parser_coverage"
-    assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
-    assert events.index(diagnostics[0]) < events.index(starts[0])
-    assert "private-value" not in repr(diagnostics)
+async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [None, 42, False, [], {"token": "private-value"}]
+    for tool_name in cases:
+        row_index += 1
+        with subtests.test(tool_name=tool_name):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
+                process = make_mock_process(
+                    [
+                        json.dumps({"type": "item.started", "item": item}),
+                        json.dumps({"type": "item.completed", "item": {**item, "result": {"content": []}}}),
+                        json.dumps({"type": "turn.completed", "usage": {}}),
+                    ]
+                )
+                events, _ = await replay_process(CodexBackend(model="fixture-model"), process, tmp_path, "review")
+                starts = [event for event in events if isinstance(event, ToolStartEvent)]
+                results = [event for event in events if isinstance(event, ToolResultEvent)]
+                diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+                assert len(starts) == len(results) == 1
+                assert starts[0].name == "unknown"
+                assert starts[0].id == results[0].id == "mcp-1"
+                assert diagnostics[0].code == "codex_parser_coverage"
+                assert diagnostics[0].metadata["warnings"]["reasons"] == {"tool_not_string": 1}
+                assert events.index(diagnostics[0]) < events.index(starts[0])
+                assert "private-value" not in repr(diagnostics)
 
 
 async def test_file_change_changes_map_single_path() -> None:
@@ -175,16 +188,20 @@ async def test_file_change_changes_map_multi_path() -> None:
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(results) == 1 and not results[0].is_error
 
-@pytest.mark.parametrize("status", ["declined", "failed"])
-async def test_file_change_unsuccessful_status_is_preserved(status: str) -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", f"file_change_{status}.jsonl")
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert results[0].is_error is True
-    assert results[0].status == status
-    if status == "failed":
-        assert "failed to apply hunk" in results[0].output
+async def test_file_change_unsuccessful_status_is_preserved(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["declined", "failed"]
+    for status in cases:
+        with subtests.test(status=status):
+            backend = CodexBackend(model="fixture-model")
+            events = await _run_fixture(backend, "Edit", f"file_change_{status}.jsonl")
+            results = [e for e in events if isinstance(e, ToolResultEvent)]
+            assert len(results) == 1
+            assert results[0].is_error is True
+            assert results[0].status == status
+            if status == "failed":
+                assert "failed to apply hunk" in results[0].output
 
 async def test_file_change_pathless_payload_diagnostic() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -283,61 +300,84 @@ async def test_file_change_idless_pathless_no_unmatched_warning(caplog: pytest.L
     assert "unparseable" in results[0].output
     assert "unmatched tool result" not in caplog.text
 
-@pytest.mark.parametrize(
-    ("fixture", "expected_output", "expected_text_count"),
-    [
+async def test_structured_output(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[Any, Any, Any]] = [
         (
             "structured_output.jsonl",
-            {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}, None,
+            {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]},
+            None,
         ),
         (
             "streamed_structured_output.jsonl",
-            {"issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]}, 1,
+            {"issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]},
+            1,
         ),
         (
             "output_text_blocks.jsonl",
-            {"issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]}, None,
+            {"issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]},
+            None,
         ),
         (
             "turn_completed_result.jsonl",
-            {"issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]}, None,
+            {"issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]},
+            None,
         ),
-    ], ids=["item-completed", "streamed-item-updated", "output-text-blocks", "turn-completed-result"],
-)
-async def test_structured_output(fixture: Any, expected_output: Any, expected_text_count: Any) -> None:
-    backend = CodexBackend(model="fixture-model")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    events = await _run_fixture(backend, "Parse", fixture, output_schema=schema)
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    native = fixture == "turn_completed_result.jsonl"
-    assert result_events[0].structured_output == (expected_output if native else None)
-    if not native:
-        text = [event.text for event in events if isinstance(event, TextEvent)]
-        assert json.loads(text[-1]) == expected_output
-        assert sum(isinstance(event, TurnEndEvent) for event in events) == len(text)
-    if expected_text_count is not None:
-        assert len([e for e in events if isinstance(e, TextEvent)]) == expected_text_count
+    ]
+    for fixture, expected_output, expected_text_count in cases:
+        with subtests.test(fixture=fixture):
+            backend = CodexBackend(model="fixture-model")
+            schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
+            events = await _run_fixture(backend, "Parse", fixture, output_schema=schema)
+            result_events = [e for e in events if isinstance(e, ResultEvent)]
+            assert len(result_events) == 1
+            native = fixture == "turn_completed_result.jsonl"
+            assert result_events[0].structured_output == (expected_output if native else None)
+            if not native:
+                text = [event.text for event in events if isinstance(event, TextEvent)]
+                assert json.loads(text[-1]) == expected_output
+                assert sum(isinstance(event, TurnEndEvent) for event in events) == len(text)
+            if expected_text_count is not None:
+                assert len([e for e in events if isinstance(e, TextEvent)]) == expected_text_count
 
-@pytest.mark.parametrize('staged', [False, True])
-async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
-    lines = [json.dumps(event) for event in [
-        {"type": "thread.started", "thread_id": "empty-final"},
-        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"issues": []}'}},
-        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
-        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
-    ]]
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec",
-               return_value=make_mock_process(lines)):
-        result, token, reason = await run_agent(
-            CodexBackend(model="fixture-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
-            output_schema=schema, require_full_schema=True,
-            investigation_budget=ReviewInvestigationBudget.from_limits(ReviewLimits()) if staged else None,
-        )
-    assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
-    assert token is not None and token.data == {"thread_id": "empty-final"}
-    assert reason is None
+async def test_empty_final_codex_message_cannot_reuse_planning_json(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for staged in cases:
+        row_index += 1
+        with subtests.test(staged=staged):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
+                lines = [
+                    json.dumps(event)
+                    for event in [
+                        {"type": "thread.started", "thread_id": "empty-final"},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"issues": []}'}},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+                    ]
+                ]
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process(lines)
+                ):
+                    result, token, reason = await run_agent(
+                        CodexBackend(model="fixture-model"),
+                        tmp_path,
+                        "review",
+                        phase=DaydreamPhase.REVIEW,
+                        output_schema=schema,
+                        require_full_schema=True,
+                        investigation_budget=ReviewInvestigationBudget.from_limits(ReviewLimits()) if staged else None,
+                    )
+                assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
+                assert token is not None and token.data == {"thread_id": "empty-final"}
+                assert reason is None
 
 
 async def test_nonzero_exit_raises_with_captured_output() -> None:
@@ -371,24 +411,42 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
     assert "no non-JSON output captured" in str(exc_info.value)
     assert exc_info.value.category == "PROCESS_EXIT"
 
-@pytest.mark.parametrize("read_only", [False, True])
-async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> None:
+async def test_continuation_token_resumes(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """Stable directories retain native resume, including non-Git read-only runs."""
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        events = [event async for event in backend.execute(
-            tmp_path, "Continue", continuation=token, read_only=read_only,
-        )]
-        call_args = mock_exec.call_args
-        flat_args = list(call_args.args) if call_args.args else []
-        assert "resume" in flat_args
-        assert "th_prev" in flat_args
-        result = next(event for event in events if isinstance(event, ResultEvent))
-        assert result.continuation is not None
-        assert result.continuation.data["thread_id"] == "th_abc123"
-        assert result.session_id == "th_abc123"
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for read_only in cases:
+        row_index += 1
+        with subtests.test(read_only=read_only):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                backend = CodexBackend(model="fixture-model")
+                mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+                token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
+                with patch(
+                    "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
+                ) as mock_exec:
+                    events = [
+                        event
+                        async for event in backend.execute(
+                            tmp_path,
+                            "Continue",
+                            continuation=token,
+                            read_only=read_only,
+                        )
+                    ]
+                    call_args = mock_exec.call_args
+                    flat_args = list(call_args.args) if call_args.args else []
+                    assert "resume" in flat_args
+                    assert "th_prev" in flat_args
+                    result = next(event for event in events if isinstance(event, ResultEvent))
+                    assert result.continuation is not None
+                    assert result.continuation.data["thread_id"] == "th_abc123"
+                    assert result.session_id == "th_abc123"
 
 async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Path, Path]) -> None:
     """A disposable clone mirrors HEAD, index, tracked worktree edits, and untracked files; rebind prompts,
@@ -698,18 +756,24 @@ async def test_codex_default_full_access_at_worktree_skips_isolation(linked_work
         assert "read-only" not in flat_args
         assert flat_args[flat_args.index("--cd") + 1] == str(source)
 
-@pytest.mark.parametrize("effort", ["high", None])
-async def test_codex_reasoning_effort_config_override(effort: str | None) -> None:
-    backend = CodexBackend(model="fixture-model", reasoning_effort=effort)
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-        flat_args = list(mock_exec.call_args.args)
-        if effort is None:
-            assert "-c" not in flat_args
-        else:
-            assert flat_args[flat_args.index("-c") + 1] == 'model_reasoning_effort="high"'
+async def test_codex_reasoning_effort_config_override(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str | None] = ["high", None]
+    for effort in cases:
+        with subtests.test(effort=effort):
+            backend = CodexBackend(model="fixture-model", reasoning_effort=effort)
+            mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+            with patch(
+                "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
+            ) as mock_exec:
+                async for _ in backend.execute(Path("/tmp"), "p"):
+                    pass
+                flat_args = list(mock_exec.call_args.args)
+                if effort is None:
+                    assert "-c" not in flat_args
+                else:
+                    assert flat_args[flat_args.index("-c") + 1] == 'model_reasoning_effort="high"'
 
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -882,41 +946,37 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 
 class TestUnwrapShellCommand:
 
-    @pytest.mark.parametrize("command,expected", [
-        pytest.param(
-            '/bin/zsh -lc "cd /home/user/project && make test"',
-            'cd /home/user/project && make test',
-            id='zsh-cd',
-        ),
-        pytest.param(
-            "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'",
-            "awk '{print $1}' file.txt",
-            id='nested-quotes',
-        ),
-        pytest.param('/bin/zsh -lc "echo \\"hi\\" and $HOME"', 'echo "hi" and $HOME', id='escaped-quotes'),
-        pytest.param('/bin/zsh -lc "echo $(date)"', 'echo $(date)', id='substitution'),
-        pytest.param("/bin/zsh -lc 'echo line1\nline2'", 'echo line1\nline2', id='multiline'),
-        pytest.param("/bin/zsh -lc 'cat <<EOF\nhello\nEOF'", 'cat <<EOF\nhello\nEOF', id='heredoc'),
-        pytest.param('python -c "print(1)"', 'python -c "print(1)"', id='non-shell'),
-        pytest.param('/bin/zsh -lc "cmd" extra_arg', '/bin/zsh -lc "cmd" extra_arg', id='trailing-args'),
-        pytest.param("/bin/zsh -lc 'unbalanced", "/bin/zsh -lc 'unbalanced", id='bad-quotes'),
-        pytest.param('/bin/zsh -lc', '/bin/zsh -lc', id='missing-payload'),
-        pytest.param('/bin/zsh -lc "ls -la"', 'ls -la', id='no-cd'),
-        pytest.param('', '', id='empty'),
-        pytest.param('/bin/zsh -lc ls', 'ls', id='bare-word'),
-        pytest.param('/bin/zsh -lc make test', 'make test', id='bare-make'),
-        pytest.param('/bin/zsh -lc ls -la', 'ls -la', id='bare-ls'),
-        pytest.param('/bin/bash -lc git status --short', 'git status --short', id='bare-bash'),
-        pytest.param("/bin/zsh -lc echo 'hello world'", "echo 'hello world'", id='bare-quotes'),
-        pytest.param("/bin/zsh -lc 'git diff main...HEAD'", 'git diff main...HEAD', id='git-diff'),
-        pytest.param(
-            '/bin/zsh -lc "sed -n \'1,260p\' amelia/agents/architect.py"',
-            "sed -n '1,260p' amelia/agents/architect.py",
-            id='sed',
-        ),
-    ])
-    def test_unwrap_payload(self, command: str, expected: str) -> None:
-        assert _unwrap_shell_command(command) == expected
+    def test_unwrap_payload(
+        self,
+        subtests: pytest.Subtests,
+    ) -> None:
+        cases: list[tuple[str, str]] = [
+            ('/bin/zsh -lc "cd /home/user/project && make test"', "cd /home/user/project && make test"),
+            ("/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'", "awk '{print $1}' file.txt"),
+            ('/bin/zsh -lc "echo \\"hi\\" and $HOME"', 'echo "hi" and $HOME'),
+            ('/bin/zsh -lc "echo $(date)"', "echo $(date)"),
+            ("/bin/zsh -lc 'echo line1\nline2'", "echo line1\nline2"),
+            ("/bin/zsh -lc 'cat <<EOF\nhello\nEOF'", "cat <<EOF\nhello\nEOF"),
+            ('python -c "print(1)"', 'python -c "print(1)"'),
+            ('/bin/zsh -lc "cmd" extra_arg', '/bin/zsh -lc "cmd" extra_arg'),
+            ("/bin/zsh -lc 'unbalanced", "/bin/zsh -lc 'unbalanced"),
+            ("/bin/zsh -lc", "/bin/zsh -lc"),
+            ('/bin/zsh -lc "ls -la"', "ls -la"),
+            ("", ""),
+            ("/bin/zsh -lc ls", "ls"),
+            ("/bin/zsh -lc make test", "make test"),
+            ("/bin/zsh -lc ls -la", "ls -la"),
+            ("/bin/bash -lc git status --short", "git status --short"),
+            ("/bin/zsh -lc echo 'hello world'", "echo 'hello world'"),
+            ("/bin/zsh -lc 'git diff main...HEAD'", "git diff main...HEAD"),
+            (
+                "/bin/zsh -lc \"sed -n '1,260p' amelia/agents/architect.py\"",
+                "sed -n '1,260p' amelia/agents/architect.py",
+            ),
+        ]
+        for command, expected in cases:
+            with subtests.test(command=command):
+                assert _unwrap_shell_command(command) == expected
 
     async def test_duplicate_completion_does_not_reuse_consumed_start(
         self, caplog: pytest.LogCaptureFixture
@@ -1089,47 +1149,41 @@ def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     assert "[REDACTED" in bounded
 
 
-@pytest.mark.parametrize(
-    ("error", "expected_retry"),
-    [
-        pytest.param(
-            {"message": "Selected model is at capacity. Please try a different model."}, True, id="observed-text",
-        ),
-        pytest.param(
-            {"message": "Try again later", "codex_error_info": "server_overloaded"}, True, id="structured-info",
-        ),
-        pytest.param(
-            {"message": "Try again later", "code": "server_overloaded"}, True, id="structured-code",
-        ),
-        pytest.param(
-            {"message": "Invalid API key", "codex_error_info": "server_overloaded"}, False, id="permanent-message",
-        ),
-        *[
-            pytest.param(
-                {"message": "Selected model is at capacity. Please try a different model.", "code": code},
-                False, id=f"explicit-{code}",
-            )
-            for code in ("unauthorized", "schema_validation", "tool_policy", "unknown_error")
-        ],
-        pytest.param({"message": "The model has capacity planning advice."}, False, id="unknown-text"),
-        pytest.param({"message": "Try again later", "code": {"server_overloaded": True}}, False, id="malformed-code"),
-    ],
-)
 async def test_public_turn_failure_preserves_metadata_and_normalizes_only_overload(
-    tmp_path: Path, error: dict[str, Any], expected_retry: bool,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Public JSONL decoding must admit capacity retries without making unknown failures retryable."""
-    process = make_mock_process([json.dumps({"type": "turn.failed", "error": error})])
-    backend = CodexBackend(model="fixture-model")
-    with pytest.raises(CodexError) as failure:
-        await replay_process(backend, process, tmp_path, "review")
-    decision = classify_failure(failure.value)
-    assert decision.retries_allowed is expected_retry
-    if expected_retry:
-        assert decision.failure_class is FailureClass.SERVER_ERROR
-    assert failure.value.error_metadata == error
-    assert str(failure.value) == error["message"]
-    assert backend._transports == []
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[dict[str, Any], bool]] = [
+        ({"message": "Selected model is at capacity. Please try a different model."}, True),
+        ({"message": "Try again later", "codex_error_info": "server_overloaded"}, True),
+        ({"message": "Try again later", "code": "server_overloaded"}, True),
+        ({"message": "Invalid API key", "codex_error_info": "server_overloaded"}, False),
+        *[
+            ({"message": "Selected model is at capacity. Please try a different model.", "code": code}, False)
+            for code in ("unauthorized", "schema_validation", "tool_policy", "unknown_error")
+        ],
+        ({"message": "The model has capacity planning advice."}, False),
+        ({"message": "Try again later", "code": {"server_overloaded": True}}, False),
+    ]
+    for error, expected_retry in cases:
+        row_index += 1
+        with subtests.test(expected_retry=expected_retry):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                process = make_mock_process([json.dumps({"type": "turn.failed", "error": error})])
+                backend = CodexBackend(model="fixture-model")
+                with pytest.raises(CodexError) as failure:
+                    await replay_process(backend, process, tmp_path, "review")
+                decision = classify_failure(failure.value)
+                assert decision.retries_allowed is expected_retry
+                if expected_retry:
+                    assert decision.failure_class is FailureClass.SERVER_ERROR
+                assert failure.value.error_metadata == error
+                assert str(failure.value) == error["message"]
+                assert backend._transports == []
 
 
 async def test_public_authentication_failure_is_known_permanent(tmp_path: Path) -> None:
@@ -1147,15 +1201,21 @@ async def test_public_authentication_failure_is_known_permanent(tmp_path: Path) 
     assert backend._transports == []
 
 
-@pytest.mark.parametrize("retryable", [None, False, True])
-def test_codex_authentication_diagnostic_precedes_transient_retry_hints(retryable: bool | None) -> None:
-    error = CodexError(
-        "authentication required. Run codex login to authenticate", retryable=retryable,
-        category="SERVER_ERROR", error_metadata={"codex_error_info": "server_overloaded"},
-    )
-    decision = classify_failure(error)
-    assert decision.failure_class is FailureClass.AUTH_CONFIG
-    assert decision.retries_allowed is False
+def test_codex_authentication_diagnostic_precedes_transient_retry_hints(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[bool | None] = [None, False, True]
+    for retryable in cases:
+        with subtests.test(retryable=retryable):
+            error = CodexError(
+                "authentication required. Run codex login to authenticate",
+                retryable=retryable,
+                category="SERVER_ERROR",
+                error_metadata={"codex_error_info": "server_overloaded"},
+            )
+            decision = classify_failure(error)
+            assert decision.failure_class is FailureClass.AUTH_CONFIG
+            assert decision.retries_allowed is False
 
 
 async def test_public_overload_after_completion_cannot_replay_completed_work(tmp_path: Path) -> None:
@@ -1168,45 +1228,57 @@ async def test_public_overload_after_completion_cannot_replay_completed_work(tmp
     assert classify_failure(failure.value).retries_allowed is False
 
 
-@pytest.mark.parametrize("error_code", [None, "model_error"])
-async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(error_code: str | None) -> None:
-    backend = CodexBackend(model="fixture-model")
-    class _FailureThenBlockingStdout:
-        def __init__(self) -> None:
-            self._lines = iter(
-                [
-                    json.dumps({"type": "future.one"}), json.dumps({"type": "future.two"}),
-                    json.dumps({"type": "turn.failed", "error": {"message": "terminal failure", "code": error_code}}),
-                ]
-            )
-            self.blocking_read_started = False
-        async def readline(self) -> bytes:
-            try:
-                return (next(self._lines) + "\n").encode()
-            except StopIteration:
-                self.blocking_read_started = True
-                await asyncio.Event().wait()
-                raise AssertionError("unreachable")
-    stdout = _FailureThenBlockingStdout()
-    mock_proc = make_mock_process([])
-    mock_proc.stdout = stdout
-    observed: list[Any] = []
-    async def consume() -> None:
-        async for event in backend.execute(Path("/tmp"), "Fail now"):
-            observed.append(event)
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="terminal failure") as failure:
-            await asyncio.wait_for(consume(), timeout=0.2)
-    assert failure.value.category is None
-    assert isinstance(observed[-1], DiagnosticEvent)
-    assert observed[-1].code == "codex_parser_coverage"
-    parser_diagnostics = [
-        event
-        for event in observed
-        if isinstance(event, DiagnosticEvent) and event.code == "codex_parser_coverage"
-    ]
-    assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
-    assert stdout.blocking_read_started is False
+async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str | None] = [None, "model_error"]
+    for error_code in cases:
+        with subtests.test(error_code=error_code):
+            backend = CodexBackend(model="fixture-model")
+
+            class _FailureThenBlockingStdout:
+                def __init__(self) -> None:
+                    self._lines = iter(
+                        [
+                            json.dumps({"type": "future.one"}),
+                            json.dumps({"type": "future.two"}),
+                            json.dumps(
+                                {"type": "turn.failed", "error": {"message": "terminal failure", "code": error_code}}
+                            ),
+                        ]
+                    )
+                    self.blocking_read_started = False
+
+                async def readline(self) -> bytes:
+                    try:
+                        return (next(self._lines) + "\n").encode()
+                    except StopIteration:
+                        self.blocking_read_started = True
+                        await asyncio.Event().wait()
+                        raise AssertionError("unreachable")
+
+            stdout = _FailureThenBlockingStdout()
+            mock_proc = make_mock_process([])
+            mock_proc.stdout = stdout
+            observed: list[Any] = []
+
+            async def consume() -> None:
+                async for event in backend.execute(Path("/tmp"), "Fail now"):
+                    observed.append(event)
+
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+                with pytest.raises(CodexError, match="terminal failure") as failure:
+                    await asyncio.wait_for(consume(), timeout=0.2)
+            assert failure.value.category is None
+            assert isinstance(observed[-1], DiagnosticEvent)
+            assert observed[-1].code == "codex_parser_coverage"
+            parser_diagnostics = [
+                event
+                for event in observed
+                if isinstance(event, DiagnosticEvent) and event.code == "codex_parser_coverage"
+            ]
+            assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
+            assert stdout.blocking_read_started is False
 
 
 async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
@@ -1240,18 +1312,31 @@ def test_text_extraction_top_level_wins_over_content_blocks() -> None:
 
 # Use the shared fan-out setting so changing backends does not change endpoint concurrency.
 
-@pytest.mark.parametrize(
-    ("raw", "ceiling", "expected"),
-    [(None, 10, 8), ("3", 10, 3), ("8", 2, 2), ("0", 10, 8), ("-1", 10, 8), ("notanint", 10, 8)],
-)
 def test_codex_fanout_concurrency_honours_the_shared_env_override(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, ceiling: int, expected: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    if raw is None:
-        monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
-    else:
-        monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
-    assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str | None, int, int]] = [
+        (None, 10, 8),
+        ("3", 10, 3),
+        ("8", 2, 2),
+        ("0", 10, 8),
+        ("-1", 10, 8),
+        ("notanint", 10, 8),
+    ]
+    for raw, ceiling, expected in cases:
+        row_index += 1
+        with subtests.test(raw=raw):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                if raw is None:
+                    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
+                else:
+                    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
+                assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
 
 
 class TestDisplayShellCommand:

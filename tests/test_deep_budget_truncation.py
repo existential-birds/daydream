@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -18,10 +18,12 @@ from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.runner import run
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.support import _scan_phase_events
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, install_stub_backend, review_stage_state, silence, stage_result
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _pin_findings_pr
 
 
@@ -76,12 +78,11 @@ async def test_runaway_host_suite_is_bounded_and_reaches_abort(
     test_ends = [event for event in ends if event["phase"] == "test-execution"]
     assert test_ends and all(event["metadata"]["stop_reason"] == "timed_out" for event in test_ends)
 
-@pytest.mark.parametrize(
-    "phase", ["intent", "alternatives", "per_stack", "merge", "arbiter", "suppression", "supervisor"],
-)
-@pytest.mark.parametrize("budget", ["wall", "tool_call"])
-async def test_review_budget_stop_emits_partial_findings(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig], phase: str,
+async def _case_review_budget_stop_emits_partial_findings(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., RunConfig],
+    phase: str,
     budget: str,
 ) -> None:
     """Real agent budget stops cannot strand completed findings before Phase B."""
@@ -154,6 +155,27 @@ async def test_review_budget_stop_emits_partial_findings(
         stub.exhaust = False
         assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge",)) == 0
         assert not json.loads(out.read_text()).get("review_warnings")
+
+
+async def test_review_budget_stop_emits_partial_findings(
+    make_config: Callable[..., RunConfig], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["intent", "alternatives", "per_stack", "merge", "arbiter", "suppression", "supervisor"]
+    cases_1: Sequence[str] = ["wall", "tool_call"]
+    case_index = 0
+    for phase in cases_0:
+        for budget in cases_1:
+            with subtests.test(phase=phase, budget=budget), isolated_case(tmp_path, str(case_index)) as scenario:
+                case_index += 1
+                multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+                await _case_review_budget_stop_emits_partial_findings(
+                    multi_stack_target=multi_stack_target,
+                    monkeypatch=scenario.monkeypatch,
+                    make_config=make_config,
+                    phase=phase,
+                    budget=budget,
+                )
+
 
 async def test_single_stack_alternatives_timeout_still_emits_findings(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],

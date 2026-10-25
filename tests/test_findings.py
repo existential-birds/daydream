@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import test_execution_identity as execution_identity
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
+from tests.harness.table_cases import isolated_case
 
 
 def _load(path: Path, *, head_sha: str = "h" * 40, **options: Any) -> Any:
@@ -47,33 +49,61 @@ def _diagram_payload() -> dict[str, Any]:
                         "flowchart": None}}
 
 
-@pytest.mark.parametrize("kind", ["review", "diagram"])
 def test_build_write_load_preserves_target_finding_and_diagram_contract(
-    tmp_path: Path, git_repo: Path, kind: str,
+    tmp_path: Path,
+    git_repo: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    head = git_ops.head_sha(git_repo)
-    pr = PRInfo(7, head, head, "main", "feature", "o", "r", "u")
-    issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
-                          confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)] if kind == "review" else []
-    payload = _diagram_payload() if kind == "diagram" else None
-    options: dict[str, Any] = {}
-    if kind == "review":
-        options = {"terminal_result": terminal_result(head_sha=head),
-                   "snapshot_diff": git_ops.diff_paths(git_repo, head, head, ["."])}
-    artifact = build_findings_artifact(git_repo, pr, issues, run_info=None,
-                                       kind=kind, diagrams=payload, **options)
-    assert (artifact["repo"], artifact["pr_number"], artifact["head_sha"]) == ("o/r", 7, head)
-    path = tmp_path / "findings.json"
-    write_findings_artifact(path, artifact)
-    loaded = _load(path, head_sha=head)
-    assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 2
-    assert loaded.kind == kind and loaded.diagrams == payload
-    if kind == "review":
-        finding = artifact["findings"][0]
-        assert (finding["fingerprint"], finding["placement"], finding["line"]) == ("f" * 64, "body", None)
-        assert loaded.analysis_complete and loaded.terminal_result["analysis_state"] == "complete"
-    else:
-        assert loaded.findings == [] and not loaded.analysis_complete
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["review", "diagram"]
+    for kind in cases:
+        row_index += 1
+        with subtests.test(kind=kind):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                head = git_ops.head_sha(git_repo)
+                pr = PRInfo(7, head, head, "main", "feature", "o", "r", "u")
+                issues = (
+                    [
+                        ParsedIssue(
+                            path="a.py",
+                            line=None,
+                            title="T",
+                            body="B",
+                            severity="high",
+                            confidence="HIGH",
+                            fingerprint="f" * 64,
+                            is_cross_stack=True,
+                        )
+                    ]
+                    if kind == "review"
+                    else []
+                )
+                payload = _diagram_payload() if kind == "diagram" else None
+                options: dict[str, Any] = {}
+                if kind == "review":
+                    options = {
+                        "terminal_result": terminal_result(head_sha=head),
+                        "snapshot_diff": git_ops.diff_paths(git_repo, head, head, ["."]),
+                    }
+                artifact = build_findings_artifact(
+                    git_repo, pr, issues, run_info=None, kind=kind, diagrams=payload, **options
+                )
+                assert (artifact["repo"], artifact["pr_number"], artifact["head_sha"]) == ("o/r", 7, head)
+                path = tmp_path / "findings.json"
+                write_findings_artifact(path, artifact)
+                loaded = _load(path, head_sha=head)
+                assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 2
+                assert loaded.kind == kind and loaded.diagrams == payload
+                if kind == "review":
+                    finding = artifact["findings"][0]
+                    assert (finding["fingerprint"], finding["placement"], finding["line"]) == ("f" * 64, "body", None)
+                    assert loaded.analysis_complete and loaded.terminal_result["analysis_state"] == "complete"
+                else:
+                    assert loaded.findings == [] and not loaded.analysis_complete
 
 
 def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:
@@ -88,57 +118,108 @@ def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:
         _load(tmp_path / "fresh-current-run.json")
 
 
-@pytest.mark.parametrize("raw", [None, '{"schema_version": 2', '[' * 2000 + '0' + ']' * 2000,
-                                 pytest.param('[' + ' ' * MAX_ARTIFACT_BYTES, id="oversized-input")])
-def test_missing_truncated_nested_and_oversized_input_is_never_clean(tmp_path: Path, raw: str | None) -> None:
-    path = tmp_path / "invalid.json"
-    if raw is not None:
-        path.write_text(raw)
-    with pytest.raises(FindingsValidationError, match="size" if raw and len(raw) > MAX_ARTIFACT_BYTES else None):
-        _load(path)
-
-
-@pytest.mark.parametrize("mutate", [
-    lambda a: a.pop("terminal_result"), lambda a: a.update(schema_version=99), lambda a: a.update(kind="diagram"),
-    lambda a: a["terminal_result"]["analyzed_revision"].update(head_sha="x" * 40),
-    lambda a: a["terminal_result"]["stack_outcomes"].clear(),
-    lambda a: a["terminal_result"].update(reason_codes=["invented"]),
-])
-def test_semantic_invariants_rejected_before_write(tmp_path: Path, mutate: Any) -> None:
-    artifact = findings_artifact()
-    mutate(artifact)
-    path = tmp_path / "invalid.json"
-    with pytest.raises(FindingsValidationError):
-        write_findings_artifact(path, artifact)
-    assert not path.exists()
-
-
-@pytest.mark.parametrize("fault,prior", [("replace", False), ("replace", True), ("object", True),
-    ("serializer", True), ("utf8", False), ("diagram-size", False)])
-def test_failed_write_preserves_prior_bytes_and_leaves_no_staging_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, prior: bool,
+def test_missing_truncated_nested_and_oversized_input_is_never_clean(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    path = tmp_path / "atomic.json"
-    if prior:
-        path.write_bytes(b"prior current result")
-    artifact = findings_artifact()
-    def fail(*args: Any, **kwargs: Any) -> Any:
-        raise OSError("rename unavailable") if fault == "replace" else ValueError("cannot serialize")
-    if fault in {"replace", "serializer"}:
-        monkeypatch.setattr(os if fault == "replace" else json, "replace" if fault == "replace" else "dumps", fail)
-    elif fault == "object":
-        artifact["run_info"] = object()
-    elif fault == "utf8":
-        artifact["run_info"] = "é" * (MAX_ARTIFACT_BYTES // 2)
-        assert len(artifact["run_info"]) < MAX_ARTIFACT_BYTES
-    else:
-        payload = _diagram_payload()
-        payload["results"]["sequence"]["spec_final"]["messages"] = [{"label": "x" * 512} for _ in range(4000)]
-        artifact = findings_artifact(kind="diagram", diagrams=payload)
-    with pytest.raises(FindingsValidationError, match="size" if fault in {"utf8", "diagram-size"} else None):
-        write_findings_artifact(path, artifact)
-    assert path.read_bytes() == b"prior current result" if prior else not path.exists()
-    assert not list(tmp_path.glob("*.tmp"))
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str | None] = [
+        None,
+        '{"schema_version": 2',
+        "[" * 2000 + "0" + "]" * 2000,
+        "[" + " " * MAX_ARTIFACT_BYTES,
+    ]
+    for raw in cases:
+        row_index += 1
+        with subtests.test(raw=raw):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                path = tmp_path / "invalid.json"
+                if raw is not None:
+                    path.write_text(raw)
+                with pytest.raises(
+                    FindingsValidationError, match="size" if raw and len(raw) > MAX_ARTIFACT_BYTES else None
+                ):
+                    _load(path)
+
+
+def test_semantic_invariants_rejected_before_write(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [
+        lambda a: a.pop("terminal_result"),
+        lambda a: a.update(schema_version=99),
+        lambda a: a.update(kind="diagram"),
+        lambda a: a["terminal_result"]["analyzed_revision"].update(head_sha="x" * 40),
+        lambda a: a["terminal_result"]["stack_outcomes"].clear(),
+        lambda a: a["terminal_result"].update(reason_codes=["invented"]),
+    ]
+    for mutate in cases:
+        row_index += 1
+        with subtests.test(mutate=mutate):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                artifact = findings_artifact()
+                mutate(artifact)
+                path = tmp_path / "invalid.json"
+                with pytest.raises(FindingsValidationError):
+                    write_findings_artifact(path, artifact)
+                assert not path.exists()
+
+
+def test_failed_write_preserves_prior_bytes_and_leaves_no_staging_file(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, bool]] = [
+        ("replace", False),
+        ("replace", True),
+        ("object", True),
+        ("serializer", True),
+        ("utf8", False),
+        ("diagram-size", False),
+    ]
+    for fault, prior in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                path = tmp_path / "atomic.json"
+                if prior:
+                    path.write_bytes(b"prior current result")
+                artifact = findings_artifact()
+
+                def fail(*args: Any, **kwargs: Any) -> Any:
+                    raise OSError("rename unavailable") if fault == "replace" else ValueError("cannot serialize")
+
+                if fault in {"replace", "serializer"}:
+                    monkeypatch.setattr(
+                        os if fault == "replace" else json, "replace" if fault == "replace" else "dumps", fail
+                    )
+                elif fault == "object":
+                    artifact["run_info"] = object()
+                elif fault == "utf8":
+                    artifact["run_info"] = "é" * (MAX_ARTIFACT_BYTES // 2)
+                    assert len(artifact["run_info"]) < MAX_ARTIFACT_BYTES
+                else:
+                    payload = _diagram_payload()
+                    payload["results"]["sequence"]["spec_final"]["messages"] = [
+                        {"label": "x" * 512} for _ in range(4000)
+                    ]
+                    artifact = findings_artifact(kind="diagram", diagrams=payload)
+                with pytest.raises(
+                    FindingsValidationError, match="size" if fault in {"utf8", "diagram-size"} else None
+                ):
+                    write_findings_artifact(path, artifact)
+                assert path.read_bytes() == b"prior current result" if prior else not path.exists()
+                assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_untrustworthy_projection_cannot_contain_findings(tmp_path: Path, valid_artifact: dict[str, Any]) -> None:

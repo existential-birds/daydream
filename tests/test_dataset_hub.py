@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import stat
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 
 from daydream.dataset import LocalRecordStore, StoreError
 from tests.harness.dataset import observation, read_records, run_record
+from tests.harness.table_cases import isolated_case
 
 TEST_REPO = "test-user/private-trajectories"
 
@@ -103,40 +105,65 @@ def test_concurrent_manifest_update_preserves_rival_records(tmp_path: Path, api:
     assert {record["run_id"] for record in read_records(downloaded).runs} == {"first", "rival"}
 
 
-@pytest.mark.parametrize("fault", ["public", "secret", "reply_secret", "oversized", "partial", "schema", "path"])
-def test_rejected_records_are_queued_with_safe_errors(tmp_path: Path, api: Any, fault: str) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-    hub = FakeDatasetHub(private=fault != "public")
-    store = LocalRecordStore(tmp_path / "records")
-    secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
-    store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else {}))
-    if fault == "reply_secret":
-        from daydream.training.labeler_versions import reply_evidence_digest
-        source_hash = hashlib.sha256(secret.encode()).hexdigest()
-        evidence = [{"reply_id": 123, "body_sha256": source_hash}]
-        store.append_observation(observation(semantic_evidence=evidence,
-            evidence_digest=reply_evidence_digest(evidence), evidence_digest_scheme="reply-evidence-v1",
-            reply_captures=[{"status": "available", "source_reply_id": "123", "body_sha256": source_hash,
-                             "captured_sha256": source_hash, "text": secret}]))
-    expected = {"public": "public_destination", "secret": "blocking_secret_findings",
-                "reply_secret": "blocking_secret_findings",
-                "oversized": "record_exceeds_shard_limit", "partial": "malformed_or_interrupted_record",
-                "schema": "invalid_or_unknown_record_schema", "path": "unsafe_storage_path"}[fault]
-    shard = next((store.root / "runs").iterdir())
-    if fault == "partial":
-        shard.write_bytes(shard.read_bytes()[:-1])
-    if fault == "schema":
-        shard.write_bytes(shard.read_bytes().replace(b'daydream.run.v1', b'daydream.run.v9'))
-    if fault == "path":
-        target = tmp_path / "outside"
-        target.write_bytes(shard.read_bytes())
-        shard.unlink()
-        shard.symlink_to(target)
-    result = api.DatasetUploader(store, TEST_REPO, backend=hub,
-                                 max_shard_bytes=20 if fault == "oversized" else 1024 * 1024).upload()
-    assert result.error == expected and result.published == 0
-    assert not hub.commits and "private-sensitive-body" not in str(result)
-    assert shard.exists()
+def test_rejected_records_are_queued_with_safe_errors(tmp_path: Path, api: Any, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["public", "secret", "reply_secret", "oversized", "partial", "schema", "path"]
+    for case_index, fault in enumerate(cases):
+        with subtests.test(fault=fault):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                from tests.harness.dataset_hub import FakeDatasetHub
+
+                hub = FakeDatasetHub(private=fault != "public")
+                store = LocalRecordStore(tmp_path / "records")
+                secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
+                store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else {}))
+                if fault == "reply_secret":
+                    from daydream.training.labeler_versions import reply_evidence_digest
+
+                    source_hash = hashlib.sha256(secret.encode()).hexdigest()
+                    evidence = [{"reply_id": 123, "body_sha256": source_hash}]
+                    store.append_observation(
+                        observation(
+                            semantic_evidence=evidence,
+                            evidence_digest=reply_evidence_digest(evidence),
+                            evidence_digest_scheme="reply-evidence-v1",
+                            reply_captures=[
+                                {
+                                    "status": "available",
+                                    "source_reply_id": "123",
+                                    "body_sha256": source_hash,
+                                    "captured_sha256": source_hash,
+                                    "text": secret,
+                                }
+                            ],
+                        )
+                    )
+                expected = {
+                    "public": "public_destination",
+                    "secret": "blocking_secret_findings",
+                    "reply_secret": "blocking_secret_findings",
+                    "oversized": "record_exceeds_shard_limit",
+                    "partial": "malformed_or_interrupted_record",
+                    "schema": "invalid_or_unknown_record_schema",
+                    "path": "unsafe_storage_path",
+                }[fault]
+                shard = next((store.root / "runs").iterdir())
+                if fault == "partial":
+                    shard.write_bytes(shard.read_bytes()[:-1])
+                if fault == "schema":
+                    shard.write_bytes(shard.read_bytes().replace(b"daydream.run.v1", b"daydream.run.v9"))
+                if fault == "path":
+                    target = tmp_path / "outside"
+                    target.write_bytes(shard.read_bytes())
+                    shard.unlink()
+                    shard.symlink_to(target)
+                result = api.DatasetUploader(
+                    store, TEST_REPO, backend=hub, max_shard_bytes=20 if fault == "oversized" else 1024 * 1024
+                ).upload()
+                assert result.error == expected and result.published == 0
+                assert not hub.commits and "private-sensitive-body" not in str(result)
+                assert shard.exists()
 
 
 def test_bounded_shards_keep_whole_records_and_identity_conflicts_fail(tmp_path: Path, api: Any) -> None:
@@ -154,42 +181,48 @@ def test_bounded_shards_keep_whole_records_and_identity_conflicts_fail(tmp_path:
     assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 1
 
 
-@pytest.mark.parametrize("fault", ["digest", "count", "path", "schema", "duplicate", "missing", "partial", "record"])
-def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any, fault: str) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-    hub = FakeDatasetHub()
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    result = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
-    tree = dict(hub.trees[result.revision])
-    manifest = json.loads(tree[api.MANIFEST_PATH])
-    shard = manifest["shards"]["runs"][0]
-    if fault == "digest":
-        tree[shard["path"]] += b"broken\n"
-    elif fault == "count":
-        shard["count"] += 1
-    elif fault == "path":
-        shard["path"] = "../outside.jsonl"
-    elif fault == "schema":
-        manifest["record_schemas"]["runs"] = "daydream.run.v99"
-    elif fault == "duplicate":
-        manifest["shards"]["runs"].append(shard)
-    elif fault == "missing":
-        del tree[shard["path"]]
-    elif fault in {"partial", "record"}:
-        data = tree.pop(shard["path"])
-        data = data[:-1] if fault == "partial" else data.replace(b'"success"', b'"failed"')
-        shard["sha256"] = hashlib.sha256(data).hexdigest()
-        shard["bytes"] = len(data)
-        shard["path"] = "runs/" + shard["sha256"] + ".jsonl"
-        tree[shard["path"]] = data
-    tree[api.MANIFEST_PATH] = json.dumps(manifest).encode()
-    revision = hub.commit(TEST_REPO, tree, hub.revision)
-    if fault == "missing":
-        hub.trees[revision].pop(shard["path"], None)
-    with pytest.raises(StoreError):
-        api.download_snapshot(TEST_REPO, revision, tmp_path / "download", backend=hub)
-    assert not (tmp_path / "download" / "runs").exists()
+def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["digest", "count", "path", "schema", "duplicate", "missing", "partial", "record"]
+    for case_index, fault in enumerate(cases):
+        with subtests.test(fault=fault):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                from tests.harness.dataset_hub import FakeDatasetHub
+
+                hub = FakeDatasetHub()
+                store = LocalRecordStore(tmp_path / "records")
+                store.commit_run(run_record())
+                result = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
+                tree = dict(hub.trees[result.revision])
+                manifest = json.loads(tree[api.MANIFEST_PATH])
+                shard = manifest["shards"]["runs"][0]
+                if fault == "digest":
+                    tree[shard["path"]] += b"broken\n"
+                elif fault == "count":
+                    shard["count"] += 1
+                elif fault == "path":
+                    shard["path"] = "../outside.jsonl"
+                elif fault == "schema":
+                    manifest["record_schemas"]["runs"] = "daydream.run.v99"
+                elif fault == "duplicate":
+                    manifest["shards"]["runs"].append(shard)
+                elif fault == "missing":
+                    del tree[shard["path"]]
+                elif fault in {"partial", "record"}:
+                    data = tree.pop(shard["path"])
+                    data = data[:-1] if fault == "partial" else data.replace(b'"success"', b'"failed"')
+                    shard["sha256"] = hashlib.sha256(data).hexdigest()
+                    shard["bytes"] = len(data)
+                    shard["path"] = "runs/" + shard["sha256"] + ".jsonl"
+                    tree[shard["path"]] = data
+                tree[api.MANIFEST_PATH] = json.dumps(manifest).encode()
+                revision = hub.commit(TEST_REPO, tree, hub.revision)
+                if fault == "missing":
+                    hub.trees[revision].pop(shard["path"], None)
+                with pytest.raises(StoreError):
+                    api.download_snapshot(TEST_REPO, revision, tmp_path / "download", backend=hub)
+                assert not (tmp_path / "download" / "runs").exists()
 
 
 def test_download_requires_exact_commit(tmp_path: Path, api: Any) -> None:
@@ -318,28 +351,35 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
     assert not (destination / "source.json").exists()
 
 
-@pytest.mark.parametrize("version", ["daydream.hub.v1", "daydream.hub.v2"])
 def test_supported_publication_refuses_historical_manifests_without_rewriting_history(
-    tmp_path: Path, api: Any, version: str,
+    tmp_path: Path,
+    api: Any,
+    subtests: pytest.Subtests,
 ) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
+    case_root = tmp_path
+    cases: Sequence[str] = ["daydream.hub.v1", "daydream.hub.v2"]
+    for case_index, version in enumerate(cases):
+        with subtests.test(version=version):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                from tests.harness.dataset_hub import FakeDatasetHub
 
-    hub = FakeDatasetHub()
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    publisher = api.DatasetUploader(store, TEST_REPO, backend=hub)
-    published = publisher.upload()
-    previous = json.loads(hub.trees[published.revision][api.MANIFEST_PATH])
-    previous["schema_version"] = version
-    old_pin = hub.commit(TEST_REPO, {api.MANIFEST_PATH: json.dumps(previous).encode()}, hub.revision)
-    before = dict(hub.trees[old_pin])
-    with pytest.raises(StoreError):
-        api.download_snapshot(TEST_REPO, old_pin, tmp_path / "old", backend=hub)
-    store.append_observation(observation())
-    result = publisher.upload()
-    assert result.failed > 0
-    assert hub.revision == old_pin
-    assert hub.trees[old_pin] == before
+                hub = FakeDatasetHub()
+                store = LocalRecordStore(tmp_path / "records")
+                store.commit_run(run_record())
+                publisher = api.DatasetUploader(store, TEST_REPO, backend=hub)
+                published = publisher.upload()
+                previous = json.loads(hub.trees[published.revision][api.MANIFEST_PATH])
+                previous["schema_version"] = version
+                old_pin = hub.commit(TEST_REPO, {api.MANIFEST_PATH: json.dumps(previous).encode()}, hub.revision)
+                before = dict(hub.trees[old_pin])
+                with pytest.raises(StoreError):
+                    api.download_snapshot(TEST_REPO, old_pin, tmp_path / "old", backend=hub)
+                store.append_observation(observation())
+                result = publisher.upload()
+                assert result.failed > 0
+                assert hub.revision == old_pin
+                assert hub.trees[old_pin] == before
 
 
 def test_snapshot_record_version_must_match_its_manifest_declaration(tmp_path: Path, api: Any) -> None:

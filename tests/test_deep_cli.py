@@ -2,6 +2,7 @@
 
 Deep is the default; ``--shallow`` opts into the single-stack flow.
 """
+from collections.abc import Sequence
 
 import pytest
 
@@ -27,20 +28,33 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.
     ):
         assert fragment in out, fragment
 
-@pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
-def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
+def _case_shallow_rejects_deep_resume_stages(stage: str) -> None:
     """Deep-pipeline resume stages are not valid with --shallow."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--shallow", "--start-at", stage])
 
-@pytest.mark.parametrize("stage", ["parse", "test"])
-def test_deep_rejects_legacy_resume_stages(stage: str) -> None:
+
+def test_shallow_rejects_deep_resume_stages(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["ttt", "per-stack", "merge"]
+    for stage in cases_0:
+        with subtests.test(stage=stage):
+            _case_shallow_rejects_deep_resume_stages(stage=stage)
+
+
+def _case_deep_rejects_legacy_resume_stages(stage: str) -> None:
     """parse/test are legacy shallow-loop stages; every mode rejects them."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--start-at", stage])
 
-@pytest.mark.parametrize("stage", ["parse", "test"])
-def test_shallow_rejects_legacy_resume_stages(stage: str, capsys: pytest.CaptureFixture[str]) -> None:
+
+def test_deep_rejects_legacy_resume_stages(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["parse", "test"]
+    for stage in cases_0:
+        with subtests.test(stage=stage):
+            _case_deep_rejects_legacy_resume_stages(stage=stage)
+
+
+def _case_shallow_rejects_legacy_resume_stages(stage: str, capsys: pytest.CaptureFixture[str]) -> None:
     """parse/test have no mapping in the unified pipeline, even with --shallow.
 
     They must error out rather than silently restart the full pipeline (the
@@ -50,3 +64,11 @@ def test_shallow_rejects_legacy_resume_stages(stage: str, capsys: pytest.Capture
     with pytest.raises(SystemExit):
         _parse_args(["target", "--shallow", "--start-at", stage])
     assert "no mapping in the unified pipeline" in capsys.readouterr().err
+
+
+def test_shallow_rejects_legacy_resume_stages(capsys: pytest.CaptureFixture[str], subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["parse", "test"]
+    for stage in cases_0:
+        with subtests.test(stage=stage):
+            capsys.readouterr()
+            _case_shallow_rejects_legacy_resume_stages(stage=stage, capsys=capsys)

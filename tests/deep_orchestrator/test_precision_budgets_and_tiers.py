@@ -19,6 +19,7 @@ from daydream.phases import TestAndHealResult, phase_test_and_heal as _phase_tes
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.test_execution import redact_test_output
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _install_accept_gate_pipeline,
@@ -34,6 +35,7 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend as _StubBackend
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     _CONFIDENCE_KNOB_STACKS,
     _PRECISION_STACKS,
@@ -53,15 +55,13 @@ from tests.test_deep_orchestrator import (
 )
 
 
-@pytest.mark.parametrize(("precision_mode", "suppression_keep", "low_survives", "suppression_count"),
-    [pytest.param(True, False, False, 1, id="on-drops-unconfirmed"),
-        pytest.param(False, False, True, 0, id="off-keeps-low"),
-        pytest.param(True, True, True, 1, id="on-keeps-confirmed"),
-    ],
-)
-async def test_precision_routes_borderline_low_finding(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, precision_mode: bool, suppression_keep: bool,
-    low_survives: bool, suppression_count: int,
+async def _case_precision_routes_borderline_low_finding(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    precision_mode: bool,
+    suppression_keep: bool,
+    low_survives: bool,
+    suppression_count: int,
 ) -> None:
     """Precision reviews borderline low findings only when enabled, then applies its verdict."""
     _silence(monkeypatch)
@@ -82,9 +82,38 @@ async def test_precision_routes_borderline_low_finding(
     assert len(arbiters) == 1
     assert arbiters[0]["model"] == "claude-opus-5"
 
-@pytest.mark.parametrize("widened", [False, True], ids=["default-low-only", "include-medium"])
-async def test_precision_confidence_classes_control_medium_suppression(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, widened: bool,
+
+async def test_precision_routes_borderline_low_finding(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[bool, bool, bool, int]] = [
+        (True, False, False, 1),
+        (False, False, True, 0),
+        (True, True, True, 1),
+    ]
+    case_index = 0
+    for precision_mode, suppression_keep, low_survives, suppression_count in cases_0:
+        with (
+            subtests.test(
+                precision_mode=precision_mode,
+                suppression_keep=suppression_keep,
+                low_survives=low_survives,
+                suppression_count=suppression_count,
+            ),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_routes_borderline_low_finding(
+                multi_stack_target=multi_stack_target,
+                monkeypatch=scenario.monkeypatch,
+                precision_mode=precision_mode,
+                suppression_keep=suppression_keep,
+                low_survives=low_survives,
+                suppression_count=suppression_count,
+            )
+
+
+async def _case_precision_confidence_classes_control_medium_suppression(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, widened: bool
 ) -> None:
     """The confidence setting decides whether an uncontested medium finding is reviewed."""
     _silence(monkeypatch)
@@ -101,9 +130,23 @@ async def test_precision_confidence_classes_control_medium_suppression(
     suppression = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
     assert len(suppression) == int(widened)
 
-@pytest.mark.parametrize("enabled", [False, True], ids=["default", "opt-in"])
-async def test_deep_flow_forwards_approve_on_clean(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool,
+
+async def test_precision_confidence_classes_control_medium_suppression(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for widened in cases_0:
+        with subtests.test(widened=widened), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_confidence_classes_control_medium_suppression(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, widened=widened
+            )
+
+
+async def _case_deep_flow_forwards_approve_on_clean(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
 ) -> None:
     """The deep flow forwards the default or opted-in approval flag to posting."""
     _silence(monkeypatch)
@@ -115,6 +158,18 @@ async def test_deep_flow_forwards_approve_on_clean(
     )
     assert exit_code == 0
     assert [call["approve_on_clean"] for call in received] == [enabled]
+
+
+async def test_deep_flow_forwards_approve_on_clean(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for enabled in cases_0:
+        with subtests.test(enabled=enabled), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_deep_flow_forwards_approve_on_clean(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, enabled=enabled
+            )
 
 
 # Boolean settings mirrored on both config dataclasses that deliberately do NOT use the

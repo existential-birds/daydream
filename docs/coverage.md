@@ -20,3 +20,19 @@ Missing, duplicate, corrupt, or cancelled evidence fails the gate. Diagnostic
 coverage from failed executions cannot authorize a merge or reusable proof.
 Use **Re-run all jobs**: receipts from different attempts cannot be combined.
 Only a successful complete merge-group gate can publish reusable tree proof.
+
+## Contract tables
+
+Related input checks can share a native `pytest.Subtests` table. Label each row
+so assertion failures identify the scenario and remaining rows still run. Keep
+independent process, cancellation, or fixture-lifecycle cases parametrized when
+sharing their setup would change the contract. For mutable table rows,
+`tests/harness/table_cases.py` supplies explicit patch rollback, fresh private
+storage and CLI configuration, offline dataset state, and recorder isolation;
+construct real repositories and other stateful dependencies inside that row.
+
+The shard recorder retains one setup/call/teardown receipt per collected parent
+and rejects failed subtests. A smaller collection does not justify weaker
+coverage: compare full-suite reports under the same interpreter, workers, and
+coverage options, including the exact covered lines and branches. Keep the
+coverage floor and exclusions unchanged during consolidation.

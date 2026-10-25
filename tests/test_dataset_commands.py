@@ -1,5 +1,6 @@
 """The public dataset commands read persisted records without archive reconstruction."""
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from daydream.dataset import LocalRecordStore
 from tests.harness.dataset import observation, run_record
 from tests.harness.scripts import cli_main
+from tests.harness.table_cases import isolated_case
 
 
 @pytest.fixture(autouse=True)
@@ -14,73 +16,113 @@ def operator_hub_destination(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
 
 
-@pytest.mark.parametrize(("cli_repo", "expected_repo"), [
-    (None, "operator/env-trajectories"),
-    ("operator/cli-trajectories", "operator/cli-trajectories"),
-])
 def test_operator_destination_selects_publication_and_pinned_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    cli_repo: str | None, expected_repo: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    from daydream.hub import HubError
-    from tests.harness.dataset_hub import FakeDatasetHub
+    case_root = tmp_path
+    cases: Sequence[tuple[str | None, str]] = [
+        (None, "operator/env-trajectories"),
+        ("operator/cli-trajectories", "operator/cli-trajectories"),
+    ]
+    for case_index, (cli_repo, expected_repo) in enumerate(cases):
+        with subtests.test(cli_repo=cli_repo, expected_repo=expected_repo):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                capsys.readouterr()
+                from daydream.hub import HubError
+                from tests.harness.dataset_hub import FakeDatasetHub
 
-    class OperatorHub(FakeDatasetHub):
-        def private_revision(self, repo_id: str) -> str:
-            if repo_id != expected_repo:
-                raise HubError("network_failed")
-            return super().private_revision(repo_id)
+                class OperatorHub(FakeDatasetHub):
+                    def private_revision(self, repo_id: str) -> str:
+                        if repo_id != expected_repo:
+                            raise HubError("network_failed")
+                        return super().private_revision(repo_id)
 
-    hub = OperatorHub()
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "operator/env-trajectories")
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record("operator-run"))
-    arguments = [] if cli_repo is None else ["--trajectory-hub-repo", cli_repo]
-    assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 1
-    assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 1
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", *arguments, "--revision", hub.revision,
-                     "--output", str(destination)]) == 0
-    assert json.loads(capsys.readouterr().out)["runs"] == 1
-    assert LocalRecordStore(destination).read_records()["runs"][0]["run_id"] == "operator-run"
+                hub = OperatorHub()
+                monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "operator/env-trajectories")
+                monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+                store = LocalRecordStore(tmp_path / "records")
+                store.commit_run(run_record("operator-run"))
+                arguments = [] if cli_repo is None else ["--trajectory-hub-repo", cli_repo]
+                assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
+                assert json.loads(capsys.readouterr().out)["published"] == 1
+                assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
+                assert json.loads(capsys.readouterr().out)["published"] == 1
+                destination = tmp_path / "download"
+                assert (
+                    cli_main(
+                        [
+                            "corpus",
+                            "dataset",
+                            "download",
+                            *arguments,
+                            "--revision",
+                            hub.revision,
+                            "--output",
+                            str(destination),
+                        ]
+                    )
+                    == 0
+                )
+                assert json.loads(capsys.readouterr().out)["runs"] == 1
+                assert LocalRecordStore(destination).read_records()["runs"][0]["run_id"] == "operator-run"
 
 
-@pytest.mark.parametrize("operation", ["publish", "status", "download"])
-@pytest.mark.parametrize("environment", [None, ""])
 def test_dataset_commands_require_operator_destination_before_any_side_effect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    operation: str, environment: str | None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    if environment is None:
-        monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    else:
-        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", environment)
-    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
+    case_root = tmp_path
+    cases_0: Sequence[str | None] = [None, ""]
+    cases_1: Sequence[str] = ["publish", "status", "download"]
+    for case_index_0, environment in enumerate(cases_0):
+        for case_index_1, operation in enumerate(cases_1):
+            with subtests.test(environment=environment, operation=operation):
+                with isolated_case(case_root, str((case_index_0 * 1) + (case_index_1 * 1000))) as sandbox:
+                    tmp_path = sandbox.tmp_path
+                    monkeypatch = sandbox.monkeypatch
+                    capsys.readouterr()
+                    if environment is None:
+                        monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+                    else:
+                        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", environment)
+                    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
 
-    def forbidden_network() -> None:
-        pytest.fail("Unconfigured dataset commands must not contact HF")
+                    def forbidden_network() -> None:
+                        pytest.fail("Unconfigured dataset commands must not contact HF")
 
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
-    destination = tmp_path / "records"
-    arguments = (["--revision", "a" * 40, "--output", str(destination)] if operation == "download"
-                 else ["--store", str(destination)])
-    assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
-    output = capsys.readouterr()
-    assert "--trajectory-hub-repo" in output.err
-    assert not destination.exists()
+                    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
+                    destination = tmp_path / "records"
+                    arguments = (
+                        ["--revision", "a" * 40, "--output", str(destination)]
+                        if operation == "download"
+                        else ["--store", str(destination)]
+                    )
+                    assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
+                    output = capsys.readouterr()
+                    assert "--trajectory-hub-repo" in output.err
+                    assert not destination.exists()
 
 
-@pytest.mark.parametrize("operation", ["publish", "status", "download"])
 def test_dataset_command_help_exposes_canonical_destination(
-    capsys: pytest.CaptureFixture[str], operation: str,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    assert cli_main(["corpus", "dataset", operation, "--help"]) == 0
-    output = capsys.readouterr()
-    assert "--trajectory-hub-repo OWNER/REPO" in output.out
-    assert "DAYDREAM_TRAJECTORY_HUB_REPO" in output.out
+    case_root = tmp_path
+    cases: Sequence[str] = ["publish", "status", "download"]
+    for case_index, operation in enumerate(cases):
+        with subtests.test(operation=operation):
+            with isolated_case(case_root, str(case_index)):
+                capsys.readouterr()
+                assert cli_main(["corpus", "dataset", operation, "--help"]) == 0
+                output = capsys.readouterr()
+                assert "--trajectory-hub-repo OWNER/REPO" in output.out
+                assert "DAYDREAM_TRAJECTORY_HUB_REPO" in output.out
 
 
 def test_dataset_status_reads_local_queue_without_credentials(
@@ -260,31 +302,43 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
         assert json.loads(capsys.readouterr().out)["published"] == 2
 
 
-@pytest.mark.parametrize("fault", ["manifest", "shard"])
 def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
+    case_root = tmp_path
+    cases: Sequence[str] = ["manifest", "shard"]
+    for case_index, fault in enumerate(cases):
+        with subtests.test(fault=fault):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                capsys.readouterr()
+                from tests.harness.dataset_hub import FakeDatasetHub
 
-    hub = FakeDatasetHub()
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 0
-    capsys.readouterr()
-    revision = hub.revision
-    tree = hub.trees[revision]
-    if fault == "manifest":
-        manifest = json.loads(tree["manifest.json"])
-        manifest["schema_version"] = "unsupported"
-        tree["manifest.json"] = json.dumps(manifest).encode()
-    else:
-        path = next(path for path in tree if path.endswith(".jsonl"))
-        tree[path] = b"SECRET_CORRUPT_SNAPSHOT"
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", "--revision", revision,
-                     "--output", str(destination)]) == 1
-    output = capsys.readouterr()
-    assert "Data Collection" in output.out
-    assert "SECRET_CORRUPT_SNAPSHOT" not in output.out + output.err
-    assert not destination.exists()
+                hub = FakeDatasetHub()
+                monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
+                monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+                store = LocalRecordStore(tmp_path / "records")
+                store.commit_run(run_record())
+                assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 0
+                capsys.readouterr()
+                revision = hub.revision
+                tree = hub.trees[revision]
+                if fault == "manifest":
+                    manifest = json.loads(tree["manifest.json"])
+                    manifest["schema_version"] = "unsupported"
+                    tree["manifest.json"] = json.dumps(manifest).encode()
+                else:
+                    path = next(path for path in tree if path.endswith(".jsonl"))
+                    tree[path] = b"SECRET_CORRUPT_SNAPSHOT"
+                destination = tmp_path / "download"
+                assert (
+                    cli_main(["corpus", "dataset", "download", "--revision", revision, "--output", str(destination)])
+                    == 1
+                )
+                output = capsys.readouterr()
+                assert "Data Collection" in output.out
+                assert "SECRET_CORRUPT_SNAPSHOT" not in output.out + output.err
+                assert not destination.exists()

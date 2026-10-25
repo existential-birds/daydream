@@ -368,17 +368,30 @@ def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
     assert "| osprey |" not in out
 
 
-@pytest.mark.parametrize(("seconds", "expected"),
-    [(None, "—"), (0.0, "<1s"), (0.5, "<1s"), (0.999, "<1s"), (1.0, "1s"), (30.0, "30s"), (59.9, "59s"),
-        (60.0, "1m"), (61.0, "1m 1s"), (150.0, "2m 30s"), (3599.0, "59m 59s"), (3600.0, "1h"), (3660.0, "1h 1m"),
-        (7200.0, "2h"), (7380.0, "2h 3m"),
-    ], ids=["none", "zero", "half", "sub-second", "1s", "30s", "59s", "1m", "1m1s", "2m30s", "59m59s",
-        "1h", "1h1m", "2h", "2h3m",
-    ],
-)
-def test_format_duration(seconds: float | None, expected: str) -> None:
+def test_format_duration(
+    subtests: pytest.Subtests,
+) -> None:
     """_format_duration covers None, sub-second, seconds, minutes, and hours."""
-    assert _format_duration(seconds) == expected
+    cases: list[tuple[float | None, str]] = [
+        (None, "—"),
+        (0.0, "<1s"),
+        (0.5, "<1s"),
+        (0.999, "<1s"),
+        (1.0, "1s"),
+        (30.0, "30s"),
+        (59.9, "59s"),
+        (60.0, "1m"),
+        (61.0, "1m 1s"),
+        (150.0, "2m 30s"),
+        (3599.0, "59m 59s"),
+        (3600.0, "1h"),
+        (3660.0, "1h 1m"),
+        (7200.0, "2h"),
+        (7380.0, "2h 3m"),
+    ]
+    for seconds, expected in cases:
+        with subtests.test(seconds=seconds):
+            assert _format_duration(seconds) == expected
 
 
 def test_duration_in_rollup() -> None:

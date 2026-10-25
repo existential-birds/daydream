@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import builtins
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +20,7 @@ from daydream.training.reward import (
     _weights_fingerprint,
     score_trajectory,
 )
+from tests.harness.table_cases import isolated_case
 
 
 def test_intrinsic_composite_is_golden() -> None:
@@ -33,37 +35,59 @@ def test_intrinsic_composite_is_golden() -> None:
     assert rb.composite == 0.7  # correctness 0.75 − 0.2·len_norm(0.25)=0.05
 
 
-@pytest.mark.parametrize('location', ['root', 'deep'])
-def test_archived_host_context_does_not_change_review_length_or_reward(tmp_path: Path, location: str) -> None:
+def test_archived_host_context_does_not_change_review_length_or_reward(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """The archive acquisition used by capture and sealed RL scores findings, retaining human bytes."""
-    legacy = ('⚠️ Existing warning.\n\n# Review\n\n## Diagrams\n```mermaid\nA-->B\n```\n\n'
-              '## Issues\n1. [api.py:1] ' + 'Existing finding. ' * 240 +
-              '\n\n## Held Findings\n2. [api.py:2] Existing held finding.\n')
-    deep = tmp_path / 'deep'
-    deep.mkdir()
-    verdicts = [{'issue_id': 1, 'verdict': 'consistent'}]
-    (deep / 'recommendation-verdicts.json').write_text(json.dumps({'verdicts': verdicts}))
-    report = (tmp_path if location == 'root' else deep) / 'review-output.md'
-    report.write_text(legacy)
-    baseline = assemble_scoring_inputs(tmp_path)
-    assert baseline.length == len(legacy)
-    baseline_reward = score_trajectory(baseline)
-    assert baseline_reward.composite is not None and baseline_reward.length_penalty is not None
-    sizes = []
-    for amount in (16, 3000):
-        context = {'scopes': [], 'scopes_omitted': 0,
-            'verification': {'status': 'available', 'value': {'remote-ci-verdict.json': {'notes': 'c' * amount}}},
-            'author_reported': {'source': 'pull_request_body', 'head_sha': None, 'body': 'a' * amount,
-                                'truncated': False}}
-        enriched = insert_review_context(legacy, context)
-        report.write_text(enriched)
-        acquired = assemble_scoring_inputs(tmp_path)
-        assert acquired.length == len(legacy) and acquired == baseline
-        assert score_trajectory(acquired).to_dict() == baseline_reward.to_dict()
-        assert report.read_text() == enriched and '## Review outcome' in enriched
-        assert '## Diagrams' in enriched and '## Held Findings' in enriched
-        sizes.append(len(enriched))
-    assert sizes[0] != sizes[1]
+    case_root = tmp_path
+    cases: Sequence[str] = ["root", "deep"]
+    for case_index, location in enumerate(cases):
+        with subtests.test(location=location):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                legacy = (
+                    "⚠️ Existing warning.\n\n# Review\n\n## Diagrams\n```mermaid\nA-->B\n```\n\n"
+                    "## Issues\n1. [api.py:1] "
+                    + "Existing finding. " * 240
+                    + "\n\n## Held Findings\n2. [api.py:2] Existing held finding.\n"
+                )
+                deep = tmp_path / "deep"
+                deep.mkdir()
+                verdicts = [{"issue_id": 1, "verdict": "consistent"}]
+                (deep / "recommendation-verdicts.json").write_text(json.dumps({"verdicts": verdicts}))
+                report = (tmp_path if location == "root" else deep) / "review-output.md"
+                report.write_text(legacy)
+                baseline = assemble_scoring_inputs(tmp_path)
+                assert baseline.length == len(legacy)
+                baseline_reward = score_trajectory(baseline)
+                assert baseline_reward.composite is not None and baseline_reward.length_penalty is not None
+                sizes = []
+                for amount in (16, 3000):
+                    context = {
+                        "scopes": [],
+                        "scopes_omitted": 0,
+                        "verification": {
+                            "status": "available",
+                            "value": {"remote-ci-verdict.json": {"notes": "c" * amount}},
+                        },
+                        "author_reported": {
+                            "source": "pull_request_body",
+                            "head_sha": None,
+                            "body": "a" * amount,
+                            "truncated": False,
+                        },
+                    }
+                    enriched = insert_review_context(legacy, context)
+                    report.write_text(enriched)
+                    acquired = assemble_scoring_inputs(tmp_path)
+                    assert acquired.length == len(legacy) and acquired == baseline
+                    assert score_trajectory(acquired).to_dict() == baseline_reward.to_dict()
+                    assert report.read_text() == enriched and "## Review outcome" in enriched
+                    assert "## Diagrams" in enriched and "## Held Findings" in enriched
+                    sizes.append(len(enriched))
+                assert sizes[0] != sizes[1]
+
 
 def test_format_invalid_floors_composite() -> None:
     rb = score_trajectory(ScoringInputs(verifier_verdicts=None,  format_valid=False, length=50))
@@ -82,26 +106,32 @@ def test_weights_are_overridable_and_change_composite_predictably() -> None:
     assert score_trajectory(base_len).composite == 0.8                          # default w_len=0.2
     assert score_trajectory(base_len, weights=RewardWeights(w_len=0.5)).composite == 0.5
 
-@pytest.mark.parametrize(("pr_feedback", "expected_penalty", "expected_posterior_cost"),
-    [pytest.param("rejected", 1.0, 0.5, id="rejected"), pytest.param("contested", 0.5, 0.0, id="contested")],
-)
-def test_outcome_applies_posterior_penalty_golden(
-    pr_feedback: str, expected_penalty: float, expected_posterior_cost: float,
-) -> None:
+def test_outcome_applies_posterior_penalty_golden(subtests: pytest.Subtests) -> None:
     """Expose posterior penalties separately from the intrinsic composite score."""
-    inputs = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
-        format_valid=True, length=4000)
-    base = score_trajectory(inputs)
-    assert type(base) is RewardBreakdown and not isinstance(base, PosteriorBreakdown)
-    assert base.composite == 0.7
-    assert "posterior_cost" not in base.to_dict()
-    rb = score_trajectory(inputs, pr_feedback=pr_feedback)
-    assert isinstance(rb, PosteriorBreakdown)
-    assert rb.false_positive_penalty == expected_penalty
-    assert rb.axes_present["false_positive"] is True
-    assert rb.composite == 0.7        # correctness minus length; posterior remains separate
-    assert rb.posterior_cost == expected_posterior_cost
-    assert "posterior_cost" in rb.to_dict()
+    cases: Sequence[tuple[str, float, float]] = [("rejected", 1.0, 0.5), ("contested", 0.5, 0.0)]
+    case_ids_0 = ["rejected", "contested"]
+    for case_index, (pr_feedback, expected_penalty, expected_posterior_cost) in enumerate(cases):
+        with subtests.test(
+            msg=case_ids_0[case_index],
+            pr_feedback=pr_feedback,
+            expected_penalty=expected_penalty,
+            expected_posterior_cost=expected_posterior_cost,
+        ):
+            inputs = ScoringInputs(
+                verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}], format_valid=True, length=4000
+            )
+            base = score_trajectory(inputs)
+            assert type(base) is RewardBreakdown and not isinstance(base, PosteriorBreakdown)
+            assert base.composite == 0.7
+            assert "posterior_cost" not in base.to_dict()
+            rb = score_trajectory(inputs, pr_feedback=pr_feedback)
+            assert isinstance(rb, PosteriorBreakdown)
+            assert rb.false_positive_penalty == expected_penalty
+            assert rb.axes_present["false_positive"] is True
+            assert rb.composite == 0.7  # correctness minus length; posterior remains separate
+            assert rb.posterior_cost == expected_posterior_cost
+            assert "posterior_cost" in rb.to_dict()
+
 
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields() -> None:
     rb = score_trajectory(ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}], format_valid=True, length=3000),

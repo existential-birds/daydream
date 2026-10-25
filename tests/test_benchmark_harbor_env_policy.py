@@ -2,6 +2,7 @@
 
 import ast
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -94,15 +95,23 @@ def test_judge_asset_declared_names_are_owned_by_the_judge_channel() -> None:
     assert declared <= set(env_policy.JUDGE.renderer_emitted) | env_policy.JUDGE.host_supplied
     assert declared - set(env_policy.JUDGE.renderer_emitted) == env_policy.JUDGE.host_supplied
 
-@pytest.mark.parametrize("prefix", sorted(env_policy.HOST.banned_prefixes))
-def test_host_builder_denies_each_declared_banned_prefix(prefix: str) -> None:
-    child = build_child_env({"PATH": "/usr/bin", f"{prefix}PROBE": "secret"}, backend="pi")
-    assert f"{prefix}PROBE" not in child
+def test_host_builder_denies_each_declared_banned_prefix(subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = sorted(env_policy.HOST.banned_prefixes)
+    for case_index, prefix in enumerate(cases):
+        with subtests.test(prefix=prefix):
+            child = build_child_env({"PATH": "/usr/bin", f"{prefix}PROBE": "secret"}, backend="pi")
+            assert f"{prefix}PROBE" not in child
 
-@pytest.mark.parametrize("prefix", sorted(env_policy.CONTAINER.scrub_prefixes))
-def test_container_scrub_denies_each_declared_prefix(prefix: str) -> None:
-    sanitized = _sanitize_reviewer_environment(_synthetic_parent("pi") | {f"{prefix}PROBE": "secret"}, backend="pi")
-    assert f"{prefix}PROBE" not in sanitized
+
+def test_container_scrub_denies_each_declared_prefix(subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = sorted(env_policy.CONTAINER.scrub_prefixes)
+    for case_index, prefix in enumerate(cases):
+        with subtests.test(prefix=prefix):
+            sanitized = _sanitize_reviewer_environment(
+                _synthetic_parent("pi") | {f"{prefix}PROBE": "secret"}, backend="pi"
+            )
+            assert f"{prefix}PROBE" not in sanitized
+
 
 def test_claude_exemption_is_exactly_the_declared_exempt_set() -> None:
     """Undeclared Anthropic names are scrubbed even in Claude mode."""
@@ -125,16 +134,22 @@ def test_every_declared_name_has_a_recorded_outcome() -> None:
     ) - _PROBES
     assert recorded == env_policy.declared_names()
 
-@pytest.mark.parametrize("backend", ["pi", "claude"])
-def test_host_child_env_table(backend: str) -> None:
-    child = build_child_env(_synthetic_parent(backend), backend=backend)
-    assert set(child) == _EXPECTED_HOST_KEEP[backend]
+def test_host_child_env_table(subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = ["pi", "claude"]
+    for case_index, backend in enumerate(cases):
+        with subtests.test(backend=backend):
+            child = build_child_env(_synthetic_parent(backend), backend=backend)
+            assert set(child) == _EXPECTED_HOST_KEEP[backend]
 
-@pytest.mark.parametrize("backend", ["pi", "claude"])
-def test_container_sanitised_env_table(backend: str) -> None:
-    sanitized = _sanitize_reviewer_environment(_synthetic_parent(backend), backend=backend)
-    observed = set(sanitized) & (env_policy.declared_names() | _PROBES)
-    assert observed == _EXPECTED_CONTAINER_KEEP[backend]
+
+def test_container_sanitised_env_table(subtests: pytest.Subtests) -> None:
+    cases: Sequence[str] = ["pi", "claude"]
+    for case_index, backend in enumerate(cases):
+        with subtests.test(backend=backend):
+            sanitized = _sanitize_reviewer_environment(_synthetic_parent(backend), backend=backend)
+            observed = set(sanitized) & (env_policy.declared_names() | _PROBES)
+            assert observed == _EXPECTED_CONTAINER_KEEP[backend]
+
 
 def test_rendered_job_config_table() -> None:
     job = yaml.safe_load(render_job_config(oracle=False).decode())

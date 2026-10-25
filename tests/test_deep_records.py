@@ -29,8 +29,10 @@ def test_record_pool_retains_scope_order_and_metadata_through_adjudication(tmp_p
     coverage = review_coverage(scope_ids=("structure", "python", "react"))
     records = [{"uid": f"{scope}:1"} for scope in ("structure", "python", "react")]
     paths = {scope: tmp_path / f"stack-{scope}-records.json" for scope in ("structure", "python", "react")}
-    pool = RecordPool({scope: records_artifact(coverage, scope, [record])
-                       for scope, record in zip(paths, records, strict=True)}, paths)
+    pool = RecordPool(
+        {scope: records_artifact(coverage, scope, [record]) for scope, record in zip(paths, records, strict=True)},
+        paths,
+    )
     assert pool.records == [records[1], records[2], records[0]]
     pool.replace([records[1], records[0]])
     pool.save()
@@ -41,61 +43,38 @@ def test_record_pool_retains_scope_order_and_metadata_through_adjudication(tmp_p
         pool.replace([{"uid": "go:1"}])
 
 
-def test_stack_name_from_uid_is_empty_for_a_separatorless_value() -> None:
-    """An empty result is the "no identity" signal, distinguishable from a real name."""
-    assert stack_name_from_uid("python") == ""
-    assert stack_name_from_uid("") == ""
+def test_record_birth_and_resume_preserve_unique_durable_identity(subtests: pytest.Subtests) -> None:
+    """Birth, partial resume, and reloading share the host ordinal allocator."""
+    cases: list[tuple[list[dict[str, Any]], list[str]]] = [
+        ([{"id": 1}, {"id": 1}, {"id": 2}], ["python:1", "python:2", "python:3"]),
+        ([{"id": 9, RECORD_UID_KEY: "python:4"}], ["python:4"]),
+        ([{"id": 1}, {"id": 2}], ["python:1", "python:2"]),
+        ([{"id": 1, RECORD_UID_KEY: "python:1"}, {"id": 2}], ["python:1", "python:2"]),
+        ([{RECORD_UID_KEY: "python:2"}, {"id": 1}, {"id": 2}], ["python:2", "python:1", "python:3"]),
+    ]
+    for records, expected in cases:
+        with subtests.test(expected=expected):
+            stamp_record_uids(records, "python")
+            assert [record_uid(record) for record in records] == expected
+            assert duplicate_record_uids(records) == []
+            # A second load cannot remint or compact an existing identity.
+            stamp_record_uids(records, "python")
+            assert [record_uid(record) for record in records] == expected
+    for uid, expected_stack in (("python", ""), ("", ""), ("weird:name:7", "weird:name")):
+        with subtests.test(uid=uid):
+            assert stack_name_from_uid(uid) == expected_stack
 
-def test_stack_name_from_uid_splits_on_the_last_separator() -> None:
-    """A trailing ordinal leaves any separators within the stack name intact."""
-    assert stack_name_from_uid("weird:name:7") == "weird:name"
 
-def test_stamp_assigns_sequential_uids_in_place() -> None:
-    """Existing list holders see assigned durable identities without rebinding."""
-    records: list[dict[str, Any]] = [{"id": 1}, {"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record[RECORD_UID_KEY] for record in records] == ["python:1", "python:2", "python:3"]
-
-def test_stamp_preserves_an_existing_uid() -> None:
-    """Resume preserves identities even after adjudication compacts their source list."""
-    records: list[dict[str, Any]] = [{"id": 9, RECORD_UID_KEY: "python:4"}]
-    stamp_record_uids(records, "python")
-    assert record_uid(records[0]) == "python:4"
-
-def test_stamp_is_idempotent() -> None:
-    """Called at both record birth and record load, the second call must be a no-op."""
-    records: list[dict[str, Any]] = [{"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    first = [record_uid(record) for record in records]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == first
-
-def test_partial_stamp_does_not_reuse_an_ordinal_already_held() -> None:
-    """Mixed stamped/unstamped records cannot receive colliding ordinals."""
-    records: list[dict[str, Any]] = [{"id": 1, RECORD_UID_KEY: "python:1"}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == ["python:1", "python:2"]
-    assert duplicate_record_uids(records) == []
-
-def test_item_source_uids_ignores_malformed_entries() -> None:
-    """A hallucinated non-string entry must not reach a consumer as provenance."""
-    item: dict[str, Any] = {"source_uids": ["python:1", 7, None, "", "react:1"]}
-    assert item_source_uids(item) == ["python:1", "react:1"]
-
-def test_item_source_uids_ignores_a_non_list_value() -> None:
-    """A scalar where a list belongs degrades to the uid fallback, never raises."""
-    item: dict[str, Any] = {"source_uids": "python:1", RECORD_UID_KEY: "structure:2"}
-    assert item_source_uids(item) == ["structure:2"]
-
-def test_union_drops_empty_and_non_string_entries() -> None:
+def test_item_provenance_filters_malformed_values_and_falls_back_to_record_uid(subtests: pytest.Subtests) -> None:
+    cases: list[tuple[dict[str, Any], list[str]]] = [
+        ({"source_uids": ["python:1", 7, None, "", "react:1"]}, ["python:1", "react:1"]),
+        ({"source_uids": "python:1", RECORD_UID_KEY: "structure:2"}, ["structure:2"]),
+    ]
+    for item, expected in cases:
+        with subtests.test(item=item):
+            assert item_source_uids(item) == expected
     assert union_source_uids(["python:1", "", None, 3], []) == ["python:1"]
 
-def test_stamp_skips_an_ordinal_a_preserved_record_already_holds() -> None:
-    """Minting skips ordinals held by preserved records, even at displaced positions."""
-    records: list[dict[str, Any]] = [{RECORD_UID_KEY: "python:2"}, {"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == ["python:2", "python:1", "python:3"]
-    assert duplicate_record_uids(records) == []
 
 def test_stamp_item_uids_skips_an_ordinal_a_preserved_item_already_holds() -> None:
     """Same hazard, same guarantee, on the merged-item side."""

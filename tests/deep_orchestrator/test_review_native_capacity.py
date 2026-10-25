@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from tests.deep_orchestrator.test_review_completion import scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate, read_events, stage_ends
 from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import seed_feature_branch, tracked_source_state
+from tests.harness.table_cases import isolated_case
 
 
 def _workload(wired: bool, *, guide_lines: int = 800) -> tuple[dict[str, str], dict[str, str]]:
@@ -44,9 +45,9 @@ def _workload(wired: bool, *, guide_lines: int = 800) -> tuple[dict[str, str], d
     return before, after
 
 
-@pytest.mark.parametrize('wired', [False, True], ids=['late-cross-file-defect', 'correctly-wired-clean'])
-async def test_late_cross_file_judgment_fits_cumulative_native_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool) -> None:
+async def _case_late_cross_file_judgment_fits_cumulative_native_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool
+) -> None:
     repo = tmp_path / 'production_sized_work'
     before, after = _workload(wired)
     seed_feature_branch(repo, base=before, feature=after)
@@ -89,9 +90,22 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
     assert len((repo / '.daydream/diff.patch').read_bytes()) > 256 * 1024
 
 
-@pytest.mark.parametrize('wired', [False, True], ids=['dropped-flag', 'wired-flag'])
-async def test_structure_traces_early_flag_to_late_request_under_original_scope_and_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool) -> None:
+async def test_late_cross_file_judgment_fits_cumulative_native_budget(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for wired in cases_0:
+        with subtests.test(wired=wired), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_late_cross_file_judgment_fits_cumulative_native_budget(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, wired=wired
+            )
+
+
+async def _case_structure_traces_early_flag_to_late_request_under_original_scope_and_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool
+) -> None:
     repo = tmp_path / 'structure_flag_flow'
     before, after = _workload(wired, guide_lines=20)
     seed_feature_branch(repo, base=before, feature=after)
@@ -166,3 +180,16 @@ async def test_structure_traces_early_flag_to_late_request_under_original_scope_
     assert [item['uid'] for item in records['issues']] == ([] if wired else ['structure:1'])
     assert 64 * 1024 < len((repo / '.daydream/diff.patch').read_bytes()) <= 256 * 1024
     assert tracked_source_state(repo) == source_before
+
+
+async def test_structure_traces_early_flag_to_late_request_under_original_scope_and_budget(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for wired in cases_0:
+        with subtests.test(wired=wired), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_structure_traces_early_flag_to_late_request_under_original_scope_and_budget(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, wired=wired
+            )

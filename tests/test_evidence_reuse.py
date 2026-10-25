@@ -17,16 +17,21 @@ def _target(**overrides: Any) -> ReuseTarget:
     }
     return ReuseTarget(**{**fields, **overrides})
 
-@pytest.mark.parametrize(("component", "override"),
-    [("argv", {"argv": ("uv", "run", "pytest", "-k", "one")}), ("cwd_relative", {"cwd_relative": "services/api"}),
-        ("runner", {"runner": "poetry"}), ("config_digest", {"config_digest": "e" * 64}),
+def test_any_component_mismatch_requires_real_validation(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("argv", {"argv": ("uv", "run", "pytest", "-k", "one")}),
+        ("cwd_relative", {"cwd_relative": "services/api"}),
+        ("runner", {"runner": "poetry"}),
+        ("config_digest", {"config_digest": "e" * 64}),
         ("tree_key", {"tree_key": "other"}),
-    ],
-)
-def test_any_component_mismatch_requires_real_validation(component: str, override: dict[str, Any]) -> None:
-    decision = decide_reuse(_identity(), _target(**override))
-    assert decision.reused is False
-    assert component in decision.mismatched_components
+    ]
+    for component, override in cases:
+        with subtests.test(component=component):
+            decision = decide_reuse(_identity(), _target(**override))
+            assert decision.reused is False
+            assert component in decision.mismatched_components
 
 def test_a_bare_tree_key_match_across_a_commit_is_not_enough() -> None:
     """MH13: the tree key is content-only, so a commit moves HEAD without moving it."""
@@ -41,9 +46,13 @@ def test_an_absent_component_is_a_named_miss() -> None:
     assert (decision.reused, decision.result) == (False, "absent-component")
     assert "uv.lock" in decision.mismatched_components
 
-@pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
-def test_incomplete_or_red_evidence_requires_real_validation(outcome: str) -> None:
-    assert decide_reuse(_identity(outcome=outcome), _target()).reused is False
+def test_incomplete_or_red_evidence_requires_real_validation(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["failed", "timed-out", "truncated"]
+    for outcome in cases:
+        with subtests.test(outcome=outcome):
+            assert decide_reuse(_identity(outcome=outcome), _target()).reused is False
 
 def test_missing_evidence_requires_real_validation() -> None:
     assert decide_reuse(None, _target()).result == "no-evidence"

@@ -6,7 +6,7 @@ import json
 import re
 import stat
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -21,10 +21,12 @@ from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.fix_isolation import FixIsolationRound
 from daydream.runner import run
 from daydream.workspace import WorkContext
+from tests.conftest import make_multi_stack_target
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import read_trajectory, root_trajectory
 from tests.test_deep_orchestrator import MakeConfig, Mute, _add_bare_remote, _merge_item, _silence
 
@@ -184,9 +186,8 @@ async def test_run_preserves_preexisting_staged_and_unstaged_owner_edits(
     assert (target / "owner-draft.txt").read_text() == "private owner draft\n"
     assert not (target / "orphan.py").exists()
 
-@pytest.mark.parametrize("index_kind", ["staged", "intent-to-add", "assume-unchanged"])
-def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
-    multi_stack_target: Path, tmp_path: Path, index_kind: str,
+def _case_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
+    multi_stack_target: Path, tmp_path: Path, index_kind: str
 ) -> None:
     """Supplement the runner cases with exact index flags and path types."""
     target = multi_stack_target
@@ -245,6 +246,21 @@ def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
         assert (target / "App.tsx").read_text() == "// retained assigned fix\n"
     finally:
         isolation.close()
+
+
+def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["staged", "intent-to-add", "assume-unchanged"]
+    case_index = 0
+    for index_kind in cases_0:
+        with subtests.test(index_kind=index_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            _case_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
+                multi_stack_target=multi_stack_target, tmp_path=scenario.tmp_path, index_kind=index_kind
+            )
+
 
 def test_round_accepts_owner_deletion_of_a_tracked_directory(multi_stack_target: Path) -> None:
     target = multi_stack_target

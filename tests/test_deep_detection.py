@@ -2,6 +2,7 @@
 import json
 import os
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -10,22 +11,11 @@ from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.sharding import shard_stacks
 from daydream.extensions import Registry, StackRule
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize(("files", "stack_name", "member", "docs_only"),
-    [pytest.param(["src/main.py"], "python", "src/main.py", None, id="python-main"),
-        pytest.param(["src/App.tsx"], "react", "src/App.tsx", None, id="react-app"),
-        pytest.param(["src/app.py", "migrations/001.sql"], "python", "migrations/001.sql", None,
-            id="ambiguous-shortcut"),
-        pytest.param(["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"], "python",
-            "backend/api/queries.sql", None, id="ambiguous-nearest-ancestor"),
-        pytest.param(["main.py", "App.tsx", "shared.sql"], "generic", "shared.sql", None, id="equal-depth-fallthrough"),
-        pytest.param(["pyproject.toml", "src/main.py"], "python", "pyproject.toml", None, id="config-promotion"),
-        pytest.param(["src/main.py", "README.md"], "generic", "README.md", False, id="md-pinned-to-generic"),
-    ],
-)
-def test_stack_membership_routing(
-    tmp_path: Path, files: list[str], stack_name: str, member: str, docs_only: bool | None,
+def _case_stack_membership_routing(
+    tmp_path: Path, files: list[str], stack_name: str, member: str, docs_only: bool | None
 ) -> None:
     """detect_stacks routes each file to the owned stack, and docs-only follows the mixed diff."""
     for path in files:
@@ -38,6 +28,33 @@ def test_stack_membership_routing(
     assert member in stack.files
     if docs_only is not None:
         assert stack.is_docs_only is docs_only
+
+
+def test_stack_membership_routing(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[list[str], str, str, bool | None]] = [
+        (["src/main.py"], "python", "src/main.py", None),
+        (["src/App.tsx"], "react", "src/App.tsx", None),
+        (["src/app.py", "migrations/001.sql"], "python", "migrations/001.sql", None),
+        (
+            ["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"],
+            "python",
+            "backend/api/queries.sql",
+            None,
+        ),
+        (["main.py", "App.tsx", "shared.sql"], "generic", "shared.sql", None),
+        (["pyproject.toml", "src/main.py"], "python", "pyproject.toml", None),
+        (["src/main.py", "README.md"], "generic", "README.md", False),
+    ]
+    case_index = 0
+    for files, stack_name, member, docs_only in cases_0:
+        with (
+            subtests.test(files=files, stack_name=stack_name, member=member, docs_only=docs_only),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_stack_membership_routing(
+                tmp_path=scenario.tmp_path, files=files, stack_name=stack_name, member=member, docs_only=docs_only
+            )
 
 
 def test_mixed_frontend_and_repository_infrastructure_routes_separately(tmp_path: Path) -> None:
@@ -80,17 +97,22 @@ def test_infrastructure_defaults_preserve_explicit_and_nested_ownership(tmp_path
     assert stacks["build"] == ["scripts/custom.cjs"]
 
 
-@pytest.mark.parametrize(("files", "expected"),
-    [pytest.param(["config.yaml"], {"generic"}, id="D-13a-config-default-generic"),
-        pytest.param(["pyproject.toml"], {"generic"}, id="D-13c-no-static-promotion"),
-        pytest.param(["src/lib.rs"], {"rust"}, id="M3-never-degrades-to-generic"),
-    ],
-)
-def test_language_classification(files: list[str], expected: set[str]) -> None:
+def _case_language_classification(files: list[str], expected: set[str]) -> None:
     """D-13a/D-13c/M3: config paths default to generic; a detected language never degrades."""
     result = detect_stacks(files)
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
     assert language_names == expected
+
+
+def test_language_classification(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[list[str], set[str]]] = [
+        (["config.yaml"], {"generic"}),
+        (["pyproject.toml"], {"generic"}),
+        (["src/lib.rs"], {"rust"}),
+    ]
+    for files, expected in cases_0:
+        with subtests.test(files=files, expected=expected):
+            _case_language_classification(files=files, expected=expected)
 
 
 def test_no_files_dropped() -> None:
@@ -101,46 +123,70 @@ def test_no_files_dropped() -> None:
     assert next(a.files for a in result if a.stack_name == "structure") == sorted(files)
 
 
-@pytest.mark.parametrize(("source", "metadata", "expected"), [
-    ('import {useState} from "react";', {}, "react"),
-    ('const React = require("react");', {}, "react"),
-    ('import {jsx} from "react/jsx-runtime";', {}, "react"),
-    ('export const App = () => <div/>;', {"package.json": {"dependencies": {"react": "*"}}}, "react"),
-    ('export const App = () => <div/>;', {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react"),
-    ('/** @jsxImportSource react */ const App = () => <div/>;', {}, "react"),
-    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;', {}, "generic",
-                 id="runtime-mode-without-owner"),
-    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
-                 {"package.json": {"dependencies": {"react": "*"}}}, "react", id="runtime-mode-react-package"),
-    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
-                 {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react", id="runtime-mode-react-config"),
-    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
-                 {"tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}}}, "generic",
-                 id="runtime-mode-preact-config"),
-    pytest.param('import React = require("react");', {}, "react", id="react-import-equals"),
-    pytest.param('import React from "react"; import Vue = require("vue");', {}, "generic",
-                 id="conflicting-import-equals"),
-    pytest.param('import React = require("react"); import Vue = require("vue");', {}, "generic",
-                 id="conflicting-both-import-equals"),
-    ('import {Component} from "@angular/core";', {}, "generic"),
-    ('import {ref} from "vue";', {}, "generic"),
-    ('import {onMount} from "svelte";', {}, "generic"),
-    ('/** @jsxImportSource preact */ const App = () => <div/>;', {}, "generic"),
-    ('import React from "react"; import {ref} from "vue";', {}, "generic"),
-    ('export const App = () => <div/>;', {"package.json": {"dependencies": {"react": "*", "vue": "*"}}}, "generic"),
-    ('export const App = () => <div/>;', {"tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}},
-                                       "package.json": {"dependencies": {"react": "*"}}}, "generic"),
-    ('export const twice = (n: number) => n * 2;', {"package.json": {"dependencies": {"react": "*"}}}, "generic"),
-    ('// import React from "react";\nconst text = `import React from "react"`;', {}, "generic"),
-    ('export const App = () => <div/>;', {}, "generic"),
-])
-def test_framework_source_evidence(tmp_path: Path, source: str, metadata: dict[str, object], expected: str) -> None:
+def _case_framework_source_evidence(tmp_path: Path, source: str, metadata: dict[str, object], expected: str) -> None:
     """Actual source/runtime evidence owns routing; extensions and co-changes cannot establish React."""
     (tmp_path / "App.tsx").write_text(source)
     for path, body in metadata.items():
         (tmp_path / path).write_text(json.dumps(body))
     result = detect_stacks(["App.tsx"], target_dir=tmp_path)
     assert [(s.stack_name, s.files) for s in result if s.stack_name != "structure"] == [(expected, ["App.tsx"])]
+
+
+def test_framework_source_evidence(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, dict[str, object], str]] = [
+        ('import {useState} from "react";', {}, "react"),
+        ('const React = require("react");', {}, "react"),
+        ('import {jsx} from "react/jsx-runtime";', {}, "react"),
+        ("export const App = () => <div/>;", {"package.json": {"dependencies": {"react": "*"}}}, "react"),
+        ("export const App = () => <div/>;", {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react"),
+        ("/** @jsxImportSource react */ const App = () => <div/>;", {}, "react"),
+        ("/** @jsxRuntime automatic */ const App = () => <div/>;", {}, "generic"),
+        (
+            "/** @jsxRuntime automatic */ const App = () => <div/>;",
+            {"package.json": {"dependencies": {"react": "*"}}},
+            "react",
+        ),
+        (
+            "/** @jsxRuntime automatic */ const App = () => <div/>;",
+            {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}},
+            "react",
+        ),
+        (
+            "/** @jsxRuntime automatic */ const App = () => <div/>;",
+            {"tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}}},
+            "generic",
+        ),
+        ('import React = require("react");', {}, "react"),
+        ('import React from "react"; import Vue = require("vue");', {}, "generic"),
+        ('import React = require("react"); import Vue = require("vue");', {}, "generic"),
+        ('import {Component} from "@angular/core";', {}, "generic"),
+        ('import {ref} from "vue";', {}, "generic"),
+        ('import {onMount} from "svelte";', {}, "generic"),
+        ("/** @jsxImportSource preact */ const App = () => <div/>;", {}, "generic"),
+        ('import React from "react"; import {ref} from "vue";', {}, "generic"),
+        ("export const App = () => <div/>;", {"package.json": {"dependencies": {"react": "*", "vue": "*"}}}, "generic"),
+        (
+            "export const App = () => <div/>;",
+            {
+                "tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}},
+                "package.json": {"dependencies": {"react": "*"}},
+            },
+            "generic",
+        ),
+        ("export const twice = (n: number) => n * 2;", {"package.json": {"dependencies": {"react": "*"}}}, "generic"),
+        ('// import React from "react";\nconst text = `import React from "react"`;', {}, "generic"),
+        ("export const App = () => <div/>;", {}, "generic"),
+    ]
+    case_index = 0
+    for source, metadata, expected in cases_0:
+        with (
+            subtests.test(source=source, metadata=metadata, expected=expected),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_framework_source_evidence(
+                tmp_path=scenario.tmp_path, source=source, metadata=metadata, expected=expected
+            )
 
 
 def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
@@ -171,12 +217,8 @@ def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
     assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
 
 
-@pytest.mark.parametrize("failure", [
-    "deleted", "malformed", "invalid-workspace-date", "cycle", "external-extends", "escape", "unreadable",
-    "metadata-symlink", "traversal",
-])
-def test_framework_unavailable_evidence_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+def _case_framework_unavailable_evidence_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     """Unsafe/incomplete input never borrows framework ownership from another changed file."""
     (tmp_path / "react.ts").write_text('import React from "react";')
@@ -224,9 +266,29 @@ def test_framework_unavailable_evidence_falls_back(
     assert Counter(primary) == Counter(["react.ts", candidate])
 
 
-@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_NONBLOCK"])
-def test_framework_missing_safe_open_capability_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str,
+def test_framework_unavailable_evidence_falls_back(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "deleted",
+        "malformed",
+        "invalid-workspace-date",
+        "cycle",
+        "external-extends",
+        "escape",
+        "unreadable",
+        "metadata-symlink",
+        "traversal",
+    ]
+    case_index = 0
+    for failure in cases_0:
+        with subtests.test(failure=failure), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_framework_unavailable_evidence_falls_back(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, failure=failure
+            )
+
+
+def _case_framework_missing_safe_open_capability_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
 ) -> None:
     """Unavailable safe-open flags retain generic source/config coverage without unsafe reads."""
     (tmp_path / "App.tsx").write_text('import React from "react"; const App = () => <div/>;')
@@ -239,6 +301,17 @@ def test_framework_missing_safe_open_capability_falls_back(
     assert [(stack.stack_name, stack.files) for stack in primary] == [("generic", files)]
     assert Counter(path for stack in primary for path in stack.files) == Counter(files)
     assert next(stack.files for stack in result if stack.stack_name == "structure") == files
+
+
+def test_framework_missing_safe_open_capability_falls_back(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["O_NOFOLLOW", "O_NONBLOCK"]
+    case_index = 0
+    for flag in cases_0:
+        with subtests.test(flag=flag), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_framework_missing_safe_open_capability_falls_back(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, flag=flag
+            )
 
 
 def test_local_tsconfig_extends(tmp_path: Path) -> None:
@@ -254,8 +327,7 @@ def test_local_tsconfig_extends(tmp_path: Path) -> None:
 
 
 
-@pytest.mark.parametrize("limit", ["source-count", "source-bytes", "metadata-count", "metadata-bytes", "total-bytes"])
-def test_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> None:
+def _case_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> None:
     """Exact defaults admit complete evidence; the first over-budget file receives generic coverage."""
     files = []
     expected_react = []
@@ -293,15 +365,17 @@ def test_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> N
     assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
 
 
-@pytest.mark.parametrize("workspace", ["package.json", "pnpm-workspace.yaml"])
-@pytest.mark.parametrize("pattern", [
-    "apps/web", "apps/*", "apps/**", "apps/w?b", "apps/[wm]*",
-    pytest.param("apps/{web,mobile}", id="unsupported-braces"),
-    pytest.param("apps/@(web|mobile)", id="unsupported-extglob"),
-    pytest.param(r"apps\*", id="unsupported-backslash"),
-])
-def test_declared_workspace_without_local_metadata_does_not_inherit_root(
-    tmp_path: Path, workspace: str, pattern: str,
+def test_framework_inspection_budget_boundaries(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["source-count", "source-bytes", "metadata-count", "metadata-bytes", "total-bytes"]
+    case_index = 0
+    for limit in cases_0:
+        with subtests.test(limit=limit), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_framework_inspection_budget_boundaries(tmp_path=scenario.tmp_path, limit=limit)
+
+
+def _case_declared_workspace_without_local_metadata_does_not_inherit_root(
+    tmp_path: Path, workspace: str, pattern: str
 ) -> None:
     """Declared or unsupported workspace boundaries cannot leak root framework ownership."""
     root: dict[str, object] = {"dependencies": {"react": "*"}}
@@ -315,6 +389,33 @@ def test_declared_workspace_without_local_metadata_does_not_inherit_root(
     result = detect_stacks(["apps/web/App.tsx"], target_dir=tmp_path)
     assert [(s.stack_name, s.files) for s in result if s.stack_name != "structure"] == [
         ("generic", ["apps/web/App.tsx"])]
+
+
+def test_declared_workspace_without_local_metadata_does_not_inherit_root(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["package.json", "pnpm-workspace.yaml"]
+    cases_1: Sequence[str] = [
+        "apps/web",
+        "apps/*",
+        "apps/**",
+        "apps/w?b",
+        "apps/[wm]*",
+        "apps/{web,mobile}",
+        "apps/@(web|mobile)",
+        "apps\\*",
+    ]
+    case_index = 0
+    for workspace in cases_0:
+        for pattern in cases_1:
+            with (
+                subtests.test(workspace=workspace, pattern=pattern),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                _case_declared_workspace_without_local_metadata_does_not_inherit_root(
+                    tmp_path=scenario.tmp_path, workspace=workspace, pattern=pattern
+                )
 
 
 def test_explicit_config_rule_survives_language_promotion() -> None:
@@ -419,8 +520,7 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None
     assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs
 
 
-@pytest.mark.parametrize('cap', [0, 1, 3, 4])
-def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap: int) -> None:
+def _case_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap: int) -> None:
     py = StackAssignment(stack_name='python', files=['a.py', 'b.py', 'c.py', 'd.py'])
     other = StackAssignment(stack_name='generic', files=['README.md'])
     diff = ''.join(f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{body}\n'
@@ -436,3 +536,10 @@ def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap:
         ['python'] if len(expected) == 1 else [f'python#{i}' for i in range(len(expected))])
     assert next(stack for stack in python if 'b.py' in stack.files).frontier_files == ['README.md']
     assert sum(len(stack.files) for stack in result) == 5
+
+
+def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[int] = [0, 1, 3, 4]
+    for cap in cases_0:
+        with subtests.test(cap=cap):
+            _case_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap=cap)

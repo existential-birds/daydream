@@ -5,7 +5,7 @@ import copy
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ from tests.deep_orchestrator.test_review_investigation import (
     stage_ends,
 )
 from tests.harness.git_helpers import seed_feature_branch
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
@@ -76,9 +77,8 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     return contents['diff'], index
 
 
-@pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted', 'navigation'])
-async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str, ext_dir: ExtDir,
+async def _case_structure_keeps_bounded_interaction_review_and_patch_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str, ext_dir: ExtDir
 ) -> None:
     if limit == 'files':
         before = {f'module_{index:04}.py': 'VALUE = 0\n' for index in range(520)}
@@ -209,10 +209,24 @@ async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
     assert data['findings'] == []
 
 
-@pytest.mark.parametrize('invalid_digest', [False, True], ids=['later-part', 'forged-later-part'])
-@pytest.mark.parametrize('sandbox', [False, True], ids=['catalog', 'inline'])
-async def test_structure_can_attribute_a_later_assigned_part(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_digest: bool, sandbox: bool,
+async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["files", "bytes", "all-omitted", "navigation"]
+    case_index = 0
+    for limit in cases_0:
+        with subtests.test(limit=limit), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_structure_keeps_bounded_interaction_review_and_patch_navigation(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                limit=limit,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+            )
+
+
+async def _case_structure_can_attribute_a_later_assigned_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_digest: bool, sandbox: bool
 ) -> None:
     """Bounded examples must not exclude genuine later Structure work from admission."""
     review = staged_review(tmp_path, monkeypatch)
@@ -257,9 +271,28 @@ async def test_structure_can_attribute_a_later_assigned_part(
     assert event['metadata']['failure_class'] == ('source_attribution' if invalid_digest else None)
 
 
-@pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
-async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir) -> None:
+async def test_structure_can_attribute_a_later_assigned_part(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[bool] = [False, True]
+    case_index = 0
+    for invalid_digest in cases_0:
+        for sandbox in cases_1:
+            with (
+                subtests.test(invalid_digest=invalid_digest, sandbox=sandbox),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_structure_can_attribute_a_later_assigned_part(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    invalid_digest=invalid_digest,
+                    sandbox=sandbox,
+                )
+
+
+async def _case_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir
+) -> None:
     ext_dir.write_module(
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
@@ -319,11 +352,25 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     assert len(retry_scopes) == 1
 
 
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-@pytest.mark.parametrize(('payload', 'omit_final'), [('medium-file', False), ('oversized-hunk', False),
-    ('oversized-hunk', True), ('unicode-line', False), ('unicode-separators', False)])
-async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool) -> None:
+async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["success", "second-rejection"]
+    case_index = 0
+    for outcome in cases_0:
+        with subtests.test(outcome=outcome), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                outcome=outcome,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+            )
+
+
+async def _case_oversized_hunk_assignments_reassemble_every_canonical_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool
+) -> None:
     from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
@@ -424,9 +471,37 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         assert len(full_index['hunks']) == 1
 
 
-@pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
-async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool) -> None:
+async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[tuple[str, bool]] = [
+        ("medium-file", False),
+        ("oversized-hunk", False),
+        ("oversized-hunk", True),
+        ("unicode-line", False),
+        ("unicode-separators", False),
+    ]
+    case_index = 0
+    for sandbox in cases_0:
+        for payload, omit_final in cases_1:
+            with (
+                subtests.test(sandbox=sandbox, payload=payload, omit_final=omit_final),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_oversized_hunk_assignments_reassemble_every_canonical_byte(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    sandbox=sandbox,
+                    payload=payload,
+                    omit_final=omit_final,
+                )
+
+
+async def _case_current_exact_builder_signatures_route_generic_and_rust_shards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool
+) -> None:
     ext_dir.write_module(
         'from dataclasses import dataclass\n'
         'from daydream.deep.prompts import (build_generic_fallback_prompt, build_per_stack_prompt, '
@@ -489,6 +564,22 @@ async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
     assert all(event['metadata']['admitted'] for scope in expected for event in stage_ends(review, scope))
 
 
+async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for bundle_capable in cases_0:
+        with subtests.test(bundle_capable=bundle_capable), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_current_exact_builder_signatures_route_generic_and_rust_shards(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                bundle_capable=bundle_capable,
+            )
+
+
 async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
@@ -525,10 +616,9 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('path', ['api.py', 'component_雪.py', 'nested/component_"quote".py', 'component_\t.py',
-                                 'api[1].py'])
-async def test_quoted_git_paths_keep_complete_required_stage_inputs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+async def _case_quoted_git_paths_keep_complete_required_stage_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
 
     repo = tmp_path / 'quoted_paths'
     seed_feature_branch(repo, base={path: '# Stable source context\nVALUE = 0\n'},
@@ -563,6 +653,23 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     assert decision['target_id'] == path and decision['status'] == 'reviewed'
     assert decision['evidence_refs'] == submitted
     assert len(required) == 1
+
+
+async def test_quoted_git_paths_keep_complete_required_stage_inputs(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "api.py",
+        "component_雪.py",
+        'nested/component_"quote".py',
+        "component_\t.py",
+        "api[1].py",
+    ]
+    case_index = 0
+    for path in cases_0:
+        with subtests.test(path=path), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_quoted_git_paths_keep_complete_required_stage_inputs(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, path=path
+            )
 
 
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
@@ -614,9 +721,9 @@ async def test_changed_prepared_input_identity_blocks_admission(tmp_path: Path, 
     assert event['metadata']['observed_tool_starts'] == 0
 
 
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])
-async def test_shared_intent_uses_actual_transport_allowance_after_required_assignment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
+async def _case_shared_intent_uses_actual_transport_allowance_after_required_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool
+) -> None:
 
     review = staged_review(tmp_path, monkeypatch, files=2)
     shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 600
@@ -648,41 +755,22 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     assert event['metadata']['observed_tool_starts'] == (0 if sandbox else 1)
 
 
-@pytest.mark.parametrize(('case', 'reason', 'attempts'), [
-    ('unparseable', 'malformed_output', 1),
-    ('invalid-native-valid-text', 'malformed_output', 1),
-    ('nested-invalid-root', None, 1),
-    ('incomplete-nested-stage', 'malformed_output', 1),
-    ('text-origin-nested', None, 1),
-    ('empty-final-turn', 'missing_output', 1),
-    ('native-prose', None, 1),
-    ('pi-schema-retry', None, 2),
-    ('missing-notes', None, 2),
-    ('empty-object', None, 2),
-    ('scalar-only-object', None, 2),
-    ('wrong-type-notes', None, 2),
-    ('native-missing-notes', 'malformed_output', 1),
-    ('compliant-json', None, 1),
-    ('prose-json', None, 1),
-    ('fenced-json', None, 1),
-    ('incidental-json', None, 1),
-    ('ambiguous-json', 'malformed_output', 1),
-    ('wrapper-siblings', 'malformed_output', 1),
-    ('result-list', 'malformed_output', 1),
-    ('recursive-wrapper', 'malformed_output', 1),
-    ('partial-second-object', 'malformed_output', 1),
-    ('partial-second-array', 'malformed_output', 1),
-    ('malformed-tail', 'malformed_output', 1),
-    ('unfinished-fence', 'malformed_output', 1),
-    ('orphan-close', 'malformed_output', 1),
-    ('unmatched-prose', 'malformed_output', 1),
-    ('oversized-final', 'malformed_output', 1),
-    ('output-shaped-invalid', 'malformed_output', 1),
-    ('output-shaped-before-valid', 'malformed_output', 1),
-    ('misplaced-closing-brace', 'malformed_output', 1),
-])
-async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, reason: str | None, attempts: int) -> None:
+async def test_shared_intent_uses_actual_transport_allowance_after_required_assignment(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for sandbox in cases_0:
+        with subtests.test(sandbox=sandbox), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_shared_intent_uses_actual_transport_allowance_after_required_assignment(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, sandbox=sandbox
+            )
+
+
+async def _case_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, reason: str | None, attempts: int
+) -> None:
     review = staged_review(tmp_path, monkeypatch, files=2)
 
     @review.backend.script(terminal=False)
@@ -786,9 +874,60 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
         assert metadata['failure_class'] == ('syntax_failure' if case == 'misplaced-closing-brace' else None)
 
 
-@pytest.mark.parametrize('packaging', ['prose', 'wrapper', 'native', 'domain-invalid'])
-async def test_staged_results_present_only_after_admission_and_preserve_raw_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], packaging: str,
+async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str | None, int]] = [
+        ("unparseable", "malformed_output", 1),
+        ("invalid-native-valid-text", "malformed_output", 1),
+        ("nested-invalid-root", None, 1),
+        ("incomplete-nested-stage", "malformed_output", 1),
+        ("text-origin-nested", None, 1),
+        ("empty-final-turn", "missing_output", 1),
+        ("native-prose", None, 1),
+        ("pi-schema-retry", None, 2),
+        ("missing-notes", None, 2),
+        ("empty-object", None, 2),
+        ("scalar-only-object", None, 2),
+        ("wrong-type-notes", None, 2),
+        ("native-missing-notes", "malformed_output", 1),
+        ("compliant-json", None, 1),
+        ("prose-json", None, 1),
+        ("fenced-json", None, 1),
+        ("incidental-json", None, 1),
+        ("ambiguous-json", "malformed_output", 1),
+        ("wrapper-siblings", "malformed_output", 1),
+        ("result-list", "malformed_output", 1),
+        ("recursive-wrapper", "malformed_output", 1),
+        ("partial-second-object", "malformed_output", 1),
+        ("partial-second-array", "malformed_output", 1),
+        ("malformed-tail", "malformed_output", 1),
+        ("unfinished-fence", "malformed_output", 1),
+        ("orphan-close", "malformed_output", 1),
+        ("unmatched-prose", "malformed_output", 1),
+        ("oversized-final", "malformed_output", 1),
+        ("output-shaped-invalid", "malformed_output", 1),
+        ("output-shaped-before-valid", "malformed_output", 1),
+        ("misplaced-closing-brace", "malformed_output", 1),
+    ]
+    case_index = 0
+    for case, reason, attempts in cases_0:
+        with (
+            subtests.test(case=case, reason=reason, attempts=attempts),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                case=case,
+                reason=reason,
+                attempts=attempts,
+            )
+
+
+async def _case_staged_results_present_only_after_admission_and_preserve_raw_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], packaging: str
 ) -> None:
     review = staged_review(tmp_path, monkeypatch, files=2)
     marker = 'HOST_PRESENTATION_MARKER'
@@ -827,6 +966,20 @@ async def test_staged_results_present_only_after_admission_and_preserve_raw_text
         assert raw_text[0].replace(sentinel, '[REDACTED_API_KEY]') in messages
 
 
+async def test_staged_results_present_only_after_admission_and_preserve_raw_text(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["prose", "wrapper", "native", "domain-invalid"]
+    case_index = 0
+    for packaging in cases_0:
+        with subtests.test(packaging=packaging), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            await _case_staged_results_present_only_after_admission_and_preserve_raw_text(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, capsys=capsys, packaging=packaging
+            )
+
+
 async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
@@ -859,10 +1012,9 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         assert combined.count(f'REQUIRED_LARGE_CHANGE_{index:04}') == 1
 
 
-@pytest.mark.parametrize('fault', ['unknown-target', 'unknown-candidate', 'contradiction', 'grounds',
-                                  'grounds-missing', 'grounds-null', 'grounds-number', 'handoff'])
-async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
+async def _case_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
     review = staged_review(tmp_path, monkeypatch)
 
     @review.backend.script('python')
@@ -904,12 +1056,30 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
     assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
 
 
-@pytest.mark.parametrize('fault', ['revision', 'artifact-digest', 'part-digest', 'path', 'side', 'range',
-                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count',
-                                  'supporting-digest', 'supporting-missing-path', 'supporting-range',
-                                  'supporting-reversed-range'])
-async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "unknown-target",
+        "unknown-candidate",
+        "contradiction",
+        "grounds",
+        "grounds-missing",
+        "grounds-null",
+        "grounds-number",
+        "handoff",
+    ]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, fault=fault
+            )
+
+
+async def _case_invalid_source_reference_preserves_prior_admitted_target_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     """A later well-shaped citation cannot alter admitted work unless frozen identity matches."""
     review = staged_review(tmp_path, monkeypatch)
@@ -977,9 +1147,37 @@ async def test_invalid_source_reference_preserves_prior_admitted_target_decision
     assert all('INVALID_ATTRIBUTION_MUST_NOT_SURVIVE' not in call['prompt'] for call in review.backend.calls)
 
 
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
+async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "revision",
+        "artifact-digest",
+        "part-digest",
+        "path",
+        "side",
+        "range",
+        "fragment",
+        "supporting-only",
+        "missing-assigned",
+        "reference-count",
+        "supporting-digest",
+        "supporting-missing-path",
+        "supporting-range",
+        "supporting-reversed-range",
+    ]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_invalid_source_reference_preserves_prior_admitted_target_decisions(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, fault=fault
+            )
+
+
+async def _case_old_only_hunk_and_later_continuations_keep_canonical_ranges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool
+) -> None:
 
     from tests.harness.git_helpers import git
 
@@ -1027,9 +1225,21 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
         assert combined.count(f'LATER_REQUIRED_CHANGE_{index:04}') == 1
 
 
-@pytest.mark.parametrize('fault', ['reordered-fragment', 'byte-offset-as-line'])
-async def test_continuation_references_cannot_alias_another_fragment_or_a_source_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for sandbox in cases_0:
+        with subtests.test(sandbox=sandbox), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_old_only_hunk_and_later_continuations_keep_canonical_ranges(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, sandbox=sandbox
+            )
+
+
+async def _case_continuation_references_cannot_alias_another_fragment_or_a_source_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
     """Byte offsets identify a specific delivered fragment, even when it splits one source line."""
     repo = tmp_path / 'continuation_attribution'
@@ -1069,6 +1279,19 @@ async def test_continuation_references_cannot_alias_another_fragment_or_a_source
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+
+
+async def test_continuation_references_cannot_alias_another_fragment_or_a_source_line(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["reordered-fragment", "byte-offset-as-line"]
+    case_index = 0
+    for fault in cases_0:
+        with subtests.test(fault=fault), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_continuation_references_cannot_alias_another_fragment_or_a_source_line(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, fault=fault
+            )
 
 
 async def test_redaction_expansion_rejects_stage_without_losing_admitted_findings(

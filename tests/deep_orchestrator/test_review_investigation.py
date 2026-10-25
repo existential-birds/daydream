@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Sequence
 from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
@@ -26,12 +26,13 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from tests.conftest import ExtDir
+from tests.conftest import ExtDir, make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
 StageResponse = Callable[[dict[str, Any], dict[str, Any]],
@@ -127,15 +128,9 @@ def read_events(repo: Path, path: str, *, event_id: str) -> Iterable[AgentEvent]
     yield ToolResultEvent(id=event_id, output=source, is_error=False)
 
 
-@pytest.mark.parametrize(('fault', 'reason'), [('no-tool-read', None),
-    ('unknown', 'malformed_output'), ('duplicate', 'malformed_output'),
-    ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
-    ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
-    ('missing-grounds', 'evidence_incomplete'), ('invalid-disposition', 'malformed_output'),
-    ('truncated-tool-output', None),
-    ('unmatched-tool-result', None), ('optional-failures', None)])
-async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
-    investigation: InvestigationRun, fault: str, reason: str) -> None:
+async def _case_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
+    investigation: InvestigationRun, fault: str, reason: str | None
+) -> None:
     @investigation.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         concrete = candidate(disposition='confirmed', finding=record())
@@ -176,6 +171,35 @@ async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid
         assert terminal['metadata']['observed_tool_starts'] == 0
     if fault == 'optional-failures':
         assert terminal['metadata']['admitted'] is True and terminal['metadata']['observed_tool_starts'] == 1
+
+
+async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str | None]] = [
+        ("no-tool-read", None),
+        ("unknown", "malformed_output"),
+        ("duplicate", "malformed_output"),
+        ("omitted", "malformed_output"),
+        ("read-all", "malformed_output"),
+        ("handoff-bytes", "evidence_incomplete"),
+        ("handoff-items", "evidence_incomplete"),
+        ("missing-grounds", "evidence_incomplete"),
+        ("invalid-disposition", "malformed_output"),
+        ("truncated-tool-output", None),
+        ("unmatched-tool-result", None),
+        ("optional-failures", None),
+    ]
+    case_index = 0
+    for fault, reason in cases_0:
+        with subtests.test(fault=fault, reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            investigation = InvestigationRun(
+                make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch
+            )
+            await _case_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
+                investigation=investigation, fault=fault, reason=reason
+            )
 
 
 def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
@@ -245,10 +269,9 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
     return review
 
 
-@pytest.mark.parametrize('seeded_defect', [False, True], ids=['clean', 'contradictory-changed-code'])
-@pytest.mark.parametrize('transport', ['exact', 'inline', 'native'])
-async def test_successful_supporting_dependency_notes_reach_only_relevant_later_assignments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seeded_defect: bool, transport: str) -> None:
+async def _case_successful_supporting_dependency_notes_reach_only_relevant_later_assignments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seeded_defect: bool, transport: str
+) -> None:
     """A clean cross-file conclusion survives disjoint batches without deciding later work."""
     review = many_file_review(tmp_path, monkeypatch, count=9, feature_overrides={
         'api.py': "from module_03 import VALUE\n\ndef hello():\n    return 'world' if VALUE == 0 else None\n",
@@ -325,9 +348,30 @@ async def test_successful_supporting_dependency_notes_reach_only_relevant_later_
     assert context['notes_omitted'] == 0
 
 
-@pytest.mark.parametrize('path_kind', ['plain', 'multibyte', 'escaped'])
-async def test_persisted_source_assertions_are_bounded_and_redacted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str) -> None:
+async def test_successful_supporting_dependency_notes_reach_only_relevant_later_assignments(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[str] = ["exact", "inline", "native"]
+    case_index = 0
+    for seeded_defect in cases_0:
+        for transport in cases_1:
+            with (
+                subtests.test(seeded_defect=seeded_defect, transport=transport),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_successful_supporting_dependency_notes_reach_only_relevant_later_assignments(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    seeded_defect=seeded_defect,
+                    transport=transport,
+                )
+
+
+async def _case_persisted_source_assertions_are_bounded_and_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str
+) -> None:
     """Provider stage notes must not become an unbounded or credential-bearing report."""
     prefix = {'plain': '', 'multibyte': ('𐐨' * 43 + '/') * 2,
               'escaped': ('é' * 84 + '/') * 2}[path_kind]
@@ -378,6 +422,17 @@ async def test_persisted_source_assertions_are_bounded_and_redacted(
     assert restored == python and reused['terminal_result']['run_id'] != data['terminal_result']['run_id']
 
 
+async def test_persisted_source_assertions_are_bounded_and_redacted(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["plain", "multibyte", "escaped"]
+    case_index = 0
+    for path_kind in cases_0:
+        with subtests.test(path_kind=path_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_persisted_source_assertions_are_bounded_and_redacted(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, path_kind=path_kind
+            )
+
+
 async def test_optional_supporting_paths_are_confined_without_rejecting_valid_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unavailable references do not veto findings or acquire source/review authority."""
@@ -423,10 +478,9 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
     assert all('PRIVATE_OUTSIDE_SOURCE' not in call['prompt'] for call in review.backend.calls)
 
 
-@pytest.mark.parametrize(('references', 'native'), [
-    ('missing', False), (None, True), ('unusable-container', False), ([None, 42, '../outside.py'], True)])
-async def test_unavailable_optional_reference_metadata_preserves_primary_stage_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, references: Any, native: bool) -> None:
+async def _case_unavailable_optional_reference_metadata_preserves_primary_stage_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, references: Any, native: bool
+) -> None:
     """Legacy/malformed optional metadata cannot erase valid findings or trigger fresh stages."""
     review = many_file_review(tmp_path, monkeypatch, count=9)
 
@@ -456,6 +510,24 @@ async def test_unavailable_optional_reference_metadata_preserves_primary_stage_a
     assert all(event['metadata']['attempt'] == 1 for event in ends)
 
 
+async def test_unavailable_optional_reference_metadata_preserves_primary_stage_admission(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[Any, bool]] = [
+        ("missing", False),
+        (None, True),
+        ("unusable-container", False),
+        ([None, 42, "../outside.py"], True),
+    ]
+    case_index = 0
+    for references, native in cases_0:
+        with subtests.test(references=references, native=native), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unavailable_optional_reference_metadata_preserves_primary_stage_admission(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, references=references, native=native
+            )
+
+
 async def test_supporting_relevance_metadata_counts_toward_the_semantic_handoff_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=129)
@@ -470,9 +542,9 @@ async def test_supporting_relevance_metadata_counts_toward_the_semantic_handoff_
     assert ends[0]['metadata']['failure_class'] == 'admission_failure'
 
 
-@pytest.mark.parametrize('stop', ['wall', 'pipeline', 'outage-circuit', 'permanent'])
-async def test_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
+async def _case_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=9)
     review.backend.fanout_concurrency = 1
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
@@ -522,6 +594,19 @@ async def test_isolated_failure_continuation_respects_shared_deadline_and_outage
         assert 'provider outage circuit denied a later batch' in diagnostic
 
 
+async def test_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["wall", "pipeline", "outage-circuit", "permanent"]
+    case_index = 0
+    for stop in cases_0:
+        with subtests.test(stop=stop), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, stop=stop
+            )
+
+
 async def test_isolated_first_pass_and_triage_failures_preserve_later_independent_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Failed batches cannot discard prior findings, suppress later batches or decide failed triage."""
@@ -564,17 +649,8 @@ async def test_isolated_first_pass_and_triage_failures_preserve_later_independen
     assert 'RuntimeError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
 
 
-@pytest.mark.parametrize('failed_stage', ['first_pass', 'triage'])
-@pytest.mark.parametrize(('stop', 'reason', 'diagnostic'), [
-    ('auth', 'authentication_failure', 'AuthenticationFailure: review invocation failed'),
-    ('admission', 'evidence_incomplete', 'Stage evidence admission failed'),
-    ('wall', 'host_wall_budget_exhaustion', 'wall_budget_exceeded'),
-    ('pipeline', 'host_pipeline_budget_exhaustion', 'pipeline_budget_exceeded'),
-    ('tools', 'host_tool_budget_exhaustion', 'tool_call_budget_exceeded'),
-])
-async def test_later_stopping_failure_retains_original_failure_and_stopping_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str,
-    stop: str, reason: str, diagnostic: str,
+async def _case_later_stopping_failure_retains_original_failure_and_stopping_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str, stop: str, reason: str, diagnostic: str
 ) -> None:
     """Saved coverage must explain both lost work and why no further batch was admitted."""
     review = many_file_review(tmp_path, monkeypatch, count=13, docs_count=0)
@@ -630,9 +706,37 @@ async def test_later_stopping_failure_retains_original_failure_and_stopping_evid
     assert stage_ends(review, 'python')[-1]['metadata']['admitted'] is False
 
 
-@pytest.mark.parametrize('stop', ['wall', 'pipeline', 'outage-circuit', 'tools'])
-async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+async def test_later_stopping_failure_retains_original_failure_and_stopping_evidence(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["first_pass", "triage"]
+    cases_1: Sequence[tuple[str, str, str]] = [
+        ("auth", "authentication_failure", "AuthenticationFailure: review invocation failed"),
+        ("admission", "evidence_incomplete", "Stage evidence admission failed"),
+        ("wall", "host_wall_budget_exhaustion", "wall_budget_exceeded"),
+        ("pipeline", "host_pipeline_budget_exhaustion", "pipeline_budget_exceeded"),
+        ("tools", "host_tool_budget_exhaustion", "tool_call_budget_exceeded"),
+    ]
+    case_index = 0
+    for failed_stage in cases_0:
+        for stop, reason, diagnostic in cases_1:
+            with (
+                subtests.test(failed_stage=failed_stage, stop=stop, reason=reason, diagnostic=diagnostic),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_later_stopping_failure_retains_original_failure_and_stopping_evidence(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    failed_stage=failed_stage,
+                    stop=stop,
+                    reason=reason,
+                    diagnostic=diagnostic,
+                )
+
+
+async def _case_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
     """A refused later batch cannot relabel attempted failed work as unattempted coverage."""
     review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
@@ -677,9 +781,22 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
     assert all(event['metadata']['admitted'] is False for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('unfinished_target', [False, True], ids=['complete', 'unfinished-first-target'])
-async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_handoff_slots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unfinished_target: bool) -> None:
+async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["wall", "pipeline", "outage-circuit", "tools"]
+    case_index = 0
+    for stop in cases_0:
+        with subtests.test(stop=stop), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, stop=stop
+            )
+
+
+async def _case_large_unsharded_scope_retains_coverage_without_spending_semantic_handoff_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unfinished_target: bool
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=129)
 
     @review.backend.script('python')
@@ -703,9 +820,22 @@ async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_
     assert scope['partial_evidence'] is unfinished_target
 
 
-@pytest.mark.parametrize('scope_id', ['python', 'generic', 'structure'])
-async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str) -> None:
+async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_handoff_slots(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for unfinished_target in cases_0:
+        with subtests.test(unfinished_target=unfinished_target), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_large_unsharded_scope_retains_coverage_without_spending_semantic_handoff_slots(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, unfinished_target=unfinished_target
+            )
+
+
+async def _case_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, docs_count=9)
     stage_spend: list[int] = []
     request_prompts: list[str] = []
@@ -757,10 +887,23 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
     assert metadata[-1]['remaining_tool_calls'] > 0
     assert len(request_prompts) == len(stages)
 
-@pytest.mark.parametrize(('sandbox', 'long_grounds'), [(False, False), (True, False), (False, True)],
-                         ids=['exact-path-inputs', 'inline-inputs', 'clipped-closed-conclusion'])
-async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool, long_grounds: bool) -> None:
+
+async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["python", "generic", "structure"]
+    case_index = 0
+    for scope_id in cases_0:
+        with subtests.test(scope_id=scope_id), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, scope_id=scope_id
+            )
+
+
+async def _case_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool, long_grounds: bool
+) -> None:
     ext_dir.write_module(
         "import json\n"
         "from daydream.deep.prompts import build_per_stack_prompt, build_structural_prompt\n"
@@ -868,11 +1011,29 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
                and stage['scope_id'] in {'python', 'structure'})
 
 
-@pytest.mark.parametrize(('stop', 'reason'), [('tool', 'host_tool_budget_exhaustion'),
-    ('model', 'model_budget_exhaustion'), ('backend', 'backend_failure'), ('builder', 'backend_failure'),
-    ('deadline', 'host_pipeline_budget_exhaustion')])
-async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, stop: str, reason: str) -> None:
+async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, bool]] = [(False, False), (True, False), (False, True)]
+    case_index = 0
+    for sandbox, long_grounds in cases_0:
+        with (
+            subtests.test(sandbox=sandbox, long_grounds=long_grounds),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                sandbox=sandbox,
+                long_grounds=long_grounds,
+            )
+
+
+async def _case_unsuccessful_later_stage_retains_only_prior_admitted_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, stop: str, reason: str
+) -> None:
     if stop == 'builder':
         ext_dir.write_module(
             "from daydream.deep.prompts import build_per_stack_prompt\n"
@@ -960,14 +1121,31 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert timer.monotonic() >= dispatch_deadlines[0]
 
 
-@pytest.mark.parametrize(('local_s', 'pipeline_s', 'reason', 'bound'), [
-    (480, 2000, 'host_wall_budget_exhaustion', 'local'),
-    (900, 2000, None, 'local'),
-    (900, 600, 'host_pipeline_budget_exhaustion', 'pipeline'),
-])
-async def test_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_s: int, pipeline_s: int,
-    reason: str | None, bound: str,
+async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str]] = [
+        ("tool", "host_tool_budget_exhaustion"),
+        ("model", "model_budget_exhaustion"),
+        ("backend", "backend_failure"),
+        ("builder", "backend_failure"),
+        ("deadline", "host_pipeline_budget_exhaustion"),
+    ]
+    case_index = 0
+    for stop, reason in cases_0:
+        with subtests.test(stop=stop, reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unsuccessful_later_stage_retains_only_prior_admitted_findings(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                stop=stop,
+                reason=reason,
+            )
+
+
+async def _case_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_s: int, pipeline_s: int, reason: str | None, bound: str
 ) -> None:
     """The same two-stage work distinguishes local configuration from the shared pipeline cap."""
     review = many_file_review(tmp_path, monkeypatch, count=5)
@@ -1018,6 +1196,31 @@ async def test_configured_investigation_time_changes_completion_without_renewing
         assert ('pipeline_budget_exceeded' if bound == 'pipeline' else 'wall_budget_exceeded') in (
             saved['diagnostics']['scopes']['python'])
         assert events[-1]['metadata']['retained_findings'] == 1
+
+
+async def test_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[int, int, str | None, str]] = [
+        (480, 2000, "host_wall_budget_exhaustion", "local"),
+        (900, 2000, None, "local"),
+        (900, 600, "host_pipeline_budget_exhaustion", "pipeline"),
+    ]
+    case_index = 0
+    for local_s, pipeline_s, reason, bound in cases_0:
+        with (
+            subtests.test(local_s=local_s, pipeline_s=pipeline_s, reason=reason, bound=bound),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                local_s=local_s,
+                pipeline_s=pipeline_s,
+                reason=reason,
+                bound=bound,
+            )
 
 
 async def test_zero_configured_investigation_time_dispatches_no_review_and_reports_incomplete_coverage(
@@ -1082,9 +1285,9 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     assert 'wall_budget_exceeded' in saved['diagnostics']['scopes']['python']
 
 
-@pytest.mark.parametrize('decision', ['rejected', 'confirmed', 'unresolved'])
-async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str) -> None:
+async def _case_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=9)
 
     @review.backend.script('python')
@@ -1120,13 +1323,22 @@ async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retai
     assert scopes(data)['python']['partial_evidence'] is (decision == 'unresolved')
 
 
-@pytest.mark.parametrize(('decision', 'reason'), [
-    ('rejected', None), ('confirmed', None), ('missing-finding', 'malformed_output'),
-    ('unresolved', 'evidence_incomplete'), ('unknown-contradiction', 'malformed_output'),
-    ('contradiction', 'evidence_incomplete'), ('unknown', 'malformed_output'),
-    ('duplicate', 'malformed_output'), ('omitted', 'malformed_output'), ('extra-target', 'malformed_output')])
-async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
-    investigation: InvestigationRun, decision: str, reason: str | None) -> None:
+async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["rejected", "confirmed", "unresolved"]
+    case_index = 0
+    for decision in cases_0:
+        with subtests.test(decision=decision), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, decision=decision
+            )
+
+
+async def _case_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
+    investigation: InvestigationRun, decision: str, reason: str | None
+) -> None:
     backend = investigation.backend
     contracts: list[dict[str, Any]] = []
 
@@ -1183,12 +1395,36 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             'assignment_mismatch' if decision == 'extra-target' else None)
 
 
-@pytest.mark.parametrize(('confirmed', 'fault', 'integration_starts'), [
-    (False, None, 18), (True, None, 18), (False, 'cutoff', 18), (True, 'cutoff', 18), (False, 'syntax', 18),
-    (True, None, 81), (True, 'cutoff', 81)])
-async def test_integration_retains_admitted_findings_and_cumulative_spend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confirmed: bool, fault: str | None,
-    integration_starts: int) -> None:
+async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, str | None]] = [
+        ("rejected", None),
+        ("confirmed", None),
+        ("missing-finding", "malformed_output"),
+        ("unresolved", "evidence_incomplete"),
+        ("unknown-contradiction", "malformed_output"),
+        ("contradiction", "evidence_incomplete"),
+        ("unknown", "malformed_output"),
+        ("duplicate", "malformed_output"),
+        ("omitted", "malformed_output"),
+        ("extra-target", "malformed_output"),
+    ]
+    case_index = 0
+    for decision, reason in cases_0:
+        with subtests.test(decision=decision, reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            investigation = InvestigationRun(
+                make_multi_stack_target(scenario.tmp_path), scenario.tmp_path, scenario.monkeypatch
+            )
+            await _case_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
+                investigation=investigation, decision=decision, reason=reason
+            )
+
+
+async def _case_integration_retains_admitted_findings_and_cumulative_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confirmed: bool, fault: str | None, integration_starts: int
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=41, lines=35)
     cutoff = fault == 'cutoff'
     backend = review.backend
@@ -1257,6 +1493,34 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
         assert [stage['stage'] for stage in stages] == ['integration', 'triage']
         assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
+
+
+async def test_integration_retains_admitted_findings_and_cumulative_spend(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, str | None, int]] = [
+        (False, None, 18),
+        (True, None, 18),
+        (False, "cutoff", 18),
+        (True, "cutoff", 18),
+        (False, "syntax", 18),
+        (True, None, 81),
+        (True, "cutoff", 81),
+    ]
+    case_index = 0
+    for confirmed, fault, integration_starts in cases_0:
+        with (
+            subtests.test(confirmed=confirmed, fault=fault, integration_starts=integration_starts),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_integration_retains_admitted_findings_and_cumulative_spend(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                confirmed=confirmed,
+                fault=fault,
+                integration_starts=integration_starts,
+            )
 
 
 async def test_failed_retry_discards_poisoned_progress_but_charges_every_observed_start(
@@ -1328,9 +1592,9 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     assert retry['system_utf8_bytes'] > first['system_utf8_bytes']
 
 
-@pytest.mark.parametrize('automatic_shards', [False, True], ids=['whole-stack', 'automatic-shards'])
-async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_shards: bool) -> None:
+async def _case_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_shards: bool
+) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=10, docs_count=0)
     checkpoint_emitted = asyncio.Event()
     blocked_scopes: set[str] = set()
@@ -1409,3 +1673,16 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
     manifests = list(review.repo.glob('.daydream/review-cache/entries/*/manifest.json'))
     assert all(json.loads(path.read_text())['unit'] not in {f'shard:{scope}' for scope in expected}
                for path in manifests)
+
+
+async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for automatic_shards in cases_0:
+        with subtests.test(automatic_shards=automatic_shards), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, automatic_shards=automatic_shards
+            )

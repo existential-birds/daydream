@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -53,6 +54,7 @@ from daydream.trajectory import (
 from daydream.trajectory.recorder import _safe_descriptor
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.backend import ScriptedBackend
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import (
     make_recorder,
     observe_metrics_and_result,
@@ -163,22 +165,32 @@ async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
 
 INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
 
-@pytest.mark.parametrize("host_closed", [False, True], ids=["open-step", "closed-step"])
-async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host_closed: bool) -> None:
+async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """Open and closed host steps both receive an incomplete-call marker."""
-    events: list[AgentEvent] = [ToolStartEvent(
-            id="d2" if host_closed else "d1", name="shell", input={} if host_closed else {"command": "sleep 999"},
-        )
-    ]
-    if host_closed:
-        events.append(TurnEndEvent(message_id="m1"))
-    events.append(ResultEvent(structured_output=None, continuation=None))
-    _, steps = await _record_events(tmp_path, *events)
-    result = _single_observation_result(steps, 0)
-    # The marker is distinct from a completed tool-call result.
-    assert result.source_call_id is None
-    assert result.content == INCOMPLETE_CONTENT
-    assert result.extra == {"is_error": True, "status": "interrupted"}
+    case_root = tmp_path
+    cases: Sequence[bool] = [False, True]
+    case_ids_0 = ["open-step", "closed-step"]
+    for case_index, host_closed in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], host_closed=host_closed):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                events: list[AgentEvent] = [
+                    ToolStartEvent(
+                        id="d2" if host_closed else "d1",
+                        name="shell",
+                        input={} if host_closed else {"command": "sleep 999"},
+                    )
+                ]
+                if host_closed:
+                    events.append(TurnEndEvent(message_id="m1"))
+                events.append(ResultEvent(structured_output=None, continuation=None))
+                _, steps = await _record_events(tmp_path, *events)
+                result = _single_observation_result(steps, 0)
+                # The marker is distinct from a completed tool-call result.
+                assert result.source_call_id is None
+                assert result.content == INCOMPLETE_CONTENT
+                assert result.extra == {"is_error": True, "status": "interrupted"}
+
 
 async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -> None:
     """A result arriving before the final flush amends its step and suppresses the marker."""
@@ -751,45 +763,52 @@ async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapsh
                 } == {snapshot.cutoff_at}
                 assert all(document.path.exists() for document in snapshot.documents)
 
-@pytest.mark.parametrize("exit_kind", ["normal", "runtime", "cancel", "system-exit"])
-async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder, exit_kind: str) -> None:
+async def test_signal_flush_excludes_exited_child(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """Every child exit shape unregisters before a later root-only flush."""
+    case_root = tmp_path
+    cases: Sequence[str] = ["normal", "runtime", "cancel", "system-exit"]
+    for case_index, exit_kind in enumerate(cases):
+        with subtests.test(exit_kind=exit_kind):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                recorder = make_recorder(tmp_path)
 
-    async def child_body() -> TrajectoryRecorder:
-        async with recorder.fork(f"exited-{exit_kind}") as child:
-            async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                observe_text_and_result(inv, "EXITED_CHILD_ONLY")
-                if exit_kind == "runtime":
-                    raise RuntimeError("child body")
-                if exit_kind == "system-exit":
-                    raise SystemExit(17)
-            return child
+                async def child_body() -> TrajectoryRecorder:
+                    async with recorder.fork(f"exited-{exit_kind}") as child:
+                        async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                            observe_text_and_result(inv, "EXITED_CHILD_ONLY")
+                            if exit_kind == "runtime":
+                                raise RuntimeError("child body")
+                            if exit_kind == "system-exit":
+                                raise SystemExit(17)
+                        return child
 
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "ROOT_ONLY")
+                async with recorder:
+                    async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                        observe_text_and_result(inv, "ROOT_ONLY")
 
-        if exit_kind == "runtime":
-            with pytest.raises(RuntimeError, match="child body"):
-                await child_body()
-        elif exit_kind == "system-exit":
-            with pytest.raises(SystemExit) as exc:
-                await child_body()
-            assert exc.value.code == 17
-        elif exit_kind == "cancel":
-            with anyio.CancelScope() as scope:
-                async with recorder.fork("exited-cancel") as active_child:
-                    async with active_child.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                        observe_text_and_result(inv, "EXITED_CHILD_ONLY")
-                        scope.cancel()
-                        await anyio.sleep_forever()
-        else:
-            await child_body()
+                    if exit_kind == "runtime":
+                        with pytest.raises(RuntimeError, match="child body"):
+                            await child_body()
+                    elif exit_kind == "system-exit":
+                        with pytest.raises(SystemExit) as exc:
+                            await child_body()
+                        assert exc.value.code == 17
+                    elif exit_kind == "cancel":
+                        with anyio.CancelScope() as scope:
+                            async with recorder.fork("exited-cancel") as active_child:
+                                async with active_child.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                                    observe_text_and_result(inv, "EXITED_CHILD_ONLY")
+                                    scope.cancel()
+                                    await anyio.sleep_forever()
+                    else:
+                        await child_body()
 
-        flush_active_signal_recorders()
-        assert _partial_path(recorder).exists()
-        child_path = recorder._sibling_path_for(f"exited-{exit_kind}")
-        assert not child_path.with_suffix(child_path.suffix + ".partial").exists()
+                    flush_active_signal_recorders()
+                    assert _partial_path(recorder).exists()
+                    child_path = recorder._sibling_path_for(f"exited-{exit_kind}")
+                    assert not child_path.with_suffix(child_path.suffix + ".partial").exists()
+
 
 async def test_signal_flush_excludes_child_after_final_write_system_exit(
     recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch
@@ -845,81 +864,116 @@ def _finish_shutdown_panel() -> None:
         panel.finish()
         set_shutdown_panel(None)
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
-async def test_signal_handler_flushes_all_siblings_once(tmp_path: Path, signum: signal.Signals) -> None:
+async def test_signal_handler_flushes_all_siblings_once(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """The real handler flushes root and both siblings without parent recursion."""
+    case_root = tmp_path
+    cases: Sequence[signal.Signals] = [signal.SIGINT, signal.SIGTERM]
+    for case_index, signum in enumerate(cases):
+        with subtests.test(signum=signum):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
 
-    root_statuses: list[str] = []
-    root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: root_statuses.append(snapshot.status))
-    entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
-    release = {name: anyio.Event() for name in entered}
-    children: dict[str, TrajectoryRecorder] = {}
-    markers = {"signal-a": "SIBLING_A_ONLY", "signal-b": "SIBLING_B_ONLY"}
+                root_statuses: list[str] = []
+                root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: root_statuses.append(snapshot.status))
+                entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
+                release = {name: anyio.Event() for name in entered}
+                children: dict[str, TrajectoryRecorder] = {}
+                markers = {"signal-a": "SIBLING_A_ONLY", "signal-b": "SIBLING_B_ONLY"}
 
-    async with root:
-        async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "ROOT_ONLY")
-        async with anyio.create_task_group() as tg:
-            for name in ("signal-a", "signal-b"):
-                tg.start_soon(_hold_fork, root, name, markers[name], entered[name], release[name], children,)
-                await entered[name].wait()
-            try:
-                with pytest.raises(KeyboardInterrupt):
-                    _signal_handler(signum, None)
-                assert root_statuses == ["partial"]
-                paths = [_partial_path(root), *(_partial_path(children[n]) for n in entered)]
-                assert all(path.exists() for path in paths)
-            finally:
-                _finish_shutdown_panel()
-                for event in release.values():
-                    event.set()
+                async with root:
+                    async with root.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                        observe_text_and_result(inv, "ROOT_ONLY")
+                    async with anyio.create_task_group() as tg:
+                        for name in ("signal-a", "signal-b"):
+                            tg.start_soon(
+                                _hold_fork,
+                                root,
+                                name,
+                                markers[name],
+                                entered[name],
+                                release[name],
+                                children,
+                            )
+                            await entered[name].wait()
+                        try:
+                            with pytest.raises(KeyboardInterrupt):
+                                _signal_handler(signum, None)
+                            assert root_statuses == ["partial"]
+                            paths = [_partial_path(root), *(_partial_path(children[n]) for n in entered)]
+                            assert all(path.exists() for path in paths)
+                        finally:
+                            _finish_shutdown_panel()
+                            for event in release.values():
+                                event.set()
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
-async def test_signal_handler_isolates_sibling_write_failure(
-    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch, signum: signal.Signals,
-) -> None:
+
+async def test_signal_handler_isolates_sibling_write_failure(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """One denied sibling partial cannot prevent healthy siblings or shutdown setup."""
+    case_root = tmp_path
+    cases: Sequence[signal.Signals] = [signal.SIGINT, signal.SIGTERM]
+    for case_index, signum in enumerate(cases):
+        with subtests.test(signum=signum):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                recorder = make_recorder(tmp_path)
 
-    entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
-    release = {name: anyio.Event() for name in entered}
-    children: dict[str, TrajectoryRecorder] = {}
-    warnings: list[str] = []
-    real_write_text = Path.write_text
+                entered = {name: anyio.Event() for name in ("signal-a", "signal-b")}
+                release = {name: anyio.Event() for name in entered}
+                children: dict[str, TrajectoryRecorder] = {}
+                warnings: list[str] = []
+                real_write_text = Path.write_text
 
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "ROOT_ONLY")
-        async with anyio.create_task_group() as tg:
-            for name, marker in (("signal-a", "SIBLING_A_ONLY"), ("signal-b", "SIBLING_B_ONLY"),):
-                tg.start_soon(_hold_fork, recorder, name, marker, entered[name], release[name], children,)
-                await entered[name].wait()
+                async with recorder:
+                    async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                        observe_text_and_result(inv, "ROOT_ONLY")
+                    async with anyio.create_task_group() as tg:
+                        for name, marker in (
+                            ("signal-a", "SIBLING_A_ONLY"),
+                            ("signal-b", "SIBLING_B_ONLY"),
+                        ):
+                            tg.start_soon(
+                                _hold_fork,
+                                recorder,
+                                name,
+                                marker,
+                                entered[name],
+                                release[name],
+                                children,
+                            )
+                            await entered[name].wait()
 
-            denied_path = _partial_path(children["signal-a"])
+                        denied_path = _partial_path(children["signal-a"])
 
-            def selective_write(path: Path, *args: Any, **kwargs: Any) -> int:
-                if path == denied_path:
-                    raise PermissionError("denied sibling A")
-                return real_write_text(path, *args, **kwargs)
+                        def selective_write(path: Path, *args: Any, **kwargs: Any) -> int:
+                            if path == denied_path:
+                                raise PermissionError("denied sibling A")
+                            return real_write_text(path, *args, **kwargs)
 
-            monkeypatch.setattr(Path, "write_text", selective_write)
-            monkeypatch.setattr("daydream.ui.print_warning", lambda _console, message: warnings.append(message),
-            )
-            try:
-                with pytest.raises(KeyboardInterrupt):
-                    _signal_handler(signum, None)
-                assert not denied_path.exists()
-                for candidate in (recorder, children["signal-b"]):
-                    path = _partial_path(candidate)
-                    assert path.exists()
-                    assert atif_validate(read_trajectory(path), validate_images=False)
-                matching_warnings = [
-                    warning for warning in warnings if "Partial trajectory write failed: PermissionError" in warning
-                ]
-                assert len(matching_warnings) == 1
-            finally:
-                _finish_shutdown_panel()
-                for event in release.values():
-                    event.set()
+                        monkeypatch.setattr(Path, "write_text", selective_write)
+                        monkeypatch.setattr(
+                            "daydream.ui.print_warning",
+                            lambda _console, message: warnings.append(message),
+                        )
+                        try:
+                            with pytest.raises(KeyboardInterrupt):
+                                _signal_handler(signum, None)
+                            assert not denied_path.exists()
+                            for candidate in (recorder, children["signal-b"]):
+                                path = _partial_path(candidate)
+                                assert path.exists()
+                                assert atif_validate(read_trajectory(path), validate_images=False)
+                            matching_warnings = [
+                                warning
+                                for warning in warnings
+                                if "Partial trajectory write failed: PermissionError" in warning
+                            ]
+                            assert len(matching_warnings) == 1
+                        finally:
+                            _finish_shutdown_panel()
+                            for event in release.values():
+                                event.set()
+
 
 async def test_forked_child_write_partial_captures_in_flight_steps(recorder: TrajectoryRecorder,) -> None:
     """A direct child write keeps the established child-to-parent cascade."""
@@ -1059,35 +1113,45 @@ async def test_host_phase_scope_noop_without_recorder() -> None:
     async with host_phase_scope(DaydreamPhase.COMMIT):
         pass  # must not raise when no recorder is active
 
-@pytest.mark.parametrize(("stop_reason", "expected_status", "expected_reason"),
-    [("completed", "succeeded", None), ("passed", "succeeded", None), ("no_ci", "succeeded", None),
-        ("timed_out", "timed_out", "timed_out"), ("cancelled", "cancelled", "cancelled"),
-        ("interrupted", "cancelled", "cancelled"), ("failed", "failed", "domain_failure"),
-        ("missing", "failed", "domain_failure"), ("unavailable", "failed", "domain_failure"),
-        ("superseded", "failed", "domain_failure"), ("pending", "failed", "domain_failure"),
-    ],
-)
-async def test_remote_ci_host_phases_record_exact_terminal_reasons(
-    recorder: TrajectoryRecorder, stop_reason: str, expected_status: str, expected_reason: str | None,
-) -> None:
+async def test_remote_ci_host_phases_record_exact_terminal_reasons(tmp_path: Path, subtests: pytest.Subtests) -> None:
     """Every admitted remote-CI reason has one closed lifecycle projection."""
-
-    async with recorder:
-        async with host_phase_scope(DaydreamPhase.REMOTE_CI) as phase:
-            await anyio.sleep(0)
-            phase.stop_reason = stop_reason
-
-    remote_events = [event
-        for event in [x.to_dict() for x in recorder._phase_events]
-        if event["phase"] == DaydreamPhase.REMOTE_CI.value
+    case_root = tmp_path
+    cases: Sequence[tuple[str, str, str | None]] = [
+        ("completed", "succeeded", None),
+        ("passed", "succeeded", None),
+        ("no_ci", "succeeded", None),
+        ("timed_out", "timed_out", "timed_out"),
+        ("cancelled", "cancelled", "cancelled"),
+        ("interrupted", "cancelled", "cancelled"),
+        ("failed", "failed", "domain_failure"),
+        ("missing", "failed", "domain_failure"),
+        ("unavailable", "failed", "domain_failure"),
+        ("superseded", "failed", "domain_failure"),
+        ("pending", "failed", "domain_failure"),
     ]
-    assert [event["event"] for event in remote_events] == ["phase_start", "phase_end"]
-    ends = [event for event in remote_events if event["event"] == "phase_end"]
-    assert len(ends) == 1
-    assert ends[0]["status"] == expected_status
-    assert ends[0].get("reason_code") == expected_reason
-    assert ends[0]["metadata"]["stop_reason"] == stop_reason
-    assert all(event["metadata"]["duration_ms"] >= 0 for event in ends)
+    for case_index, (stop_reason, expected_status, expected_reason) in enumerate(cases):
+        with subtests.test(stop_reason=stop_reason, expected_status=expected_status, expected_reason=expected_reason):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                recorder = make_recorder(tmp_path)
+
+                async with recorder:
+                    async with host_phase_scope(DaydreamPhase.REMOTE_CI) as phase:
+                        await anyio.sleep(0)
+                        phase.stop_reason = stop_reason
+
+                remote_events = [
+                    event
+                    for event in [x.to_dict() for x in recorder._phase_events]
+                    if event["phase"] == DaydreamPhase.REMOTE_CI.value
+                ]
+                assert [event["event"] for event in remote_events] == ["phase_start", "phase_end"]
+                ends = [event for event in remote_events if event["event"] == "phase_end"]
+                assert len(ends) == 1
+                assert ends[0]["status"] == expected_status
+                assert ends[0].get("reason_code") == expected_reason
+                assert ends[0]["metadata"]["stop_reason"] == stop_reason
+                assert all(event["metadata"]["duration_ms"] >= 0 for event in ends)
 
 
 class _RecordingSink:
@@ -1193,40 +1257,50 @@ async def test_standalone_empty_root_still_writes_nothing(tmp_path: Path) -> Non
     assert not recorder.path.exists()
     assert callbacks == []
 
-@pytest.mark.parametrize("exception_kind", ["runtime", "cancel"])
-async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(tmp_path: Path, exception_kind: str,) -> None:
+async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """Escaping failure stays primary while the complete snapshot admits partial truth."""
-    sink = _RecordingSink()
-    session_id = f"host-only-{exception_kind}"
-    primary: BaseException = (RuntimeError("authoritative body failure")
-        if exception_kind == "runtime"
-        else anyio.get_cancelled_exc_class()()
-    )
-    recorder = _sink_recorder(sink, tmp_path, session_id=session_id)
-    caught: BaseException | None = None
-    try:
-        async with recorder:
-            async with trajectory_module.phase_scope(DaydreamPhase.MERGE):
-                raise primary
-    except BaseException as exc:
-        caught = exc
+    case_root = tmp_path
+    cases: Sequence[str] = ["runtime", "cancel"]
+    for case_index, exception_kind in enumerate(cases):
+        with subtests.test(exception_kind=exception_kind):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                sink = _RecordingSink()
+                session_id = f"host-only-{exception_kind}"
+                primary: BaseException = (
+                    RuntimeError("authoritative body failure")
+                    if exception_kind == "runtime"
+                    else anyio.get_cancelled_exc_class()()
+                )
+                recorder = _sink_recorder(sink, tmp_path, session_id=session_id)
+                caught: BaseException | None = None
+                try:
+                    async with recorder:
+                        async with trajectory_module.phase_scope(DaydreamPhase.MERGE):
+                            raise primary
+                except BaseException as exc:
+                    caught = exc
 
-    assert caught is primary
-    assert sink.order == [f"writer:{session_id}", "callback"]
-    assert len(sink.writes) == len(sink.snapshots) == 1
-    document, status = sink.writes[0]
-    snapshot = sink.snapshots[0]
-    assert status == snapshot.status == "complete"
-    assert snapshot.documents == (document,)
-    payload = json.loads(document.json_bytes)
-    assert atif_validate(payload, validate_images=False)
-    assert payload["extra"]["partial"] is True
-    assert payload["extra"]["run_ended_at"] == snapshot.cutoff_at
-    assert payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
-    expected_phase_status = "failed" if exception_kind == "runtime" else "cancelled"
-    assert payload["extra"]["phase_events"][-1]["status"] == expected_phase_status
-    assert recorder.steps == []
-    assert recorder._invocation_counter == 0
+                assert caught is primary
+                assert sink.order == [f"writer:{session_id}", "callback"]
+                assert len(sink.writes) == len(sink.snapshots) == 1
+                document, status = sink.writes[0]
+                snapshot = sink.snapshots[0]
+                assert status == snapshot.status == "complete"
+                assert snapshot.documents == (document,)
+                payload = json.loads(document.json_bytes)
+                assert atif_validate(payload, validate_images=False)
+                assert payload["extra"]["partial"] is True
+                assert payload["extra"]["run_ended_at"] == snapshot.cutoff_at
+                assert payload["steps"] == [_host_only_step(recorder, snapshot.cutoff_at)]
+                expected_phase_status = "failed" if exception_kind == "runtime" else "cancelled"
+                assert payload["extra"]["phase_events"][-1]["status"] == expected_phase_status
+                assert recorder.steps == []
+                assert recorder._invocation_counter == 0
+
 
 async def test_bound_empty_root_with_completed_child_retains_both_documents(tmp_path: Path,) -> None:
     """A completed child is retained once behind the synthetic root document."""

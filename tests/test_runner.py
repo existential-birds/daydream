@@ -11,7 +11,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from io import StringIO
@@ -70,6 +70,7 @@ from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import StubBackend, review_stage_result, silence
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
@@ -90,9 +91,8 @@ _ARTIFACT_PR = PRInfo(
     url="https://example.invalid/owner/repo/pull/7",
 )
 
-@pytest.mark.parametrize("flow_name", [None, "deep", "shallow"])
-async def test_unborn_non_improve_runner_fails_before_backend(
-    tmp_path: Path, make_config: Callable[..., RunConfig], flow_name: str | None,
+async def _case_unborn_non_improve_runner_fails_before_backend(
+    tmp_path: Path, make_config: Callable[..., RunConfig], flow_name: str | None
 ) -> None:
     repo = tmp_path / "unborn"
     _init_repo(repo)
@@ -103,6 +103,20 @@ async def test_unborn_non_improve_runner_fails_before_backend(
     assert await runner.run(config) == 1
     assert git_ops.is_unborn_head(repo)
     assert git_ops.staged_patch(repo) == before
+
+
+async def test_unborn_non_improve_runner_fails_before_backend(
+    make_config: Callable[..., RunConfig], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str | None] = [None, "deep", "shallow"]
+    case_index = 0
+    for flow_name in cases_0:
+        with subtests.test(flow_name=flow_name), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unborn_non_improve_runner_fails_before_backend(
+                tmp_path=scenario.tmp_path, make_config=make_config, flow_name=flow_name
+            )
+
 
 async def test_unborn_improve_approved_head_rejected_before_backend(
     tmp_path: Path, make_config: Callable[..., RunConfig],
@@ -363,14 +377,14 @@ def _assert_partial_evidence_published(repo: Path, archive_dir: Path, *, archive
 def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
     raise OSError("collection unavailable")
 
-@pytest.mark.parametrize("failure_mode,exit_code", [
-    ("none", 0), ("destination", 0), ("evaluation", 3),
-    ("identity", 0), ("frozen_tree", 0), ("dump_publication", 0),
-    ("dataset-file", 0), ("dataset-symlink", 0), ("dataset-runtime-owned", 0),
-])
-async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
-    exit_code: int, capsys: pytest.CaptureFixture[str],
+async def _case_artifact_session_runner_controlled_custom_flow_publishes_after_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: Any,
+    archive_dir: Path,
+    failure_mode: str,
+    exit_code: int,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.archive import finalize_archive_run
     from daydream.eval.analyzer import analyze_session
@@ -525,6 +539,40 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert manifest["session_id"] == public_run.name
     assert manifest["archive_status"] == "complete"
 
+
+async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, int]] = [
+        ("none", 0),
+        ("destination", 0),
+        ("evaluation", 3),
+        ("identity", 0),
+        ("frozen_tree", 0),
+        ("dump_publication", 0),
+        ("dataset-file", 0),
+        ("dataset-symlink", 0),
+        ("dataset-runtime-owned", 0),
+    ]
+    case_index = 0
+    for failure_mode, exit_code in cases_0:
+        with (
+            subtests.test(failure_mode=failure_mode, exit_code=exit_code),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            capsys.readouterr()
+            await _case_artifact_session_runner_controlled_custom_flow_publishes_after_model(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                archive_dir=scenario.archive_dir,
+                failure_mode=failure_mode,
+                exit_code=exit_code,
+                capsys=capsys,
+            )
+
+
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
 ) -> None:
@@ -573,9 +621,12 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
     assert evaluation["daydream_dir"] == str(repo.resolve() / ".daydream")
     assert str(backend.cwd) not in json.dumps(evaluation)
 
-@pytest.mark.parametrize("finalizer_failure", ["none", "interrupt", "evaluation"])
-async def test_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, finalizer_failure: str,
+async def _case_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: Any,
+    archive_dir: Path,
+    finalizer_failure: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A complete recorder write cannot turn a failed body into host success."""
@@ -605,9 +656,32 @@ async def test_artifact_session_runner_preserves_primary_and_publishes_partial_e
         return
     _assert_partial_evidence_published(repo, archive_dir, archive_failed=finalizer_failure == "evaluation")
 
-@pytest.mark.parametrize("evaluation_failure", [False, True])
-async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, evaluation_failure: bool,
+
+async def test_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["none", "interrupt", "evaluation"]
+    case_index = 0
+    for finalizer_failure in cases_0:
+        with subtests.test(finalizer_failure=finalizer_failure), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            await _case_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                archive_dir=scenario.archive_dir,
+                finalizer_failure=finalizer_failure,
+                capsys=capsys,
+            )
+
+
+async def _case_artifact_session_runner_cancellation_finalizes_then_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: Any,
+    archive_dir: Path,
+    evaluation_failure: bool,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Cancellation joins the backend, durably publishes evidence, then escapes."""
@@ -638,6 +712,26 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert backend.cancelled is True
     assert ("Data Collection" in capsys.readouterr().out) is evaluation_failure
     _assert_partial_evidence_published(repo, archive_dir, archive_failed=evaluation_failure)
+
+
+async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for evaluation_failure in cases_0:
+        with subtests.test(evaluation_failure=evaluation_failure), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            await _case_artifact_session_runner_cancellation_finalizes_then_propagates(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+                archive_dir=scenario.archive_dir,
+                evaluation_failure=evaluation_failure,
+                capsys=capsys,
+            )
+
 
 async def test_signal_flush_immutable_cutoff_before_first_root_step(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: Callable[..., RunConfig],
@@ -1023,15 +1117,8 @@ class TestResolveBackendPhaseModel:
         assert created[0][1]["audit_root"] == first.resolve(strict=True)
         assert created[0][1]["audit_outward_symlinks"] == frozenset({first / "outward"})
 
-@pytest.mark.parametrize(
-    ("capability", "bound_root", "reason"),
-    [
-        (None, "expected", "missing_capability"), ("wrong-token", "expected", "wrong_capability"),
-        (AUDIT_ROOT_ISOLATION, "other", "wrong_root"),
-    ],
-)
-def test_improve_backend_preflight_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str | None, bound_root: str, reason: str,
+def _case_improve_backend_preflight_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str | None, bound_root: str, reason: str
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -1061,11 +1148,35 @@ def test_improve_backend_preflight_fails_closed(
     assert exc_info.value.phase == "recon"
     assert exc_info.value.reason == reason
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("unborn", [False, True])
-async def test_improve_inherited_storage_override_stops_before_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: Callable[..., RunConfig], unborn: bool,
+
+def test_improve_backend_preflight_fails_closed(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str | None, str, str]] = [
+        (None, "expected", "missing_capability"),
+        ("wrong-token", "expected", "wrong_capability"),
+        (AUDIT_ROOT_ISOLATION, "other", "wrong_root"),
+    ]
+    case_index = 0
+    for capability, bound_root, reason in cases_0:
+        with (
+            subtests.test(capability=capability, bound_root=bound_root, reason=reason),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_improve_backend_preflight_fails_closed(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                capability=capability,
+                bound_root=bound_root,
+                reason=reason,
+            )
+
+
+async def _case_improve_inherited_storage_override_stops_before_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: Callable[..., RunConfig],
+    unborn: bool,
 ) -> None:
     repo = tmp_path / "source"
     _init_repo(repo)
@@ -1094,6 +1205,26 @@ async def test_improve_inherited_storage_override_stops_before_model(
     assert (repo / "app.py").read_text() == "VALUE = 2\n"
     assert (repo / ".git" / "index").read_bytes() == before_index
     assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+
+
+@pytest.mark.anyio
+async def test_improve_inherited_storage_override_stops_before_model(
+    capsys: pytest.CaptureFixture[str], make_config: Callable[..., RunConfig], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for unborn in cases_0:
+        with subtests.test(unborn=unborn), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            capsys.readouterr()
+            await _case_improve_inherited_storage_override_stops_before_model(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                capsys=capsys,
+                make_config=make_config,
+                unborn=unborn,
+            )
+
 
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
@@ -1525,8 +1656,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     assert "Analyze the failures and fix them" in repair_backend.prompts[0]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
 
-@pytest.mark.parametrize("flow", list(DaydreamRunFlow))
-def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
+def _case_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
     identity = capture_manifest_run_identity(
         RunConfig(fix_backend="codex", test_backend="pi"), flow, build_registry(), tmp_path,
     )
@@ -1540,10 +1670,18 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
 
-@pytest.mark.parametrize("flow_name", [None, *DEEP_FLOW_ALIASES])
-@pytest.mark.parametrize("shallow", [False, True])
-def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
-    tmp_path: Path, flow_name: str | None, shallow: bool,
+
+def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[DaydreamRunFlow] = list(DaydreamRunFlow)
+    case_index = 0
+    for flow in cases_0:
+        with subtests.test(flow=flow), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_manifest_identity_preserves_mode_capabilities(tmp_path=scenario.tmp_path, flow=flow)
+
+
+def _case_manifest_identity_uses_per_stack_tier_for_deep_aliases(
+    tmp_path: Path, flow_name: str | None, shallow: bool
 ) -> None:
     config = RunConfig(
         flow_name=flow_name, shallow=shallow, review_backend="claude",
@@ -1555,6 +1693,23 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     assert identity.review_backend == "claude"
     assert identity.phases.per_stack_review
     assert identity.deep is not shallow
+
+
+def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str | None] = [None, *DEEP_FLOW_ALIASES]
+    cases_1: Sequence[bool] = [False, True]
+    case_index = 0
+    for flow_name in cases_0:
+        for shallow in cases_1:
+            with (
+                subtests.test(flow_name=flow_name, shallow=shallow),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                _case_manifest_identity_uses_per_stack_tier_for_deep_aliases(
+                    tmp_path=scenario.tmp_path, flow_name=flow_name, shallow=shallow
+                )
+
 
 async def test_overlapping_posting_runs_keep_their_own_github_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,

@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import closing
 from dataclasses import replace
 from io import StringIO
@@ -51,6 +51,7 @@ from tests.harness.stub_backend import (
     review_stage_result,
     silence,
 )
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import diff_adding
 from tests.test_archive import _manifest_write_snapshot, _strict_archive
 from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok, _pin_findings_pr
@@ -553,43 +554,70 @@ async def test_shallow_run_captures_recommended_patch(
     assert "+# daydream recommended change" in recommended_text
     assert "+# daydream recommended change" not in diff_text
 
-@pytest.mark.parametrize(("has_recommendation", "post_window", "expected_verdict", "expected_hunks"), [
-    (True, "existing\nrecommended = 1\n", "applied", 1),
-    (False, "existing\nreviewed = 2\n", "not_applied", 0),
-])
-def test_fix_applied_signal_uses_captured_recommendation_only(
-    tmp_path: Path, has_recommendation: bool, post_window: str, expected_verdict: str, expected_hunks: int,
-) -> None:
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    recommended = tmp_path / "recommended.patch"
-    if has_recommendation:
-        recommended.write_text(diff_adding("recommended = 1"))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "base_branch": "main",
-           "recommended_patch": recommended.read_text() if has_recommendation else ""}
-    signal = fix_applied_signal(
-        row, changed_files=["app.py"], repo_clone=tmp_path, diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["c1"], file_at_fetcher=lambda repo, path, sha: post_window,
-    )
-    assert signal.verdict == expected_verdict
-    assert signal.hunks_total == signal.hunks_applied == expected_hunks
+def test_fix_applied_signal_uses_captured_recommendation_only(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[bool, str, str, int]] = [
+        (True, "existing\nrecommended = 1\n", "applied", 1),
+        (False, "existing\nreviewed = 2\n", "not_applied", 0),
+    ]
+    for case_index, (has_recommendation, post_window, expected_verdict, expected_hunks) in enumerate(cases):
+        with subtests.test(
+            has_recommendation=has_recommendation,
+            post_window=post_window,
+            expected_verdict=expected_verdict,
+            expected_hunks=expected_hunks,
+        ):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+                recommended = tmp_path / "recommended.patch"
+                if has_recommendation:
+                    recommended.write_text(diff_adding("recommended = 1"))
+                row = {
+                    "repo_slug": "org/repo",
+                    "head_sha": "abc",
+                    "base_branch": "main",
+                    "recommended_patch": recommended.read_text() if has_recommendation else "",
+                }
+                signal = fix_applied_signal(
+                    row,
+                    changed_files=["app.py"],
+                    repo_clone=tmp_path,
+                    diff_fetcher=lambda repo, base, head: ["app.py"],
+                    commits_in_window_fetcher=lambda repo, base, head: ["c1"],
+                    file_at_fetcher=lambda repo, path, sha: post_window,
+                )
+                assert signal.verdict == expected_verdict
+                assert signal.hunks_total == signal.hunks_applied == expected_hunks
 
-@pytest.mark.parametrize(("file_contents", "expected_verdict"),
-    [
-        pytest.param("existing\nrecommended = 1\n", "applied", id="recommended-line-present"),
-        pytest.param("existing\nreviewed = 2\n", "rejected", id="recommended-line-absent"),
-    ],
-)
-def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file_contents: str, expected_verdict: str,
-) -> None:
-    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature",
-           "recommended_patch": (tmp_path / "recommended.patch").read_text()}
-    sig = local_commit_applied_signal(
-        row, repo_clone=tmp_path, commits_since_fetcher=lambda repo, branch, since: ["c1"],
-        file_at_fetcher=lambda repo, path, sha: file_contents,
-    )
-    assert sig.verdict == expected_verdict
+
+def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[str, str]] = [
+        ("existing\nrecommended = 1\n", "applied"),
+        ("existing\nreviewed = 2\n", "rejected"),
+    ]
+    case_ids_0 = ["recommended-line-present", "recommended-line-absent"]
+    for case_index, (file_contents, expected_verdict) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], file_contents=file_contents, expected_verdict=expected_verdict):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+                (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
+                row = {
+                    "repo_slug": "org/repo",
+                    "head_sha": "abc",
+                    "branch": "feature",
+                    "recommended_patch": (tmp_path / "recommended.patch").read_text(),
+                }
+                sig = local_commit_applied_signal(
+                    row,
+                    repo_clone=tmp_path,
+                    commits_since_fetcher=lambda repo, branch, since: ["c1"],
+                    file_at_fetcher=lambda repo, path, sha: file_contents,
+                )
+                assert sig.verdict == expected_verdict
+
 
 async def test_deep_run_archives_location_and_shipped_duplication_axes(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,

@@ -6,7 +6,7 @@ import json
 import re
 import shlex
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ from tests.harness.git_helpers import (
 )
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     MakeConfig,
     _silence,
@@ -99,9 +100,8 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
     assert outcomes["item:2"]["verdict"] == "resolved"
     assert json.loads((deep / "push-verdict.json").read_text())["status"] == "succeeded"
 
-@pytest.mark.parametrize("new_file_permissions", [0o600, 0o644])
-async def test_related_regression_real_runner_stabilizes_and_commits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, new_file_permissions: int,
+async def _case_related_regression_real_runner_stabilizes_and_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, new_file_permissions: int
 ) -> None:
     """Real host-test/Git path retains A/B/T and restores C + user scratch."""
     repo = tmp_path / "footprint-run"
@@ -246,3 +246,22 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     for artifact in ("fix-outcomes.json", "test-verdict.json", "recommended-capture.json",):
         assert (archived / "deep" / artifact).read_bytes() == (deep / artifact).read_bytes()
     assert (archived / "recommended.patch").read_bytes() == (repo / ".daydream/recommended.patch").read_bytes()
+
+
+async def test_related_regression_real_runner_stabilizes_and_commits(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[int] = [384, 420]
+    case_index = 0
+    for new_file_permissions in cases_0:
+        with (
+            subtests.test(new_file_permissions=new_file_permissions),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_related_regression_real_runner_stabilizes_and_commits(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                new_file_permissions=new_file_permissions,
+            )

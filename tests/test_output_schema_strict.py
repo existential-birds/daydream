@@ -110,10 +110,14 @@ def test_output_schemas_were_discovered() -> None:
     """Guard the guard: discovery must not silently match zero schemas."""
     assert _SCHEMAS, "No *_SCHEMA constants discovered — schema collection is broken"
 
-@pytest.mark.parametrize("name,schema", _SCHEMAS, ids=[n for n, _ in _SCHEMAS])
-def test_output_schema_is_codex_strict_compliant(name: str, schema: dict[str, Any]) -> None:
+def test_output_schema_is_codex_strict_compliant(
+    subtests: pytest.Subtests,
+) -> None:
     """Every output schema satisfies OpenAI strict structured-output rules."""
-    violations = _strict_violations(schema, name)
-    if schema.get("type") != "object":
-        violations.append(f"{name}: root schema must be an object")
-    assert not violations, "Schema not Codex/OpenAI strict-compliant:\n" + "\n".join(violations)
+    cases: list[tuple[str, dict[str, Any]]] = _SCHEMAS
+    for name, schema in cases:
+        with subtests.test(name=name):
+            violations = _strict_violations(schema, name)
+            if schema.get("type") != "object":
+                violations.append(f"{name}: root schema must be an object")
+            assert not violations, "Schema not Codex/OpenAI strict-compliant:\n" + "\n".join(violations)

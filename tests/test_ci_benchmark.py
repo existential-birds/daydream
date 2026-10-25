@@ -17,7 +17,8 @@ from uuid import UUID
 
 import pytest
 
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
+from tests.harness.table_cases import isolated_case
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci_benchmark.py"
 _REPO = "acme/widgets"
@@ -148,106 +149,160 @@ def test_report_retains_failed_and_active_runs_without_counting_them_as_successe
     assert (output / "run-1.json").is_file() and (output / "run-2.json").is_file()
 
 
-@pytest.mark.parametrize("fault", ["sha", "attempt", "runner"])
 def test_report_rejects_different_revision_attempt_or_runner_class(
-    tmp_path: Path, fake_gh: FakeGh, fault: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    run, jobs = _sample(1, 4, 100)
-    if fault == "sha":
-        run["head_sha"] = "b" * 40
-    elif fault == "attempt":
-        run["run_attempt"] = 2
-    else:
-        jobs[1]["labels"] = ["paid-larger-runner"]
-    result, output = _report(tmp_path, fake_gh, [(4, run, jobs)])
-    assert result.returncode != 0
-    expected = "used a different runner class" if fault == "runner" else "does not match the benchmark identity"
-    assert expected in result.stderr
-    assert not (output / "report.md").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["sha", "attempt", "runner"]
+    for fault in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                run, jobs = _sample(1, 4, 100)
+                if fault == "sha":
+                    run["head_sha"] = "b" * 40
+                elif fault == "attempt":
+                    run["run_attempt"] = 2
+                else:
+                    jobs[1]["labels"] = ["paid-larger-runner"]
+                result, output = _report(tmp_path, fake_gh, [(4, run, jobs)])
+                assert result.returncode != 0
+                expected = (
+                    "used a different runner class" if fault == "runner" else "does not match the benchmark identity"
+                )
+                assert expected in result.stderr
+                assert not (output / "report.md").exists()
 
 
-@pytest.mark.parametrize("count", [4, 8, 20], ids=["legacy", "default-treatment", "maximum-treatment"])
 def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Same-SHA, same-size treatments must still belong to this invocation."""
-    manifest = tmp_path / "manifest.json"
-    receipt = tmp_path / "dispatch.json"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    shim = bin_dir / "gh"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import json, pathlib, sys\n"
-        f"manifest = pathlib.Path({str(manifest)!r})\n"
-        f"receipt = pathlib.Path({str(receipt)!r})\n"
-        "args = sys.argv[1:]\n"
-        "if args[:2] == ['workflow', 'run']:\n"
-        "    receipt.write_text(json.dumps({'args': args, 'pending': json.loads(manifest.read_text())['pending']}))\n"
-        "elif args[0] == 'api' and '/commits/' in args[-1]:\n"
-        f"    print(json.dumps({{'sha': {_SHA!r}}}))\n"
-        "elif args[0] == 'api' and '/runs?' in args[-1]:\n"
-        "    items = []\n"
-        "    if receipt.exists():\n"
-        "        sent = json.loads(receipt.read_text())\n"
-        f"        foreign = {{'id': 222, 'head_sha': {_SHA!r}, 'run_attempt': 1,\n"
-        "                   'html_url': 'https://github.test/222',\n"
-        "                   'display_title': 'CI benchmark somebody-else'}\n"
-        "        items = [foreign]\n"
-        "        polls = receipt.with_suffix('.polls')\n"
-        "        if polls.exists():\n"
-        "            fields = [arg.split('=', 1)[1] for arg in sent['args'] if arg.startswith('benchmark_id=')]\n"
-        "            marker = fields[0] if fields else ''\n"
-        "            items.append(dict(foreign, id=111, html_url='https://github.test/111',\n"
-        "                              display_title='CI benchmark ' + marker))\n"
-        "        polls.touch()\n"
-        "    print(json.dumps({'workflow_runs': items}))\n"
-        "else:\n"
-        "    raise SystemExit('unexpected gh call: ' + repr(args))\n"
-    )
-    shim.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
-    result = subprocess.run(
-        [sys.executable, str(_SCRIPT), "launch", "--repo", _REPO, "--ref", "benchmark", "--sha", _SHA,
-         "--jobs", str(count), "--manifest", str(manifest)], capture_output=True, text=True, check=False, timeout=15,
-    )
-    assert result.returncode == 0, result.stderr
-    recorded = json.loads(manifest.read_text())
-    assert [entry["id"] for entry in recorded["runs"]] == [111]
-    sent = json.loads(receipt.read_text())
-    marker = sent["pending"]["dispatch_id"]
-    assert str(UUID(marker)) == marker and UUID(marker).version == 4
-    assert f"benchmark_id={marker}" in sent["args"]
-    assert f"test_jobs={count}" in sent["args"]
-    assert recorded["runs"] == [{"id": 111, "jobs": count, "attempt": 1, "dispatch_id": marker}]
-    assert "pending" not in recorded
+    table_root = tmp_path
+    row_index = 0
+    cases: list[int] = [4, 8, 20]
+    for count in cases:
+        row_index += 1
+        with subtests.test(count=count):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                manifest = tmp_path / "manifest.json"
+                receipt = tmp_path / "dispatch.json"
+                bin_dir = tmp_path / "bin"
+                bin_dir.mkdir()
+                shim = bin_dir / "gh"
+                shim.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, pathlib, sys\n"
+                    f"manifest = pathlib.Path({str(manifest)!r})\n"
+                    f"receipt = pathlib.Path({str(receipt)!r})\n"
+                    "args = sys.argv[1:]\n"
+                    "if args[:2] == ['workflow', 'run']:\n"
+                    "    receipt.write_text(json.dumps({'args': args, "
+                    "'pending': json.loads(manifest.read_text())['pending']}))\n"
+                    "elif args[0] == 'api' and '/commits/' in args[-1]:\n"
+                    f"    print(json.dumps({{'sha': {_SHA!r}}}))\n"
+                    "elif args[0] == 'api' and '/runs?' in args[-1]:\n"
+                    "    items = []\n"
+                    "    if receipt.exists():\n"
+                    "        sent = json.loads(receipt.read_text())\n"
+                    f"        foreign = {{'id': 222, 'head_sha': {_SHA!r}, 'run_attempt': 1,\n"
+                    "                   'html_url': 'https://github.test/222',\n"
+                    "                   'display_title': 'CI benchmark somebody-else'}\n"
+                    "        items = [foreign]\n"
+                    "        polls = receipt.with_suffix('.polls')\n"
+                    "        if polls.exists():\n"
+                    "            fields = [arg.split('=', 1)[1] for arg in sent['args'] "
+                    "if arg.startswith('benchmark_id=')]\n"
+                    "            marker = fields[0] if fields else ''\n"
+                    "            items.append(dict(foreign, id=111, html_url='https://github.test/111',\n"
+                    "                              display_title='CI benchmark ' + marker))\n"
+                    "        polls.touch()\n"
+                    "    print(json.dumps({'workflow_runs': items}))\n"
+                    "else:\n"
+                    "    raise SystemExit('unexpected gh call: ' + repr(args))\n"
+                )
+                shim.chmod(0o755)
+                monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(_SCRIPT),
+                        "launch",
+                        "--repo",
+                        _REPO,
+                        "--ref",
+                        "benchmark",
+                        "--sha",
+                        _SHA,
+                        "--jobs",
+                        str(count),
+                        "--manifest",
+                        str(manifest),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+                assert result.returncode == 0, result.stderr
+                recorded = json.loads(manifest.read_text())
+                assert [entry["id"] for entry in recorded["runs"]] == [111]
+                sent = json.loads(receipt.read_text())
+                marker = sent["pending"]["dispatch_id"]
+                assert str(UUID(marker)) == marker and UUID(marker).version == 4
+                assert f"benchmark_id={marker}" in sent["args"]
+                assert f"test_jobs={count}" in sent["args"]
+                assert recorded["runs"] == [{"id": 111, "jobs": count, "attempt": 1, "dispatch_id": marker}]
+                assert "pending" not in recorded
 
 
-@pytest.mark.parametrize("scenario", ["foreign", "missing-title", "explicit-foreign", "ambiguous", "legacy-pending"])
 def test_resolve_preserves_pending_when_dispatch_identity_is_not_proven(
-    tmp_path: Path, fake_gh: FakeGh, scenario: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    pending: dict[str, Any] = {"jobs": 4, "before": [], "dispatch_id": _DISPATCH_ID}
-    run, _ = _sample(1, 4, 100)
-    run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
-    if scenario in ("foreign", "explicit-foreign"):
-        run["display_title"] = "CI benchmark cc40ab14-9829-457d-9916-2b858e645c61"
-    elif scenario == "missing-title":
-        del run["display_title"]
-    elif scenario == "legacy-pending":
-        del pending["dispatch_id"]
-    candidates = [run, {**run, "id": 2}] if scenario == "ambiguous" else [run]
-    fake_gh.set_response("GET", f"repos/{_REPO}/actions/workflows/ci.yml/runs", {"workflow_runs": candidates})
-    manifest = tmp_path / "manifest.json"
-    original = json.dumps({"repository": _REPO, "ref": "benchmark", "sha": _SHA, "runs": [], "pending": pending})
-    manifest.write_text(original)
-    command = [sys.executable, str(_SCRIPT), "resolve", "--manifest", str(manifest)]
-    if scenario == "explicit-foreign":
-        command += ["--run-id", "1"]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert result.returncode != 0
-    assert "dispatch" in result.stderr
-    assert manifest.read_text() == original
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["foreign", "missing-title", "explicit-foreign", "ambiguous", "legacy-pending"]
+    for scenario in cases:
+        row_index += 1
+        with subtests.test(scenario=scenario):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                pending: dict[str, Any] = {"jobs": 4, "before": [], "dispatch_id": _DISPATCH_ID}
+                run, _ = _sample(1, 4, 100)
+                run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
+                if scenario in ("foreign", "explicit-foreign"):
+                    run["display_title"] = "CI benchmark cc40ab14-9829-457d-9916-2b858e645c61"
+                elif scenario == "missing-title":
+                    del run["display_title"]
+                elif scenario == "legacy-pending":
+                    del pending["dispatch_id"]
+                candidates = [run, {**run, "id": 2}] if scenario == "ambiguous" else [run]
+                fake_gh.set_response(
+                    "GET", f"repos/{_REPO}/actions/workflows/ci.yml/runs", {"workflow_runs": candidates}
+                )
+                manifest = tmp_path / "manifest.json"
+                original = json.dumps(
+                    {"repository": _REPO, "ref": "benchmark", "sha": _SHA, "runs": [], "pending": pending}
+                )
+                manifest.write_text(original)
+                command = [sys.executable, str(_SCRIPT), "resolve", "--manifest", str(manifest)]
+                if scenario == "explicit-foreign":
+                    command += ["--run-id", "1"]
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                assert result.returncode != 0
+                assert "dispatch" in result.stderr
+                assert manifest.read_text() == original
 
 
 def test_resolve_explicit_run_still_accepts_the_owned_dispatch(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -265,46 +320,69 @@ def test_resolve_explicit_run_still_accepts_the_owned_dispatch(tmp_path: Path, f
     assert "pending" not in resolved
 
 
-@pytest.mark.parametrize("fault", [None, "foreign", "missing-title", "invalid-uuid"])
 def test_report_requires_recorded_dispatch_identity_for_marked_entries(
-    tmp_path: Path, fake_gh: FakeGh, fault: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    run, jobs = _sample(1, 4, 100)
-    marker = "invalid" if fault == "invalid-uuid" else _DISPATCH_ID
-    if fault != "missing-title":
-        run["display_title"] = "CI benchmark " + ("foreign" if fault == "foreign" else marker)
-    result, output = _report(tmp_path, fake_gh, [(4, run, jobs)], dispatch_id=marker)
-    if fault is None:
-        assert result.returncode == 0, result.stderr
-        assert json.loads((output / "measurements.json").read_text())["measurements"][0]["id"] == 1
-    else:
-        assert result.returncode != 0
-        assert "dispatch" in result.stderr
-        assert (output / "run-1.json").exists()
-        assert not (output / "report.md").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str | None] = [None, "foreign", "missing-title", "invalid-uuid"]
+    for fault in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                run, jobs = _sample(1, 4, 100)
+                marker = "invalid" if fault == "invalid-uuid" else _DISPATCH_ID
+                if fault != "missing-title":
+                    run["display_title"] = "CI benchmark " + ("foreign" if fault == "foreign" else marker)
+                result, output = _report(tmp_path, fake_gh, [(4, run, jobs)], dispatch_id=marker)
+                if fault is None:
+                    assert result.returncode == 0, result.stderr
+                    assert json.loads((output / "measurements.json").read_text())["measurements"][0]["id"] == 1
+                else:
+                    assert result.returncode != 0
+                    assert "dispatch" in result.stderr
+                    assert (output / "run-1.json").exists()
+                    assert not (output / "report.md").exists()
 
 
-@pytest.mark.parametrize("incomplete_count", [4, 20], ids=["original-configuration", "additional-configuration"])
 def test_report_requires_three_successes_for_original_and_additional_configurations(
-    tmp_path: Path, fake_gh: FakeGh, incomplete_count: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Failed/active samples cannot make a newly measured group or an original group ready."""
-    samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
-    for count in (1, 2, 4, 16, 20):
-        for gate in ([100, 120] if count == incomplete_count else [190, 210, 250]):
-            durations = [40] + [20] * 15 if count == 16 else [30] * 20 if count == 20 else None
-            run, jobs = _sample(len(samples) + 1, count, gate, durations=durations)
-            samples.append((count, run, jobs))
-    for status, conclusion in (("completed", "failure"), ("in_progress", None)):
-        durations = [30] * 20 if incomplete_count == 20 else None
-        run, jobs = _sample(len(samples) + 1, incomplete_count, 120, durations=durations)
-        run.update(status=status, conclusion=conclusion)
-        jobs[2].update(status=status, conclusion=conclusion)
-        samples.append((incomplete_count, run, jobs))
-    result, output = _report(tmp_path, fake_gh, samples)
-    assert result.returncode == 0, result.stderr
-    report = (output / "report.md").read_text()
-    assert "Timing sample requirement: PENDING" in report
-    measurements = json.loads((output / "measurements.json").read_text())["measurements"]
-    assert [(row["conclusion"], row["complete"]) for row in measurements[-2:]] == [("failure", True), (None, False)]
-    assert all("gate_seconds" not in row for row in measurements[-2:])
+    table_root = tmp_path
+    row_index = 0
+    cases: list[int] = [4, 20]
+    for incomplete_count in cases:
+        row_index += 1
+        with subtests.test(incomplete_count=incomplete_count):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
+                for count in (1, 2, 4, 16, 20):
+                    for gate in [100, 120] if count == incomplete_count else [190, 210, 250]:
+                        durations = [40] + [20] * 15 if count == 16 else [30] * 20 if count == 20 else None
+                        run, jobs = _sample(len(samples) + 1, count, gate, durations=durations)
+                        samples.append((count, run, jobs))
+                for status, conclusion in (("completed", "failure"), ("in_progress", None)):
+                    durations = [30] * 20 if incomplete_count == 20 else None
+                    run, jobs = _sample(len(samples) + 1, incomplete_count, 120, durations=durations)
+                    run.update(status=status, conclusion=conclusion)
+                    jobs[2].update(status=status, conclusion=conclusion)
+                    samples.append((incomplete_count, run, jobs))
+                result, output = _report(tmp_path, fake_gh, samples)
+                assert result.returncode == 0, result.stderr
+                report = (output / "report.md").read_text()
+                assert "Timing sample requirement: PENDING" in report
+                measurements = json.loads((output / "measurements.json").read_text())["measurements"]
+                assert [(row["conclusion"], row["complete"]) for row in measurements[-2:]] == [
+                    ("failure", True),
+                    (None, False),
+                ]
+                assert all("gate_seconds" not in row for row in measurements[-2:])

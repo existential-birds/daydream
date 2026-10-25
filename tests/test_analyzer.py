@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -40,6 +41,7 @@ from daydream.trajectory import (
     snapshot_trajectories,
 )
 from tests.harness.git_helpers import git
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder, trajectory_payload
 
 
@@ -83,35 +85,50 @@ def test_analyze_timing_without_lifecycle_is_unavailable() -> None:
     }
 
 
-@pytest.mark.parametrize(("status", "cutoff_at", "wall"), [
-    ("partial", "2026-01-01T00:00:04Z", 4.0),
-    ("complete", "2026-01-01T00:00:10Z", 10.0),
-    ("partial", "2026-01-01T00:00:10Z", None),
-    ("complete", "2026-01-01T00:00:04Z", None),
-])
-def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
-    status: Literal["complete", "partial"], cutoff_at: str, wall: float | None,
+def test_evaluation_uses_frozen_bytes_status_and_cutoff(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
-        "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
-        "final_metrics": {"total_cost_usd": 0.5},
-        "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
-            "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
-    }
-    snapshot = _snapshot(root, status=status, cutoff_at=cutoff_at)
-    snapshot.validate("frozen")
-    live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
-    live_path.parent.mkdir(parents=True)
-    live_path.write_bytes(snapshot.documents[0].json_bytes)
-    root["final_metrics"]["total_cost_usd"] = 99.0
-    root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
-    live_path.write_text(json.dumps(root))
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[Literal["complete", "partial"], str, float | None]] = [
+        ("partial", "2026-01-01T00:00:04Z", 4.0),
+        ("complete", "2026-01-01T00:00:10Z", 10.0),
+        ("partial", "2026-01-01T00:00:10Z", None),
+        ("complete", "2026-01-01T00:00:04Z", None),
+    ]
+    for status, cutoff_at, wall in cases:
+        row_index += 1
+        with subtests.test(cutoff_at=cutoff_at):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                root: dict[str, Any] = {
+                    "session_id": "frozen",
+                    "trajectory_id": "frozen",
+                    "_source_file": "trajectory.json",
+                    "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
+                    "final_metrics": {"total_cost_usd": 0.5},
+                    "extra": {
+                        "partial": False,
+                        "run_started_at": "2026-01-01T00:00:00Z",
+                        "run_ended_at": "2026-01-01T00:00:10Z",
+                        "snapshot_at": "2026-01-01T00:00:04Z",
+                    },
+                }
+                snapshot = _snapshot(root, status=status, cutoff_at=cutoff_at)
+                snapshot.validate("frozen")
+                live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
+                live_path.parent.mkdir(parents=True)
+                live_path.write_bytes(snapshot.documents[0].json_bytes)
+                root["final_metrics"]["total_cost_usd"] = 99.0
+                root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
+                live_path.write_text(json.dumps(root))
 
-    result = analyze_session(tmp_path / ".daydream", write_snapshot=snapshot)
+                result = analyze_session(tmp_path / ".daydream", write_snapshot=snapshot)
 
-    assert result["cost"]["total_cost_usd"] == 0.5
-    assert result["timing"]["total_wall_clock_seconds"] == wall
-    assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+                assert result["cost"]["total_cost_usd"] == 0.5
+                assert result["timing"]["total_wall_clock_seconds"] == wall
+                assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
 
 
 SESSION = "11111111-2222-3333-4444-555555555555"
@@ -139,21 +156,46 @@ def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
     assert result["total_cost_usd"] == 0.00006
     assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
 
-@pytest.mark.parametrize(("name", "expected"),
-    [("Write", "write"), ("write", "write"), ("Edit", "write"), ("edit", "write"), ("MultiEdit", "write"),
-        ("multiedit", "write"), ("NotebookEdit", "write"), ("notebookedit", "write"), ("patch", "write"),
-        ("apply_patch", "write"), ("Read", "read"), ("read", "read"), ("shell", "other"), ("bash", "other"),
+def test_write_tool_counts_are_backend_neutral(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
+        ("Write", "write"),
+        ("write", "write"),
+        ("Edit", "write"),
+        ("edit", "write"),
+        ("MultiEdit", "write"),
+        ("multiedit", "write"),
+        ("NotebookEdit", "write"),
+        ("notebookedit", "write"),
+        ("patch", "write"),
+        ("apply_patch", "write"),
+        ("Read", "read"),
+        ("read", "read"),
+        ("shell", "other"),
+        ("bash", "other"),
         ("custom", "other"),
-    ],
-)
-def test_write_tool_counts_are_backend_neutral(name: str, expected: str) -> None:
-    result = analyze_tools({"main": None,
-        "forked": [{"_source_file": "deep-python.json", "steps": [{
-            "step_id": 1, "tool_calls": [{"function_name": name, "arguments": {}}],
-        }]}],
-    })
-    assert result["by_type"] == {name: 1}
-    assert result["write_ratio"] == (1.0 if expected == "write" else 0.0)
+    ]
+    for name, expected in cases:
+        with subtests.test(name=name):
+            result = analyze_tools(
+                {
+                    "main": None,
+                    "forked": [
+                        {
+                            "_source_file": "deep-python.json",
+                            "steps": [
+                                {
+                                    "step_id": 1,
+                                    "tool_calls": [{"function_name": name, "arguments": {}}],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+            assert result["by_type"] == {name: 1}
+            assert result["write_ratio"] == (1.0 if expected == "write" else 0.0)
 
 def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
     shell_calls = [{"function_name": "shell", "arguments": {"command": f"echo {i}"}} for i in range(311)]
@@ -178,17 +220,26 @@ def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
     )
     return cast(list[str], result["trajectories"][0]["noise_flags"])
 
-@pytest.mark.parametrize(("result_extra", "expected"),
-    [({"is_error": True}, "failed_tool_result"), ({"status": "interrupted"}, "incomplete_tool_call"),
+def test_training_flags_linked_tool_failures(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[dict[str, Any], str]] = [
+        ({"is_error": True}, "failed_tool_result"),
+        ({"status": "interrupted"}, "incomplete_tool_call"),
         ({"cancelled": True}, "incomplete_tool_call"),
-    ],
-)
-def test_training_flags_linked_tool_failures(result_extra: dict[str, Any], expected: str) -> None:
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
-            "observation": {"results": [{"source_call_id": "call-1", "content": "output", "extra": result_extra}]},
-        }
     ]
-    assert _training_flags(steps) == [expected]
+    for result_extra, expected in cases:
+        with subtests.test(expected=expected):
+            steps = [
+                {
+                    "step_id": 1,
+                    "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
+                    "observation": {
+                        "results": [{"source_call_id": "call-1", "content": "output", "extra": result_extra}]
+                    },
+                }
+            ]
+            assert _training_flags(steps) == [expected]
 
 def test_training_flags_unpaired_calls_and_null_interrupted_marker_once() -> None:
     steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
@@ -220,16 +271,23 @@ def test_training_diagnostics_map_only_recognized_codes_in_fixed_order() -> None
     ]
     assert _training_flags(steps) == ["incomplete_telemetry", "parser_coverage_gap"]
 
-@pytest.mark.parametrize("legacy_extra", [None, {}, {"is_error": "true"}, {"cancelled": 1}, []])
-def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(legacy_extra: Any,) -> None:
-    result: dict[str, Any] = {"source_call_id": "call-1", "content": "ok"}
-    if legacy_extra is not None:
-        result["extra"] = legacy_extra
-    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "read", "arguments": {}}],
-            "observation": {"results": [result]},
-        }
-    ]
-    assert _training_flags(steps) == []
+def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[Any] = [None, {}, {"is_error": "true"}, {"cancelled": 1}, []]
+    for legacy_extra in cases:
+        with subtests.test(legacy_extra=legacy_extra):
+            result: dict[str, Any] = {"source_call_id": "call-1", "content": "ok"}
+            if legacy_extra is not None:
+                result["extra"] = legacy_extra
+            steps = [
+                {
+                    "step_id": 1,
+                    "tool_calls": [{"tool_call_id": "call-1", "function_name": "read", "arguments": {}}],
+                    "observation": {"results": [result]},
+                }
+            ]
+            assert _training_flags(steps) == []
 
 def test_analyze_costs_includes_cached_tokens_when_prompt_dominates() -> None:
     trajectories = {"main": {
@@ -439,89 +497,67 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
     assert result["per_file"]["app.py"]["erosion"] == 0.0
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
 
-@pytest.mark.parametrize(("source", "expected"),
-    [
-        pytest.param("def f(items):\n    return [x for x in items]\n", 1 / 2, id="identity-comprehension"),
-        pytest.param(
+def test_quality_verbosity_detects_redundancy(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, float]] = [
+        ("def f(items):\n    return [x for x in items]\n", 1 / 2),
+        (
             "def process(items):\n    for x in items:\n        if len(items) == 0:\n"
             "            return None\n        print(x)\n",
-            2 / 5, id="empty-list-guard",
+            2 / 5,
         ),
-        pytest.param(
-            "def compute(x):\n    intermediate = x + 1\n    return intermediate * 2\n",
-            round(1 / 3, 4), id="single-use-variable",
-        ),
-        pytest.param(
-            "def compute(x):\n    intermediate = x + 1; return intermediate * 2\n",
-            0.0, id="same-row-reference-is-not-later",
-        ),
-        pytest.param(
+        ("def compute(x):\n    intermediate = x + 1\n    return intermediate * 2\n", round(1 / 3, 4)),
+        ("def compute(x):\n    intermediate = x + 1; return intermediate * 2\n", 0.0),
+        (
             "def compute(x):\n    intermediate = x + 1; print(intermediate)\n    return intermediate * 2\n",
-            round(1 / 3, 4), id="same-row-reference-does-not-add-to-later-count",
+            round(1 / 3, 4),
         ),
-        pytest.param(
-            "def compute(x):\n    intermediate = x + 1\n    intermediate = x + 2\n    return intermediate * 2\n",
-            1 / 4, id="later-assignment-target-counts-as-reference",
-        ),
-        pytest.param(
+        ("def compute(x):\n    intermediate = x + 1\n    intermediate = x + 2\n    return intermediate * 2\n", 1 / 4),
+        (
             "def compute(x):\n    intermediate = x + 1\n"
             "    def nested(default=intermediate):\n        return intermediate\n    return intermediate * 2\n",
-            1 / 5, id="nested-signature-and-body-do-not-add-outer-references",
+            1 / 5,
         ),
-        pytest.param(
+        (
             "def compute(x):\n    intermediate = x + 1\n    def nested(y):\n"
             "        intermediate = y + 2\n        return intermediate * 2\n    return intermediate * 3\n",
-            round(2 / 6, 4), id="nested-assignments-have-independent-reference-counts",
+            round(2 / 6, 4),
         ),
-        pytest.param(
+        (
             "def compute(x):\n    intermediate = x + 1\n    @decorate(intermediate)\n"
             "    def nested():\n        return intermediate\n    return intermediate * 2\n",
-            0.0, id="nested-decorator-counts-as-outer-reference",
+            0.0,
         ),
-        pytest.param(
-            "def compute(x):\n    intermediate = (\n        x + intermediate\n    )\n    return x * 2\n",
-            1 / 5, id="later-row-rhs-reference-counts-within-assignment",
+        ("def compute(x):\n    intermediate = (\n        x + intermediate\n    )\n    return x * 2\n", 1 / 5),
+        ("def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n    return inner(x, y)\n", 2 / 4),
+        (
+            "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n                return 1\n    return 0\n",
+            round(2 / 6, 4),
         ),
-        pytest.param(
-            "def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n    return inner(x, y)\n",
-            2 / 4, id="trivial-wrapper",
-        ),
-        pytest.param(
-            "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n"
-            "                return 1\n    return 0\n",
-            round(2 / 6, 4), id="nested-ladder",
-        ),
-        pytest.param(
+        (
             "def a():\n    if x > 1:\n        return 1\n    return 0\n\n"
             "def b():\n    if x > 1:\n        return 1\n    return 0\n",
-            6 / 8, id="clone-block",
+            6 / 8,
         ),
-        pytest.param("def f(items):\n    return [x for x in items if x > 0]\n", 0.0, id="filtered-comprehension",),
-        pytest.param(
-            "def f(a, b):\n    return [x for x in a for y in b]\n",
-            0.0, id="multi-generator-comprehension",
-        ),
-        pytest.param(
-            "def f(items):\n    while should_continue(items):\n"
-            "        if not items:\n            break\n",
-            0.0, id="predicate-guard",
-        ),
-        pytest.param(
-            "def f(items):\n    while items:\n        if not items:\n            break\n",
-            2 / 4, id="bare-collection-guard",
-        ),
-        pytest.param(
-            "def f(items):\n    while len(items) > 0:\n        if not items:\n"
-            "            break\n",
-            2 / 4, id="len-comparison-guard",
-        ),
-    ],
-)
-def test_quality_verbosity_detects_redundancy(tmp_path: Path, source: str, expected: float) -> None:
-    entry = _quality(tmp_path, {"app.py": source})["per_file"]["app.py"]
-    if expected:
-        assert entry["verbosity"] > 0
-    assert entry["verbosity"] == pytest.approx(expected)
+        ("def f(items):\n    return [x for x in items if x > 0]\n", 0.0),
+        ("def f(a, b):\n    return [x for x in a for y in b]\n", 0.0),
+        ("def f(items):\n    while should_continue(items):\n        if not items:\n            break\n", 0.0),
+        ("def f(items):\n    while items:\n        if not items:\n            break\n", 2 / 4),
+        ("def f(items):\n    while len(items) > 0:\n        if not items:\n            break\n", 2 / 4),
+    ]
+    for source, expected in cases:
+        row_index += 1
+        with subtests.test(source=source):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                entry = _quality(tmp_path, {"app.py": source})["per_file"]["app.py"]
+                if expected:
+                    assert entry["verbosity"] > 0
+                assert entry["verbosity"] == pytest.approx(expected)
 
 def test_quality_per_file_keyed_by_relative_path(tmp_path: Path) -> None:
     result = _quality(tmp_path, {"pkg/mod.py": "def f(x):\n    return x\n"})
@@ -574,84 +610,105 @@ def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch
     assert result["per_file"]["linked_file.py"]["sloc"] == 1
 
 
-@pytest.mark.parametrize("layout", ["root", "nested", "linked"])
-@pytest.mark.parametrize("candidate_paths", [None, {"app.py", "solo.py"}], ids=["workspace", "candidate"])
 def test_quality_git_scope_confines_targets_and_clone_peers(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    layout: str, candidate_paths: set[str] | None,
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Git membership owns reads and clones; standalone peer tests cannot detect ignored pollution."""
-    workspace = git_repo
-    if layout == "nested":
-        workspace = git_repo / "service"
-        workspace.mkdir()
-        (git_repo / "outside.py").write_text("OUTSIDE = 1\n")
-    elif layout == "linked":
-        workspace = tmp_path / "linked"
-        git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
-    block = "    if x > 1:\n        return 1\n    return 0\n"
-    solo_block = "    if y > 7:\n        return 8\n    return 9\n"
-    contents = {
-        "app.py": "def app(x):\n" + block,
-        "solo.py": "def solo(y):\n" + solo_block,
-        "peer.py": "def peer(x):\n" + block,
-        "deps/tracked.py": "def tracked(x):\n" + block,
-        ".rules/hidden.py": "HIDDEN = 2\n",
-        "ignored/artifact.py": "def artifact(y):\n" + solo_block,
-        "cache/dependency.py": "def dependency(y):\n" + solo_block,
-        "vendor/excluded.py": "VENDOR = 3\n",
-        "generated.py": "# Code generated by protoc. DO NOT EDIT.\nGENERATED = 4\n",
-        "replaced/secret.py": "SECRET = 5\n",
-    }
-    (workspace / ".gitignore").write_text("deps/\nignored/\ncache/\n")
-    for relative, content in contents.items():
-        target = workspace / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-    git(workspace, "add", "app.py", "solo.py", ".rules", "vendor", "generated.py", "replaced")
-    git(workspace, "add", "-f", "deps/tracked.py")
-    outside = tmp_path / "external-source"
-    outside.mkdir()
-    (outside / "secret.py").write_text("SECRET = 99\n")
-    (workspace / "linked.py").symlink_to(outside / "secret.py")
-    git(workspace, "add", "linked.py")
-    (workspace / "replaced/secret.py").unlink()
-    (workspace / "replaced").rmdir()
-    (workspace / "replaced").symlink_to(outside, target_is_directory=True)
-    os.mkfifo(workspace / "pipe.py")
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases_1: list[set[str] | None] = [None, {"app.py", "solo.py"}]
+    for candidate_paths in cases_1:
+        cases_2: list[str] = ["root", "nested", "linked"]
+        for layout in cases_2:
+            row_index += 1
+            with subtests.test(candidate_paths=candidate_paths, layout=layout):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    monkeypatch = case.monkeypatch
+                    git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                    workspace = git_repo
+                    if layout == "nested":
+                        workspace = git_repo / "service"
+                        workspace.mkdir()
+                        (git_repo / "outside.py").write_text("OUTSIDE = 1\n")
+                    elif layout == "linked":
+                        workspace = tmp_path / "linked"
+                        git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
+                    block = "    if x > 1:\n        return 1\n    return 0\n"
+                    solo_block = "    if y > 7:\n        return 8\n    return 9\n"
+                    contents = {
+                        "app.py": "def app(x):\n" + block,
+                        "solo.py": "def solo(y):\n" + solo_block,
+                        "peer.py": "def peer(x):\n" + block,
+                        "deps/tracked.py": "def tracked(x):\n" + block,
+                        ".rules/hidden.py": "HIDDEN = 2\n",
+                        "ignored/artifact.py": "def artifact(y):\n" + solo_block,
+                        "cache/dependency.py": "def dependency(y):\n" + solo_block,
+                        "vendor/excluded.py": "VENDOR = 3\n",
+                        "generated.py": "# Code generated by protoc. DO NOT EDIT.\nGENERATED = 4\n",
+                        "replaced/secret.py": "SECRET = 5\n",
+                    }
+                    (workspace / ".gitignore").write_text("deps/\nignored/\ncache/\n")
+                    for relative, content in contents.items():
+                        target = workspace / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(content)
+                    git(workspace, "add", "app.py", "solo.py", ".rules", "vendor", "generated.py", "replaced")
+                    git(workspace, "add", "-f", "deps/tracked.py")
+                    outside = tmp_path / "external-source"
+                    outside.mkdir()
+                    (outside / "secret.py").write_text("SECRET = 99\n")
+                    (workspace / "linked.py").symlink_to(outside / "secret.py")
+                    git(workspace, "add", "linked.py")
+                    (workspace / "replaced/secret.py").unlink()
+                    (workspace / "replaced").rmdir()
+                    (workspace / "replaced").symlink_to(outside, target_is_directory=True)
+                    os.mkfifo(workspace / "pipe.py")
 
-    allowed_reads = {"app.py", "solo.py", "peer.py", "deps/tracked.py", ".rules/hidden.py", "generated.py"}
-    reads: list[str] = []
-    open_path, scandir = Path.open, os.scandir
+                    allowed_reads = {
+                        "app.py",
+                        "solo.py",
+                        "peer.py",
+                        "deps/tracked.py",
+                        ".rules/hidden.py",
+                        "generated.py",
+                    }
+                    reads: list[str] = []
+                    open_path, scandir = Path.open, os.scandir
 
-    def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
-        if path.is_relative_to(workspace) and path.suffix == ".py":
-            relative = str(path.relative_to(workspace))
-            assert relative in allowed_reads, f"out-of-scope Python read: {relative}"
-            reads.append(relative)
-        return open_path(path, *args, **kwargs)
+                    def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
+                        if path.is_relative_to(workspace) and path.suffix == ".py":
+                            relative = str(path.relative_to(workspace))
+                            assert relative in allowed_reads, f"out-of-scope Python read: {relative}"
+                            reads.append(relative)
+                        return open_path(path, *args, **kwargs)
 
-    def scan(path: Any) -> Any:
-        if isinstance(path, (str, bytes, os.PathLike)):
-            assert not Path(os.fsdecode(path)).is_relative_to(workspace), "Git quality must not recursively traverse"
-        return scandir(path)
+                    def scan(path: Any) -> Any:
+                        if isinstance(path, (str, bytes, os.PathLike)):
+                            assert not Path(os.fsdecode(path)).is_relative_to(workspace), (
+                                "Git quality must not recursively traverse"
+                            )
+                        return scandir(path)
 
-    monkeypatch.setattr(Path, "open", open_source)
-    monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(workspace / ".daydream", candidate_paths=candidate_paths)
-    expected = [".rules/hidden.py", "app.py", "deps/tracked.py", "peer.py", "solo.py"]
-    if candidate_paths is not None:
-        expected = ["app.py", "solo.py"]
-    assert result["scoped_files"] == len(expected)
-    assert list(result["per_file"]) == expected
-    assert sorted(reads) == sorted(allowed_reads)
-    assert result["per_file"]["app.py"]["verbosity"] == 0.75
-    assert result["per_file"]["solo.py"]["verbosity"] == 0.0
+                    monkeypatch.setattr(Path, "open", open_source)
+                    monkeypatch.setattr(os, "scandir", scan)
+                    result = analyze_quality(workspace / ".daydream", candidate_paths=candidate_paths)
+                    expected = [".rules/hidden.py", "app.py", "deps/tracked.py", "peer.py", "solo.py"]
+                    if candidate_paths is not None:
+                        expected = ["app.py", "solo.py"]
+                    assert result["scoped_files"] == len(expected)
+                    assert list(result["per_file"]) == expected
+                    assert sorted(reads) == sorted(allowed_reads)
+                    assert result["per_file"]["app.py"]["verbosity"] == 0.75
+                    assert result["per_file"]["solo.py"]["verbosity"] == 0.0
 
-    (workspace / "peer.py").write_text("PEER = 6\n")
-    assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.75
-    (workspace / "deps/tracked.py").write_text("TRACKED = 7\n")
-    assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.0
+                    (workspace / "peer.py").write_text("PEER = 6\n")
+                    assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.75
+                    (workspace / "deps/tracked.py").write_text("TRACKED = 7\n")
+                    assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.0
 
 
 def test_quality_git_inventory_failure_never_recurses(
@@ -746,18 +803,26 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> No
     assert entry["high_cc_functions"] == 1
     assert entry["erosion"] == 1.0
 
-@pytest.mark.parametrize(("source", "verbosity"),
-    [
+def test_quality_verbosity_wrapper_cases(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, float]] = [
         ("def f(x):\n    return g(x, 42)\n", 0.0),  # literal argument
         ("def f(x):\n    return g(x=x)\n", 0.0),  # keyword argument
         ("def f(*xs):\n    return g(*xs)\n", 0.0),  # starred argument
         ("def f(x: int):\n    return g(x)\n", 1.0),  # annotation adds no behavior
         ("def f(x=1):\n    return g(x)\n", 0.0),  # default adds behavior
-    ],
-)
-def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity: float) -> None:
-    result = _quality(tmp_path, {"app.py": source})
-    assert result["per_file"]["app.py"]["verbosity"] == verbosity
+    ]
+    for source, verbosity in cases:
+        row_index += 1
+        with subtests.test(source=source):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result = _quality(tmp_path, {"app.py": source})
+                assert result["per_file"]["app.py"]["verbosity"] == verbosity
 
 
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
@@ -792,48 +857,76 @@ def test_quality_candidate_scope_indexes_valid_peers_for_clones(tmp_path: Path,)
     assert changed["per_file"]["app.py"]["verbosity"] == 0.0
 
 
-@pytest.mark.parametrize("candidate_paths", [None, {"app.py"}], ids=["workspace", "candidate"])
 def test_quality_reuses_eligibility_bytes_for_parsing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Eligibility and parsing share one read, including peers and failed inputs."""
-    block = "    if x > 1:\n        return 1\n    return 0\n"
-    ws = _quality_workspace(tmp_path, {
-        "app.py": "def a():\n" + block,
-        "peer.py": "def b():\n" + block,
-        "broken.py": "def broken(:\n" + block,
-        "gen_tool.py": "# Code generated by protoc. DO NOT EDIT.\ndef c():\n    return 3\n",
-        "denied.py": "def denied():\n    return 4\n",
-    })
-    (ws / "undecodable.py").write_bytes(b'def byte_string():\n    return "\xff"\n')
-    opens: dict[str, int] = {}
-    open_path = Path.open
+    table_root = tmp_path
+    row_index = 0
+    cases: list[set[str] | None] = [None, {"app.py"}]
+    for candidate_paths in cases:
+        row_index += 1
+        with subtests.test(candidate_paths=candidate_paths):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                block = "    if x > 1:\n        return 1\n    return 0\n"
+                ws = _quality_workspace(
+                    tmp_path,
+                    {
+                        "app.py": "def a():\n" + block,
+                        "peer.py": "def b():\n" + block,
+                        "broken.py": "def broken(:\n" + block,
+                        "gen_tool.py": "# Code generated by protoc. DO NOT EDIT.\ndef c():\n    return 3\n",
+                        "denied.py": "def denied():\n    return 4\n",
+                    },
+                )
+                (ws / "undecodable.py").write_bytes(b'def byte_string():\n    return "\xff"\n')
+                opens: dict[str, int] = {}
+                open_path = Path.open
 
-    def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
-        if path.parent == ws and path.suffix == ".py":
-            opens[path.name] = opens.get(path.name, 0) + 1
-            if path.name == "denied.py":
-                raise PermissionError("source is unreadable")
-        return open_path(path, *args, **kwargs)
+                def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
+                    if path.parent == ws and path.suffix == ".py":
+                        opens[path.name] = opens.get(path.name, 0) + 1
+                        if path.name == "denied.py":
+                            raise PermissionError("source is unreadable")
+                    return open_path(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", open_source)
-    result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
+                monkeypatch.setattr(Path, "open", open_source)
+                result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
 
-    assert opens == {name: 1 for name in (
-        "app.py", "peer.py", "broken.py", "gen_tool.py", "denied.py", "undecodable.py",
-    )}
-    assert result["scoped_files"] == (4 if candidate_paths is None else 1)
-    expected_paths = ["app.py", "peer.py", "undecodable.py"] if candidate_paths is None else ["app.py"]
-    assert list(result["per_file"]) == expected_paths
-    assert result["per_file"]["app.py"] == {
-        "erosion": 0.0, "verbosity": 0.75, "sloc": 4, "functions": 1, "high_cc_functions": 0,
-    }
-    assert result["erosion"] == 0.0
-    assert result["verbosity"] == (0.6 if candidate_paths is None else 0.75)
-    if candidate_paths is None:
-        assert result["per_file"]["undecodable.py"] == {
-            "erosion": 0.0, "verbosity": 0.0, "sloc": 2, "functions": 1, "high_cc_functions": 0,
-        }
+                assert opens == {
+                    name: 1
+                    for name in (
+                        "app.py",
+                        "peer.py",
+                        "broken.py",
+                        "gen_tool.py",
+                        "denied.py",
+                        "undecodable.py",
+                    )
+                }
+                assert result["scoped_files"] == (4 if candidate_paths is None else 1)
+                expected_paths = ["app.py", "peer.py", "undecodable.py"] if candidate_paths is None else ["app.py"]
+                assert list(result["per_file"]) == expected_paths
+                assert result["per_file"]["app.py"] == {
+                    "erosion": 0.0,
+                    "verbosity": 0.75,
+                    "sloc": 4,
+                    "functions": 1,
+                    "high_cc_functions": 0,
+                }
+                assert result["erosion"] == 0.0
+                assert result["verbosity"] == (0.6 if candidate_paths is None else 0.75)
+                if candidate_paths is None:
+                    assert result["per_file"]["undecodable.py"] == {
+                        "erosion": 0.0,
+                        "verbosity": 0.0,
+                        "sloc": 2,
+                        "functions": 1,
+                        "high_cc_functions": 0,
+                    }
 
 def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path,) -> None:
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},)
@@ -893,20 +986,29 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: 
 
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
-@pytest.mark.parametrize(("comprehension", "label"),
-    [(f"[x for x in xs {_TEN_COMPREHENSION_FILTERS}]", "list"),
+def test_quality_erosion_comprehension_types_cc_parity(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    """Comprehension generators and filters must all contribute to the CC>10 threshold."""
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str]] = [
+        (f"[x for x in xs {_TEN_COMPREHENSION_FILTERS}]", "list"),
         (f"{{x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "set"),
         (f"{{x: x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "dict"),
         (f"(x for x in xs {_TEN_COMPREHENSION_FILTERS})", "generator"),
-    ],
-)
-def test_quality_erosion_comprehension_types_cc_parity(tmp_path: Path, comprehension: str, label: str) -> None:
-    """Comprehension generators and filters must all contribute to the CC>10 threshold."""
-    result = _quality(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
+    ]
+    for comprehension, label in cases:
+        row_index += 1
+        with subtests.test(comprehension=comprehension):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result = _quality(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
-    entry = result["per_file"]["app.py"]
-    assert entry["high_cc_functions"] == 1, label
-    assert entry["erosion"] == 1.0
+                entry = result["per_file"]["app.py"]
+                assert entry["high_cc_functions"] == 1, label
+                assert entry["erosion"] == 1.0
 
 def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path,) -> None:
     result = _quality(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
@@ -939,28 +1041,38 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
     assert result["verbosity"] == 0.0
 
 
-@pytest.mark.parametrize("failure", ["unavailable", "empty-tree", "exception"])
 def test_quality_parser_failure_keeps_scope_without_metrics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Binding failure excludes metrics without pretending the eligible source was absent."""
-    class FailedParser:
-        def parse(self, _source: bytes) -> None:
-            if failure == "exception":
-                raise ValueError("native parser failed")
-            return None
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["unavailable", "empty-tree", "exception"]
+    for failure in cases:
+        row_index += 1
+        with subtests.test(failure=failure):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
 
-    parser = None if failure == "unavailable" else FailedParser()
-    monkeypatch.setattr(quality_mod, "_quality_python_parser", lambda: parser)
-    result = _quality(tmp_path, {"app.py": "def f(x):\n    return x\n"})
+                class FailedParser:
+                    def parse(self, _source: bytes) -> None:
+                        if failure == "exception":
+                            raise ValueError("native parser failed")
+                        return None
 
-    assert result == {
-        "erosion": None,
-        "verbosity": None,
-        "per_file": {},
-        "calibration": {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"},
-        "scoped_files": 1,
-    }
+                parser = None if failure == "unavailable" else FailedParser()
+                monkeypatch.setattr(quality_mod, "_quality_python_parser", lambda: parser)
+                result = _quality(tmp_path, {"app.py": "def f(x):\n    return x\n"})
+
+                assert result == {
+                    "erosion": None,
+                    "verbosity": None,
+                    "per_file": {},
+                    "calibration": {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"},
+                    "scoped_files": 1,
+                }
 
 
 def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
@@ -1002,16 +1114,29 @@ def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> N
     assert result["per_file"]["blank.py"]["sloc"] == 0
     assert result["verbosity"] is None
 
-@pytest.mark.parametrize(("mutation", "label"),
-    [("        item = items.pop()\n", "pop"), ("        items.clear()\n", "clear")],
-)
-def test_quality_verbosity_guard_after_mutation_not_flagged(tmp_path: Path, mutation: str, label: str) -> None:
+def test_quality_verbosity_guard_after_mutation_not_flagged(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """Mutation invalidates the loop-header nonempty proof, so its termination guard is needed."""
-    result = _quality(tmp_path,
-        {"app.py": "def f(items):\n    while items:\n" + mutation + "        if not items:\n            break\n"},
-    )
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str]] = [("        item = items.pop()\n", "pop"), ("        items.clear()\n", "clear")]
+    for mutation, label in cases:
+        row_index += 1
+        with subtests.test(mutation=mutation):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result = _quality(
+                    tmp_path,
+                    {
+                        "app.py": "def f(items):\n    while items:\n"
+                        + mutation
+                        + "        if not items:\n            break\n"
+                    },
+                )
 
-    assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
+                assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
 
 def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path,) -> None:
     """An intervening non-mutating statement leaves the loop-header nonempty proof valid."""
@@ -1028,19 +1153,27 @@ def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: 
 
     assert result["per_file"]["app.py"]["verbosity"] > 0
 
-@pytest.mark.parametrize(("wrapper_body", "label"),
-    [
+def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str]] = [
         ('    """Pass through."""\n    return inner(x, y)\n', "documented"),
         ("    return inner(x, y)\n", "undocumented"),
-    ],
-)
-def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(tmp_path: Path, wrapper_body: str, label: str,
-) -> None:
-    result = _quality(tmp_path,
-        {"app.py": ("def inner(x, y):\n" "    return x + y\n" "\n" "def outer(x, y):\n" + wrapper_body)},
-    )
+    ]
+    for wrapper_body, label in cases:
+        row_index += 1
+        with subtests.test(wrapper_body=wrapper_body):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                result = _quality(
+                    tmp_path,
+                    {"app.py": ("def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n" + wrapper_body)},
+                )
 
-    assert result["per_file"]["app.py"]["verbosity"] > 0, label
+                assert result["per_file"]["app.py"]["verbosity"] > 0, label
 
 def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
     """The explicit atif vendor exclusion must work without a conventional vendor basename."""
@@ -1347,26 +1480,33 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
     assert clean_duplication["max_similarity"] is None
     assert clean_location["in_hunk_rate"] > location["in_hunk_rate"]
 
-@pytest.mark.parametrize(("file", "line", "expected_tier", "expected_distance"),
-    [pytest.param("svc/loader.py", 88, "in_hunk", 0, id="in_hunk"),
-        pytest.param("svc/loader.py", 94, "within_tolerance", 2, id="within_tolerance"),
-        pytest.param("svc/loader.py", 4, "beyond_tolerance", 81, id="beyond_tolerance"),
-        pytest.param("other/untouched.py", 88, "file_absent", None, id="file_absent"),
-    ],
-)
 def test_location_tiers_are_each_reachable(
-    tmp_path: Path, file: str, line: int, expected_tier: str, expected_distance: int | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(deep, [_item(1, file=file, line=line)])
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, int, str, int | None]] = [
+        ("svc/loader.py", 88, "in_hunk", 0),
+        ("svc/loader.py", 94, "within_tolerance", 2),
+        ("svc/loader.py", 4, "beyond_tolerance", 81),
+        ("other/untouched.py", 88, "file_absent", None),
+    ]
+    for file, line, expected_tier, expected_distance in cases:
+        row_index += 1
+        with subtests.test(file=file):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                dd, deep = _worked_example_dirs(tmp_path)
+                seed_merged_items(deep, [_item(1, file=file, line=line)])
 
-    location = analyze_location(dd)
+                location = analyze_location(dd)
 
-    assert location["scored_items"] == 1
-    assert location["tiers"][expected_tier] == 1
-    assert location["tier_rates"][expected_tier] == 1.0
-    assert location["items"][0]["tier"] == expected_tier
-    assert location["items"][0]["distance"] == expected_distance
+                assert location["scored_items"] == 1
+                assert location["tiers"][expected_tier] == 1
+                assert location["tier_rates"][expected_tier] == 1.0
+                assert location["items"][0]["tier"] == expected_tier
+                assert location["items"][0]["distance"] == expected_distance
 
 def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> None:
     dd, deep = _worked_example_dirs(tmp_path)
@@ -1489,28 +1629,35 @@ def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Pat
     assert duplication["shipped_items"] == 202
     assert duplication["near_duplicate_pairs"] == 0   # the tail pair is beyond the cap
 
-@pytest.mark.parametrize(("payload", "expected_error"),
-    [pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
-        pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
-        pytest.param("{}", ValueError, id="missing-items"),
-    ],
-)
 def test_location_and_duplication_propagate_corrupt_merged_items(
-    tmp_path: Path, payload: str, expected_error: type[Exception]
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """The shared loader's raise-on-corrupt contract holds for the new axes too.
 
     A bogus shipped set is never silently counted -- and never silently scored."""
-    dd, deep = _worked_example_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
-    (deep / "merged-items.json").write_text(payload)
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, type[Exception]]] = [
+        ("{not json", json.JSONDecodeError),
+        ('{"items": {"a": 1}}', ValueError),
+        ("{}", ValueError),
+    ]
+    for payload, expected_error in cases:
+        row_index += 1
+        with subtests.test(payload=payload):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                dd, deep = _worked_example_dirs(tmp_path)
+                seed_stack_records(deep, "python", n=4)
+                (deep / "merged-items.json").write_text(payload)
 
-    with pytest.raises(expected_error):
-        analyze_findings(dd)
-    with pytest.raises(expected_error):
-        analyze_location(dd)
-    with pytest.raises(expected_error):
-        analyze_shipped_duplication(dd)
+                with pytest.raises(expected_error):
+                    analyze_findings(dd)
+                with pytest.raises(expected_error):
+                    analyze_location(dd)
+                with pytest.raises(expected_error):
+                    analyze_shipped_duplication(dd)
 
 def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path,) -> None:
     dd, deep = _worked_example_dirs(tmp_path)
@@ -1666,11 +1813,16 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     assert result["findings"]["shipped_duplication"]["same_file_pairs"] == 1
     assert result["findings"]["shipped_duplication"]["near_duplicate_pairs"] == 0
 
-@pytest.mark.parametrize(("filename", "label"),
-    [("trajectory.json", "main"), ("deep-python.json", "deep-python"),
-        ("trajectory-20260101T000000-abc123.json", "main"), ("deadbeef.deep-python.json", "deep-python"),
-    ],
-)
-def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:
+def test_agent_label_keeps_its_legacy_filename_tolerance(
+    subtests: pytest.Subtests,
+) -> None:
     """The legacy shapes are retained deliberately — pin them instead of guessing they are dead."""
-    assert _agent_label(filename) == label
+    cases: list[tuple[str, str]] = [
+        ("trajectory.json", "main"),
+        ("deep-python.json", "deep-python"),
+        ("trajectory-20260101T000000-abc123.json", "main"),
+        ("deadbeef.deep-python.json", "deep-python"),
+    ]
+    for filename, label in cases:
+        with subtests.test(filename=filename):
+            assert _agent_label(filename) == label

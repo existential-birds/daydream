@@ -43,28 +43,32 @@ def _driver(loader: Loader) -> str:
 def _vocabulary(events: list[AgentEvent]) -> set[str]:
     return {type(e).__name__ for e in events}
 
-@pytest.mark.parametrize("loader", [claude_loader, codex_loader, pi_loader])
-async def test_backend_conformance(loader: Loader) -> None:
-    events = [e async for e in loader(CANONICAL_SCRIPT)]
-    types = _vocabulary(events)
-    assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= types
-    starts = {e.id for e in events if isinstance(e, ToolStartEvent)}
-    results = {e.id for e in events if isinstance(e, ToolResultEvent)}
-    assert results <= starts
-    assert any(isinstance(e, (MetricsEvent, CostEvent)) for e in events)
-    read_only_events = [e async for e in loader(CANONICAL_SCRIPT, read_only=True)]
-    assert _vocabulary(read_only_events) == types
-    assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
-    driver = _driver(loader)
-    deltas = KNOWN_DELTAS[driver]
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    costs = [e for e in events if isinstance(e, CostEvent)]
-    if driver == "claude":
-        assert all(m.message_id != "" for m in metrics)
-    else:
-        # Compare float values by equality, not identity, and require both metric lists nonempty to
-        # prevent a vacuous pass.
-        assert metrics
-        assert costs
-        assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
-        assert all(c.cost_usd == deltas["cost_usd"] for c in costs)
+async def test_backend_conformance(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[Loader] = [claude_loader, codex_loader, pi_loader]
+    for loader in cases:
+        with subtests.test(loader=loader):
+            events = [e async for e in loader(CANONICAL_SCRIPT)]
+            types = _vocabulary(events)
+            assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= types
+            starts = {e.id for e in events if isinstance(e, ToolStartEvent)}
+            results = {e.id for e in events if isinstance(e, ToolResultEvent)}
+            assert results <= starts
+            assert any(isinstance(e, (MetricsEvent, CostEvent)) for e in events)
+            read_only_events = [e async for e in loader(CANONICAL_SCRIPT, read_only=True)]
+            assert _vocabulary(read_only_events) == types
+            assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
+            driver = _driver(loader)
+            deltas = KNOWN_DELTAS[driver]
+            metrics = [e for e in events if isinstance(e, MetricsEvent)]
+            costs = [e for e in events if isinstance(e, CostEvent)]
+            if driver == "claude":
+                assert all(m.message_id != "" for m in metrics)
+            else:
+                # Compare float values by equality, not identity, and require both metric lists nonempty to
+                # prevent a vacuous pass.
+                assert metrics
+                assert costs
+                assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
+                assert all(c.cost_usd == deltas["cost_usd"] for c in costs)

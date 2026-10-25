@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -6,10 +7,12 @@ import yaml
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.storage import WorkspaceCorrupt
 from daydream.benchmark.workspace import init_workspace
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize("payload",
-    [
+def test_manifest_loader_bounds_every_invalid_shape(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = [
         "cases: null\n",
         "cases: {}\n",
         "cases: 7\n",
@@ -19,13 +22,16 @@ from daydream.benchmark.workspace import init_workspace
         "x: !!python/object/apply:os.system ['false']\n",
         "",
         "- not\n- a\n- mapping\n",
-    ],
-)
-def test_manifest_loader_bounds_every_invalid_shape(tmp_path: Path, payload: str) -> None:
-    (tmp_path / "benchmark.yaml").write_text(payload)
-    with pytest.raises(WorkspaceCorrupt) as excinfo:
-        load_benchmark_manifest(tmp_path, canonicalize_case_order=True)
-    assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
+    ]
+    for case_index, payload in enumerate(cases):
+        with subtests.test(payload=payload):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                (tmp_path / "benchmark.yaml").write_text(payload)
+                with pytest.raises(WorkspaceCorrupt) as excinfo:
+                    load_benchmark_manifest(tmp_path, canonicalize_case_order=True)
+                assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
+
 
 def test_manifest_loader_preserves_absent_cases_default(tmp_path: Path) -> None:
     root = tmp_path / "ws"
@@ -58,18 +64,23 @@ def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: 
     assert yaml.safe_load(manifest_path.read_text())["cases"] == [first, second]
     assert [row.case_id for row in loaded.cases] == [second["case_id"], first["case_id"]]
 
-@pytest.mark.parametrize("kind", ["missing", "directory", "invalid-encoding", "unhashable-key"])
-def test_manifest_loader_bounds_real_read_and_decode_errors(tmp_path: Path, kind: str) -> None:
-    path = tmp_path / "benchmark.yaml"
-    if kind == "directory":
-        path.mkdir()
-    elif kind == "invalid-encoding":
-        path.write_bytes(b"\xff\xff\x00")
-    elif kind == "unhashable-key":
-        path.write_text("? [one, two]\n: value\n")
+def test_manifest_loader_bounds_real_read_and_decode_errors(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["missing", "directory", "invalid-encoding", "unhashable-key"]
+    for case_index, kind in enumerate(cases):
+        with subtests.test(kind=kind):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                path = tmp_path / "benchmark.yaml"
+                if kind == "directory":
+                    path.mkdir()
+                elif kind == "invalid-encoding":
+                    path.write_bytes(b"\xff\xff\x00")
+                elif kind == "unhashable-key":
+                    path.write_text("? [one, two]\n: value\n")
 
-    with pytest.raises(WorkspaceCorrupt) as excinfo:
-        load_benchmark_manifest(tmp_path)
+                with pytest.raises(WorkspaceCorrupt) as excinfo:
+                    load_benchmark_manifest(tmp_path)
 
-    assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
-    assert excinfo.value.__cause__ is not None
+                assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
+                assert excinfo.value.__cause__ is not None

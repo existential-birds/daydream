@@ -29,6 +29,7 @@ from tests.harness.remote_ci import (
     seed_pr_identity,
     start_remote_ci_fake,
 )
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_integration import (
     _FULL_FLOW_ISSUE,
@@ -59,75 +60,71 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
 
     assert events == ["flush", "panel-start", "snapshot", "backend-step"]
 
-@pytest.mark.parametrize(("argv", "expected"),
-    [
-        pytest.param(['--review', '--approved-head-sha', 'a' * 40, '/tmp/repo'], {'approved_head_sha': 'a' * 40},
-            id='approved_head_sha_flag_populates_config'),
-        pytest.param(['--review', '/tmp/repo'], {'approved_head_sha': None},
-            id='approved_head_sha_defaults_none'),
-        pytest.param(['/tmp/project', '-s', 'python'], {'stack': 'python'},
-            id='stack_short_flag'),
-        pytest.param(['/tmp/project'], {'ignore_paths': []},
-            id='ignore_paths_default_empty'),
-        pytest.param(['/tmp/project'], {'dataset_capture': False, 'dataset_store_path': None, 'archive': True},
-            id='dataset_capture_is_opt_in'),
-        pytest.param(['--dataset-store', '/tmp/records', '/tmp/project'],
-            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records')},
-            id='dataset_store_enables_capture'),
-        pytest.param(['--capture-data', '--dataset-store', '/tmp/records', '--no-archive', '/tmp/project'],
-            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records'), 'archive': False},
-            id='dataset_capture_without_archive'),
-        pytest.param(['/tmp/project', '--ignore-path', '.planning'], {'ignore_paths': ['.planning']},
-            id='ignore_paths_single'),
-        pytest.param(['/tmp/project', '--ignore-path', '.planning', '--ignore-path', 'vendor'],
-            {'ignore_paths': ['.planning', 'vendor']},
-            id='ignore_paths_repeatable'),
-        pytest.param(['--branch', 'feat/x', '--base', 'develop', '/tmp/repo'],
-            {'branch': 'feat/x', 'base': 'develop', 'output_mode': 'loop'},
-            id='parse_args_branch_and_base'),
-        pytest.param(['--comment', '/tmp/repo'], {'output_mode': 'comment'},
-            id='parse_args_comment_mode_sets_output_mode'),
-        pytest.param(['--review', '/tmp/repo'], {'output_mode': 'review'},
-            id='parse_args_review_mode_sets_output_mode'),
-        pytest.param(['/tmp/repo'], {'output_mode': 'loop'},
-            id='parse_args_default_is_loop'),
-        pytest.param(['--review', '--findings-out', 'findings/findings.json', '/tmp/repo'],
-            {'findings_out': 'findings/findings.json', 'output_mode': 'review'},
-            id='findings_out_with_review_populates_config'),
-        pytest.param(['--diagram-only', 'flowchart', '/tmp/repo'], {'output_mode': 'diagram', 'diagram': 'flowchart'},
-            id='diagram_only_sets_output_mode_and_diagram_value'),
-        pytest.param(['--diagram', 'off', '/tmp/repo'], {'output_mode': 'loop', 'diagram': 'off'},
-            id='diagram_flag_leaves_output_mode_alone'),
-        pytest.param(['/tmp/repo'], {'diagram': None},
-            id='diagram_defaults_to_unset'),
-        pytest.param(['--diagram-only', 'sequence', '--findings-out', 'f.json', '/tmp/repo'],
-            {'findings_out': 'f.json', 'output_mode': 'diagram'},
-            id='findings_out_with_diagram_only_populates_config'),
-        pytest.param(['--findings-out', 'findings/findings.json', '/tmp/repo'],
-            {'findings_out': 'findings/findings.json', 'output_mode': 'loop', 'shallow': False},
-            id='findings_out_with_deep_flow_populates_config'),
-        pytest.param(['--review', '/tmp/repo'], {'findings_out': None},
-            id='findings_out_defaults_none'),
-        pytest.param(['--review', '--pr-number', '42', '/tmp/repo'], {'pr_number': 42},
-            id='pr_number_flag_populates_config'),
-        pytest.param(['--copy', 'a.env', '--copy', 'b.env', '/tmp/repo'],
-            {'extra_copy': [Path('a.env'), Path('b.env')]},
-            id='parse_args_copy_repeatable'),
-        pytest.param(['/tmp/repo'], {'extra_copy': []},
-            id='parse_args_copy_default_empty'),
-
-    ],
-)
 def test_review_arguments_populate_config(
-    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: dict[str, Any],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    config = _cfg(monkeypatch, argv)
-    for field, value in expected.items():
-        actual = getattr(config, field)
-        if value is None or isinstance(value, bool):
-            assert actual is value, field
-        else:
-            assert actual == value, field
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[list[str], dict[str, Any]]] = [
+        (["--review", "--approved-head-sha", "a" * 40, "/tmp/repo"], {"approved_head_sha": "a" * 40}),
+        (["--review", "/tmp/repo"], {"approved_head_sha": None}),
+        (["/tmp/project", "-s", "python"], {"stack": "python"}),
+        (["/tmp/project"], {"ignore_paths": []}),
+        (["/tmp/project"], {"dataset_capture": False, "dataset_store_path": None, "archive": True}),
+        (
+            ["--dataset-store", "/tmp/records", "/tmp/project"],
+            {"dataset_capture": True, "dataset_store_path": Path("/tmp/records")},
+        ),
+        (
+            ["--capture-data", "--dataset-store", "/tmp/records", "--no-archive", "/tmp/project"],
+            {"dataset_capture": True, "dataset_store_path": Path("/tmp/records"), "archive": False},
+        ),
+        (["/tmp/project", "--ignore-path", ".planning"], {"ignore_paths": [".planning"]}),
+        (
+            ["/tmp/project", "--ignore-path", ".planning", "--ignore-path", "vendor"],
+            {"ignore_paths": [".planning", "vendor"]},
+        ),
+        (
+            ["--branch", "feat/x", "--base", "develop", "/tmp/repo"],
+            {"branch": "feat/x", "base": "develop", "output_mode": "loop"},
+        ),
+        (["--comment", "/tmp/repo"], {"output_mode": "comment"}),
+        (["--review", "/tmp/repo"], {"output_mode": "review"}),
+        (["/tmp/repo"], {"output_mode": "loop"}),
+        (
+            ["--review", "--findings-out", "findings/findings.json", "/tmp/repo"],
+            {"findings_out": "findings/findings.json", "output_mode": "review"},
+        ),
+        (["--diagram-only", "flowchart", "/tmp/repo"], {"output_mode": "diagram", "diagram": "flowchart"}),
+        (["--diagram", "off", "/tmp/repo"], {"output_mode": "loop", "diagram": "off"}),
+        (["/tmp/repo"], {"diagram": None}),
+        (
+            ["--diagram-only", "sequence", "--findings-out", "f.json", "/tmp/repo"],
+            {"findings_out": "f.json", "output_mode": "diagram"},
+        ),
+        (
+            ["--findings-out", "findings/findings.json", "/tmp/repo"],
+            {"findings_out": "findings/findings.json", "output_mode": "loop", "shallow": False},
+        ),
+        (["--review", "/tmp/repo"], {"findings_out": None}),
+        (["--review", "--pr-number", "42", "/tmp/repo"], {"pr_number": 42}),
+        (["--copy", "a.env", "--copy", "b.env", "/tmp/repo"], {"extra_copy": [Path("a.env"), Path("b.env")]}),
+        (["/tmp/repo"], {"extra_copy": []}),
+    ]
+    for argv, expected in cases:
+        row_index += 1
+        with subtests.test(argv=argv):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                config = _cfg(monkeypatch, argv)
+                for field, value in expected.items():
+                    actual = getattr(config, field)
+                    if value is None or isinstance(value, bool):
+                        assert actual is value, field
+                    else:
+                        assert actual == value, field
 
 
 
@@ -151,11 +148,22 @@ def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
 
 
 
-@pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
-def test_flow_conflicts_rejected(monkeypatch: pytest.MonkeyPatch, conflict: Any) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
+def test_flow_conflicts_rejected(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [["--review"], ["--comment"], ["--shallow"]]
+    for conflict in cases:
+        row_index += 1
+        with subtests.test(conflict=conflict):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
+                with pytest.raises(SystemExit):
+                    _parse_args()
 
 def test_loop_flag_rejected(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "/tmp/project"])
@@ -183,20 +191,42 @@ def test_verbose_joined_equals_rejected() -> None:
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--log=true"])
 
-@pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
 def test_yes_with_review_only_output_errors(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], output_flag: Any,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", output_flag, "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "--yes" in capsys.readouterr().err
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = ["--review", "--comment"]
+    for output_flag in cases:
+        row_index += 1
+        with subtests.test(output_flag=output_flag):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                capsys.readouterr()
+                monkeypatch.setattr(sys, "argv", ["daydream", "--yes", output_flag, "/tmp/project"])
+                with pytest.raises(SystemExit):
+                    _parse_args()
+                assert "--yes" in capsys.readouterr().err
 
-@pytest.mark.parametrize("stack", ["go", "rust", "ios"])
-def test_stack_choice_routes_to_stack_field(monkeypatch: pytest.MonkeyPatch, stack: Any) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--stack", stack])
-    config = _parse_args()
-    assert config.stack == stack
+def test_stack_choice_routes_to_stack_field(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = ["go", "rust", "ios"]
+    for stack in cases:
+        row_index += 1
+        with subtests.test(stack=stack):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--stack", stack])
+                config = _parse_args()
+                assert config.stack == stack
 
 
 
@@ -215,56 +245,83 @@ def test_parse_args_comment_mode_excludes_review(monkeypatch: pytest.MonkeyPatch
 
 
 
-@pytest.mark.parametrize("extra", [["--comment"], ["--shallow"]])
 def test_findings_out_rejects_flows_without_pipeline_errors(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], extra: Any,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    err = capsys.readouterr().err
-    assert "--findings-out" in err
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [["--comment"], ["--shallow"]]
+    for extra in cases:
+        row_index += 1
+        with subtests.test(extra=extra):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                capsys.readouterr()
+                monkeypatch.setattr(sys, "argv", ["daydream", *extra, "--findings-out", "f.json", "/tmp/repo"])
+                with pytest.raises(SystemExit) as exc_info:
+                    _parse_args()
+                assert exc_info.value.code == 2
+                err = capsys.readouterr().err
+                assert "--findings-out" in err
 
 
 
 
-@pytest.mark.parametrize(("argv", "expected"),
-    [(["--diagram", "both", "--diagram-only", "sequence"], "--diagram-only"),
+def test_diagram_only_conflicts_are_rejected(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[list[str], str]] = [
+        (["--diagram", "both", "--diagram-only", "sequence"], "--diagram-only"),
         (["--diagram-only", "sequence", "--comment"], "not allowed with argument"),
         (["--diagram-only", "sequence", "--review"], "not allowed with argument"),
         (["--diagram-only", "sequence", "--flow", "improve"], "--flow"),
         (["--diagram-only", "sequence", "--start-at", "merge"], "--start-at merge"),
         (["--diagram-only", "sequence", "--yes"], "--yes"),
-    ],
-    ids=["diagram_with_diagram_only", "diagram_only_with_comment", "diagram_only_with_review", "diagram_only_with_flow",
-        "diagram_only_with_start_at", "diagram_only_with_yes",
-    ],
-)
-def test_diagram_only_conflicts_are_rejected(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str], expected: str,
+    ]
+    for argv, expected in cases:
+        row_index += 1
+        with subtests.test(expected=expected):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                capsys.readouterr()
+                monkeypatch.setattr(sys, "argv", ["daydream", *argv, "/tmp/repo"])
+                with pytest.raises(SystemExit) as exc_info:
+                    _parse_args()
+                assert exc_info.value.code == 2
+                assert expected in capsys.readouterr().err
+
+
+
+
+
+def test_parse_args_boolean_modifiers(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", *argv, "/tmp/repo"])
-    with pytest.raises(SystemExit) as exc_info:
-        _parse_args()
-    assert exc_info.value.code == 2
-    assert expected in capsys.readouterr().err
-
-
-
-
-
-@pytest.mark.parametrize(("flag", "field", "expected"),
-    [pytest.param("--worktree", "force_worktree", True, id="worktree"),
-        pytest.param("--shallow", "shallow", True, id="shallow"),
-        pytest.param("--non-interactive", "non_interactive", True, id="non-interactive"),
-        pytest.param(None, "non_interactive", False, id="non-interactive-default"),
-    ],
-)
-def test_parse_args_boolean_modifiers(monkeypatch: pytest.MonkeyPatch, flag: str | None, field: str, expected: bool
-) -> None:
-    argv = [flag] if flag is not None else []
-    assert getattr(_cfg(monkeypatch, [*argv, "/tmp/repo"]), field) is expected
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str | None, str, bool]] = [
+        ("--worktree", "force_worktree", True),
+        ("--shallow", "shallow", True),
+        ("--non-interactive", "non_interactive", True),
+        (None, "non_interactive", False),
+    ]
+    for flag, field, expected in cases:
+        row_index += 1
+        with subtests.test(flag=flag):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                argv = [flag] if flag is not None else []
+                assert getattr(_cfg(monkeypatch, [*argv, "/tmp/repo"]), field) is expected
 
 
 
@@ -377,22 +434,41 @@ def test_print_issues_table_renders() -> None:
 
 
 
-@pytest.mark.parametrize("flag,phase",
-    [("--review-backend", "review"), ("--fix-backend", "fix"), ("--test-backend", "test"),
-        ("--exploration-model", "exploration"), ("--review-model", "review"), ("--parse-model", "parse"),
-        ("--fix-model", "fix"), ("--test-model", "test"),
-    ],
-)
-@pytest.mark.parametrize("sep", [" ", "="],)
 def test_per_phase_flag_rejected_with_config_pointer(
-    flag: Any, phase: Any, sep: str, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    argv = [flag, "claude-opus-5", str(tmp_path)] if sep == " " else [f"{flag}=claude-opus-5", str(tmp_path)]
-    with pytest.raises(SystemExit):
-        _parse_args(argv)
-    err = capsys.readouterr().err
-    assert flag in err
-    assert f"[tool.daydream.phases.{phase}]" in err
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[str] = [" ", "="]
+    for sep in cases_1:
+        cases_2: list[tuple[Any, Any]] = [
+            ("--review-backend", "review"),
+            ("--fix-backend", "fix"),
+            ("--test-backend", "test"),
+            ("--exploration-model", "exploration"),
+            ("--review-model", "review"),
+            ("--parse-model", "parse"),
+            ("--fix-model", "fix"),
+            ("--test-model", "test"),
+        ]
+        for flag, phase in cases_2:
+            row_index += 1
+            with subtests.test(sep=sep, flag=flag):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    capsys.readouterr()
+                    argv = (
+                        [flag, "claude-opus-5", str(tmp_path)]
+                        if sep == " "
+                        else [f"{flag}=claude-opus-5", str(tmp_path)]
+                    )
+                    with pytest.raises(SystemExit):
+                        _parse_args(argv)
+                    err = capsys.readouterr().err
+                    assert flag in err
+                    assert f"[tool.daydream.phases.{phase}]" in err
 
 
 
@@ -419,66 +495,101 @@ def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
     gh.chmod(0o755)
 
 
-@pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
-def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: Path, backend_name: str,) -> None:
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    (repo / ".gitignore").write_text(".daydream/\ndaydream_plans/\n", encoding="utf-8")
-    (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    git(repo, "add", ".gitignore", "app.py")
-    commit(repo, "initial")
-    origin = bare_remote(tmp_path / "origin.git")
-    git(repo, "remote", "add", "origin", str(origin))
-    git(repo, "push", "-u", "origin", "main")
+def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["codex", "pi", "osprey"]
+    for backend_name in cases:
+        row_index += 1
+        with subtests.test(backend_name=backend_name):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo = tmp_path / "repo"
+                init_repo(repo)
+                (repo / ".gitignore").write_text(".daydream/\ndaydream_plans/\n", encoding="utf-8")
+                (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+                git(repo, "add", ".gitignore", "app.py")
+                commit(repo, "initial")
+                origin = bare_remote(tmp_path / "origin.git")
+                git(repo, "remote", "add", "origin", str(origin))
+                git(repo, "push", "-u", "origin", "main")
 
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    backend_marker = tmp_path / "backend-launched"
-    backend_script = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$BACKEND_MARKER\"\nexit 97\n"
-    for executable in ("codex", "pi", "osprey"):
-        path = fake_bin / executable
-        path.write_text(backend_script, encoding="utf-8")
-        path.chmod(0o755)
+                fake_bin = tmp_path / "bin"
+                fake_bin.mkdir()
+                backend_marker = tmp_path / "backend-launched"
+                backend_script = '#!/bin/sh\nprintf \'%s\\n\' "$0 $*" >> "$BACKEND_MARKER"\nexit 97\n'
+                for executable in ("codex", "pi", "osprey"):
+                    path = fake_bin / executable
+                    path.write_text(backend_script, encoding="utf-8")
+                    path.chmod(0o755)
 
-    gh_log = tmp_path / "gh.log"
-    _write_fake_gh(fake_bin, "GH_LOG", "fixture-user")
-    process_tmp = tmp_path / "process-tmp"
-    process_tmp.mkdir()
+                gh_log = tmp_path / "gh.log"
+                _write_fake_gh(fake_bin, "GH_LOG", "fixture-user")
+                process_tmp = tmp_path / "process-tmp"
+                process_tmp.mkdir()
 
-    before_head = git(repo, "rev-parse", "HEAD")
-    before_refs = git(repo, "show-ref")
-    before_status = git(repo, "status", "--porcelain=v1")
-    before_origin_refs = git(origin, "show-ref")
-    env = {key: value
-        for key, value in os.environ.items()
-        if key
-        not in {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "DAYDREAM_GITHUB_APP_ID",
-            "DAYDREAM_GITHUB_APP_PRIVATE_KEY",
-        }
-    }
-    env.update({"PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}", "BACKEND_MARKER": str(backend_marker),
-            "GH_LOG": str(gh_log), "TMPDIR": str(process_tmp), "CI": "1",
-        }
-    )
-    result = subprocess.run(  # noqa: S603 - fixed module and enum parameter
-        [sys.executable, "-m", "daydream", "improve", "--backend", backend_name, "--no-archive", "--no-eval",
-            str(repo),
-        ], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, env=env, timeout=30,
-    )
+                before_head = git(repo, "rev-parse", "HEAD")
+                before_refs = git(repo, "show-ref")
+                before_status = git(repo, "status", "--porcelain=v1")
+                before_origin_refs = git(origin, "show-ref")
+                env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key
+                    not in {
+                        "ANTHROPIC_API_KEY",
+                        "OPENAI_API_KEY",
+                        "GH_TOKEN",
+                        "GITHUB_TOKEN",
+                        "DAYDREAM_GITHUB_APP_ID",
+                        "DAYDREAM_GITHUB_APP_PRIVATE_KEY",
+                    }
+                }
+                env.update(
+                    {
+                        "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+                        "BACKEND_MARKER": str(backend_marker),
+                        "GH_LOG": str(gh_log),
+                        "TMPDIR": str(process_tmp),
+                        "CI": "1",
+                    }
+                )
+                result = subprocess.run(  # noqa: S603 - fixed module and enum parameter
+                    [
+                        sys.executable,
+                        "-m",
+                        "daydream",
+                        "improve",
+                        "--backend",
+                        backend_name,
+                        "--no-archive",
+                        "--no-eval",
+                        str(repo),
+                    ],
+                    cwd=Path(__file__).resolve().parents[1],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=30,
+                )
 
-    combined = result.stdout + result.stderr
-    assert result.returncode == 1, combined
-    assert f"backend '{backend_name}'" in combined
-    assert "Use backend 'claude'" in combined
-    assert not backend_marker.exists()
-    assert gh_log.read_text(encoding="utf-8").splitlines() == [
-        "api /user", "repo view --json nameWithOwner -q .nameWithOwner",
-    ]
-    assert git(repo, "rev-parse", "HEAD") == before_head
-    assert git(repo, "show-ref") == before_refs
-    assert git(repo, "status", "--porcelain=v1") == before_status
-    assert git(origin, "show-ref") == before_origin_refs
-    assert not list(process_tmp.glob("daydream-audit-*"))
+                combined = result.stdout + result.stderr
+                assert result.returncode == 1, combined
+                assert f"backend '{backend_name}'" in combined
+                assert "Use backend 'claude'" in combined
+                assert not backend_marker.exists()
+                assert gh_log.read_text(encoding="utf-8").splitlines() == [
+                    "api /user",
+                    "repo view --json nameWithOwner -q .nameWithOwner",
+                ]
+                assert git(repo, "rev-parse", "HEAD") == before_head
+                assert git(repo, "show-ref") == before_refs
+                assert git(repo, "status", "--porcelain=v1") == before_status
+                assert git(origin, "show-ref") == before_origin_refs
+                assert not list(process_tmp.glob("daydream-audit-*"))
 
 
 _SIGNAL_FIXTURE_EXTENSION = """

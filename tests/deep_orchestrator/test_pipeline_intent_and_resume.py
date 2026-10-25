@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from daydream.prompts.authorial_intent import (
 from daydream.run_context import current_run_context
 from daydream.runner import run
 from daydream.ui.summary import print_preflight_notice
+from tests.conftest import make_multi_stack_target, make_tiny_diff_target
 from tests.deep_orchestrator.support import (
     _capture_warnings,
     _forbidden_input,
@@ -30,6 +32,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import seed_base_support_files, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
     MakeConfig,
@@ -453,13 +456,15 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     assert any("notes.txt" in prompt for prompt in fix_prompts)
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 
-@pytest.mark.parametrize(("shape", "custom_builder", "expected_count"), [
-    ("normal", False, 7), ("normal", True, 8), ("no-arbiter", False, 7),
-    ("tiny", False, 3), ("shallow", False, 3), ("sharded", False, 20),
-])
-async def test_preflight_notice(
-    multi_stack_target: Path, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, shape: str, custom_builder: bool, expected_count: int,
+async def _case_preflight_notice(
+    multi_stack_target: Path,
+    tiny_diff_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    shape: str,
+    custom_builder: bool,
+    expected_count: int,
 ) -> None:
     """Rendered estimates must follow executed review roles, not obsolete parse calls or raw turns."""
     if custom_builder:
@@ -563,6 +568,37 @@ async def test_preflight_notice(
         assert {current for current, _, _ in progress_calls} == {1, 2, 3, 4, 5}
         assert all(total == 5 for _, total, _ in progress_calls)
 
+
+async def test_preflight_notice(make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, bool, int]] = [
+        ("normal", False, 7),
+        ("normal", True, 8),
+        ("no-arbiter", False, 7),
+        ("tiny", False, 3),
+        ("shallow", False, 3),
+        ("sharded", False, 20),
+    ]
+    case_index = 0
+    for shape, custom_builder, expected_count in cases_0:
+        with (
+            subtests.test(shape=shape, custom_builder=custom_builder, expected_count=expected_count),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            tiny_diff_target = make_tiny_diff_target(scenario.tmp_path)
+            await _case_preflight_notice(
+                multi_stack_target=multi_stack_target,
+                tiny_diff_target=tiny_diff_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                shape=shape,
+                custom_builder=custom_builder,
+                expected_count=expected_count,
+            )
+
+
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-34: --start-at per-stack re-runs ALL per-stack reviews (after priming TTT artifacts)."""
     _silence(monkeypatch)
@@ -604,9 +640,8 @@ async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, mon
     assert len(merge_calls) == 1
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
 
-@pytest.mark.parametrize("empty", [False, True])
-async def test_review_and_resume_ignore_obsolete_sweep_outputs(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, empty: bool,
+async def _case_review_and_resume_ignore_obsolete_sweep_outputs(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, empty: bool
 ) -> None:
     """Current reviewer outputs alone define findings, including on merge resume."""
     _silence(monkeypatch)
@@ -632,3 +667,15 @@ async def test_review_and_resume_ignore_obsolete_sweep_outputs(
     assert all("stale" not in item["description"] for item in resumed)
     report = (multi_stack_target / ".review-output.md").read_text()
     assert "## Coverage" not in report
+
+
+async def test_review_and_resume_ignore_obsolete_sweep_outputs(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for empty in cases_0:
+        with subtests.test(empty=empty), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_review_and_resume_ignore_obsolete_sweep_outputs(
+                multi_stack_target=multi_stack_target, monkeypatch=scenario.monkeypatch, empty=empty
+            )

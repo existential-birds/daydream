@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 import pytest
@@ -46,30 +47,38 @@ def _res(disp: PerFindingDisposition) -> PerFindingResolution:
 MERGED = PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged")
 
 
-def test_run_label_all_accepted_any_merge_state() -> None:
-    for pr in (MERGED, PRMergeSignal(False, None, state="open"), PRMergeSignal(False, None, state="closed")):
-        assert derive_outcome_label(_fp_rubric(pr, [_res("accepted")])) == "accepted"
 
-def test_run_label_all_rejected_any_merge_state() -> None:
-    for pr in (MERGED, PRMergeSignal(False, None, state="closed")):
-        assert derive_outcome_label(_fp_rubric(pr, [_res("rejected")])) == "rejected"
+def test_pr_run_labels_depend_on_dispositions_and_posterior_source(subtests: pytest.Subtests) -> None:
+    """Merge status cannot turn rejected/contested feedback into an accepted run."""
+    cases: list[tuple[list[PerFindingDisposition], PosteriorSource, str, list[PRMergeSignal]]] = [
+        (
+            ["accepted"],
+            "pr_review",
+            "accepted",
+            [MERGED, PRMergeSignal(False, None, state="open"), PRMergeSignal(False, None, state="closed")],
+        ),
+        (["rejected"], "pr_review", "rejected", [MERGED, PRMergeSignal(False, None, state="closed")]),
+        (["accepted", "rejected"], "pr_review", "contested", [MERGED]),
+        (["accepted", "unanswered", "missing"], "pr_review", "contested", [MERGED]),
+        (["accepted"], "none", "unknown", [MERGED]),
+    ]
+    for dispositions, source, expected, merge_states in cases:
+        for pr in merge_states:
+            with subtests.test(dispositions=dispositions, source=source, state=pr.state):
+                rubric = _fp_rubric(pr, [_res(disposition) for disposition in dispositions], source=source)
+                assert derive_outcome_label(rubric) == expected
 
-def test_run_label_mixed_decisive_is_contested() -> None:
-    rub = _fp_rubric(MERGED, [_res("accepted"), _res("rejected")])
-    assert derive_outcome_label(rub) == "contested"
 
-def test_run_label_decisive_with_non_decisive_is_contested() -> None:
-    rub = _fp_rubric(MERGED, [_res("accepted"), _res("unanswered"), _res("missing")])
-    assert derive_outcome_label(rub) == "contested"
-
-@pytest.mark.parametrize(("verdict", "expected"),
-    [pytest.param("applied", "accepted", id="applied-is-accepted"),
-        pytest.param("rejected", "rejected", id="rejected-is-rejected"),
-        pytest.param("unknown", "unknown", id="other-verdict-is-unknown"),
-    ],
-)
-def test_run_label_local_branch(verdict: Literal["applied", "rejected", "unknown"], expected: str) -> None:
-    assert derive_outcome_label(_local_rubric(verdict)) == expected
+def test_run_label_local_branch(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[Literal["applied", "rejected", "unknown"], str]] = [
+        ("applied", "accepted"),
+        ("rejected", "rejected"),
+        ("unknown", "unknown"),
+    ]
+    case_ids_0 = ["applied-is-accepted", "rejected-is-rejected", "other-verdict-is-unknown"]
+    for case_index, (verdict, expected) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], verdict=verdict, expected=expected):
+            assert derive_outcome_label(_local_rubric(verdict)) == expected
 
 
 def _local_rubric(verdict: Literal["applied", "rejected", "unknown"]) -> Rubric:
@@ -80,9 +89,6 @@ def _local_rubric(verdict: Literal["applied", "rejected", "unknown"]) -> Rubric:
     )
 
 
-def test_run_label_no_signal_is_unknown() -> None:
-    rub = _fp_rubric(MERGED, [_res("accepted")], source="none")
-    assert derive_outcome_label(rub) == "unknown"
 
 
 def test_per_finding_non_pr_source_stays_unknown() -> None:

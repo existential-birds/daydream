@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import pytest
 
 from daydream.deep.state import DeepState
@@ -44,20 +46,8 @@ def test_mode_preserves_existing_string_conversion() -> None:
     assert DeepState({"mode": None}).mode == "None"
     assert DeepState({"mode": 3}).mode == "3"
 
-@pytest.mark.parametrize(("key", "property_name", "value", "expected_type"),
-    [("diff", "diff", 1, "str"), ("diff", "diff_or_empty", 1, "str"),
-        ("diff_path", "diff_path", "diff.patch", "Path"), ("tier", "tier", "large", "one of: parallel, single, skip"),
-        ("exploration_dir", "exploration_dir", "exploration", "Path or None"),
-        ("items_file", "items_file", "items.json", "Path"), ("items", "items", {}, "list"),
-        ("diagrams", "diagrams", [], "dict or None"), ("import_graph", "import_graph", [], "dict"),
-        ("intent_authoritative", "intent_authoritative", 1, "bool"), ("changed_files", "changed_files", [], "set"),
-        ("stacks", "stacks", {}, "list"), ("review_coverage", "unfinished_scopes", [], "ReviewCoverage"),
-        ("record_pool", "record_pool", {}, "RecordPool"), ("iteration", "iteration", "1", "int or None"),
-        ("diff_truncation", "diff_truncation", {}, "DeepDiffBoundInfo or None",),
-        ("arbiter_continuation", "arbiter_continuation", {}, "ContinuationToken or None",),
-    ],
-)
-def test_accessors_reject_wrong_outer_types_at_access(key: str, property_name: str, value: object, expected_type: str,
+def _case_accessors_reject_wrong_outer_types_at_access(
+    key: str, property_name: str, value: object, expected_type: str
 ) -> None:
     original = {key: value}
     state = DeepState(original)
@@ -65,6 +55,34 @@ def test_accessors_reject_wrong_outer_types_at_access(key: str, property_name: s
     ):
         getattr(state, property_name)
     assert original[key] is value
+
+
+def test_accessors_reject_wrong_outer_types_at_access(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str, str, object, str]] = [
+        ("diff", "diff", 1, "str"),
+        ("diff", "diff_or_empty", 1, "str"),
+        ("diff_path", "diff_path", "diff.patch", "Path"),
+        ("tier", "tier", "large", "one of: parallel, single, skip"),
+        ("exploration_dir", "exploration_dir", "exploration", "Path or None"),
+        ("items_file", "items_file", "items.json", "Path"),
+        ("items", "items", {}, "list"),
+        ("diagrams", "diagrams", [], "dict or None"),
+        ("import_graph", "import_graph", [], "dict"),
+        ("intent_authoritative", "intent_authoritative", 1, "bool"),
+        ("changed_files", "changed_files", [], "set"),
+        ("stacks", "stacks", {}, "list"),
+        ("review_coverage", "unfinished_scopes", [], "ReviewCoverage"),
+        ("record_pool", "record_pool", {}, "RecordPool"),
+        ("iteration", "iteration", "1", "int or None"),
+        ("diff_truncation", "diff_truncation", {}, "DeepDiffBoundInfo or None"),
+        ("arbiter_continuation", "arbiter_continuation", {}, "ContinuationToken or None"),
+    ]
+    for key, property_name, value, expected_type in cases_0:
+        with subtests.test(key=key, property_name=property_name, value=value, expected_type=expected_type):
+            _case_accessors_reject_wrong_outer_types_at_access(
+                key=key, property_name=property_name, value=value, expected_type=expected_type
+            )
+
 
 def test_wrong_push_receipt_preserves_remote_ci_disabled_semantics() -> None:
     assert DeepState({"push_receipt": object()}).push_receipt is None

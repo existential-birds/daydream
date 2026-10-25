@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from tests.deep_orchestrator.test_review_investigation import candidate, many_fi
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.harness.table_cases import isolated_case
 
 
 class CodexReviewProvider:
@@ -96,9 +97,8 @@ class CodexReviewProvider:
         return process
 
 
-@pytest.mark.parametrize('exhausted', [False, True], ids=['recovered', 'middle-batch-exhausted'])
-async def test_codex_overload_recovery_and_later_independent_batches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exhausted: bool,
+async def _case_codex_overload_recovery_and_later_independent_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exhausted: bool
 ) -> None:
     """Retry the native failure without losing findings or falsely completing failed targets."""
     seeded = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
@@ -139,9 +139,19 @@ async def test_codex_overload_recovery_and_later_independent_batches(
         assert 'CodexError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
 
 
-@pytest.mark.parametrize('process_exit', [False, True], ids=['turn-failed', 'process-exit'])
-async def test_codex_permanent_public_failures_stop_later_independent_batches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_exit: bool,
+async def test_codex_overload_recovery_and_later_independent_batches(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for exhausted in cases_0:
+        with subtests.test(exhausted=exhausted), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_codex_overload_recovery_and_later_independent_batches(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, exhausted=exhausted
+            )
+
+
+async def _case_codex_permanent_public_failures_stop_later_independent_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_exit: bool
 ) -> None:
     """Native permanent failures stop the scope while retaining an earlier admitted finding."""
     seeded = many_file_review(tmp_path, monkeypatch, count=13, docs_count=0)
@@ -176,3 +186,16 @@ async def test_codex_permanent_public_failures_stop_later_independent_batches(
     coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
     diagnostic = coverage['diagnostics']['scopes']['python']
     assert 'authentication_failure' in diagnostic and 'codex login' not in diagnostic
+
+
+async def test_codex_permanent_public_failures_stop_later_independent_batches(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for process_exit in cases_0:
+        with subtests.test(process_exit=process_exit), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_codex_permanent_public_failures_stop_later_independent_batches(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, process_exit=process_exit
+            )

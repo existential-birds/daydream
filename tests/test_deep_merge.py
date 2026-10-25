@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.table_cases import isolated_case
 
 
 def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -34,9 +35,8 @@ def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return dd, records, alternatives
 
 
-@pytest.mark.parametrize("payload", [[], {"issues": []}])
-async def test_empty_merge_host_noop_requires_current_record_envelope(
-    tmp_path: Path, make_work: Callable[..., WorkContext], payload: object,
+async def _case_empty_merge_host_noop_requires_current_record_envelope(
+    tmp_path: Path, make_work: Callable[..., WorkContext], payload: object
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
     records = dd / "stack-python-records.json"
@@ -55,13 +55,21 @@ async def test_empty_merge_host_noop_requires_current_record_envelope(
     assert report.read_text() == DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 
-@pytest.mark.parametrize("input_kind", [
-    "nonempty-records", "nonempty-alternatives", "missing-records", "missing-alternatives",
-    "malformed-records", "malformed-alternatives", "wrong-records-shape", "wrong-alternatives-shape",
-    "envelope-alternatives", "no-record-paths", "custom-strategy", "custom-builder",
-])
-async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str,
+async def test_empty_merge_host_noop_requires_current_record_envelope(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[object] = [[], {"issues": []}]
+    case_index = 0
+    for payload in cases_0:
+        with subtests.test(payload=payload), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_empty_merge_host_noop_requires_current_record_envelope(
+                tmp_path=scenario.tmp_path, make_work=make_work, payload=payload
+            )
+
+
+async def _case_empty_merge_requires_completed_inputs_and_builtin_contract(
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str
 ) -> None:
     dd, records, alternatives = _empty_merge_inputs(tmp_path)
     strategy: str | None = None
@@ -108,6 +116,32 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     assert backend.call_count == 1
     if input_kind == "custom-builder":
         assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
+
+
+async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = [
+        "nonempty-records",
+        "nonempty-alternatives",
+        "missing-records",
+        "missing-alternatives",
+        "malformed-records",
+        "malformed-alternatives",
+        "wrong-records-shape",
+        "wrong-alternatives-shape",
+        "envelope-alternatives",
+        "no-record-paths",
+        "custom-strategy",
+        "custom-builder",
+    ]
+    case_index = 0
+    for input_kind in cases_0:
+        with subtests.test(input_kind=input_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_empty_merge_requires_completed_inputs_and_builtin_contract(
+                tmp_path=scenario.tmp_path, make_work=make_work, monkeypatch=scenario.monkeypatch, input_kind=input_kind
+            )
 
 
 async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(

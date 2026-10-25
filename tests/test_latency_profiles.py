@@ -30,6 +30,7 @@ from daydream.deep.latency import (
     summarize_risk,
     wonder_decision,
 )
+from tests.harness.table_cases import isolated_case
 
 
 def _rec(uid: str, file: str, line: int, severity: str = "medium") -> dict[str, object]:
@@ -59,21 +60,23 @@ def _signals(diff: str, *, files: int = 4, stacks: int = 2) -> DiffSignals:
 
 ROUTINE_DIFF = "diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n+wording\n"
 
-@pytest.mark.parametrize(("diff", "floor"),
-    [
+def test_each_surface_family_forbids_the_cheapest_route(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
         ("+def authenticate(user):\n", "security_surface"),
         ("+    threading.Lock()\n", "concurrency_surface"),
         ("+ALTER TABLE users ADD COLUMN ttl int;\n", "persistence_surface"),
         ("+@app.route('/v1/things')\n", "interface_surface"),
         ("+    migrations/0007_ttl.py\n", "migration_surface"),
-    ],
-)
-def test_each_surface_family_forbids_the_cheapest_route(diff: str, floor: str) -> None:
-    summary = summarize_risk(_signals(diff))
-    assert floor in summary.floors
-    route = route_for("fast", summary)
-    assert route.wonder != "skip" and route.arbiter_effort != "medium"
-    assert route.wonder == "high" and route.arbiter_effort == "high"
+    ]
+    for diff, floor in cases:
+        with subtests.test(diff=diff):
+            summary = summarize_risk(_signals(diff))
+            assert floor in summary.floors
+            route = route_for("fast", summary)
+            assert route.wonder != "skip" and route.arbiter_effort != "medium"
+            assert route.wonder == "high" and route.arbiter_effort == "high"
 
 def test_high_severity_or_contested_findings_forbid_the_cheapest_route() -> None:
     for findings in (FindingSignals(high_severity=True, contested=False), FindingSignals(False, True)):
@@ -145,36 +148,65 @@ def test_wonder_decision_is_pure_over_route_summary_tier_and_fold() -> None:
     assert wonder_decision(route_for("forensic", summary), summary, folded=False, tier="skip").outcome == "skip"
     assert wonder_decision(route_for("balanced", summary), summary, folded=False, tier="skip").outcome == "run"
 
-@pytest.mark.parametrize('fault',
-                         ['identity', 'null-targets', 'id-binding', 'boolean', 'missing-field', 'missing-verdict',
-                          'execution-contract', 'record-evidence'])
-def test_group_cache_rejects_malformed_bound_verdicts(tmp_path: Path, fault: str) -> None:
-    group = PlannedGroup('arbiter-group-0', ('python:1',), 'high', 'policy')
-    verdict: dict[str, Any] = {'arb_id': 1, 'keep': True, 'severity': 'high', 'confidence': 'HIGH',
-                               'description': 'finding', 'rationale': 'verified', 'evidence': 'a.py:1'}
-    _persist_group_verdicts(tmp_path, group, {1: verdict}, contract="execution-contract", records_digest="records")
-    loaded = _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records")
-    assert loaded == {1: verdict}
-    path = arbiter_group_verdicts_path(tmp_path, group.group_id)
-    payload = json.loads(path.read_text())
-    if fault == 'execution-contract':
-        payload['contract'] = 'foreign'
-    elif fault == 'record-evidence':
-        payload['input_digest'] = payload['settled_digest'] = 'foreign'
-    elif fault == 'identity':
-        payload['group_id'] = 'other'
-    elif fault == 'null-targets':
-        payload['target_uids'] = None
-    elif fault == 'id-binding':
-        payload['verdicts']['1']['arb_id'] = 2
-    elif fault == 'boolean':
-        payload['verdicts']['1']['keep'] = 'no'
-    elif fault == 'missing-field':
-        del payload['verdicts']['1']['evidence']
-    else:
-        payload['verdicts'] = {}
-    path.write_text(json.dumps(payload))
-    assert _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records") is None
+def test_group_cache_rejects_malformed_bound_verdicts(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = [
+        "identity",
+        "null-targets",
+        "id-binding",
+        "boolean",
+        "missing-field",
+        "missing-verdict",
+        "execution-contract",
+        "record-evidence",
+    ]
+    for fault in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                group = PlannedGroup("arbiter-group-0", ("python:1",), "high", "policy")
+                verdict: dict[str, Any] = {
+                    "arb_id": 1,
+                    "keep": True,
+                    "severity": "high",
+                    "confidence": "HIGH",
+                    "description": "finding",
+                    "rationale": "verified",
+                    "evidence": "a.py:1",
+                }
+                _persist_group_verdicts(
+                    tmp_path, group, {1: verdict}, contract="execution-contract", records_digest="records"
+                )
+                loaded = _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records")
+                assert loaded == {1: verdict}
+                path = arbiter_group_verdicts_path(tmp_path, group.group_id)
+                payload = json.loads(path.read_text())
+                if fault == "execution-contract":
+                    payload["contract"] = "foreign"
+                elif fault == "record-evidence":
+                    payload["input_digest"] = payload["settled_digest"] = "foreign"
+                elif fault == "identity":
+                    payload["group_id"] = "other"
+                elif fault == "null-targets":
+                    payload["target_uids"] = None
+                elif fault == "id-binding":
+                    payload["verdicts"]["1"]["arb_id"] = 2
+                elif fault == "boolean":
+                    payload["verdicts"]["1"]["keep"] = "no"
+                elif fault == "missing-field":
+                    del payload["verdicts"]["1"]["evidence"]
+                else:
+                    payload["verdicts"] = {}
+                path.write_text(json.dumps(payload))
+                assert (
+                    _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records")
+                    is None
+                )
 
 
 @pytest.mark.parametrize('change', ['model', 'effort', 'schema'])

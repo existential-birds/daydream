@@ -251,12 +251,15 @@ def test_more_output_or_changed_bytes_alone_is_not_progress() -> None:
     assert job.next_action() == RepairAction.BLOCKED
 
 
-@pytest.mark.parametrize(("raw_value", "expected"), [(-5, 1800.0), ("nonsense", 1800.0),
-                                                      (0.0, 0.0), (900.0, 900.0)])
-def test_invalid_job_limits_degrade_to_the_default(raw_value: object, expected: float) -> None:
+def test_invalid_job_limits_degrade_to_the_default(
+    subtests: pytest.Subtests,
+) -> None:
     """The existing resolver family degrades invalid input to the default."""
-    cfg = _limit_config(repair_execution_wall_s=raw_value)
-    assert _resolve_non_negative_float(cfg, "repair_execution_wall_s", 1800.0) == expected
+    cases: list[tuple[object, float]] = [(-5, 1800.0), ("nonsense", 1800.0), (0.0, 0.0), (900.0, 900.0)]
+    for raw_value, expected in cases:
+        with subtests.test(expected=expected):
+            cfg = _limit_config(repair_execution_wall_s=raw_value)
+            assert _resolve_non_negative_float(cfg, "repair_execution_wall_s", 1800.0) == expected
 
 
 def test_execution_count_ceiling_is_exhausted_not_blocked() -> None:

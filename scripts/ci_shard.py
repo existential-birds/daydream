@@ -141,6 +141,15 @@ def pytest_testnodedown(node: Any, error: Any) -> None:
 def pytest_runtest_logreport(report: Any) -> None:
     if not _STATE:
         return
+    from _pytest.subtests import SubtestReport
+
+    # Native subtests emit extra call reports with their parent's node ID.
+    # Only the parent owns execution phases; a failed row still rejects the
+    # receipt even if a plugin accidentally leaves the parent report passing.
+    if isinstance(report, SubtestReport):
+        if report.failed:
+            _STATE["errors"].append(f"failed subtest: {report.nodeid}")
+        return
     phases = _STATE["reports"].setdefault(report.nodeid, {})
     if report.when in phases:
         _STATE["errors"].append(f"duplicate {report.when} report: {report.nodeid}")

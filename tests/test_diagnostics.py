@@ -88,18 +88,22 @@ def test_redaction_precedes_head_tail_bound() -> None:
     assert "[REDACTED" in out
     assert out.rstrip().endswith("tail") or "tail" in out
 
-@pytest.mark.parametrize("char", ["x", "é", "漢", "😀"], ids=["ascii", "2-byte", "3-byte", "4-byte"])
-def test_large_diagnostics_capped_with_single_marker(char: str) -> None:
-    outer = RuntimeError("HEAD-SENTINEL " + char * 200_000)
-    inner = git_ops.GitError("root cause tail: git reflog expired")
-    outer.__cause__ = inner
-    out = format_verbose_exception(outer)
-    assert len(out.encode("utf-8")) <= 65536
-    assert out.count("[VERBOSE_DIAGNOSTIC_TRUNCATED]") == 1
-    assert out.startswith("Traceback") or "HEAD-SENTINEL" in out
-    assert "root cause tail" in out
-    assert out.index("HEAD-SENTINEL") < out.index("[VERBOSE_DIAGNOSTIC_TRUNCATED]")
-    assert out.index("[VERBOSE_DIAGNOSTIC_TRUNCATED]") < out.index("root cause tail")
+def test_large_diagnostics_capped_with_single_marker(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["x", "é", "漢", "😀"]
+    for char in cases:
+        with subtests.test(char=char):
+            outer = RuntimeError("HEAD-SENTINEL " + char * 200_000)
+            inner = git_ops.GitError("root cause tail: git reflog expired")
+            outer.__cause__ = inner
+            out = format_verbose_exception(outer)
+            assert len(out.encode("utf-8")) <= 65536
+            assert out.count("[VERBOSE_DIAGNOSTIC_TRUNCATED]") == 1
+            assert out.startswith("Traceback") or "HEAD-SENTINEL" in out
+            assert "root cause tail" in out
+            assert out.index("HEAD-SENTINEL") < out.index("[VERBOSE_DIAGNOSTIC_TRUNCATED]")
+            assert out.index("[VERBOSE_DIAGNOSTIC_TRUNCATED]") < out.index("root cause tail")
 
 def test_formatter_failure_returns_only_unavailable_marker(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.setattr("daydream.observability.privacy.PrivacyPolicy.text",

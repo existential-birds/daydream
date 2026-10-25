@@ -41,6 +41,7 @@ from daydream.runner import _resolve_backend
 from daydream.test_execution import MissingTestCommandError, canonical_test_command
 from daydream.workspace import WorkContext
 from tests.harness.review_result import review_coverage
+from tests.harness.table_cases import isolated_case
 
 
 def _routine_signals() -> DiffSignals:
@@ -139,18 +140,28 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(
     assert _codex_backend(cfg, "fix").reasoning_effort == "low"
 
 
-@pytest.mark.parametrize("phase", ["wonder", "arbiter"])
-def test_pi_review_effort_default_does_not_enable_latency_or_group_overrides(tmp_path: Path, phase: str) -> None:
-    file_config = DaydreamFileConfig()
-    cfg = RunConfig(target=str(tmp_path), backend="pi", file_config=file_config)
-    cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
-    backend = _resolve_backend(cfg, phase, effort_override="xhigh")
-    assert isinstance(backend, PiBackend)
-    assert backend.reasoning_effort is None
-    file_config.phases[phase] = {"reasoning_effort": "low"}
-    pinned = _resolve_backend(cfg, phase, effort_override="xhigh")
-    assert isinstance(pinned, PiBackend)
-    assert pinned.reasoning_effort == "low"
+def test_pi_review_effort_default_does_not_enable_latency_or_group_overrides(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["wonder", "arbiter"]
+    for phase in cases:
+        row_index += 1
+        with subtests.test(phase=phase):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                file_config = DaydreamFileConfig()
+                cfg = RunConfig(target=str(tmp_path), backend="pi", file_config=file_config)
+                cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
+                backend = _resolve_backend(cfg, phase, effort_override="xhigh")
+                assert isinstance(backend, PiBackend)
+                assert backend.reasoning_effort is None
+                file_config.phases[phase] = {"reasoning_effort": "low"}
+                pinned = _resolve_backend(cfg, phase, effort_override="xhigh")
+                assert isinstance(pinned, PiBackend)
+                assert pinned.reasoning_effort == "low"
 
 
 def test_backend_cache_splits_on_table_default_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -24,6 +24,7 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
+from tests.harness.table_cases import isolated_case
 
 SCHEMA = {"type": "object", "properties": {"findings": {"type": "array", "items": {"type": "string"}}},
     "required": ["findings"], "additionalProperties": False,
@@ -47,23 +48,36 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
 
-@pytest.mark.parametrize(('base_s', 'invocation_s', 'expected_s'), [
-    (2, 20, 8), (9, 20, 12), (9, 5, 5), (0, 20, 0),
-])
 def test_explicit_review_deadline_remains_exact_for_large_diff(
-    monkeypatch: pytest.MonkeyPatch, base_s: int, invocation_s: int, expected_s: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A configured local base scales once while explicit pipeline and caller clamps stay exact."""
-    clock = FakeClock().install(monkeypatch)
-    large = "+line\n" * 6_500
-    with review_deadline_scope(15, diff=large, scale_deadline=False):
-        assert review_deadline(discovery=False) == clock.monotonic() + 15
-        assert review_deadline(discovery=True) == clock.monotonic() + 12
-        budget = ReviewInvestigationBudget.from_limits(
-            ReviewLimits(investigation_s=base_s), deadline=clock.monotonic() + invocation_s)
-        assert budget.limits.investigation_s == base_s * 4
-        assert budget.limits.tool_calls == budget.remaining_tool_calls == 192
-        assert budget.deadline == clock.monotonic() + expected_s
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[int, int, int]] = [
+        (2, 20, 8),
+        (9, 20, 12),
+        (9, 5, 5),
+        (0, 20, 0),
+    ]
+    for base_s, invocation_s, expected_s in cases:
+        row_index += 1
+        with subtests.test(base_s=base_s):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                clock = FakeClock().install(monkeypatch)
+                large = "+line\n" * 6_500
+                with review_deadline_scope(15, diff=large, scale_deadline=False):
+                    assert review_deadline(discovery=False) == clock.monotonic() + 15
+                    assert review_deadline(discovery=True) == clock.monotonic() + 12
+                    budget = ReviewInvestigationBudget.from_limits(
+                        ReviewLimits(investigation_s=base_s), deadline=clock.monotonic() + invocation_s
+                    )
+                    assert budget.limits.investigation_s == base_s * 4
+                    assert budget.limits.tool_calls == budget.remaining_tool_calls == 192
+                    assert budget.deadline == clock.monotonic() + expected_s
 
 async def test_large_review_can_complete_after_old_time_and_tool_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -222,33 +236,50 @@ async def test_pre_rendered_inputs_become_captured_bytes_during_finalization(tmp
     assert "read only these exact files" not in backend.prompts[1]
     assert str(artifact) not in backend.prompts[1]
 
-@pytest.mark.parametrize("schema", [None, SCHEMA])
 async def test_finalization_contract_excludes_discovery_and_supports_output_kinds(
-    tmp_path: Path, schema: dict[str, Any] | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-
-    backend = ScriptedBackend(script=[
-        [TextEvent(text="SPECULATIVE_NOTE"), ToolStartEvent(id="extra", name="read", input={})],
-        [ResultEvent(structured_output={"findings": []}, continuation=None)] if schema else
-        [TextEvent(text="Incomplete exploration: supplied map covers src.py only.")],
-    ])
-    result = await run_agent(backend, tmp_path, "DISCOVERY_STRATEGY: run tests, search upstream, read every file",
-        phase=DaydreamPhase.DEEP, output_schema=schema,
-        finalization_context=FinalizationContext(
-            task="Produce the requested map" if schema is None else "Review assigned code",
-            assigned_files=("src.py",), output_semantics="Only the assigned deliverable",
-            supplied_context=(("diff", "+ return 1"),),
-        ), review_limits=ReviewLimits(10, 2, 0), progress_callback=lambda _: None,
-    )
-    assert result[2] == "tool_call_budget_exceeded"
-    prompt = backend.last_prompt
-    assert "DISCOVERY_STRATEGY" not in prompt
-    assert "Investigation allowance" not in prompt
-    assert "SPECULATIVE_NOTE" not in prompt
-    assert "+ return 1" in prompt
-    assert "src.py" in prompt
-    assert ("plain-text deliverable" if schema is None else '"additionalProperties": false') in prompt
-    assert backend.max_turns[-1] is None
+    table_root = tmp_path
+    row_index = 0
+    cases: list[dict[str, Any] | None] = [None, SCHEMA]
+    for schema in cases:
+        row_index += 1
+        with subtests.test(schema=schema):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                backend = ScriptedBackend(
+                    script=[
+                        [TextEvent(text="SPECULATIVE_NOTE"), ToolStartEvent(id="extra", name="read", input={})],
+                        [ResultEvent(structured_output={"findings": []}, continuation=None)]
+                        if schema
+                        else [TextEvent(text="Incomplete exploration: supplied map covers src.py only.")],
+                    ]
+                )
+                result = await run_agent(
+                    backend,
+                    tmp_path,
+                    "DISCOVERY_STRATEGY: run tests, search upstream, read every file",
+                    phase=DaydreamPhase.DEEP,
+                    output_schema=schema,
+                    finalization_context=FinalizationContext(
+                        task="Produce the requested map" if schema is None else "Review assigned code",
+                        assigned_files=("src.py",),
+                        output_semantics="Only the assigned deliverable",
+                        supplied_context=(("diff", "+ return 1"),),
+                    ),
+                    review_limits=ReviewLimits(10, 2, 0),
+                    progress_callback=lambda _: None,
+                )
+                assert result[2] == "tool_call_budget_exceeded"
+                prompt = backend.last_prompt
+                assert "DISCOVERY_STRATEGY" not in prompt
+                assert "Investigation allowance" not in prompt
+                assert "SPECULATIVE_NOTE" not in prompt
+                assert "+ return 1" in prompt
+                assert "src.py" in prompt
+                assert ("plain-text deliverable" if schema is None else '"additionalProperties": false') in prompt
+                assert backend.max_turns[-1] is None
 
 async def test_time_shorter_than_reserve_only_dispatches_finalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

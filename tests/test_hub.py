@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +11,8 @@ from typing import Any
 import httpx2
 import pytest
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, RemoteEntryNotFoundError
+
+from tests.harness.table_cases import isolated_case
 
 REPO = "test-user/private-trajectories"
 HEAD = "a" * 40
@@ -66,29 +68,37 @@ def test_private_revision_is_a_private_dataset_pin(monkeypatch: pytest.MonkeyPat
     assert api.calls == [("repo_info", {"repo_id": REPO, "repo_type": "dataset", "revision": "main"})]
 
 
-@pytest.mark.parametrize("visibility", [False, None, "private", 1])
-def test_public_or_unconfirmed_destinations_are_rejected(
-    monkeypatch: pytest.MonkeyPatch, visibility: object,
-) -> None:
-    from daydream.hub import HubError
+def test_public_or_unconfirmed_destinations_are_rejected(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[object] = [False, None, "private", 1]
+    for case_index, visibility in enumerate(cases):
+        with subtests.test(visibility=visibility):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                from daydream.hub import HubError
 
-    client, api = install_sdk(monkeypatch)
-    api.info.private = visibility
-    with pytest.raises(HubError) as failure:
-        client.private_revision(REPO)
-    assert failure.value.code == "public_destination"
-    assert "SECRET" not in str(failure.value)
+                client, api = install_sdk(monkeypatch)
+                api.info.private = visibility
+                with pytest.raises(HubError) as failure:
+                    client.private_revision(REPO)
+                assert failure.value.code == "public_destination"
+                assert "SECRET" not in str(failure.value)
 
 
-@pytest.mark.parametrize("revision", ["main", "a" * 39, "A" * 40, None])
-def test_invalid_repository_pins_are_rejected(monkeypatch: pytest.MonkeyPatch, revision: object) -> None:
-    from daydream.hub import HubError
+def test_invalid_repository_pins_are_rejected(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[object] = ["main", "a" * 39, "A" * 40, None]
+    for case_index, revision in enumerate(cases):
+        with subtests.test(revision=revision):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                from daydream.hub import HubError
 
-    client, api = install_sdk(monkeypatch)
-    api.info.sha = revision
-    with pytest.raises(HubError) as failure:
-        client.private_revision(REPO)
-    assert failure.value.code == "invalid_revision"
+                client, api = install_sdk(monkeypatch)
+                api.info.sha = revision
+                with pytest.raises(HubError) as failure:
+                    client.private_revision(REPO)
+                assert failure.value.code == "invalid_revision"
 
 
 def test_commit_installs_complete_bytes_in_one_guarded_dataset_commit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,24 +116,28 @@ def test_commit_installs_complete_bytes_in_one_guarded_dataset_commit(monkeypatc
     assert len(api.calls) == 1
 
 
-@pytest.mark.parametrize("status", [401, 403, 404, 409, 500, 503])
-def test_network_failures_never_expose_payloads_or_claim_conflicts(
-    monkeypatch: pytest.MonkeyPatch, status: int,
-) -> None:
-    from daydream.hub import HubError
+def test_network_failures_never_expose_payloads_or_claim_conflicts(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[int] = [401, 403, 404, 409, 500, 503]
+    for case_index, status in enumerate(cases):
+        with subtests.test(status=status):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                from daydream.hub import HubError
 
-    client, api = install_sdk(monkeypatch)
-    api.error = http_error(status)
-    actions: list[Callable[[], Any]] = [
-        lambda: client.private_revision(REPO), lambda: client.read_file(REPO, "manifest.json", HEAD),
-        lambda: client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD),
-    ]
-    for action in actions:
-        with pytest.raises(HubError) as failure:
-            action()
-        assert failure.value.code == "network_failed"
-        assert str(failure.value) == "network_failed"
-        assert failure.value.__cause__ is None
+                client, api = install_sdk(monkeypatch)
+                api.error = http_error(status)
+                actions: list[Callable[[], Any]] = [
+                    lambda: client.private_revision(REPO),
+                    lambda: client.read_file(REPO, "manifest.json", HEAD),
+                    lambda: client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD),
+                ]
+                for action in actions:
+                    with pytest.raises(HubError) as failure:
+                        action()
+                    assert failure.value.code == "network_failed"
+                    assert str(failure.value) == "network_failed"
+                    assert failure.value.__cause__ is None
 
 
 def test_only_http_precondition_failed_is_a_commit_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,20 +181,24 @@ def test_local_cache_miss_never_looks_like_an_absent_remote_manifest(monkeypatch
         client.read_file(REPO, "manifest.json", HEAD)
 
 
-@pytest.mark.parametrize("operation", ["read", "commit"])
-@pytest.mark.parametrize("revision", ["main", "a" * 39, "A" * 40])
-def test_mutable_or_noncanonical_pins_never_reach_the_network(
-    monkeypatch: pytest.MonkeyPatch, operation: str, revision: str,
-) -> None:
-    from daydream.hub import HubError
+def test_mutable_or_noncanonical_pins_never_reach_the_network(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases_0: Sequence[str] = ["main", "a" * 39, "A" * 40]
+    cases_1: Sequence[str] = ["read", "commit"]
+    for case_index_0, revision in enumerate(cases_0):
+        for case_index_1, operation in enumerate(cases_1):
+            with subtests.test(revision=revision, operation=operation):
+                with isolated_case(case_root, str((case_index_0 * 1) + (case_index_1 * 1000))) as sandbox:
+                    monkeypatch = sandbox.monkeypatch
+                    from daydream.hub import HubError
 
-    client, api = install_sdk(monkeypatch)
-    with pytest.raises(HubError, match="^invalid_revision$"):
-        if operation == "read":
-            client.read_file(REPO, "manifest.json", revision)
-        else:
-            client.commit(REPO, {"manifest.json": b"{}\n"}, revision)
-    assert api.calls == []
+                    client, api = install_sdk(monkeypatch)
+                    with pytest.raises(HubError, match="^invalid_revision$"):
+                        if operation == "read":
+                            client.read_file(REPO, "manifest.json", revision)
+                        else:
+                            client.commit(REPO, {"manifest.json": b"{}\n"}, revision)
+                    assert api.calls == []
 
 
 def test_invalid_commit_response_never_acknowledges_publication(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -206,21 +224,25 @@ def test_constructor_412_is_not_a_remote_commit_conflict(monkeypatch: pytest.Mon
     assert api.calls == []
 
 
-@pytest.mark.parametrize("kind", ["missing", "directory", "dangling_symlink"])
-def test_unreadable_or_nonregular_cache_results_fail_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str,
-) -> None:
-    from daydream.hub import HubError
+def test_unreadable_or_nonregular_cache_results_fail_closed(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["missing", "directory", "dangling_symlink"]
+    for case_index, kind in enumerate(cases):
+        with subtests.test(kind=kind):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                from daydream.hub import HubError
 
-    client, api = install_sdk(monkeypatch)
-    source = tmp_path / "source"
-    if kind == "directory":
-        source.mkdir()
-    elif kind == "dangling_symlink":
-        source.symlink_to(tmp_path / "absent")
-    api.download = source
-    with pytest.raises(HubError, match="^network_failed$"):
-        client.read_file(REPO, "manifest.json", HEAD)
+                client, api = install_sdk(monkeypatch)
+                source = tmp_path / "source"
+                if kind == "directory":
+                    source.mkdir()
+                elif kind == "dangling_symlink":
+                    source.symlink_to(tmp_path / "absent")
+                api.download = source
+                with pytest.raises(HubError, match="^network_failed$"):
+                    client.read_file(REPO, "manifest.json", HEAD)
 
 
 def test_missing_extra_reports_a_sanitized_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:

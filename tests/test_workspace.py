@@ -43,6 +43,7 @@ from tests.harness.git_helpers import (
     init_repo as _init_repo,
     install_diff_base_git_shim,
 )
+from tests.harness.table_cases import isolated_case
 
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,120 +236,149 @@ async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: P
     assert _git(repo, "rev-parse", "origin/main") != new_origin_sha
     assert not any("worktree " in line for line in _git(repo, "worktree", "list", "--porcelain").splitlines()[1:])
 
-@pytest.mark.parametrize("namespace,name,lock_state,broken,residue", [
-    pytest.param("worktrees", "run-old-reanchor", None, False, False, id="unlocked-reanchor"),
-    pytest.param("worktrees", "run-old-reanchor", "live", False, False, id="live-reanchor"),
-    pytest.param("worktrees", "run-old-reanchor", None, True, False, id="registry-listed-broken-git-chain"),
-    pytest.param("worktrees", "custom-named-worktree", "live", False, False, id="live-custom-name"),
-    pytest.param("audit", "run-crashed", "stale", False, False, id="stale-audit-lock"),
-    pytest.param("worktrees", "run-known-reanchor", None, False, True, id="registered-and-unknown-residue"),
-])
 async def test_open_workspace_rejects_public_registered_worktrees_without_mutation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, namespace: str, name: str,
-    lock_state: str | None, broken: bool, residue: bool,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    checkout = repo / ".daydream" / namespace / name
-    git_ops.worktree_add(repo, checkout, "main", detach=True, lock_reason=lock_state)
-    lock = git_ops.git_dir(checkout) / "locked"
-    if lock_state == "stale":
-        os.utime(lock, (0, 0))
-    lock_bytes = lock.read_bytes() if lock.exists() else None
-    if broken:
-        (checkout / ".git").unlink()
-    canary = checkout / "operator.bin"
-    canary.write_bytes(b"registered operator bytes\x00")
-    unknown = checkout.parent / "operator-notes" / "retained.txt"
-    if residue:
-        unknown.parent.mkdir()
-        unknown.write_bytes(b"retain me")
-    before = _git(repo, "worktree", "list", "--porcelain")
-    _forbid_default_private_base(monkeypatch)
-    monkeypatch.setattr(git_ops, "worktree_lock_mtime", lambda _path: pytest.fail("unsupported storage was probed"))
-    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
-        async with _open(repo, owner):
-            pass
-    assert checkout.is_dir() and checkout.parent.is_dir()
-    assert canary.read_bytes() == b"registered operator bytes\x00"
-    assert (lock.read_bytes() if lock.exists() else None) == lock_bytes
-    assert (checkout / ".git").exists() is not broken
-    if residue:
-        assert unknown.read_bytes() == b"retain me"
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str, str | None, bool, bool]] = [
+        ("worktrees", "run-old-reanchor", None, False, False),
+        ("worktrees", "run-old-reanchor", "live", False, False),
+        ("worktrees", "run-old-reanchor", None, True, False),
+        ("worktrees", "custom-named-worktree", "live", False, False),
+        ("audit", "run-crashed", "stale", False, False),
+        ("worktrees", "run-known-reanchor", None, False, True),
+    ]
+    for namespace, name, lock_state, broken, residue in cases:
+        row_index += 1
+        with subtests.test(namespace=namespace):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                repo, _ = _make_repo_with_origin(tmp_path)
+                owner = _private_owner(repo, tmp_path)
+                checkout = repo / ".daydream" / namespace / name
+                git_ops.worktree_add(repo, checkout, "main", detach=True, lock_reason=lock_state)
+                lock = git_ops.git_dir(checkout) / "locked"
+                if lock_state == "stale":
+                    os.utime(lock, (0, 0))
+                lock_bytes = lock.read_bytes() if lock.exists() else None
+                if broken:
+                    (checkout / ".git").unlink()
+                canary = checkout / "operator.bin"
+                canary.write_bytes(b"registered operator bytes\x00")
+                unknown = checkout.parent / "operator-notes" / "retained.txt"
+                if residue:
+                    unknown.parent.mkdir()
+                    unknown.write_bytes(b"retain me")
+                before = _git(repo, "worktree", "list", "--porcelain")
+                _forbid_default_private_base(monkeypatch)
+                monkeypatch.setattr(
+                    git_ops, "worktree_lock_mtime", lambda _path: pytest.fail("unsupported storage was probed")
+                )
+                with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
+                    async with _open(repo, owner):
+                        pass
+                assert checkout.is_dir() and checkout.parent.is_dir()
+                assert canary.read_bytes() == b"registered operator bytes\x00"
+                assert (lock.read_bytes() if lock.exists() else None) == lock_bytes
+                assert (checkout / ".git").exists() is not broken
+                if residue:
+                    assert unknown.read_bytes() == b"retain me"
+                assert _git(repo, "worktree", "list", "--porcelain") == before
+                assert not (owner.operational_state_root / "operational").exists()
 
-@pytest.mark.parametrize("namespace_shape", ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],
-)
-async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tmp_path: Path, namespace_shape: str,
+async def test_open_workspace_rejects_linked_public_namespace_before_mutation(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    outside = tmp_path / "outside"
-    name = "run-outside-reanchor"
-    if namespace_shape.startswith("ancestor"):
-        external = outside / "worktrees" / name
-    else:
-        external = outside / name
-    git_ops.worktree_add(repo, external, "main", detach=True)
-    canary = external / "operator.bin"
-    canary.write_bytes(b"outside operator bytes\x00")
-    if namespace_shape == "ancestor-symlink":
-        (repo / ".daydream").symlink_to(outside, target_is_directory=True)
-    elif namespace_shape == "terminal-symlink":
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").symlink_to(outside, target_is_directory=True,)
-    elif namespace_shape == "ancestor-file":
-        (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
-    else:
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").write_bytes(b"operator namespace bytes\x00")
-    before = _git(repo, "worktree", "list", "--porcelain")
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"]
+    for namespace_shape in cases:
+        row_index += 1
+        with subtests.test(namespace_shape=namespace_shape):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo, _ = _make_repo_with_origin(tmp_path)
+                owner = _private_owner(repo, tmp_path)
+                outside = tmp_path / "outside"
+                name = "run-outside-reanchor"
+                if namespace_shape.startswith("ancestor"):
+                    external = outside / "worktrees" / name
+                else:
+                    external = outside / name
+                git_ops.worktree_add(repo, external, "main", detach=True)
+                canary = external / "operator.bin"
+                canary.write_bytes(b"outside operator bytes\x00")
+                if namespace_shape == "ancestor-symlink":
+                    (repo / ".daydream").symlink_to(outside, target_is_directory=True)
+                elif namespace_shape == "terminal-symlink":
+                    (repo / ".daydream").mkdir()
+                    (repo / ".daydream" / "worktrees").symlink_to(
+                        outside,
+                        target_is_directory=True,
+                    )
+                elif namespace_shape == "ancestor-file":
+                    (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
+                else:
+                    (repo / ".daydream").mkdir()
+                    (repo / ".daydream" / "worktrees").write_bytes(b"operator namespace bytes\x00")
+                before = _git(repo, "worktree", "list", "--porcelain")
 
-    with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
-        async with _open(repo, owner):
-            pass
+                with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
+                    async with _open(repo, owner):
+                        pass
 
-    assert canary.read_bytes() == b"outside operator bytes\x00"
-    if namespace_shape.endswith("file"):
-        unsafe_file = repo / ".daydream"
-        if namespace_shape == "terminal-file":
-            unsafe_file /= "worktrees"
-        assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational" / name).exists()
-
-
+                assert canary.read_bytes() == b"outside operator bytes\x00"
+                if namespace_shape.endswith("file"):
+                    unsafe_file = repo / ".daydream"
+                    if namespace_shape == "terminal-file":
+                        unsafe_file /= "worktrees"
+                    assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
+                assert _git(repo, "worktree", "list", "--porcelain") == before
+                assert not (owner.operational_state_root / "operational" / name).exists()
 
 
-@pytest.mark.parametrize("contents", [
-    pytest.param({"worktrees/run-old-reanchor/retained.txt": b"operator bytes\n"}, id="unregistered-directory"),
-    pytest.param({"worktrees": None, "audit": None}, id="empty-operational-roots"),
-    pytest.param({"worktrees/run-old-reanchor/retained.txt": b"stray operator bytes",
-                  "audit/notes.txt": b"not a worktree"}, id="unrecognized-mixed-residue"),
-])
+
+
 async def test_open_workspace_rejects_public_operational_residue_without_removing_operator_data(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: dict[str, bytes | None],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    owner = _private_owner(repo, tmp_path)
-    for relative, data in contents.items():
-        path = repo / ".daydream" / relative
-        if data is None:
-            path.mkdir(parents=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-    before = _git(repo, "worktree", "list", "--porcelain")
-    _forbid_default_private_base(monkeypatch)
-    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
-        async with _open(repo, owner):
-            pass
-    for relative, data in contents.items():
-        path = repo / ".daydream" / relative
-        assert path.is_dir() if data is None else path.read_bytes() == data
-    assert _git(repo, "worktree", "list", "--porcelain") == before
-    assert not (owner.operational_state_root / "operational").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[dict[str, bytes | None]] = [
+        {"worktrees/run-old-reanchor/retained.txt": b"operator bytes\n"},
+        {"worktrees": None, "audit": None},
+        {"worktrees/run-old-reanchor/retained.txt": b"stray operator bytes", "audit/notes.txt": b"not a worktree"},
+    ]
+    for contents in cases:
+        row_index += 1
+        with subtests.test(contents=contents):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                repo, _ = _make_repo_with_origin(tmp_path)
+                owner = _private_owner(repo, tmp_path)
+                for relative, data in contents.items():
+                    path = repo / ".daydream" / relative
+                    if data is None:
+                        path.mkdir(parents=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
+                before = _git(repo, "worktree", "list", "--porcelain")
+                _forbid_default_private_base(monkeypatch)
+                with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
+                    async with _open(repo, owner):
+                        pass
+                for relative, data in contents.items():
+                    path = repo / ".daydream" / relative
+                    assert path.is_dir() if data is None else path.read_bytes() == data
+                assert _git(repo, "worktree", "list", "--porcelain") == before
+                assert not (owner.operational_state_root / "operational").exists()
 
 
 
@@ -513,68 +543,91 @@ def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) ->
     assert ".env" in rel
     assert (dest / ".env").read_text() == "SECRET=1\n"
 
-@pytest.mark.parametrize("source_kind", ["config", "extra"])
-@pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
-def test_copy_rejects_absolute_and_parent_entries_before_copy(tmp_path: Path, source_kind: str, escape_kind: str,
+def test_copy_rejects_absolute_and_parent_entries_before_copy(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env")
-    (repo / ".env").write_text("E=1\n")
-    outside = tmp_path / "outside.txt"
-    outside.write_text("KEEP\n")
-    entry = "../outside.txt" if escape_kind == "parent" else str(outside)
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[str] = ["parent", "absolute"]
+    for escape_kind in cases_1:
+        cases_2: list[str] = ["config", "extra"]
+        for source_kind in cases_2:
+            row_index += 1
+            with subtests.test(escape_kind=escape_kind, source_kind=source_kind):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    repo, _ = _make_repo_with_origin(tmp_path)
+                    _ignore(repo, ".env")
+                    (repo / ".env").write_text("E=1\n")
+                    outside = tmp_path / "outside.txt"
+                    outside.write_text("KEEP\n")
+                    entry = "../outside.txt" if escape_kind == "parent" else str(outside)
 
-    if source_kind == "config":
-        (repo / "pyproject.toml").write_text(f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n')
-        extra = None
-    else:
-        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
-        extra = [Path(entry)]
+                    if source_kind == "config":
+                        (repo / "pyproject.toml").write_text(f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n')
+                        extra = None
+                    else:
+                        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
+                        extra = [Path(entry)]
 
-    dest = _dest(tmp_path)
+                    dest = _dest(tmp_path)
 
-    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
-        copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
+                    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
+                        copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
 
-    # Fail-closed: the valid earlier ".env" entry was NOT copied.
-    assert not (dest / ".env").exists()
-    # The external file was never read or modified.
-    assert outside.read_text() == "KEEP\n"
+                    # Fail-closed: the valid earlier ".env" entry was NOT copied.
+                    assert not (dest / ".env").exists()
+                    # The external file was never read or modified.
+                    assert outside.read_text() == "KEEP\n"
 
-@pytest.mark.parametrize("root_kind", ["source", "destination"])
-def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir()
-    secret = outside_dir / "secret.txt"
-    secret.write_text("KEEP\n")
-    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
-    (repo / "sub").mkdir()
+def test_copy_rejects_resolved_symlink_escape(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["source", "destination"]
+    for root_kind in cases:
+        row_index += 1
+        with subtests.test(root_kind=root_kind):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo, _ = _make_repo_with_origin(tmp_path)
+                outside_dir = tmp_path / "outside"
+                outside_dir.mkdir()
+                secret = outside_dir / "secret.txt"
+                secret.write_text("KEEP\n")
+                (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
+                (repo / "sub").mkdir()
 
-    dest = _dest(tmp_path)
-    (dest / "sub").mkdir()
+                dest = _dest(tmp_path)
+                (dest / "sub").mkdir()
 
-    if root_kind == "source":
-        # The SOURCE-side "sub" is a symlink escaping the checkout. Do not
-        # write the real nested file first -- the directory is replaced by the
-        # symlink below.
-        (repo / "sub").rmdir()
-        (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "source"
-    else:
-        # The source has a real nested file (passes source containment); the
-        # DESTINATION-side "sub" is a symlink escaping the worktree.
-        (repo / "sub" / "leak.txt").write_text("real\n")
-        (dest / "sub").rmdir()
-        (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "destination"
+                if root_kind == "source":
+                    # The SOURCE-side "sub" is a symlink escaping the checkout. Do not
+                    # write the real nested file first -- the directory is replaced by the
+                    # symlink below.
+                    (repo / "sub").rmdir()
+                    (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
+                    root_label = "source"
+                else:
+                    # The source has a real nested file (passes source containment); the
+                    # DESTINATION-side "sub" is a symlink escaping the worktree.
+                    (repo / "sub" / "leak.txt").write_text("real\n")
+                    (dest / "sub").rmdir()
+                    (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
+                    root_label = "destination"
 
-    with pytest.raises(WorkspaceCopyPathError, match=f"resolves outside the {root_label} worktree",):
-        copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
+                with pytest.raises(
+                    WorkspaceCopyPathError,
+                    match=f"resolves outside the {root_label} worktree",
+                ):
+                    copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
 
-    # Nothing was written into the escaped directory.
-    assert not (outside_dir / "leak.txt").exists()
-    assert secret.read_text() == "KEEP\n"
+                # Nothing was written into the escaped directory.
+                assert not (outside_dir / "leak.txt").exists()
+                assert secret.read_text() == "KEEP\n"
 
 def test_copy_allows_source_symlink_resolving_inside_source(tmp_path: Path,) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -724,29 +777,42 @@ async def test_audit_workspace_rejects_recorded_head_race_before_snapshot(tmp_pa
     assert _audit_source_signature(repo) == before
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["malformed-head", "remove-after-preference"])
 async def test_audit_workspace_redacts_diff_base_probe_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["malformed-head", "remove-after-preference"]
+    for mode in cases:
+        row_index += 1
+        with subtests.test(mode=mode):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                repo, _ = _make_repo_with_origin(tmp_path)
+                head = _git(repo, "rev-parse", "HEAD")
+                before = _audit_source_signature(repo)
 
-    repo, _ = _make_repo_with_origin(tmp_path)
-    head = _git(repo, "rev-parse", "HEAD")
-    before = _audit_source_signature(repo)
+                with install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head) as shim_dir:
+                    with pytest.raises(
+                        git_ops.SnapshotPreparationError,
+                        match=r"^cannot resolve branch-focus diff merge-base$",
+                    ) as exc_info:
+                        async with open_audit_workspace(
+                            repo,
+                            run_id="redacted-base-probe",
+                            branch_base_ref="main",
+                            expected_head_sha=head,
+                        ):
+                            pytest.fail("failed source probe yielded an audit workspace")
 
-    with install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head) as shim_dir:
-        with pytest.raises(git_ops.SnapshotPreparationError, match=r"^cannot resolve branch-focus diff merge-base$",
-        ) as exc_info:
-            async with open_audit_workspace(
-                repo, run_id="redacted-base-probe", branch_base_ref="main", expected_head_sha=head,
-            ):
-                pytest.fail("failed source probe yielded an audit workspace")
-
-    message = str(exc_info.value)
-    assert "PRIVATE_STDOUT_SENTINEL" not in message
-    assert shim_dir.name not in message
-    assert str(repo) not in message
-    assert head not in message
-    assert _audit_source_signature(repo) == before
+                message = str(exc_info.value)
+                assert "PRIVATE_STDOUT_SENTINEL" not in message
+                assert shim_dir.name not in message
+                assert str(repo) not in message
+                assert head not in message
+                assert _audit_source_signature(repo) == before
 
 @pytest.mark.anyio
 async def test_audit_workspace_rejects_missing_cloned_diff_base_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -805,71 +871,83 @@ async def test_audit_workspace_rejects_missing_cloned_diff_base_object(tmp_path:
     assert _audit_source_signature(repo) == before
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("linked", [False, True])
-async def test_audit_workspace_independent_of_source_storage(tmp_path: Path, linked: bool) -> None:
-    repo, bare = _make_repo_with_origin(tmp_path)
-    if linked:
-        source = tmp_path / "linked source"
-        _git(repo, "worktree", "add", "-b", "feature", str(source))
-        repo = source
-    for name in ("layered.txt", "deleted.txt", "recreated.txt"):
-        (repo / name).write_text("committed\n")
-    (repo / "binary.bin").write_bytes(b"committed\x00\xff")
-    (repo / ".gitignore").write_text("secret.txt\n")
-    (repo / "inside-link").symlink_to("layered.txt")
-    outside = tmp_path / "outside-secret"
-    outside.write_text("must not materialize")
-    (repo / "outside-link").symlink_to(outside)
-    _git(repo, "add", "-A")
-    _commit(repo, "snapshot fixture")
-    _git(repo, "branch", "another-branch")
-    _git(repo, "tag", "independent-tag")
-    (repo / "layered.txt").write_text("staged\n")
-    (repo / "binary.bin").write_bytes(b"staged\x00\xfe")
-    (repo / "new.bin").write_bytes(b"new\x00\xfd")
-    _git(repo, "add", "layered.txt", "binary.bin", "new.bin")
-    _git(repo, "rm", "recreated.txt")
-    (repo / "recreated.txt").write_text("recreated but not indexed\n")
-    (repo / "layered.txt").write_text("working\n")
-    (repo / "deleted.txt").unlink()
-    (repo / "secret.txt").write_text("ignored secret")
-    (repo / "scratch.txt").write_text("untracked scratch")
-    before = _audit_source_signature(repo)
-    before_origin_refs = _git(bare, "show-ref")
-    captured: Path | None = None
-    async with open_audit_workspace(repo, run_id="independent-storage") as audit:
-        captured = audit.repo
-        assert not audit.repo.is_relative_to(repo.resolve())
-        assert not repo.resolve().is_relative_to(audit.repo)
-        assert audit.source == repo.resolve()
-        assert audit.repo_git_common_dir != audit.source_git_common_dir
-        assert not audit.repo_git_common_dir.is_relative_to(audit.source_git_common_dir)
-        assert not audit.source_git_common_dir.is_relative_to(audit.repo_git_common_dir)
-        assert git_ops.object_alternates(audit.repo, strict=True) == ()
-        assert git_ops.list_remotes(audit.repo, strict=True) == []
-        assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
-        assert git_ops.list_local_branches(audit.repo) == git_ops.list_local_branches(repo)
-        assert _git(audit.repo, "rev-parse", "independent-tag") == _git(repo, "rev-parse", "independent-tag")
-        assert git_ops.staged_patch(audit.repo) == before[3]
-        for name in ("layered.txt", "binary.bin", "new.bin", "recreated.txt"):
-            assert (audit.repo / name).read_bytes() == (repo / name).read_bytes()
-        assert not (audit.repo / "deleted.txt").exists()
-        assert not (audit.repo / "secret.txt").exists()
-        assert not (audit.repo / "scratch.txt").exists()
-        assert (audit.repo / "inside-link").is_symlink()
-        assert (audit.repo / "outside-link").is_symlink()
-        assert os.readlink(audit.repo / "outside-link") == str(outside)
-        assert audit.outward_symlinks == frozenset({audit.repo / "outside-link"})
-        _configure_identity(audit.repo)
-        (audit.repo / "model-note.txt").write_text("only in snapshot")
-        _git(audit.repo, "add", "-A")
-        _commit(audit.repo, "model commit")
-        _git(audit.repo, "update-ref", "refs/heads/audit-only", "HEAD")
-        assert _audit_source_signature(repo) == before
-        assert _git(bare, "show-ref") == before_origin_refs
-    assert captured is not None and not captured.exists()
-    assert _audit_source_signature(repo) == before
-    assert outside.read_text() == "must not materialize"
+async def test_audit_workspace_independent_of_source_storage(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for linked in cases:
+        row_index += 1
+        with subtests.test(linked=linked):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo, bare = _make_repo_with_origin(tmp_path)
+                if linked:
+                    source = tmp_path / "linked source"
+                    _git(repo, "worktree", "add", "-b", "feature", str(source))
+                    repo = source
+                for name in ("layered.txt", "deleted.txt", "recreated.txt"):
+                    (repo / name).write_text("committed\n")
+                (repo / "binary.bin").write_bytes(b"committed\x00\xff")
+                (repo / ".gitignore").write_text("secret.txt\n")
+                (repo / "inside-link").symlink_to("layered.txt")
+                outside = tmp_path / "outside-secret"
+                outside.write_text("must not materialize")
+                (repo / "outside-link").symlink_to(outside)
+                _git(repo, "add", "-A")
+                _commit(repo, "snapshot fixture")
+                _git(repo, "branch", "another-branch")
+                _git(repo, "tag", "independent-tag")
+                (repo / "layered.txt").write_text("staged\n")
+                (repo / "binary.bin").write_bytes(b"staged\x00\xfe")
+                (repo / "new.bin").write_bytes(b"new\x00\xfd")
+                _git(repo, "add", "layered.txt", "binary.bin", "new.bin")
+                _git(repo, "rm", "recreated.txt")
+                (repo / "recreated.txt").write_text("recreated but not indexed\n")
+                (repo / "layered.txt").write_text("working\n")
+                (repo / "deleted.txt").unlink()
+                (repo / "secret.txt").write_text("ignored secret")
+                (repo / "scratch.txt").write_text("untracked scratch")
+                before = _audit_source_signature(repo)
+                before_origin_refs = _git(bare, "show-ref")
+                captured: Path | None = None
+                async with open_audit_workspace(repo, run_id="independent-storage") as audit:
+                    captured = audit.repo
+                    assert not audit.repo.is_relative_to(repo.resolve())
+                    assert not repo.resolve().is_relative_to(audit.repo)
+                    assert audit.source == repo.resolve()
+                    assert audit.repo_git_common_dir != audit.source_git_common_dir
+                    assert not audit.repo_git_common_dir.is_relative_to(audit.source_git_common_dir)
+                    assert not audit.source_git_common_dir.is_relative_to(audit.repo_git_common_dir)
+                    assert git_ops.object_alternates(audit.repo, strict=True) == ()
+                    assert git_ops.list_remotes(audit.repo, strict=True) == []
+                    assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
+                    assert git_ops.list_local_branches(audit.repo) == git_ops.list_local_branches(repo)
+                    assert _git(audit.repo, "rev-parse", "independent-tag") == _git(
+                        repo, "rev-parse", "independent-tag"
+                    )
+                    assert git_ops.staged_patch(audit.repo) == before[3]
+                    for name in ("layered.txt", "binary.bin", "new.bin", "recreated.txt"):
+                        assert (audit.repo / name).read_bytes() == (repo / name).read_bytes()
+                    assert not (audit.repo / "deleted.txt").exists()
+                    assert not (audit.repo / "secret.txt").exists()
+                    assert not (audit.repo / "scratch.txt").exists()
+                    assert (audit.repo / "inside-link").is_symlink()
+                    assert (audit.repo / "outside-link").is_symlink()
+                    assert os.readlink(audit.repo / "outside-link") == str(outside)
+                    assert audit.outward_symlinks == frozenset({audit.repo / "outside-link"})
+                    _configure_identity(audit.repo)
+                    (audit.repo / "model-note.txt").write_text("only in snapshot")
+                    _git(audit.repo, "add", "-A")
+                    _commit(audit.repo, "model commit")
+                    _git(audit.repo, "update-ref", "refs/heads/audit-only", "HEAD")
+                    assert _audit_source_signature(repo) == before
+                    assert _git(bare, "show-ref") == before_origin_refs
+                assert captured is not None and not captured.exists()
+                assert _audit_source_signature(repo) == before
+                assert outside.read_text() == "must not materialize"
 
 @pytest.mark.anyio
 async def test_audit_workspace_unborn_is_independent(tmp_path: Path) -> None:
@@ -898,17 +976,27 @@ async def test_audit_workspace_unborn_is_independent(tmp_path: Path) -> None:
     assert _audit_source_signature(repo) == before
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", [RuntimeError, SystemExit])
-async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path, failure: type[BaseException]) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    before = _audit_source_signature(repo)
-    captured: Path | None = None
-    with pytest.raises(failure, match="primary"):
-        async with open_audit_workspace(repo, run_id="cleanup-error") as audit:
-            captured = audit.repo
-            raise failure("primary")
-    assert captured is not None and not captured.exists()
-    assert _audit_source_signature(repo) == before
+async def test_audit_workspace_cleanup_runs_on_exception(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[type[BaseException]] = [RuntimeError, SystemExit]
+    for failure in cases:
+        row_index += 1
+        with subtests.test(failure=failure):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo, _ = _make_repo_with_origin(tmp_path)
+                before = _audit_source_signature(repo)
+                captured: Path | None = None
+                with pytest.raises(failure, match="primary"):
+                    async with open_audit_workspace(repo, run_id="cleanup-error") as audit:
+                        captured = audit.repo
+                        raise failure("primary")
+                assert captured is not None and not captured.exists()
+                assert _audit_source_signature(repo) == before
 
 @pytest.mark.anyio
 async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> None:
@@ -923,31 +1011,41 @@ async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> N
     assert captured is not None and not captured.exists()
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("primary", [False, True])
-@pytest.mark.parametrize("cleanup_error", [OSError, RuntimeError])
 async def test_audit_workspace_cleanup_failure_preserves_primary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, primary: bool,
-    cleanup_error: type[Exception],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    subtests: pytest.Subtests,
 ) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[type[Exception]] = [OSError, RuntimeError]
+    for cleanup_error in cases_1:
+        cases_2: list[bool] = [False, True]
+        for primary in cases_2:
+            row_index += 1
+            with subtests.test(cleanup_error=cleanup_error, primary=primary):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    monkeypatch = case.monkeypatch
+                    caplog.clear()
+                    repo, _ = _make_repo_with_origin(tmp_path)
+                    cleanups: list[Path] = []
+                    real_cleanup = tempfile.TemporaryDirectory.cleanup
 
-    repo, _ = _make_repo_with_origin(tmp_path)
-    cleanups: list[Path] = []
-    real_cleanup = tempfile.TemporaryDirectory.cleanup
+                    def failing_cleanup(instance: tempfile.TemporaryDirectory[str]) -> None:
+                        cleanups.append(Path(instance.name))
+                        real_cleanup(instance)
+                        raise cleanup_error("injected cleanup failure")
 
-    def failing_cleanup(instance: tempfile.TemporaryDirectory[str]) -> None:
-        cleanups.append(Path(instance.name))
-        real_cleanup(instance)
-        raise cleanup_error("injected cleanup failure")
-
-    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", failing_cleanup)
-    expected = RuntimeError if primary else GitError
-    with pytest.raises(expected, match="primary" if primary else "cleanup failed"):
-        async with open_audit_workspace(repo, run_id="cleanup-failure"):
-            if primary:
-                raise RuntimeError("primary")
-    assert len(cleanups) == 1
-    if primary:
-        assert "cleanup failed during primary error" in caplog.text
+                    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", failing_cleanup)
+                    expected = RuntimeError if primary else GitError
+                    with pytest.raises(expected, match="primary" if primary else "cleanup failed"):
+                        async with open_audit_workspace(repo, run_id="cleanup-failure"):
+                            if primary:
+                                raise RuntimeError("primary")
+                    assert len(cleanups) == 1
+                    if primary:
+                        assert "cleanup failed during primary error" in caplog.text
 
 @pytest.mark.anyio
 async def test_audit_workspace_preparation_failure_cleans_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -999,17 +1097,31 @@ async def test_open_workspace_unborn_requires_explicit_opt_in(tmp_path: Path) ->
         assert work.repo == repo
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("options", [{"branch": "trunk"}, {"base": "trunk"}, {"force_ephemeral": True}])
-async def test_open_workspace_unborn_rejects_commit_anchored_options(tmp_path: Path, options: dict[str, object],
+async def test_open_workspace_unborn_rejects_commit_anchored_options(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo = tmp_path / "unborn"
-    _init_repo(repo)
-    branch = options.get("branch")
-    base = options.get("base")
-    assert branch is None or isinstance(branch, str)
-    assert base is None or isinstance(base, str)
-    with pytest.raises(GitError, match="unborn improve"):
-        async with open_workspace(repo, branch=branch, base=base, force_ephemeral=bool(options.get("force_ephemeral")),
-            skip_tests=True, allow_unborn=True,
-        ):
-            pytest.fail("commit-anchored mode admitted unborn repository")
+    table_root = tmp_path
+    row_index = 0
+    cases: list[dict[str, object]] = [{"branch": "trunk"}, {"base": "trunk"}, {"force_ephemeral": True}]
+    for options in cases:
+        row_index += 1
+        with subtests.test(options=options):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo = tmp_path / "unborn"
+                _init_repo(repo)
+                branch = options.get("branch")
+                base = options.get("base")
+                assert branch is None or isinstance(branch, str)
+                assert base is None or isinstance(base, str)
+                with pytest.raises(GitError, match="unborn improve"):
+                    async with open_workspace(
+                        repo,
+                        branch=branch,
+                        base=base,
+                        force_ephemeral=bool(options.get("force_ephemeral")),
+                        skip_tests=True,
+                        allow_unborn=True,
+                    ):
+                        pytest.fail("commit-anchored mode admitted unborn repository")

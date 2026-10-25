@@ -92,11 +92,13 @@ from daydream.trajectory import (
     siblings_directory,
 )
 from daydream.workspace import WorkContext
+from tests.conftest import make_git_repo
 from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -215,9 +217,8 @@ def _quiet_phase_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("daydream.agent.console.print", lambda *args, **kwargs: None)
 
 
-@pytest.mark.parametrize("missing", ["session_id", "capture_tree_key", "footprint"])
-async def test_test_and_heal_requires_explicit_evidence_contract(
-    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str,
+async def _case_test_and_heal_requires_explicit_evidence_contract(
+    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str
 ) -> None:
     """A caller omission must fail before suite execution or repair dispatch."""
     backend = ScriptedBackend()
@@ -231,10 +232,21 @@ async def test_test_and_heal_requires_explicit_evidence_contract(
     assert backend.prompts == []
 
 
-@pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched"])
-@pytest.mark.parametrize("missing", ["edit_scope", "read_scope"])
-async def test_fix_requires_explicit_scopes(
-    tmp_path: Path, make_work: Callable[..., WorkContext], entry_point: str, missing: str,
+async def test_test_and_heal_requires_explicit_evidence_contract(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["session_id", "capture_tree_key", "footprint"]
+    case_index = 0
+    for missing in cases_0:
+        with subtests.test(missing=missing), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_test_and_heal_requires_explicit_evidence_contract(
+                tmp_path=scenario.tmp_path, make_work=make_work, missing=missing
+            )
+
+
+async def _case_fix_requires_explicit_scopes(
+    tmp_path: Path, make_work: Callable[..., WorkContext], entry_point: str, missing: str
 ) -> None:
     """Neither fixer entry point may silently grant omitted edit/read authority."""
     backend = ScriptedBackend()
@@ -249,9 +261,26 @@ async def test_fix_requires_explicit_scopes(
     assert backend.prompts == []
 
 
-@pytest.mark.parametrize("missing", ["footprint", "round_snapshot"])
-async def test_parallel_fix_requires_explicit_round_contract(
-    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str,
+async def test_fix_requires_explicit_scopes(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["phase_fix", "phase_fix_batched"]
+    cases_1: Sequence[str] = ["edit_scope", "read_scope"]
+    case_index = 0
+    for entry_point in cases_0:
+        for missing in cases_1:
+            with (
+                subtests.test(entry_point=entry_point, missing=missing),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_fix_requires_explicit_scopes(
+                    tmp_path=scenario.tmp_path, make_work=make_work, entry_point=entry_point, missing=missing
+                )
+
+
+async def _case_parallel_fix_requires_explicit_round_contract(
+    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str
 ) -> None:
     """Parallel callers must supply both authorization and captured rollback state."""
     backend = ScriptedBackend()
@@ -268,6 +297,19 @@ async def test_parallel_fix_requires_explicit_round_contract(
     with pytest.raises(TypeError, match="requires footprint and round_snapshot"):
         await phases.phase_fix_parallel(backend, make_work(tmp_path), items, **contract)
     assert backend.prompts == []
+
+
+async def test_parallel_fix_requires_explicit_round_contract(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["footprint", "round_snapshot"]
+    case_index = 0
+    for missing in cases_0:
+        with subtests.test(missing=missing), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_parallel_fix_requires_explicit_round_contract(
+                tmp_path=scenario.tmp_path, make_work=make_work, missing=missing
+            )
 
 
 def _round_snapshot(repo: Path, paths: frozenset[str]) -> WorktreeRollbackSnapshot:
@@ -375,11 +417,8 @@ def test_test_healing_guard_reports_restoration_failure(
     assert violations is None
     assert migration.read_text() == "-- healing edit\n"
 
-@pytest.mark.parametrize(("mutate", "expected_violations"), [(True, ["migrations/0000_local_draft.sql"]), (False, [])],
-    ids=["edited", "untouched"],
-)
-def test_test_healing_guard_preserves_preexisting_untracked_bytes(
-    tmp_path: Path, _quiet_phase_ui: None, mutate: bool, expected_violations: list[str],
+def _case_test_healing_guard_preserves_preexisting_untracked_bytes(
+    tmp_path: Path, _quiet_phase_ui: None, mutate: bool, expected_violations: list[str]
 ) -> None:
     init_repo(tmp_path)
     (tmp_path / "README.md").write_text("# Fixture\n")
@@ -402,6 +441,26 @@ def test_test_healing_guard_preserves_preexisting_untracked_bytes(
 
     assert violations == expected_violations
     assert migration.read_bytes() == original
+
+
+def test_test_healing_guard_preserves_preexisting_untracked_bytes(
+    _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, list[str]]] = [(True, ["migrations/0000_local_draft.sql"]), (False, [])]
+    case_index = 0
+    for mutate, expected_violations in cases_0:
+        with (
+            subtests.test(mutate=mutate, expected_violations=expected_violations),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_test_healing_guard_preserves_preexisting_untracked_bytes(
+                tmp_path=scenario.tmp_path,
+                _quiet_phase_ui=_quiet_phase_ui,
+                mutate=mutate,
+                expected_violations=expected_violations,
+            )
+
 
 def _retained_commit_tree(repo: Path, paths: set[str]) -> dict[str, Any]:
     """Supply real retained-tree evidence with the test's explicit authorized paths."""
@@ -781,11 +840,12 @@ def _footprint(repo: Path) -> AuthorizedFixFootprint:
     return AuthorizedFixFootprint.build(repo, set(), [])
 
 
-@pytest.mark.parametrize("outcome_case", ["normal", "timeout", "exception"])
-@pytest.mark.asyncio
-async def test_confinement_runs_for_every_repair_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None, outcome_case: str,
+async def _case_confinement_runs_for_every_repair_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+    outcome_case: str,
 ) -> None:
     """Requirement 12: timeout and exception are covered, not just completion."""
 
@@ -828,6 +888,25 @@ async def test_confinement_runs_for_every_repair_outcome(
     else:
         await call
     assert calls == ["ran"], f"confinement skipped for outcome={outcome_case}"
+
+
+@pytest.mark.asyncio
+async def test_confinement_runs_for_every_repair_outcome(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["normal", "timeout", "exception"]
+    case_index = 0
+    for outcome_case in cases_0:
+        with subtests.test(outcome_case=outcome_case), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_confinement_runs_for_every_repair_outcome(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_work=make_work,
+                _quiet_phase_ui=_quiet_phase_ui,
+                outcome_case=outcome_case,
+            )
+
 
 @pytest.mark.asyncio
 async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
@@ -882,17 +961,26 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     assert backend.call_count == 2
     assert "failure-summarizer" in backend.prompts[-1].lower()
 
-@pytest.mark.parametrize(("abort_reason", "output", "expected"), [
-    ("wall_budget_exceeded", "PARTIAL-DIAGNOSIS-abc", RepairOutcome.BUDGET_INTERRUPTED),
-    (None, "", RepairOutcome.DIAGNOSIS_UNRESOLVED),
-    (None, "fixed it", RepairOutcome.DIAGNOSIS_UNRESOLVED),
-    ("backend_failure", "", RepairOutcome.EXECUTION_ERROR),
-])
-def test_host_interruption_outranks_model_claim_of_success(
-    abort_reason: str | None, output: str, expected: RepairOutcome,
+def _case_host_interruption_outranks_model_claim_of_success(
+    abort_reason: str | None, output: str, expected: RepairOutcome
 ) -> None:
     """Requirement 2: interruption wins; missing output is never success."""
     assert classify_repair_outcome(abort_reason, output) is expected
+
+
+def test_host_interruption_outranks_model_claim_of_success(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str | None, str, RepairOutcome]] = [
+        ("wall_budget_exceeded", "PARTIAL-DIAGNOSIS-abc", RepairOutcome.BUDGET_INTERRUPTED),
+        (None, "", RepairOutcome.DIAGNOSIS_UNRESOLVED),
+        (None, "fixed it", RepairOutcome.DIAGNOSIS_UNRESOLVED),
+        ("backend_failure", "", RepairOutcome.EXECUTION_ERROR),
+    ]
+    for abort_reason, output, expected in cases_0:
+        with subtests.test(abort_reason=abort_reason, output=output, expected=expected):
+            _case_host_interruption_outranks_model_claim_of_success(
+                abort_reason=abort_reason, output=output, expected=expected
+            )
+
 
 def test_test_and_heal_result_repairs_field_defaults_for_existing_callers() -> None:
     """The defaulted field keeps all eight existing positional constructions valid."""
@@ -935,9 +1023,8 @@ async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
         assert forbidden in prompt_without
 
 
-@pytest.mark.parametrize("inline", [False, True])
-async def test_bound_phase_fix_transports_only_named_private_inputs(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool,
+async def _case_bound_phase_fix_transports_only_named_private_inputs(
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool
 ) -> None:
     """A production fix gets intent/index bytes without an artifact-dir grant."""
 
@@ -977,6 +1064,20 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
             assert str(affected) in prompt
             assert "deliberate intent" not in prompt
 
+
+async def test_bound_phase_fix_transports_only_named_private_inputs(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for inline in cases_0:
+        with subtests.test(inline=inline), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_bound_phase_fix_transports_only_named_private_inputs(
+                tmp_path=scenario.tmp_path, make_work=make_work, _quiet_phase_ui=_quiet_phase_ui, inline=inline
+            )
+
+
 def test_build_fix_prompt_concise_mode() -> None:
     prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}], concise_mode=True,)
     assert "CONCISE MODE" in prompt
@@ -1012,12 +1113,8 @@ def test_repair_prompt_discloses_truncation() -> None:
     assert "truncated" in prompt.lower()
 
 
-@pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched", "phase_fix_parallel"])
-@pytest.mark.parametrize("bad_ref", ["traversal", "absolute", "symlink", "missing"])
-@pytest.mark.asyncio
-async def test_fix_entrypoints_reject_invalid_finding_file_refs(
-    git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, entry_point: str,
-    bad_ref: str,
+async def _case_fix_entrypoints_reject_invalid_finding_file_refs(
+    git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, entry_point: str, bad_ref: str
 ) -> None:
     """Every fix entry point rejects unconfined or missing files.
 
@@ -1051,6 +1148,30 @@ async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
         await call
     assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_fix_entrypoints_reject_invalid_finding_file_refs(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["phase_fix", "phase_fix_batched", "phase_fix_parallel"]
+    cases_1: Sequence[str] = ["traversal", "absolute", "symlink", "missing"]
+    case_index = 0
+    for entry_point in cases_0:
+        for bad_ref in cases_1:
+            with (
+                subtests.test(entry_point=entry_point, bad_ref=bad_ref),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                git_repo = make_git_repo(scenario.tmp_path)
+                await _case_fix_entrypoints_reject_invalid_finding_file_refs(
+                    git_repo=git_repo,
+                    make_work=make_work,
+                    _quiet_phase_ui=_quiet_phase_ui,
+                    entry_point=entry_point,
+                    bad_ref=bad_ref,
+                )
 
 
 @pytest.mark.asyncio
@@ -1485,24 +1606,15 @@ async def test_declined_commit_without_configured_command_reports_no_execution(
 
 # phase_test_and_heal — option 1 setup-investigator wiring
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("command", "argv", "reason", "forbidden_prompt_text"),
-    [
-        pytest.param(
-            "echo approved-ran", ["echo", "approved-ran"], "verdict reason", "approved-ran",
-            id="approved-command-runs-once",
-        ),
-        pytest.param(
-            shlex.join([sys.executable, "-c", "print('ok')"]), [sys.executable, "-c", "print('ok')"],
-            "The documented command runs a Python check", "print('ok')",
-            id="replacement-confirmed",
-        ),
-    ],
-)
-async def test_approved_investigator_command_stays_host_side(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None, command: str, argv: list[str], reason: str, forbidden_prompt_text: str,
+async def _case_approved_investigator_command_stays_host_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+    command: str,
+    argv: list[str],
+    reason: str,
+    forbidden_prompt_text: str,
 ) -> None:
     """Approval runs the command once host-side; agent prompts retain the test-output contract."""
     backend = ScriptedBackend(script=[_structured_turn(_verdict("replace", command, reason))])
@@ -1526,6 +1638,39 @@ async def test_approved_investigator_command_stays_host_side(
     assert all(forbidden_prompt_text not in prompt for prompt in backend.prompts)
     assert "Run this exact test command" not in "\n".join(backend.prompts)
     assert "read-only setup-investigator" in backend.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_approved_investigator_command_stays_host_side(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, list[str], str, str]] = [
+        ("echo approved-ran", ["echo", "approved-ran"], "verdict reason", "approved-ran"),
+        (
+            shlex.join([sys.executable, "-c", "print('ok')"]),
+            [sys.executable, "-c", "print('ok')"],
+            "The documented command runs a Python check",
+            "print('ok')",
+        ),
+    ]
+    case_index = 0
+    for command, argv, reason, forbidden_prompt_text in cases_0:
+        with (
+            subtests.test(command=command, argv=argv, reason=reason, forbidden_prompt_text=forbidden_prompt_text),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_approved_investigator_command_stays_host_side(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_work=make_work,
+                _quiet_phase_ui=_quiet_phase_ui,
+                command=command,
+                argv=argv,
+                reason=reason,
+                forbidden_prompt_text=forbidden_prompt_text,
+            )
+
 
 @pytest.mark.asyncio
 async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
@@ -1573,11 +1718,12 @@ async def test_phase_test_and_heal_unavailable_command_reports_no_execution(
     assert result.attempts[0].kind == "no-execution"
     assert not (tmp_path / ".daydream").exists()
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("investigation", ["correct", "declined", "failed"])
-async def test_unreplaced_test_command_retries_original_host_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None, investigation: str,
+async def _case_unreplaced_test_command_retries_original_host_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+    investigation: str,
 ) -> None:
     """A correct, declined, or failed investigation preserves the original test command."""
     warnings: list[str] = []
@@ -1603,6 +1749,24 @@ async def test_unreplaced_test_command_retries_original_host_command(
     assert backend.read_only_calls == [True]
     if investigation == "failed":
         assert any("Setup investigator failed" in message for message in warnings), warnings
+
+
+@pytest.mark.asyncio
+async def test_unreplaced_test_command_retries_original_host_command(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["correct", "declined", "failed"]
+    case_index = 0
+    for investigation in cases_0:
+        with subtests.test(investigation=investigation), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unreplaced_test_command_retries_original_host_command(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_work=make_work,
+                _quiet_phase_ui=_quiet_phase_ui,
+                investigation=investigation,
+            )
 
 
 # phase_test_and_heal — option 4 failure-summarizer + handoff
@@ -1709,17 +1873,12 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     assert user_prompts == ["Choice"]
     assert copy_called is False
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("turn", "expected_substrings"),
-    [((RuntimeError("scripted summarizer failure"),),
-            ("# Daydream handoff", "Instructions for the next agent", "```"),
-        ),
-        (_structured_turn({"unexpected": "shape"}), ("# Daydream handoff",)),
-    ],
-)
-async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None, turn: Sequence[AgentEvent | BaseException],
+async def _case_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+    turn: Sequence[AgentEvent | BaseException],
     expected_substrings: tuple[str, ...],
 ) -> None:
     _, success, _ = await _run_option4_handoff(monkeypatch, tmp_path, make_work, turn)
@@ -1739,12 +1898,39 @@ async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
         facts_section = body.split("## Hypotheses (unverified)")[0]
         assert "unknown" not in facts_section.lower()
 
-# _resolve_handoff_paths — ephemeral worktree + archive routing
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recorded", [False, True])
-async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: bool,
+async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[Sequence[AgentEvent | BaseException], tuple[str, ...]]] = [
+        (
+            (RuntimeError("scripted summarizer failure"),),
+            ("# Daydream handoff", "Instructions for the next agent", "```"),
+        ),
+        (_structured_turn({"unexpected": "shape"}), ("# Daydream handoff",)),
+    ]
+    case_index = 0
+    for turn, expected_substrings in cases_0:
+        with (
+            subtests.test(turn=turn, expected_substrings=expected_substrings),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_work=make_work,
+                _quiet_phase_ui=_quiet_phase_ui,
+                turn=turn,
+                expected_substrings=expected_substrings,
+            )
+
+
+# _resolve_handoff_paths — ephemeral worktree + archive routing
+
+async def _case_standalone_ephemeral_handoff_survives_worktree_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: bool
 ) -> None:
     """A standalone handoff belongs to the source even when archive storage is unavailable."""
 
@@ -1781,6 +1967,21 @@ async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
     finally:
         if worktree.exists():
             git(source, "worktree", "remove", "--force", str(worktree))
+
+
+@pytest.mark.asyncio
+async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for recorded in cases_0:
+        with subtests.test(recorded=recorded), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_standalone_ephemeral_handoff_survives_worktree_cleanup(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, recorded=recorded
+            )
+
 
 @pytest.mark.asyncio
 async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_ownership(
@@ -2036,10 +2237,8 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     assert str(outside_two) not in body
     assert str(live_daydream) not in body
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("private_leaf", ["control.json", "sibling-run/log.txt"])
-async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, make_work: Callable[..., WorkContext], private_leaf: str,
+async def _case_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, make_work: Callable[..., WorkContext], private_leaf: str
 ) -> None:
     """A model cannot echo private control or sibling-workspace identities."""
 
@@ -2068,15 +2267,30 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     assert "private runtime path" not in body
     assert "output contained a private runtime path" in caplog.text
 
+
+@pytest.mark.asyncio
+async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
+    caplog: pytest.LogCaptureFixture, make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["control.json", "sibling-run/log.txt"]
+    case_index = 0
+    for private_leaf in cases_0:
+        with subtests.test(private_leaf=private_leaf), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            caplog.clear()
+            await _case_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
+                tmp_path=scenario.tmp_path, caplog=caplog, make_work=make_work, private_leaf=private_leaf
+            )
+
+
 # The host renders review-output.md from validated merge items.
 _MERGE_ITEMS = merge_result([{
     "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
     "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
 }])
 
-@pytest.mark.parametrize(("inline", "structural_bytes"), [(False, 7_880), (True, 7_880), (True, 400)])
-async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, structural_bytes: int,
+async def _case_merge_sanctioned_inputs_use_real_transport_specific_budget(
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, structural_bytes: int
 ) -> None:
     """Structural inputs reach the backend under the same closed transport budget as language records."""
 
@@ -2145,10 +2359,29 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         ):
             assert str(expected) in prompt
 
-@pytest.mark.parametrize("inline", [False, True])
-@pytest.mark.parametrize("unavailable", ["missing", "symlink"])
-async def test_merge_rejects_unavailable_requested_structural_input(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, unavailable: str,
+
+async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool, int]] = [(False, 7880), (True, 7880), (True, 400)]
+    case_index = 0
+    for inline, structural_bytes in cases_0:
+        with (
+            subtests.test(inline=inline, structural_bytes=structural_bytes),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_merge_sanctioned_inputs_use_real_transport_specific_budget(
+                tmp_path=scenario.tmp_path,
+                make_work=make_work,
+                _quiet_phase_ui=_quiet_phase_ui,
+                inline=inline,
+                structural_bytes=structural_bytes,
+            )
+
+
+async def _case_merge_rejects_unavailable_requested_structural_input(
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, unavailable: str
 ) -> None:
     """A requested structural source cannot silently disappear or expand access through a symlink."""
     repo = tmp_path / "repo"
@@ -2178,6 +2411,29 @@ async def test_merge_rejects_unavailable_requested_structural_input(
                 dedup_candidates_path=dedup, structural_records_path=structural, allow_standalone=True,
             )
         assert backend.call_count == 0
+
+
+async def test_merge_rejects_unavailable_requested_structural_input(
+    make_work: Callable[..., WorkContext], _quiet_phase_ui: None, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    cases_1: Sequence[str] = ["missing", "symlink"]
+    case_index = 0
+    for inline in cases_0:
+        for unavailable in cases_1:
+            with (
+                subtests.test(inline=inline, unavailable=unavailable),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_merge_rejects_unavailable_requested_structural_input(
+                    tmp_path=scenario.tmp_path,
+                    make_work=make_work,
+                    _quiet_phase_ui=_quiet_phase_ui,
+                    inline=inline,
+                    unavailable=unavailable,
+                )
+
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_inline_exploration_budget_degrades(
@@ -2388,10 +2644,8 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
     assert calls == {"stage": 1, "commit_staged": 1}
     assert git(repo, "show", "HEAD:app.py") == "after"
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("permissions", [0o600, 0o640, 0o664, 0o700, 0o610, 0o644])
-async def test_strict_commit_accepts_new_file_permissions_without_changing_owner_bytes(
-    tmp_path: Path, make_work: Callable[..., WorkContext], permissions: int,
+async def _case_strict_commit_accepts_new_file_permissions_without_changing_owner_bytes(
+    tmp_path: Path, make_work: Callable[..., WorkContext], permissions: int
 ) -> None:
 
     repo = tmp_path / "repo"
@@ -2423,10 +2677,23 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     expected_mode = "100755" if permissions & 0o100 else "100644"
     assert git(repo, "ls-tree", "HEAD", "--", "new.py").startswith(expected_mode)
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native_retained", [False, True])
-async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
-    tmp_path: Path, make_work: Callable[..., WorkContext], native_retained: bool,
+async def test_strict_commit_accepts_new_file_permissions_without_changing_owner_bytes(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[int] = [384, 416, 436, 448, 392, 420]
+    case_index = 0
+    for permissions in cases_0:
+        with subtests.test(permissions=permissions), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_strict_commit_accepts_new_file_permissions_without_changing_owner_bytes(
+                tmp_path=scenario.tmp_path, make_work=make_work, permissions=permissions
+            )
+
+
+async def _case_strict_commit_preserves_non_utf8_retained_and_protected_paths(
+    tmp_path: Path, make_work: Callable[..., WorkContext], native_retained: bool
 ) -> None:
 
     repo = tmp_path / "repo"
@@ -2458,15 +2725,27 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     assert frozenset(git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD")) == retained
     assert git(repo, "diff", "--cached") == ""
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("artifact_path", "tracked", "preexisting", "must_block"),
-    [(".daydream/runtime.json", False, False, False), (".daydream/runtime.json", False, True, False),
-        (".review-output.md", False, True, False), (".daydreamish/runtime.json", False, False, True),
-        (".daydream/tracked.json", True, True, True),
-    ],
-)
-async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user_files(
-    tmp_path: Path, make_work: Callable[..., WorkContext], artifact_path: str, tracked: bool, preexisting: bool,
+async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for native_retained in cases_0:
+        with subtests.test(native_retained=native_retained), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_strict_commit_preserves_non_utf8_retained_and_protected_paths(
+                tmp_path=scenario.tmp_path, make_work=make_work, native_retained=native_retained
+            )
+
+
+async def _case_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user_files(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    artifact_path: str,
+    tracked: bool,
+    preexisting: bool,
     must_block: bool,
 ) -> None:
     """A real hook may update runtime output, never tracked or lookalike user files."""
@@ -2509,10 +2788,37 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
     assert git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD") == "app.py"
     assert git(repo, "diff", "--cached") == ""
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hook_mutation", ["worktree", "index"])
-async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], hook_mutation: str,
+async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user_files(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, bool, bool, bool]] = [
+        (".daydream/runtime.json", False, False, False),
+        (".daydream/runtime.json", False, True, False),
+        (".review-output.md", False, True, False),
+        (".daydreamish/runtime.json", False, False, True),
+        (".daydream/tracked.json", True, True, True),
+    ]
+    case_index = 0
+    for artifact_path, tracked, preexisting, must_block in cases_0:
+        with (
+            subtests.test(artifact_path=artifact_path, tracked=tracked, preexisting=preexisting, must_block=must_block),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user_files(
+                tmp_path=scenario.tmp_path,
+                make_work=make_work,
+                artifact_path=artifact_path,
+                tracked=tracked,
+                preexisting=preexisting,
+                must_block=must_block,
+            )
+
+
+async def _case_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], hook_mutation: str
 ) -> None:
 
     repo = tmp_path / "repo"
@@ -2545,6 +2851,24 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
     assert git(repo, "show", "HEAD:app.py") == "after"
     expected_worktree = "hook mutation\n" if hook_mutation == "worktree" else "after\n"
     assert (repo / "app.py").read_text() == expected_worktree
+
+
+@pytest.mark.asyncio
+async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
+    make_work: Callable[..., WorkContext], tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["worktree", "index"]
+    case_index = 0
+    for hook_mutation in cases_0:
+        with subtests.test(hook_mutation=hook_mutation), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_work=make_work,
+                hook_mutation=hook_mutation,
+            )
+
 
 async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -2630,11 +2954,12 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("cwd_relative", [".", "services/api"])
-async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
-    tmp_path: Path, make_work: Callable[..., WorkContext], make_config: Callable[..., Any],
-    _quiet_phase_ui: None, cwd_relative: str,
+async def _case_first_targeted_call_runs_in_the_resolved_package_cwd(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    _quiet_phase_ui: None,
+    cwd_relative: str,
 ) -> None:
     """The first actual subprocess uses the frozen package cwd and argv."""
     repo = _init_plain_repo(tmp_path)
@@ -2659,6 +2984,29 @@ async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
     assert evidence.identity.cwd_relative == cwd_relative
     assert evidence.identity.runner == "uv"
     assert backend.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    _quiet_phase_ui: None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    cases_0: Sequence[str] = [".", "services/api"]
+    case_index = 0
+    for cwd_relative in cases_0:
+        with subtests.test(cwd_relative=cwd_relative), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_first_targeted_call_runs_in_the_resolved_package_cwd(
+                tmp_path=scenario.tmp_path,
+                make_work=make_work,
+                make_config=make_config,
+                _quiet_phase_ui=_quiet_phase_ui,
+                cwd_relative=cwd_relative,
+            )
+
 
 @pytest.mark.asyncio
 async def test_supplied_recipe_never_triggers_a_second_resolution(

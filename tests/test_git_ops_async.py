@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import threading
 import time
@@ -15,7 +16,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends._subprocess import terminate_process
 from daydream.git_ops import process as git_process
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import refreshing_session
 from tests.harness.processes import (
     fd_count,
@@ -23,6 +24,7 @@ from tests.harness.processes import (
     wait_for_process_group_exit,
     wait_for_process_ids,
 )
+from tests.harness.table_cases import isolated_case
 
 
 def _budget(
@@ -206,16 +208,32 @@ async def test_auth_resolution_that_consumes_budget_never_spawns_request(
         await git_process._run_gh_async(tmp_path, ["api", "/user"], auth=git_ops.INHERIT_GITHUB_AUTH, budget=budget)
     assert spawn_calls == []
 
-@pytest.mark.parametrize(("per_page", "max_pages"), [(0, 10), (-1, 10), (100, 0), (100, -1)])
 async def test_nonpositive_page_limits_fail_before_spawning_gh(
-    fake_gh: FakeGh, git_repo: Path, per_page: int, max_pages: int,
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    with pytest.raises(git_ops.GitError, match="pagination limits must be positive"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo, "repos/acme/widgets/statuses", envelope=None,
-            limits=git_ops.GitHubPageLimits(per_page=per_page, max_pages=max_pages), budget=_budget(),
-        )
-    assert fake_gh.process_calls() == []
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[tuple[int, int]] = [(0, 10), (-1, 10), (100, 0), (100, -1)]
+    for per_page, max_pages in cases:
+        row_index += 1
+        with subtests.test(per_page=per_page):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                with pytest.raises(git_ops.GitError, match="pagination limits must be positive"):
+                    await git_ops.gh_api_bounded_pages(
+                        git_repo,
+                        "repos/acme/widgets/statuses",
+                        envelope=None,
+                        limits=git_ops.GitHubPageLimits(per_page=per_page, max_pages=max_pages),
+                        budget=_budget(),
+                    )
+                assert fake_gh.process_calls() == []
 
 async def test_bounded_pages_collect_list_with_headers_and_cwd(fake_gh: FakeGh, git_repo: Path) -> None:
     sha = "a" * 40
@@ -243,64 +261,81 @@ async def test_bounded_pages_collect_list_with_headers_and_cwd(fake_gh: FakeGh, 
     )
     assert completed.stdout == ""
 
-@pytest.mark.parametrize(
-    ("endpoint", "envelope"),
-    [
+async def test_enveloped_pagination(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[tuple[str, str]] = [
         ("repos/acme/widgets/commits/{sha}/check-runs?filter=latest", "check_runs"),
         ("repos/acme/widgets/actions/workflows", "workflows"),
-    ],
-)
-async def test_enveloped_pagination(
-    fake_gh: FakeGh, git_repo: Path, endpoint: str, envelope: str,
-) -> None:
-    sha = "b" * 40
-    endpoint = endpoint.format(sha=sha)
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), {"total_count": 1, envelope: [{"id": 7}]})
-    result = await git_ops.gh_api_bounded_pages(
-        git_repo, endpoint, envelope=envelope, limits=git_ops.GitHubPageLimits(), budget=_budget(),
-    )
-    assert result == [{"id": 7}]
-    assert fake_gh.process_calls()[-1].argv[-1] == _page_endpoint(endpoint, 1)
+    ]
+    for endpoint, envelope in cases:
+        row_index += 1
+        with subtests.test(endpoint=endpoint):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                sha = "b" * 40
+                endpoint = endpoint.format(sha=sha)
+                fake_gh.set_response("GET", _page_endpoint(endpoint, 1), {"total_count": 1, envelope: [{"id": 7}]})
+                result = await git_ops.gh_api_bounded_pages(
+                    git_repo,
+                    endpoint,
+                    envelope=envelope,
+                    limits=git_ops.GitHubPageLimits(),
+                    budget=_budget(),
+                )
+                assert result == [{"id": 7}]
+                assert fake_gh.process_calls()[-1].argv[-1] == _page_endpoint(endpoint, 1)
 
-@pytest.mark.parametrize(
-    ("response", "expected_result", "expected_error"),
-    [
-        pytest.param(
-            {"total_count": 100, "workflows": [{"id": n} for n in range(100)]}, [{"id": n} for n in range(100)], None,
-            id="full-page-stops-at-declared-total",
-        ),
-        pytest.param({"total_count": 2, "workflows": [{"id": 1}]}, None, "incomplete", id="short-page-is-incomplete"),
-        pytest.param(
-            {"total_count": 1001, "workflows": []}, None, "pagination limit",
-            id="over-capacity-rejected-before-second-call",
-        ),
-    ],
-)
 async def test_enveloped_workflows_pagination_fails_at_its_boundaries(
-    fake_gh: FakeGh, git_repo: Path, response: dict[str, Any], expected_result: list[dict[str, int]] | None,
-    expected_error: str | None,
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    endpoint = "repos/acme/widgets/actions/workflows"
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
-    if expected_error is None:
-        result = await git_ops.gh_api_bounded_pages(
-            git_repo,
-            endpoint,
-            envelope='workflows',
-            limits=git_ops.GitHubPageLimits(),
-            budget=_budget(),
-        )
-        assert result == expected_result
-    else:
-        with pytest.raises(git_ops.GitError, match=expected_error):
-            await git_ops.gh_api_bounded_pages(
-                git_repo,
-                endpoint,
-                envelope='workflows',
-                limits=git_ops.GitHubPageLimits(),
-                budget=_budget(),
-            )
-    assert len(fake_gh.process_calls()) == 1
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[tuple[dict[str, Any], list[dict[str, int]] | None, str | None]] = [
+        ({"total_count": 100, "workflows": [{"id": n} for n in range(100)]}, [{"id": n} for n in range(100)], None),
+        ({"total_count": 2, "workflows": [{"id": 1}]}, None, "incomplete"),
+        ({"total_count": 1001, "workflows": []}, None, "pagination limit"),
+    ]
+    for response, expected_result, expected_error in cases:
+        row_index += 1
+        with subtests.test(expected_error=expected_error):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                endpoint = "repos/acme/widgets/actions/workflows"
+                fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
+                if expected_error is None:
+                    result = await git_ops.gh_api_bounded_pages(
+                        git_repo,
+                        endpoint,
+                        envelope="workflows",
+                        limits=git_ops.GitHubPageLimits(),
+                        budget=_budget(),
+                    )
+                    assert result == expected_result
+                else:
+                    with pytest.raises(git_ops.GitError, match=expected_error):
+                        await git_ops.gh_api_bounded_pages(
+                            git_repo,
+                            endpoint,
+                            envelope="workflows",
+                            limits=git_ops.GitHubPageLimits(),
+                            budget=_budget(),
+                        )
+                assert len(fake_gh.process_calls()) == 1
 
 async def test_branch_is_encoded_and_pr_snapshot_is_exact(fake_gh: FakeGh, git_repo: Path) -> None:
     branch_endpoint = "repos/acme/widgets/rules/branches/feature%2Fspace%20ship"
@@ -335,55 +370,110 @@ async def test_deadline_recomputed_before_each_spawn_and_partial_discarded(fake_
         )
     assert [call.argv[-1] for call in fake_gh.process_calls()] == [_page_endpoint(endpoint, 1)]
 
-@pytest.mark.parametrize("response", [ [], {"check_runs": "wrong"}, {"total_count": True, "check_runs": []}, ])
-async def test_malformed_envelope_is_rejected(fake_gh: FakeGh, git_repo: Path, response: Any) -> None:
-    endpoint = "repos/acme/widgets/commits/" + "d" * 40 + "/check-runs?filter=latest"
-    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
-    with pytest.raises(git_ops.GitError, match="shape"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo, endpoint, envelope="check_runs", limits=git_ops.GitHubPageLimits(), budget=_budget(),
-        )
-
-@pytest.mark.parametrize("max_pages", [1, 2])
-async def test_enveloped_exact_capacity_returns_declared_total(fake_gh: FakeGh, git_repo: Path, max_pages: int) -> None:
-    endpoint = "repos/acme/widgets/actions/workflows"
-    expected = [{"id": value} for value in range(1, max_pages * 2 + 1)]
-    for page in range(1, max_pages + 1):
-        start = (page - 1) * 2
-        fake_gh.set_response(
-            "GET", _page_endpoint(endpoint, page, per_page=2),
-            {"total_count": len(expected), "workflows": expected[start : start + 2]},
-        )
-    result = await git_ops.gh_api_bounded_pages(
-        git_repo,
-        endpoint,
-        envelope='workflows',
-        limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
-        budget=_budget(),
-    )
-    assert result == expected
-    assert [call.argv[-1] for call in fake_gh.process_calls()] == [
-        _page_endpoint(endpoint, page, per_page=2)
-        for page in range(1, max_pages + 1)
+async def test_malformed_envelope_is_rejected(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[Any] = [
+        [],
+        {"check_runs": "wrong"},
+        {"total_count": True, "check_runs": []},
     ]
+    for response in cases:
+        row_index += 1
+        with subtests.test(response=response):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                endpoint = "repos/acme/widgets/commits/" + "d" * 40 + "/check-runs?filter=latest"
+                fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
+                with pytest.raises(git_ops.GitError, match="shape"):
+                    await git_ops.gh_api_bounded_pages(
+                        git_repo,
+                        endpoint,
+                        envelope="check_runs",
+                        limits=git_ops.GitHubPageLimits(),
+                        budget=_budget(),
+                    )
 
-@pytest.mark.parametrize("max_pages", [1, 2])
-async def test_envelope_less_full_capacity_remains_ambiguous(fake_gh: FakeGh, git_repo: Path, max_pages: int) -> None:
-    sha = "f" * 40
-    endpoint = f"repos/acme/widgets/commits/{sha}/statuses"
-    for page in range(1, max_pages + 1):
-        fake_gh.set_response(
-            "GET", _page_endpoint(endpoint, page, per_page=2), [{"id": page * 2 - 1}, {"id": page * 2}],
-        )
-    with pytest.raises(git_ops.GitError, match="pagination limit"):
-        await git_ops.gh_api_bounded_pages(
-            git_repo,
-            endpoint,
-            envelope=None,
-            limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
-            budget=_budget(),
-        )
-    assert len(fake_gh.process_calls()) == max_pages
+async def test_enveloped_exact_capacity_returns_declared_total(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[int] = [1, 2]
+    for max_pages in cases:
+        row_index += 1
+        with subtests.test(max_pages=max_pages):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                endpoint = "repos/acme/widgets/actions/workflows"
+                expected = [{"id": value} for value in range(1, max_pages * 2 + 1)]
+                for page in range(1, max_pages + 1):
+                    start = (page - 1) * 2
+                    fake_gh.set_response(
+                        "GET",
+                        _page_endpoint(endpoint, page, per_page=2),
+                        {"total_count": len(expected), "workflows": expected[start : start + 2]},
+                    )
+                result = await git_ops.gh_api_bounded_pages(
+                    git_repo,
+                    endpoint,
+                    envelope="workflows",
+                    limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
+                    budget=_budget(),
+                )
+                assert result == expected
+                assert [call.argv[-1] for call in fake_gh.process_calls()] == [
+                    _page_endpoint(endpoint, page, per_page=2) for page in range(1, max_pages + 1)
+                ]
+
+async def test_envelope_less_full_capacity_remains_ambiguous(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[int] = [1, 2]
+    for max_pages in cases:
+        row_index += 1
+        with subtests.test(max_pages=max_pages):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                sha = "f" * 40
+                endpoint = f"repos/acme/widgets/commits/{sha}/statuses"
+                for page in range(1, max_pages + 1):
+                    fake_gh.set_response(
+                        "GET",
+                        _page_endpoint(endpoint, page, per_page=2),
+                        [{"id": page * 2 - 1}, {"id": page * 2}],
+                    )
+                with pytest.raises(git_ops.GitError, match="pagination limit"):
+                    await git_ops.gh_api_bounded_pages(
+                        git_repo,
+                        endpoint,
+                        envelope=None,
+                        limits=git_ops.GitHubPageLimits(per_page=2, max_pages=max_pages),
+                        budget=_budget(),
+                    )
+                assert len(fake_gh.process_calls()) == max_pages
 
 async def test_full_tenth_page_is_rejected_at_hard_limit(fake_gh: FakeGh, git_repo: Path) -> None:
     sha = "e" * 40
@@ -400,34 +490,60 @@ async def test_full_tenth_page_is_rejected_at_hard_limit(fake_gh: FakeGh, git_re
         )
     assert len(fake_gh.process_calls()) == 10
 
-@pytest.mark.parametrize(
-    ("response", "expected", "error"),
-    [
+async def test_classic_required_checks_narrow_absence(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[tuple[Any, Any, type[BaseException] | None]] = [
         ({"__error__": "gh: Branch not protected (HTTP 404)"}, None, None),
         ({"__error__": "gh: Not Found (HTTP 404)"}, None, git_ops.GitError),
         ({"__error__": "API rate limit exceeded (HTTP 403)"}, None, git_ops.RateLimitError),
-        ([], None, git_ops.GitError), ({"contexts": ["ci"]}, {"contexts": ["ci"]}, None),
-    ],
-)
-async def test_classic_required_checks_narrow_absence(
-    fake_gh: FakeGh, git_repo: Path, response: Any, expected: Any, error: type[BaseException] | None,
-) -> None:
-    endpoint = "repos/acme/widgets/branches/main/protection/required_status_checks"
-    fake_gh.set_response("GET", endpoint, response)
-    if error is not None:
-        with pytest.raises(error):
-            await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
-    else:
-        assert (
-            await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
-            == expected
-        )
+        ([], None, git_ops.GitError),
+        ({"contexts": ["ci"]}, {"contexts": ["ci"]}, None),
+    ]
+    for response, expected, error in cases:
+        row_index += 1
+        with subtests.test(response=response):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                endpoint = "repos/acme/widgets/branches/main/protection/required_status_checks"
+                fake_gh.set_response("GET", endpoint, response)
+                if error is not None:
+                    with pytest.raises(error):
+                        await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
+                else:
+                    assert (
+                        await git_ops.gh_classic_required_checks(git_repo, "acme", "widgets", "main", budget=_budget())
+                        == expected
+                    )
 
-@pytest.mark.parametrize("response", [{"__stdout__": "not-json"}, []])
-async def test_pr_snapshot_rejects_invalid_json_or_shape(fake_gh: FakeGh, git_repo: Path, response: Any) -> None:
-    fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", response)
-    with pytest.raises(git_ops.GitError):
-        await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
+async def test_pr_snapshot_rejects_invalid_json_or_shape(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[Any] = [{"__stdout__": "not-json"}, []]
+    for response in cases:
+        row_index += 1
+        with subtests.test(response=response):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                fake_gh = install_fake_gh(tmp_path, monkeypatch)
+                fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", response)
+                with pytest.raises(git_ops.GitError):
+                    await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
 
 async def _exercise_blocking_request(
     fake_gh: FakeGh, git_repo: Path, tmp_path: Path, *, cancel: bool,

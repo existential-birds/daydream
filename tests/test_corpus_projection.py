@@ -1,6 +1,7 @@
 """Pure reductions and real CLI projection over pinned record-store evidence."""
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from tests.harness.record_projection import (
     seed_projection_store,
 )
 from tests.harness.scripts import cli_main
+from tests.harness.table_cases import isolated_case
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -168,32 +170,57 @@ def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_
     assert len(load_dataset_v2(config.out_dir)) == 2
 
 
-@pytest.mark.parametrize(("slug", "reason"), [
-    *((slug, "c5_excluded_repo") for slug in (
-        "getsentry/sentry", "GETSENTRY/SENTRY", "https://github.com/getsentry/sentry.git",
-        "git@github.com:getsentry/sentry.git", "git@host:getsentry/sentry", "getsentry/sentry.git",
-        "  getsentry/sentry  ")),
-    *((slug, "repo_identity_missing") for slug in (None, "", "  ", "owner/repo/extra")),
-])
 def test_cli_identity_and_benchmark_refusal_writes_no_projection(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], slug: Any, reason: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    store = seed_projection_store(tmp_path, repo_slug=slug)
-    config = projection_config(store, tmp_path)
-    assert cli_main(_cli_args(config)) == 1
-    captured = capsys.readouterr()
-    assert reason in captured.out + captured.err
-    assert not config.out_dir.exists()
+    case_root = tmp_path
+    cases: Sequence[tuple[Any, str]] = [
+        *(
+            (slug, "c5_excluded_repo")
+            for slug in (
+                "getsentry/sentry",
+                "GETSENTRY/SENTRY",
+                "https://github.com/getsentry/sentry.git",
+                "git@github.com:getsentry/sentry.git",
+                "git@host:getsentry/sentry",
+                "getsentry/sentry.git",
+                "  getsentry/sentry  ",
+            )
+        ),
+        *((slug, "repo_identity_missing") for slug in (None, "", "  ", "owner/repo/extra")),
+    ]
+    for case_index, (slug, reason) in enumerate(cases):
+        with subtests.test(slug=slug, reason=reason):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                capsys.readouterr()
+                store = seed_projection_store(tmp_path, repo_slug=slug)
+                config = projection_config(store, tmp_path)
+                assert cli_main(_cli_args(config)) == 1
+                captured = capsys.readouterr()
+                assert reason in captured.out + captured.err
+                assert not config.out_dir.exists()
 
 
-@pytest.mark.parametrize("slug", ["OWNER/Repo", " https://github.com/OWNER/Repo.git ",
-                                  "git@github.com:OWNER/Repo.git", "OWNER/Repo.git"])
-def test_cli_canonical_source_identity_is_preserved(tmp_path: Path, slug: str) -> None:
-    store = seed_projection_store(tmp_path, repo_slug=slug)
-    config = projection_config(store, tmp_path)
-    assert cli_main(_cli_args(config)) == 0
-    for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
-        assert row["lineage"]["repo_slug"] == row["task_identity"]["repo_slug"] == "OWNER/Repo"
+def test_cli_canonical_source_identity_is_preserved(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = [
+        "OWNER/Repo",
+        " https://github.com/OWNER/Repo.git ",
+        "git@github.com:OWNER/Repo.git",
+        "OWNER/Repo.git",
+    ]
+    for case_index, slug in enumerate(cases):
+        with subtests.test(slug=slug):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                store = seed_projection_store(tmp_path, repo_slug=slug)
+                config = projection_config(store, tmp_path)
+                assert cli_main(_cli_args(config)) == 0
+                for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
+                    assert row["lineage"]["repo_slug"] == row["task_identity"]["repo_slug"] == "OWNER/Repo"
 
 
 def test_mixed_repositories_build_without_permission_evidence(tmp_path: Path) -> None:
@@ -226,20 +253,25 @@ def test_missing_judgments_remain_in_complete_adjudication_population(tmp_path: 
     assert {entry["disposition"] for entry in report} == {"unanswered"}
 
 
-@pytest.mark.parametrize("failure", ["snapshot", "trajectory"])
-def test_required_frozen_inputs_fail_before_output(tmp_path: Path, failure: str) -> None:
-    store = seed_projection_store(tmp_path)
-    config = projection_config(store, tmp_path)
-    if failure == "snapshot":
-        (store.root / "snapshots" / f"{config.snapshot_id}.jsonl").unlink()
-    else:
-        fresh = LocalRecordStore(tmp_path / "absent-trace")
-        run = projection_run(trajectories={"status": "unproduced"})
-        fresh.commit_run(run)
-        append_projection_evidence(fresh, run)
-        config = projection_config(fresh, tmp_path)
-    assert cli_main(_cli_args(config)) == 1
-    assert not config.out_dir.exists()
+def test_required_frozen_inputs_fail_before_output(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["snapshot", "trajectory"]
+    for case_index, failure in enumerate(cases):
+        with subtests.test(failure=failure):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                store = seed_projection_store(tmp_path)
+                config = projection_config(store, tmp_path)
+                if failure == "snapshot":
+                    (store.root / "snapshots" / f"{config.snapshot_id}.jsonl").unlink()
+                else:
+                    fresh = LocalRecordStore(tmp_path / "absent-trace")
+                    run = projection_run(trajectories={"status": "unproduced"})
+                    fresh.commit_run(run)
+                    append_projection_evidence(fresh, run)
+                    config = projection_config(fresh, tmp_path)
+                assert cli_main(_cli_args(config)) == 1
+                assert not config.out_dir.exists()
 
 
 def test_v2_loader_rejects_incomplete_wrong_version_and_malformed_outputs(tmp_path: Path) -> None:
@@ -366,45 +398,70 @@ def test_equivalent_records_preserve_normalized_pre_cutover_training_examples(tm
     assert sorted(normalized, key=lambda row: row["finding_fingerprint"]) == expected["records"]
 
 
-@pytest.mark.parametrize("target", ["store-root", "shards", "ancestor", "output-alias", "store-alias"])
 def test_cli_output_refuses_record_store_overlap_without_mutating_input(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    store = seed_projection_store(tmp_path)
-    config = projection_config(store, tmp_path)
-    input_root = store.root
-    if target == "store-root":
-        output_root = store.root
-    elif target == "shards":
-        output_root = store.root / "runs"
-    elif target == "ancestor":
-        output_root = store.root.parent
-    elif target == "output-alias":
-        alias = tmp_path / "output-alias"
-        alias.symlink_to(store.root, target_is_directory=True)
-        output_root = alias / "runs"
-    else:
-        input_root = tmp_path / "store-alias"
-        input_root.symlink_to(store.root, target_is_directory=True)
-        output_root = store.root
-    (tmp_path / "operator-notes.txt").write_text("existing local evidence and notes must survive")
-    before_files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    before_paths = set(tmp_path.rglob("*"))
-    args = ["corpus", "build", "--store", str(input_root), "--snapshot-id", config.snapshot_id,
-            "--out", str(output_root / "corpus.jsonl")]
-    assert cli_main(args) == 1
-    assert "overlaps the record store namespace" in capsys.readouterr().out
-    after_files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    assert after_files == before_files
-    assert set(tmp_path.rglob("*")) == before_paths
+    case_root = tmp_path
+    cases: Sequence[str] = ["store-root", "shards", "ancestor", "output-alias", "store-alias"]
+    for case_index, target in enumerate(cases):
+        with subtests.test(target=target):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                capsys.readouterr()
+                store = seed_projection_store(tmp_path)
+                config = projection_config(store, tmp_path)
+                input_root = store.root
+                if target == "store-root":
+                    output_root = store.root
+                elif target == "shards":
+                    output_root = store.root / "runs"
+                elif target == "ancestor":
+                    output_root = store.root.parent
+                elif target == "output-alias":
+                    alias = tmp_path / "output-alias"
+                    alias.symlink_to(store.root, target_is_directory=True)
+                    output_root = alias / "runs"
+                else:
+                    input_root = tmp_path / "store-alias"
+                    input_root.symlink_to(store.root, target_is_directory=True)
+                    output_root = store.root
+                (tmp_path / "operator-notes.txt").write_text("existing local evidence and notes must survive")
+                before_files = {
+                    path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+                }
+                before_paths = set(tmp_path.rglob("*"))
+                args = [
+                    "corpus",
+                    "build",
+                    "--store",
+                    str(input_root),
+                    "--snapshot-id",
+                    config.snapshot_id,
+                    "--out",
+                    str(output_root / "corpus.jsonl"),
+                ]
+                assert cli_main(args) == 1
+                assert "overlaps the record store namespace" in capsys.readouterr().out
+                after_files = {
+                    path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+                }
+                assert after_files == before_files
+                assert set(tmp_path.rglob("*")) == before_paths
 
 
-@pytest.mark.parametrize("slug", [17, ["owner/repo"], {"repo": "owner/repo"}])
-def test_capture_refuses_nonstring_identity_before_run_write(tmp_path: Path, slug: Any) -> None:
-    store = LocalRecordStore(tmp_path / "records")
-    record = projection_run()
-    record["original_task"]["value"]["repository"]["repo_slug"] = slug
-    with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
-        store.commit_run(record)
-    assert store.read_records()["runs"] == ()
-    assert not (tmp_path / "out").exists()
+def test_capture_refuses_nonstring_identity_before_run_write(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[Any] = [17, ["owner/repo"], {"repo": "owner/repo"}]
+    for case_index, slug in enumerate(cases):
+        with subtests.test(slug=slug):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                store = LocalRecordStore(tmp_path / "records")
+                record = projection_run()
+                record["original_task"]["value"]["repository"]["repo_slug"] = slug
+                with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+                    store.commit_run(record)
+                assert store.read_records()["runs"] == ()
+                assert not (tmp_path / "out").exists()

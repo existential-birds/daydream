@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -626,11 +627,20 @@ async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
     )
 
 
-@pytest.mark.parametrize("decisions", [None, [], [{}],
-    [{"item_uid": "item:4", "selected": 1, "reason_code": "selected"}],
-    [{"item_uid": "item:4", "selected": True, "reason_code": "selected"}] * 2,
-])
-def test_verdict_buckets_reject_unchecked_or_missing_selection(decisions: Any) -> None:
+def _case_verdict_buckets_reject_unchecked_or_missing_selection(decisions: Any) -> None:
     payload = {"selection": {"decisions": decisions}}
     with pytest.raises(ValueError):
         fix_steps._verdict_buckets([{"id": 4, "item_uid": "item:4", "lens": "structural"}], payload)
+
+
+def test_verdict_buckets_reject_unchecked_or_missing_selection(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[Any] = [
+        None,
+        [],
+        [{}],
+        [{"item_uid": "item:4", "selected": 1, "reason_code": "selected"}],
+        [{"item_uid": "item:4", "selected": True, "reason_code": "selected"}] * 2,
+    ]
+    for decisions in cases_0:
+        with subtests.test(decisions=decisions):
+            _case_verdict_buckets_reject_unchecked_or_missing_selection(decisions=decisions)

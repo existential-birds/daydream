@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Consolidate related test matrices into labelled native subtest tables, sharing
+  immutable setup while retaining isolated mutable scenarios and branch coverage.
+
 - Reduce the README to agent setup, code review, and research entry points; remove
   historical documentation and retain concise agent contracts with source links.
 

@@ -4,8 +4,10 @@ import pytest
 from daydream.archive.git_safe import normalize_remote_url
 
 
-@pytest.mark.parametrize(("raw", "slug", "url_out"),
-    [
+def test_normalize_strips_credentials_and_keeps_identity(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str, str]] = [
         # M2: user:pass@ userinfo
         ("https://user:ghp_abc123@github.com/o/r.git", "o/r", "https://github.com/o/r"),
         # M2: token-only user@ (x-access-token form)
@@ -22,15 +24,15 @@ from daydream.archive.git_safe import normalize_remote_url
         ("ssh://git@github.com/o/r.git", "o/r", "https://github.com/o/r"),
         # slug preserved through .git strip and trailing slash
         ("https://github.com/o/r/", "o/r", "https://github.com/o/r"),
-    ],
-)
-def test_normalize_strips_credentials_and_keeps_identity(raw: str, slug: str, url_out: str) -> None:
-    identity, url = normalize_remote_url(raw)
-    assert identity == slug
-    assert url == url_out
-    # M3 invariant: no userinfo, no credential query value survives
-    assert "@" not in (url or "")
-    assert "token=" not in (url or "")
+    ]
+    for raw, slug, url_out in cases:
+        with subtests.test(raw=raw):
+            identity, url = normalize_remote_url(raw)
+            assert identity == slug
+            assert url == url_out
+            # M3 invariant: no userinfo, no credential query value survives
+            assert "@" not in (url or "")
+            assert "token=" not in (url or "")
 
 def test_normalize_unparseable_returns_none_identity() -> None:
     identity, _ = normalize_remote_url("not a url at all")

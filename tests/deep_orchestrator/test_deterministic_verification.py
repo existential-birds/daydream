@@ -6,7 +6,7 @@ import json
 import re
 import shlex
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from daydream.test_execution import resolve_test_recipe
 from tests.harness.git_helpers import bare_remote, git, seed_feature_branch
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend, silence
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import MakeConfig
 
 
@@ -120,8 +121,7 @@ async def test_runner_substantiates_blocking_check_claims(
             assert "make typecheck" in failures if scenario == "unavailable" else "mutated" in failures
             assert not (repo / ".daydream/deep/fix-outcomes.json").exists()
 
-@pytest.mark.parametrize("command_kind", ["missing_executable", "timeout"])
-async def test_check_evidence_unavailable_fails_closed(tmp_path: Path, command_kind: str) -> None:
+async def _case_check_evidence_unavailable_fails_closed(tmp_path: Path, command_kind: str) -> None:
     """Real subprocess failures cannot become confirmed model regressions."""
     from types import SimpleNamespace
     script = tmp_path / "check.py"
@@ -136,6 +136,16 @@ async def test_check_evidence_unavailable_fails_closed(tmp_path: Path, command_k
     with pytest.raises(CheckClaimUnavailable, match="unavailable"):
         await substantiate_check_claims(tmp_path, verdicts, recipe=recipe, wall_budget_s=0.01)
 
+
+async def test_check_evidence_unavailable_fails_closed(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["missing_executable", "timeout"]
+    case_index = 0
+    for command_kind in cases_0:
+        with subtests.test(command_kind=command_kind), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_check_evidence_unavailable_fails_closed(tmp_path=scenario.tmp_path, command_kind=command_kind)
+
+
 async def test_verifier_does_not_execute_model_shell_commands(tmp_path: Path) -> None:
     """Check commands need repository authorization, even if they would pass."""
     verdicts = [{"issue_id": 1, "verdict": "regressed", "reason": "check fails", "check_command": "touch unauthorized"}]
@@ -143,8 +153,7 @@ async def test_verifier_does_not_execute_model_shell_commands(tmp_path: Path) ->
         await substantiate_check_claims(tmp_path, verdicts, recipe=None)
     assert not (tmp_path / "unauthorized").exists()
 
-@pytest.mark.parametrize("reason", ["mypy reports errors", "build fails"])
-async def test_unrelated_test_recipe_cannot_refute_other_checks(tmp_path: Path, reason: str) -> None:
+async def _case_unrelated_test_recipe_cannot_refute_other_checks(tmp_path: Path, reason: str) -> None:
     from types import SimpleNamespace
     recipe = resolve_test_recipe(SimpleNamespace(test_command=f"{sys.executable} -c pass"),
         SimpleNamespace(test_command=None), repo_root=tmp_path,
@@ -152,8 +161,17 @@ async def test_unrelated_test_recipe_cannot_refute_other_checks(tmp_path: Path, 
     with pytest.raises(CheckClaimUnavailable, match="no repository-declared command"):
         await substantiate_check_claims(tmp_path, [{"verdict": "regressed", "reason": reason}], recipe=recipe)
 
-@pytest.mark.parametrize("explicit_command", [None, "make lint"])
-async def test_all_explicit_check_claims_need_evidence(tmp_path: Path, explicit_command: str | None) -> None:
+
+async def test_unrelated_test_recipe_cannot_refute_other_checks(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = ["mypy reports errors", "build fails"]
+    case_index = 0
+    for reason in cases_0:
+        with subtests.test(reason=reason), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unrelated_test_recipe_cannot_refute_other_checks(tmp_path=scenario.tmp_path, reason=reason)
+
+
+async def _case_all_explicit_check_claims_need_evidence(tmp_path: Path, explicit_command: str | None) -> None:
     seed_feature_branch(
         tmp_path, base={"api.py": "VALUE = 1\n", "Makefile": "lint:\n\ttrue\ntypecheck:\n\tfalse\n"},
         feature={"api.py": "VALUE = 2\n"},
@@ -166,6 +184,18 @@ async def test_all_explicit_check_claims_need_evidence(tmp_path: Path, explicit_
     assert result[0]["check_evidence"]["status"] == "failed"
     assert [check["status"] for check in result[0]["check_evidence"]["checks"]] == ["passed", "failed"]
 
+
+async def test_all_explicit_check_claims_need_evidence(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str | None] = [None, "make lint"]
+    case_index = 0
+    for explicit_command in cases_0:
+        with subtests.test(explicit_command=explicit_command), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_all_explicit_check_claims_need_evidence(
+                tmp_path=scenario.tmp_path, explicit_command=explicit_command
+            )
+
+
 async def test_legacy_green_check_needs_regression_classification(tmp_path: Path) -> None:
     seed_feature_branch(
         tmp_path, base={"api.py": "VALUE = 1\n", "Makefile": "lint:\n\ttrue\n"},
@@ -176,8 +206,7 @@ async def test_legacy_green_check_needs_regression_classification(tmp_path: Path
             "verdict": "regressed", "reason": "Ruff rejects these blank lines so make lint fails",
         }], recipe=None)
 
-@pytest.mark.parametrize("mutate", [False, True])
-async def test_check_identity_preserves_symlinks_and_detects_clean_file_chmod(tmp_path: Path, mutate: bool) -> None:
+async def _case_check_identity_preserves_symlinks_and_detects_clean_file_chmod(tmp_path: Path, mutate: bool) -> None:
     from types import SimpleNamespace
 
     seed_feature_branch(
@@ -199,6 +228,20 @@ async def test_check_identity_preserves_symlinks_and_detects_clean_file_chmod(tm
         outcomes = await substantiate_check_claims(tmp_path, verdicts, recipe=recipe)
         assert outcomes[0]["verdict"] == "unresolved"
     assert (tmp_path / "owner-link").is_symlink()
+
+
+async def test_check_identity_preserves_symlinks_and_detects_clean_file_chmod(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for mutate in cases_0:
+        with subtests.test(mutate=mutate), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_check_identity_preserves_symlinks_and_detects_clean_file_chmod(
+                tmp_path=scenario.tmp_path, mutate=mutate
+            )
+
 
 async def test_explicit_check_classification_requires_host_evidence(tmp_path: Path) -> None:
     with pytest.raises(CheckClaimUnavailable, match="no repository-declared validation command"):

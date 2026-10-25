@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
 from tests.harness.review_result import review_coverage, terminal_result
+from tests.harness.table_cases import isolated_case
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 
@@ -352,99 +354,192 @@ def test_find_pr_by_number_raises_when_slug_unresolved(monkeypatch: pytest.Monke
         pr_review.find_pr_by_number(git_repo, 7)
 
 
-@pytest.mark.parametrize("lookup", ["branch", "number"])
-@pytest.mark.parametrize("include_empty_slug", [False, True])
 def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
-    monkeypatch: pytest.MonkeyPatch, git_repo: Path, tmp_path: Path, lookup: str, include_empty_slug: bool,
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Both gh lookup routes preserve validated head identity through export."""
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases_1: list[bool] = [False, True]
+    for include_empty_slug in cases_1:
+        cases_2: list[str] = ["branch", "number"]
+        for lookup in cases_2:
+            row_index += 1
+            with subtests.test(include_empty_slug=include_empty_slug, lookup=lookup):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    monkeypatch = case.monkeypatch
+                    git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
 
-    row, base, head = _local_pr_row(git_repo)
-    row["headRepository"] = {"id": "R_fixture", "name": "shelfspace-mono"}
-    if include_empty_slug:
-        row["headRepository"]["nameWithOwner"] = ""
-    row["headRepositoryOwner"] = {"login": "shelfspace-app"}
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda *_a, **_k: ("o", "r"))
-    info = (pr_review.find_open_pr(git_repo) if lookup == "branch" else pr_review.find_pr_by_number(git_repo, 7))
-    assert info is not None
-    assert (info.head_repo, info.base_sha, info.head_sha) == ("shelfspace-app/shelfspace-mono", base, head)
+                    row, base, head = _local_pr_row(git_repo)
+                    row["headRepository"] = {"id": "R_fixture", "name": "shelfspace-mono"}
+                    if include_empty_slug:
+                        row["headRepository"]["nameWithOwner"] = ""
+                    row["headRepositoryOwner"] = {"login": "shelfspace-app"}
+                    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+                    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+                    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda *_a, **_k: ("o", "r"))
+                    info = (
+                        pr_review.find_open_pr(git_repo)
+                        if lookup == "branch"
+                        else pr_review.find_pr_by_number(git_repo, 7)
+                    )
+                    assert info is not None
+                    assert (info.head_repo, info.base_sha, info.head_sha) == (
+                        "shelfspace-app/shelfspace-mono",
+                        base,
+                        head,
+                    )
 
-    output = tmp_path / "findings.json"
-    config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
-    assert _emit_findings_from_items(
-        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS, terminal_result=terminal_result(head_sha=head),
-        captured_pr=info, snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
-    ) == 0
-    artifact = load_findings_artifact(output, expected_repo="o/r", expected_pr_number=7, expected_head_sha=head,)
-    assert artifact.findings == []
+                    output = tmp_path / "findings.json"
+                    config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
+                    assert (
+                        _emit_findings_from_items(
+                            git_repo,
+                            config,
+                            [],
+                            run_info="",
+                            renderers=BUILTIN_RENDERERS,
+                            terminal_result=terminal_result(head_sha=head),
+                            captured_pr=info,
+                            snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
+                        )
+                        == 0
+                    )
+                    artifact = load_findings_artifact(
+                        output,
+                        expected_repo="o/r",
+                        expected_pr_number=7,
+                        expected_head_sha=head,
+                    )
+                    assert artifact.findings == []
 
-    # Captured export identity still requires an available PR head.
-    output.unlink()
-    row["headRefOid"] = "f" * 40
-    with pytest.raises(GitError, match="bad object"):
-        _emit_findings_from_items(
-            git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
-            terminal_result=terminal_result(head_sha="f" * 40), captured_pr=replace(info, head_sha="f" * 40),
-            snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
-        )
-    assert not output.exists()
+                    # Captured export identity still requires an available PR head.
+                    output.unlink()
+                    row["headRefOid"] = "f" * 40
+                    with pytest.raises(GitError, match="bad object"):
+                        _emit_findings_from_items(
+                            git_repo,
+                            config,
+                            [],
+                            run_info="",
+                            renderers=BUILTIN_RENDERERS,
+                            terminal_result=terminal_result(head_sha="f" * 40),
+                            captured_pr=replace(info, head_sha="f" * 40),
+                            snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
+                        )
+                    assert not output.exists()
 
-@pytest.mark.parametrize("value", [None, False, 7, " ", "fork/r/extra", "fork/", "/r"])
-def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
-    row = {"headRepository": {"name": "r", "nameWithOwner": value}, "headRepositoryOwner": {"login": "fork"}}
-    with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+def test_head_slug_fallback_does_not_mask_invalid_present_value(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[Any] = [None, False, 7, " ", "fork/r/extra", "fork/", "/r"]
+    for value in cases:
+        with subtests.test(value=value):
+            row = {"headRepository": {"name": "r", "nameWithOwner": value}, "headRepositoryOwner": {"login": "fork"}}
+            with pytest.raises(GitError, match="invalid PR row"):
+                pr_review._head_repo_slug_from_row(row)
 
-@pytest.mark.parametrize("component", ["name", "login"])
-@pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
-def test_head_slug_fallback_rejects_invalid_components(component: str, value: Any) -> None:
-    row = {"headRepository": {"name": "r", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "fork"}}
-    row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
-    with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+def test_head_slug_fallback_rejects_invalid_components(
+    subtests: pytest.Subtests,
+) -> None:
+    cases_1: list[Any] = [None, False, 7, "", " ", "a/b", "a\nb"]
+    for value in cases_1:
+        cases_2: list[str] = ["name", "login"]
+        for component in cases_2:
+            with subtests.test(value=value, component=component):
+                row = {"headRepository": {"name": "r", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "fork"}}
+                row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
+                with pytest.raises(GitError, match="invalid PR row"):
+                    pr_review._head_repo_slug_from_row(row)
 
-@pytest.mark.parametrize("slug", ["other/r", "fork/other"])
-def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
-    with pytest.raises(GitError, match="contradictory head repository identity") as error:
-        pr_review._head_repo_slug_from_row({
-            "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
-            "headRepositoryOwner": {"login": "fork"},
-        })
-    assert "private-value" not in str(error.value)
-    assert slug not in str(error.value)
+def test_head_slug_rejects_contradictory_valid_identity(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["other/r", "fork/other"]
+    for slug in cases:
+        with subtests.test(slug=slug):
+            with pytest.raises(GitError, match="contradictory head repository identity") as error:
+                pr_review._head_repo_slug_from_row(
+                    {
+                        "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
+                        "headRepositoryOwner": {"login": "fork"},
+                    }
+                )
+            assert "private-value" not in str(error.value)
+            assert slug not in str(error.value)
 
 def test_head_slug_allows_case_differences() -> None:
     assert pr_review._head_repo_slug_from_row({"headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
         "headRepositoryOwner": {"login": "fork"},
     }) == "FORK/widgets"
 
-@pytest.mark.parametrize(("field", "value"),
-    [("number", True), ("number", 0), ("headRefOid", "HEAD"), ("headRefOid", "deadbeef"), ("headRefName", ""),
-        ("headRefName", 7), ("headRefName", "feature~1"), ("baseRefName", ""), ("baseRefName", "main~1"), ("url", ""),
-        ("url", 7), ("headRepository", "fork/r"), ("headRepository", {"nameWithOwner": "fork/r/extra"}),
-        ("headRepository", {}), ("headRepository", {"nameWithOwner": 7, "name": "r"}), ("headRepositoryOwner", {}),
-        ("headRepositoryOwner", {"login": 7}), ("headRepositoryOwner", {"login": ""}), ("headRepositoryOwner", "fork"),
-    ],
-)
-def test_pr_info_rejects_malformed_row_fields(monkeypatch: pytest.MonkeyPatch, git_repo: Path, field: str, value: Any,
+def test_pr_info_rejects_malformed_row_fields(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    row, _, _ = _local_pr_row(git_repo)
-    row[field] = value
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
-    with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
-        pr_review._pr_info_from_row(git_repo, row)
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[tuple[str, Any]] = [
+        ("number", True),
+        ("number", 0),
+        ("headRefOid", "HEAD"),
+        ("headRefOid", "deadbeef"),
+        ("headRefName", ""),
+        ("headRefName", 7),
+        ("headRefName", "feature~1"),
+        ("baseRefName", ""),
+        ("baseRefName", "main~1"),
+        ("url", ""),
+        ("url", 7),
+        ("headRepository", "fork/r"),
+        ("headRepository", {"nameWithOwner": "fork/r/extra"}),
+        ("headRepository", {}),
+        ("headRepository", {"nameWithOwner": 7, "name": "r"}),
+        ("headRepositoryOwner", {}),
+        ("headRepositoryOwner", {"login": 7}),
+        ("headRepositoryOwner", {"login": ""}),
+        ("headRepositoryOwner", "fork"),
+    ]
+    for field, value in cases:
+        row_index += 1
+        with subtests.test(field=field):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                row, _, _ = _local_pr_row(git_repo)
+                row[field] = value
+                monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
+                with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
+                    pr_review._pr_info_from_row(git_repo, row)
 
-@pytest.mark.parametrize("missing_field", ["headRepository", "headRepositoryOwner"])
 def test_pr_info_rejects_missing_requested_head_metadata(
-    monkeypatch: pytest.MonkeyPatch, git_repo: Path, missing_field: str,
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    row, _, _ = _local_pr_row(git_repo)
-    del row[missing_field]
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
-    with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._pr_info_from_row(git_repo, row)
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["headRepository", "headRepositoryOwner"]
+    for missing_field in cases:
+        row_index += 1
+        with subtests.test(missing_field=missing_field):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                row, _, _ = _local_pr_row(git_repo)
+                del row[missing_field]
+                monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
+                with pytest.raises(GitError, match="invalid PR row"):
+                    pr_review._pr_info_from_row(git_repo, row)
 
 def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypatch: pytest.MonkeyPatch, git_repo: Path,
 ) -> None:
@@ -455,15 +550,28 @@ def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypa
     with pytest.raises(GitError, match="invalid PR row"):
         pr_review._pr_info_from_row(git_repo, row)
 
-@pytest.mark.parametrize("head_owner", [None, {"login": "former-owner"}])
-def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.MonkeyPatch, git_repo: Path, head_owner: Any,
+def test_pr_info_accepts_null_same_repo_head_metadata(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    row, _, _ = _local_pr_row(git_repo)
-    row["headRepository"] = None
-    row["headRepositoryOwner"] = head_owner
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[Any] = [None, {"login": "former-owner"}]
+    for head_owner in cases:
+        row_index += 1
+        with subtests.test(head_owner=head_owner):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                row, _, _ = _local_pr_row(git_repo)
+                row["headRepository"] = None
+                row["headRepositoryOwner"] = head_owner
+                monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
 
-    assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
+                assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
 
 def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     def fail_branch(_repo: Path) -> str | None:
@@ -473,21 +581,40 @@ def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.Monk
     with pytest.raises(GitError, match="cannot read current branch"):
         pr_review.find_open_pr(git_repo)
 
-@pytest.mark.parametrize("lookup", ["branch", "number"])
-def test_fork_pr_uses_upstream_base_for_both_lookup_paths(monkeypatch: pytest.MonkeyPatch, git_repo: Path, lookup: str
+def test_fork_pr_uses_upstream_base_for_both_lookup_paths(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    row, base, _ = _local_pr_row(git_repo, head_owner="forky")
-    _git(git_repo, "remote", "add", "origin", "https://github.com/forky/r.git")
-    _git(git_repo, "remote", "add", "upstream", "https://github.com/acme/widgets.git")
-    _git(git_repo, "update-ref", "refs/remotes/upstream/main", base)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("acme", "widgets"),)
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["branch", "number"]
+    for lookup in cases:
+        row_index += 1
+        with subtests.test(lookup=lookup):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                row, base, _ = _local_pr_row(git_repo, head_owner="forky")
+                _git(git_repo, "remote", "add", "origin", "https://github.com/forky/r.git")
+                _git(git_repo, "remote", "add", "upstream", "https://github.com/acme/widgets.git")
+                _git(git_repo, "update-ref", "refs/remotes/upstream/main", base)
+                monkeypatch.setattr(
+                    git_ops,
+                    "gh_repo_view_required",
+                    lambda _r, **_kwargs: ("acme", "widgets"),
+                )
+                monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
+                monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
 
-    info = (pr_review.find_open_pr(git_repo) if lookup == "branch" else pr_review.find_pr_by_number(git_repo, 7))
-    assert info is not None
-    assert info.base_sha == base
-    assert info.head_repo == "forky/r"
+                info = (
+                    pr_review.find_open_pr(git_repo) if lookup == "branch" else pr_review.find_pr_by_number(git_repo, 7)
+                )
+                assert info is not None
+                assert info.base_sha == base
+                assert info.head_repo == "forky/r"
 
 def test_pr_base_remote_matching_is_credential_safe(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     row, base, _ = _local_pr_row(git_repo)
@@ -898,17 +1025,31 @@ def test_base_tip_api_read_rejects_advanced_pr(
     assert calls == [f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"]
 
 
-@pytest.mark.parametrize("path", ["é.py", "spaced name.py", 'quoted"name.py'])
-def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path, path: str) -> None:
-    from tests.harness.git_helpers import git
-    base = git_ops.head_sha(git_repo)
-    (git_repo / path).write_text("defect = True\n")
-    git(git_repo, "add", path)
-    git(git_repo, "commit", "-m", "add quoted path")
-    head = git_ops.head_sha(git_repo)
-    pr = PRInfo(7, head, base, "main", "feature", "o", "r", "https://github.com/o/r/pull/7")
-    diff = git_ops.diff_paths(git_repo, base, head, ["."])
-    issue = ParsedIssue(path=path, line=1, title="Defect", body="defect")
-    placed = classify(git_repo, pr, [issue], snapshot_diff=diff)
-    assert [(finding.path, finding.line) for finding in placed.inline] == [(path, 1)]
-    assert placed.body_only == []
+def test_snapshot_placement_decodes_git_quoted_paths(
+    git_repo: Path,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[str] = ["é.py", "spaced name.py", 'quoted"name.py']
+    for path in cases:
+        row_index += 1
+        with subtests.test(path=path):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                from tests.harness.git_helpers import git
+
+                base = git_ops.head_sha(git_repo)
+                (git_repo / path).write_text("defect = True\n")
+                git(git_repo, "add", path)
+                git(git_repo, "commit", "-m", "add quoted path")
+                head = git_ops.head_sha(git_repo)
+                pr = PRInfo(7, head, base, "main", "feature", "o", "r", "https://github.com/o/r/pull/7")
+                diff = git_ops.diff_paths(git_repo, base, head, ["."])
+                issue = ParsedIssue(path=path, line=1, title="Defect", body="defect")
+                placed = classify(git_repo, pr, [issue], snapshot_diff=diff)
+                assert [(finding.path, finding.line) for finding in placed.inline] == [(path, 1)]
+                assert placed.body_only == []

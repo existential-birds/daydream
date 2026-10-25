@@ -26,6 +26,7 @@ from daydream.deep.orchestrator import _collapse_stacks_for_tiny_diff
 from daydream.hunk_index import head_side_ranges_by_file, parse_hunks
 from daydream.services import Service, enumerate_services
 from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.table_cases import isolated_case
 
 PYTHON_SOURCE = """\
 def outer(a, b):
@@ -269,28 +270,33 @@ def test_cross_module_edges_are_counted_per_direction(tmp_path: Path) -> None:
 
 # --- Flowchart eligibility and branch counting ------------------------------
 
-@pytest.mark.parametrize(
-    "path,source,name,branch_points",
-    [
-        pytest.param("api/sample.py", PYTHON_SOURCE, "outer", 4, id="python"),
-        pytest.param("api/sample.ts", TYPESCRIPT_SOURCE, "handle", 5, id="typescript"),
-        pytest.param("api/sample.go", GO_SOURCE, "Handle", 5, id="go"),
-        pytest.param("api/sample.rs", RUST_SOURCE, "handle", 6, id="rust"),
-    ],
-)
 def test_branch_points_are_counted_per_language(
-    tmp_path: Path, path: str, source: str, name: str, branch_points: int
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {path: source})
-    eligibility = _decide(repo, changed, ranges)
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, str, str, int]] = [
+        ("api/sample.py", PYTHON_SOURCE, "outer", 4),
+        ("api/sample.ts", TYPESCRIPT_SOURCE, "handle", 5),
+        ("api/sample.go", GO_SOURCE, "Handle", 5),
+        ("api/sample.rs", RUST_SOURCE, "handle", 6),
+    ]
+    for path, source, name, branch_points in cases:
+        row_index += 1
+        with subtests.test(path=path):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo = tmp_path / "repo"
+                changed, ranges = _diff_repo(repo, {}, {path: source})
+                eligibility = _decide(repo, changed, ranges)
 
-    top = eligibility.candidate_roots[0]
-    assert (top.file, top.name, top.branch_points) == (path, name, branch_points)
-    assert eligibility.flowchart.eligible
-    assert eligibility.flowchart.rule == "branch-points"
-    assert f"most: {branch_points} in {name}" in eligibility.flowchart.reason
-    assert eligibility.eligible_kinds() == ["flowchart"]
+                top = eligibility.candidate_roots[0]
+                assert (top.file, top.name, top.branch_points) == (path, name, branch_points)
+                assert eligibility.flowchart.eligible
+                assert eligibility.flowchart.rule == "branch-points"
+                assert f"most: {branch_points} in {name}" in eligibility.flowchart.reason
+                assert eligibility.eligible_kinds() == ["flowchart"]
 
 def test_unsupported_language_contributes_no_branch_points(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

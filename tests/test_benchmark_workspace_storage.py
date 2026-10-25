@@ -2,6 +2,7 @@ import fcntl
 import inspect
 import os
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ from daydream.benchmark.storage import (
     resolve_authoring_path,
     sha256_file,
 )
+from tests.harness.table_cases import isolated_case
 from tests.harness.transaction_faults import TransactionFaultDriver
 
 
@@ -131,45 +133,51 @@ def test_transaction_retires_digest_matched_file_atomically(tmp_path: Path) -> N
     assert not bundle.exists()
     assert (tmp_path / "benchmark.yaml").read_bytes() == b"after"
 
-@pytest.mark.parametrize("boundary", [0, 1, 2, 3, "manifest"])
-def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, boundary: int | Literal["manifest"]
-) -> None:
-    root = tmp_path / f"ws-{boundary}"
-    bundle = root / "snapshots" / "old.bundle"
-    case = root / "cases" / "case.yaml"
-    manifest = root / "benchmark.yaml"
-    bundle.parent.mkdir(parents=True)
-    case.parent.mkdir(parents=True)
-    bundle.write_bytes(b"old bundle")
-    case.write_bytes(b"old case")
-    manifest.write_bytes(b"old manifest")
-    faults = TransactionFaultDriver(root, op_id="retire-crash", kind="import")
-    with faults.transaction as tx:
-        tx.retire("snapshots/old.bundle", expected_sha256=sha256_file(bundle))
-        tx.stage("cases/case.yaml", b"new case")
-        tx.stage("benchmark.yaml", b"new manifest")
-        faults.halt_at("manifest" if boundary == "manifest" else f"target-{boundary}")
-    doc = load_json_strict(root / "transactions" / "retire-crash" / "journal.json")
-    applied = 3 if boundary == "manifest" else boundary
-    assert doc["state"] == ("complete" if boundary == "manifest" else "prepared" if applied == 0 else "committing"
-    )
-    assert doc["applied_count"] == applied
-    if applied:
-        assert not bundle.exists()  # retirement was genuinely performed before recovery
-    if applied >= 2:
-        assert case.read_bytes() == b"new case"
-    if applied >= 3:
-        assert manifest.read_bytes() == b"new manifest"
-    recover_startup(root)
-    if boundary == "manifest":
-        assert not bundle.exists()
-        assert case.read_bytes() == b"new case"
-        assert manifest.read_bytes() == b"new manifest"
-    else:
-        assert bundle.read_bytes() == b"old bundle"
-        assert case.read_bytes() == b"old case"
-        assert manifest.read_bytes() == b"old manifest"
-    recover_startup(root)  # retirement recovery is idempotent after cleanup
+def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[int | Literal["manifest"]] = [0, 1, 2, 3, "manifest"]
+    for case_index, boundary in enumerate(cases):
+        with subtests.test(boundary=boundary):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                root = tmp_path / f"ws-{boundary}"
+                bundle = root / "snapshots" / "old.bundle"
+                case = root / "cases" / "case.yaml"
+                manifest = root / "benchmark.yaml"
+                bundle.parent.mkdir(parents=True)
+                case.parent.mkdir(parents=True)
+                bundle.write_bytes(b"old bundle")
+                case.write_bytes(b"old case")
+                manifest.write_bytes(b"old manifest")
+                faults = TransactionFaultDriver(root, op_id="retire-crash", kind="import")
+                with faults.transaction as tx:
+                    tx.retire("snapshots/old.bundle", expected_sha256=sha256_file(bundle))
+                    tx.stage("cases/case.yaml", b"new case")
+                    tx.stage("benchmark.yaml", b"new manifest")
+                    faults.halt_at("manifest" if boundary == "manifest" else f"target-{boundary}")
+                doc = load_json_strict(root / "transactions" / "retire-crash" / "journal.json")
+                applied = 3 if boundary == "manifest" else boundary
+                assert doc["state"] == (
+                    "complete" if boundary == "manifest" else "prepared" if applied == 0 else "committing"
+                )
+                assert doc["applied_count"] == applied
+                if applied:
+                    assert not bundle.exists()  # retirement was genuinely performed before recovery
+                if applied >= 2:
+                    assert case.read_bytes() == b"new case"
+                if applied >= 3:
+                    assert manifest.read_bytes() == b"new manifest"
+                recover_startup(root)
+                if boundary == "manifest":
+                    assert not bundle.exists()
+                    assert case.read_bytes() == b"new case"
+                    assert manifest.read_bytes() == b"new manifest"
+                else:
+                    assert bundle.read_bytes() == b"old bundle"
+                    assert case.read_bytes() == b"old case"
+                    assert manifest.read_bytes() == b"old manifest"
+                recover_startup(root)  # retirement recovery is idempotent after cleanup
+
 
 def test_transaction_retirement_refuses_digest_mismatch(tmp_path: Path) -> None:
     bundle = tmp_path / "snapshots" / "old.bundle"
@@ -287,19 +295,26 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
             assert target.read_text() == "after"
         assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
-@pytest.mark.parametrize(
-    "boundary", ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"],
-)
-def test_invalid_fault_boundaries_do_not_publish_a_journal_or_change_targets(tmp_path: Path, boundary: str) -> None:
-    target = tmp_path / "target.yaml"
-    target.write_text("before")
-    faults = TransactionFaultDriver(tmp_path, op_id="invalid-boundary", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "after")
-        with pytest.raises(ValueError):
-            faults.halt_at(boundary)
-    assert target.read_text() == "before"
-    assert not (tmp_path / "transactions" / "invalid-boundary" / "journal.json").exists()
+def test_invalid_fault_boundaries_do_not_publish_a_journal_or_change_targets(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"]
+    for case_index, boundary in enumerate(cases):
+        with subtests.test(boundary=boundary):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                target = tmp_path / "target.yaml"
+                target.write_text("before")
+                faults = TransactionFaultDriver(tmp_path, op_id="invalid-boundary", kind="write")
+                with faults.transaction as tx:
+                    _stage(tx, target, "after")
+                    with pytest.raises(ValueError):
+                        faults.halt_at(boundary)
+                assert target.read_text() == "before"
+                assert not (tmp_path / "transactions" / "invalid-boundary" / "journal.json").exists()
+
 
 def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path: Path) -> None:
     op = tmp_path / "transactions" / "op-x"
@@ -387,30 +402,44 @@ def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
 # One entry per journal validation in recover_startup; the mutation is the only per-case
 # input, and ``escaped_name`` marks the single case that must also leave the workspace parent
 # untouched (path confinement, not just fail-closed).
-@pytest.mark.parametrize(("op_id", "mutate", "escaped_name"), [
-    ("op-1", lambda d: d.__setitem__("state", "bogus"), None),
-    ("op-2", lambda d: d.__setitem__("op_id", "other-dir"), None),
-    ("op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"),
-     "escaped-by-journal.bin"),
-    ("op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"), None),
-    ("op-5", lambda d: d["targets"].append(dict(d["targets"][0])), None),
-    ("op-6", lambda d: d.__setitem__("applied_count", 99), None),
-    ("op-7", lambda d: d.__setitem__("replacement_order", ["not-a-target"]), None),
-], ids=["invalid_state", "opid_mismatch", "rel_escape", "stage_with_separator", "duplicate_target_rel",
-        "applied_count_out_of_bounds", "replacement_order_unknown_target"],
-)
-def test_journal_corruption_fails_closed(tmp_path: Path, op_id: str, mutate: Any,
-        escaped_name: str | None,
-) -> None:
-    outside = None if escaped_name is None else tmp_path.parent / escaped_name
-    if outside is not None:
-        outside.unlink(missing_ok=True)
-    _write_corrupt_journal(tmp_path, op_id, mutate)
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-    assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
-    if outside is not None:
-        assert not outside.exists()  # no path outside the workspace changed
+def test_journal_corruption_fails_closed(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[str, Any, str | None]] = [
+        ("op-1", lambda d: d.__setitem__("state", "bogus"), None),
+        ("op-2", lambda d: d.__setitem__("op_id", "other-dir"), None),
+        (
+            "op-3",
+            lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"),
+            "escaped-by-journal.bin",
+        ),
+        ("op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"), None),
+        ("op-5", lambda d: d["targets"].append(dict(d["targets"][0])), None),
+        ("op-6", lambda d: d.__setitem__("applied_count", 99), None),
+        ("op-7", lambda d: d.__setitem__("replacement_order", ["not-a-target"]), None),
+    ]
+    case_ids_0 = [
+        "invalid_state",
+        "opid_mismatch",
+        "rel_escape",
+        "stage_with_separator",
+        "duplicate_target_rel",
+        "applied_count_out_of_bounds",
+        "replacement_order_unknown_target",
+    ]
+    for case_index, (op_id, mutate, escaped_name) in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], op_id=op_id, mutate=mutate, escaped_name=escaped_name):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                outside = None if escaped_name is None else tmp_path.parent / escaped_name
+                if outside is not None:
+                    outside.unlink(missing_ok=True)
+                _write_corrupt_journal(tmp_path, op_id, mutate)
+                with pytest.raises(WorkspaceCorrupt):
+                    recover_startup(tmp_path)
+                assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
+                if outside is not None:
+                    assert not outside.exists()  # no path outside the workspace changed
+
 
 def test_cross_transaction_target_conflict_is_corruption(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"

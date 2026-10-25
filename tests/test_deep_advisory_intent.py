@@ -1,5 +1,5 @@
 """Modest unattended Pi reviews retain author evidence without inferred intent."""
-
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import review_coverage
+from tests.harness.table_cases import isolated_case
 
 
 def _context(
@@ -92,22 +93,34 @@ async def test_custom_intent_prompt_keeps_model_dispatch(
     assert len(calls) == 1
     assert ctx.data["intent_summary"] == "MODEL INTENT"
 
-@pytest.mark.parametrize("variant", [
-    "interactive", "custom", "many_sources", "large_diff", "other_backend", "no_capability",
-])
-async def test_existing_intent_path_retained_outside_modest_unattended_default_pi(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, variant: str,
+async def _case_existing_intent_path_retained_outside_modest_unattended_default_pi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, variant: str
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work, variant=variant)
     await _step_intent(ctx)
     assert len(calls) == 1
     assert ctx.data["intent_path"].read_text() == "MODEL INTENT"
 
-@pytest.mark.parametrize("view", [{"state": "OPEN", "headRefOid": "mismatched", "body": "STALE AUTHOR BODY"},
-    {"state": "CLOSED", "body": "STALE AUTHOR BODY"}, {"state": "OPEN", "body": "   "},
-])
-async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, view: dict[str, str],
+
+async def test_existing_intent_path_retained_outside_modest_unattended_default_pi(
+    make_config: Any, make_work: Any, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["interactive", "custom", "many_sources", "large_diff", "other_backend", "no_capability"]
+    case_index = 0
+    for variant in cases_0:
+        with subtests.test(variant=variant), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_existing_intent_path_retained_outside_modest_unattended_default_pi(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                make_work=make_work,
+                variant=variant,
+            )
+
+
+async def _case_advisory_context_does_not_promote_stale_or_missing_author_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, view: dict[str, str]
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda *_args, **_kwargs: view)
@@ -115,3 +128,24 @@ async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     assert calls == []
     assert ctx.data["intent_authoritative"] is False
     assert "STALE AUTHOR BODY" not in ctx.data["intent_summary"]
+
+
+async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
+    make_config: Any, make_work: Any, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[dict[str, str]] = [
+        {"state": "OPEN", "headRefOid": "mismatched", "body": "STALE AUTHOR BODY"},
+        {"state": "CLOSED", "body": "STALE AUTHOR BODY"},
+        {"state": "OPEN", "body": "   "},
+    ]
+    case_index = 0
+    for view in cases_0:
+        with subtests.test(view=view), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_advisory_context_does_not_promote_stale_or_missing_author_intent(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                make_work=make_work,
+                view=view,
+            )

@@ -39,6 +39,7 @@ from tests.harness.fake_cli_process import (
     FakeCliProcess,
     install_fake_cli_process,
 )
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 # A complete, valid stream for each CLI.
@@ -207,11 +208,22 @@ async def test_zero_disables_idle_detection(tmp_path: Path, monkeypatch: pytest.
     events = await drain(PiBackend(model="test-model"), tmp_path)
     assert [e.text for e in events if isinstance(e, TextEvent)] == ["slow but alive"]
 
-@pytest.mark.parametrize("raw", ["not-a-number", "-5", "nan", "inf"])
-def test_malformed_override_falls_back_to_default(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_malformed_override_falls_back_to_default(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
     """A garbage/negative/non-finite value never disables or shortens the window."""
-    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, raw)
-    assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["not-a-number", "-5", "nan", "inf"]
+    for raw in cases:
+        row_index += 1
+        with subtests.test(raw=raw):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, raw)
+                assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
 
 def test_default_idle_windows_straddle_the_default_turn_allowance(monkeypatch: pytest.MonkeyPatch) -> None:
     """Defaults straddle an ordinary turn; the 300-second exploration investigation can wall-expire first.

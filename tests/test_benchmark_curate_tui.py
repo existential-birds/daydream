@@ -5,6 +5,7 @@ Drives ``run_curate_tui`` over the real service path (``_seed_ready_case`` +
 ``[a/e/n/x/c/r/d/z/i/q]`` is pinned by a test that asserts the persisted case
 YAML/state via service reads.
 """
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,8 @@ from daydream.benchmark.curate_tui import (
     run_curate_tui,
 )
 from daydream.benchmark.storage import atomic_write_json, load_json_strict, load_yaml_strict
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import FakeGh, install_fake_gh
+from tests.harness.table_cases import isolated_case
 from tests.test_benchmark_curation import _reanchor_frozen_inline, _seed_ready_case, _seed_ready_case_mixed
 
 
@@ -188,27 +190,33 @@ def test_action_new_via_real_editor_persists_authored(tmp_path: Path, fake_gh: F
     assert mode == "600"                        # editor buffer was mode 0600
     assert not Path(buf).exists()               # buffer removed after the edit
 
-@pytest.mark.parametrize("editor_script",
-    [
-        pytest.param("#!/bin/sh\nexit 3\n", id="nonzero-exit"),
-        pytest.param(
-            "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n",
-            id="malformed-buffer",
-        ),
-    ],
-)
 def test_editor_failure_leaves_state_unchanged(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    editor_script: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"
-    before = path.read_bytes()
-    _install_editor(tmp_path, monkeypatch, editor_script)
+    case_root = tmp_path
+    cases: Sequence[str] = [
+        "#!/bin/sh\nexit 3\n",
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n",
+    ]
+    case_ids_0 = ["nonzero-exit", "malformed-buffer"]
+    for case_index, editor_script in enumerate(cases):
+        with subtests.test(msg=case_ids_0[case_index], editor_script=editor_script):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                monkeypatch = sandbox.monkeypatch
+                fake_gh = install_fake_gh(tmp_path / "fake-gh-state", sandbox.monkeypatch)
+                capsys.readouterr()
+                ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+                path = ws / "cases" / f"{case_id}.yaml"
+                before = path.read_bytes()
+                _install_editor(tmp_path, monkeypatch, editor_script)
 
-    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
-    assert path.read_bytes() == before
-    assert "Traceback" not in capsys.readouterr().err
+                run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
+                assert path.read_bytes() == before
+                assert "Traceback" not in capsys.readouterr().err
+
 
 def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)

@@ -1,6 +1,7 @@
 import hashlib
 import re
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, get_args
 
@@ -60,31 +61,42 @@ def _valid_manifest() -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("raw,expected",
-    [("api.anthropic.com", "api.anthropic.com"), ("API.Anthropic.COM", "api.anthropic.com"),
-        ("https://api.anthropic.com", "api.anthropic.com"), ("api.anthropic.com:443", "api.anthropic.com"),
-        ("user:pass@api.anthropic.com", "api.anthropic.com"), ("api.anthropic.com/path", "api.anthropic.com"),
-    ],
-)
-def test_normalize_hostname(raw: Any, expected: Any) -> None:
-    assert normalize_hostname(raw) == expected
 
-@pytest.mark.parametrize("raw", ["", "*.anthropic.com", "not a host", "http://"])
-def test_normalize_hostname_rejects_malformed(raw: Any) -> None:
-    with pytest.raises(ValueError):
-        normalize_hostname(raw)
+def test_hostname_normalization_and_rejection(subtests: pytest.Subtests) -> None:
+    """Operator host forms canonicalize consistently; wildcard/blank inputs fail closed."""
+    valid = [
+        "api.anthropic.com",
+        "API.Anthropic.COM",
+        "https://api.anthropic.com",
+        "api.anthropic.com:443",
+        "user:pass@api.anthropic.com",
+        "api.anthropic.com/path",
+    ]
+    for raw in valid:
+        with subtests.test(raw=raw):
+            assert normalize_hostname(raw) == "api.anthropic.com"
+    for raw in ("", "*.anthropic.com", "not a host", "http://"):
+        with subtests.test(invalid=raw):
+            with pytest.raises(ValueError):
+                normalize_hostname(raw)
 
-@pytest.mark.parametrize(("section", "field", "value"),
-    [(None, "bogus", True), ("source", "hostname", "gitlab.com"), ("privacy", "reviewer_allowed_hosts", []),
-        (None, "benchmark_id", "not-a-uuid"), (None, "created_at", "2026-08-21T12:00:00"),
-    ],
-)
-def test_manifest_rejects_invalid_fields(section: str | None, field: str, value: Any) -> None:
-    base = _valid_manifest()
-    target = base if section is None else base[section]
-    target[field] = value
-    with pytest.raises(ValidationError):
-        BenchmarkManifest.model_validate(base)
+
+def test_manifest_rejects_invalid_fields(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[str | None, str, Any]] = [
+        (None, "bogus", True),
+        ("source", "hostname", "gitlab.com"),
+        ("privacy", "reviewer_allowed_hosts", []),
+        (None, "benchmark_id", "not-a-uuid"),
+        (None, "created_at", "2026-08-21T12:00:00"),
+    ]
+    for case_index, (section, field, value) in enumerate(cases):
+        with subtests.test(section=section, field=field, value=value):
+            base = _valid_manifest()
+            target = base if section is None else base[section]
+            target[field] = value
+            with pytest.raises(ValidationError):
+                BenchmarkManifest.model_validate(base)
+
 
 def test_source_repository_id_is_nonblank_opaque_string() -> None:
     s = Source(provider="github", hostname="github.com", repository="o/r", repository_id="R_kgDOABC123")
@@ -117,10 +129,45 @@ def test_privacy_classification_and_policies_are_literals() -> None:
         with pytest.raises(ValidationError):
             BenchmarkManifest.model_validate(raw)
 
-def test_snapshot_policy_is_literal(raw: dict[str, Any]) -> None:
-    raw["snapshot"]["policy"] = "some_head"
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
+
+def test_case_snapshot_guards_bind_readiness_policy_and_revision(subtests: pytest.Subtests) -> None:
+    """Each row starts from valid authored evidence and isolates one readiness/provenance guard."""
+    valid = CaseDocument.model_validate(_valid_case_dict())
+    assert valid.snapshot.status == "ready"
+    assert valid.snapshot.requested_base_sha == "0123456789abcdef0123456789abcdef01234567"
+    absent = object()
+    mutations: list[tuple[str, str, object]] = [
+        ("snapshot", "policy", "some_head"),
+        ("snapshot", "base_resolution", absent),
+        ("snapshot", "base_resolution", "invented"),
+        ("snapshot", "bundle_file", absent),
+        ("snapshot", "requested_base_sha", absent),
+        ("snapshot", "requested_base_sha", "c" * 40),
+        ("curation", "snapshot_attested", False),
+    ]
+    for section, field, value in mutations:
+        with subtests.test(section=section, field=field, value=value):
+            raw = _valid_case_dict()
+            if value is absent:
+                raw[section].pop(field)
+            else:
+                raw[section][field] = value
+            with pytest.raises(ValidationError):
+                CaseDocument.model_validate(raw)
+    for corruption in ("stale-attested", "unreplayable-with-ready-fields"):
+        with subtests.test(corruption=corruption):
+            raw = _valid_case_dict()
+            if corruption == "stale-attested":
+                raw["curation"].update(state="stale", snapshot_attested=True, gold_status=None, clean_attested=False)
+            else:
+                raw["snapshot"].update(
+                    status="unreplayable",
+                    error={"reason": "equal_trees", "detail": "no change"},
+                    bundle_file="snapshots/pr-000101-0123456789ab.bundle",
+                )
+            with pytest.raises(ValidationError):
+                CaseDocument.model_validate(raw)
+
 
 def test_reviewer_judge_hosts_stay_lists() -> None:
     m = BenchmarkManifest.model_validate(_valid_manifest())
@@ -167,37 +214,32 @@ def _valid_import_document() -> dict[str, Any]:
     }
 
 
-def test_import_document_validates_and_forbids_unknown() -> None:
-    doc = _valid_import_document()
-    assert ImportDocument.model_validate(doc).pull_request.number == 101
-    doc["bogus"] = True
-    with pytest.raises(ValidationError):
-        ImportDocument.model_validate(doc)
 
-def test_import_pull_request_is_strict_submodel() -> None:
-    doc = _valid_import_document()
-    doc["pull_request"]["bogus"] = True
-    with pytest.raises(ValidationError) as ei:
-        ImportDocument.model_validate(doc)
-    assert ei.value.errors()[0]["loc"][0] == "pull_request"
+def test_import_and_case_models_require_strict_nested_shapes(subtests: pytest.Subtests) -> None:
+    """Top-level and nested extra keys stay forbidden; required PR metadata cannot disappear."""
+    assert ImportDocument.model_validate(_valid_import_document()).pull_request.number == 101
+    for kind, section, missing in (
+        ("import", None, False),
+        ("import", "pull_request", False),
+        ("case", "pull_request", True),
+        ("case", "pull_request", False),
+        ("case", "source", False),
+    ):
+        with subtests.test(kind=kind, section=section, missing=missing):
+            raw = _valid_import_document() if kind == "import" else _valid_case_dict()
+            target = raw if section is None else raw[section]
+            if missing:
+                target.pop("author")
+            else:
+                target["bogus"] = 1
+            with pytest.raises(ValidationError) as rejected:
+                if kind == "import":
+                    ImportDocument.model_validate(raw)
+                else:
+                    CaseDocument.model_validate(raw)
+            if section is not None:
+                assert rejected.value.errors()[0]["loc"][0] == section
 
-def test_case_pull_request_is_strict_submodel(raw: dict[str, Any]) -> None:
-    # partial (missing a required field) rejected
-    raw["pull_request"].pop("author")
-    with pytest.raises(ValidationError) as ei:
-        CaseDocument.model_validate(raw)
-    assert ei.value.errors()[0]["loc"][0] == "pull_request"
-    # unknown nested key rejected
-    raw2 = _valid_case_dict()
-    raw2["pull_request"]["bogus"] = 1
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw2)
-
-def test_case_source_is_strict_submodel(raw: dict[str, Any]) -> None:
-    raw["source"]["bogus"] = 1
-    with pytest.raises(ValidationError) as ei:
-        CaseDocument.model_validate(raw)
-    assert ei.value.errors()[0]["loc"][0] == "source"
 
 def test_pull_request_meta_predate_reads_empty_and_validates() -> None:
     # predate import: lacks the additive body/digest/html_url/merged/closed fields
@@ -223,21 +265,35 @@ def test_pull_request_changed_files_is_optional_but_canonical_when_present() -> 
     paths = ["a:b.py", r"dir\literal.py", "src/file with spaces.py"]
     assert PullRequestMeta.model_validate({**raw, "changed_files": paths}).changed_files == paths
 
-@pytest.mark.parametrize("paths",
-    [["b.py", "a.py"], ["a.py", "a.py"], [""], ["/absolute.py"], ["../escape.py"], ["src/../escape.py"],
+def test_pull_request_changed_files_rejects_noncanonical_paths(subtests: pytest.Subtests) -> None:
+    cases: Sequence[list[Any]] = [
+        ["b.py", "a.py"],
+        ["a.py", "a.py"],
+        [""],
+        ["/absolute.py"],
+        ["../escape.py"],
+        ["src/../escape.py"],
         ["src//empty.py"],
         ["nul\x00.py"],
         [1],
-    ],
-)
-def test_pull_request_changed_files_rejects_noncanonical_paths(paths: list[Any]) -> None:
-    raw = {
-        "number": 101, "url": "u", "title": "t", "state": "open", "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
-        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-        "author": {"login": "a", "type": "User"}, "changed_files": paths,
-    }
-    with pytest.raises(ValidationError):
-        PullRequestMeta.model_validate(raw)
+    ]
+    for case_index, paths in enumerate(cases):
+        with subtests.test(paths=paths):
+            raw = {
+                "number": 101,
+                "url": "u",
+                "title": "t",
+                "state": "open",
+                "base": {"sha": "b" * 40},
+                "head": {"sha": "a" * 40},
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "author": {"login": "a", "type": "User"},
+                "changed_files": paths,
+            }
+            with pytest.raises(ValidationError):
+                PullRequestMeta.model_validate(raw)
+
 
 def test_pull_request_meta_fails_closed_on_malformed_required() -> None:
     base = {
@@ -356,18 +412,6 @@ def _unreplayable_snapshot(
     }
 
 
-def test_ready_snapshot_requires_merge_base_resolution_marker() -> None:
-    marked = _valid_case_dict()
-    assert CaseDocument.model_validate(marked).snapshot.status == "ready"
-
-    missing = _valid_case_dict()
-    missing["snapshot"].pop("base_resolution")
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(missing)
-
-    marked["snapshot"]["base_resolution"] = "invented"
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(marked)
 
 def test_base_drift_is_the_only_new_snapshot_reason(raw: dict[str, Any]) -> None:
     raw["snapshot"] = _unreplayable_snapshot(
@@ -383,90 +427,78 @@ def test_base_drift_is_the_only_new_snapshot_reason(raw: dict[str, Any]) -> None
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_ready_snapshot_rejects_missing_bundle_fields(raw: dict[str, Any]) -> None:
-    # Re-validate from a raw dict so a missing required field is caught.
-    raw["snapshot"].pop("bundle_file")
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
 
-def test_ready_snapshot_requires_requested_base_sha(raw: dict[str, Any]) -> None:
-    # requested_base_sha is required on a ready snapshot (no back-compat).
-    raw["snapshot"].pop("requested_base_sha")
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
-    # a populated requested_base_sha passes and is the selected base-branch tip.
-    doc = _valid_case()
-    assert doc.snapshot.requested_base_sha == "0123456789abcdef0123456789abcdef01234567"
 
-def test_ready_requires_snapshot_attestation(raw: dict[str, Any]) -> None:
-    raw["curation"].update({"state": "ready", "snapshot_attested": False})
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
 
-def test_stale_requires_snapshot_not_attested(raw: dict[str, Any]) -> None:
-    raw["curation"].update({"state": "stale", "snapshot_attested": True, "gold_status": None, "clean_attested": False})
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
 
-def test_unreplayable_curation_requires_unreplayable_snapshot(raw: dict[str, Any]) -> None:
-    raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
-                            "clean_attested": False, "gold_status": None, "findings": []})
-    with pytest.raises(ValidationError):           # ready snapshot + unreplayable state
-        CaseDocument.model_validate(raw)
-    # a genuine unreplayable snapshot + unreplayable state loads
+
+def test_unreplayable_snapshot_and_curation_states_must_agree(subtests: pytest.Subtests) -> None:
+    """Unreplayable evidence cannot be ready, while explicit exclusion remains valid."""
+    for starting_state in ("ready-snapshot", "unreplayable-snapshot"):
+        with subtests.test(starting_state=starting_state):
+            raw = _valid_case_dict()
+            if starting_state == "ready-snapshot":
+                raw["curation"].update(
+                    state="unreplayable", snapshot_attested=False, clean_attested=False, gold_status=None, findings=[]
+                )
+                with pytest.raises(ValidationError):
+                    CaseDocument.model_validate(raw)
+                raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
+                parsed = CaseDocument.model_validate(raw)
+                assert parsed.curation.state == "unreplayable" and parsed.snapshot.status == "unreplayable"
+            else:
+                raw["snapshot"] = _unreplayable_snapshot(
+                    policy="explicit_head",
+                    requested_head="a" * 40,
+                    original_base_sha="b" * 40,
+                    requested_base_sha="0123456789abcdef0123456789abcdef01234567",
+                    reason="head_not_on_pr",
+                    detail="not on PR",
+                )
+                with pytest.raises(ValidationError):
+                    CaseDocument.model_validate(raw)
+                raw["curation"].update(
+                    state="excluded",
+                    snapshot_attested=False,
+                    clean_attested=False,
+                    gold_status=None,
+                    findings=[],
+                    task_spec_sha256=None,
+                    case_exclusion={"reason": "unreplayable", "note": None},
+                )
+                assert CaseDocument.model_validate(raw).curation.state == "excluded"
+    raw = _valid_case_dict()
     raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
-    doc = CaseDocument.model_validate(raw)
-    assert doc.curation.state == "unreplayable"
-
-def test_unreplayable_snapshot_requires_matching_curation_unless_excluded(raw: dict[str, Any]) -> None:
-    raw["snapshot"] = _unreplayable_snapshot(
-        policy="explicit_head", requested_head="a" * 40, original_base_sha="b" * 40,
-        requested_base_sha="0123456789abcdef0123456789abcdef01234567",
-        reason="head_not_on_pr", detail="not on PR",
+    raw["curation"].update(
+        state="unreplayable",
+        snapshot_attested=False,
+        clean_attested=False,
+        gold_status=None,
+        findings=[],
+        task_spec_sha256=None,
     )
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
+    assert CaseDocument.model_validate(raw).snapshot.status == "unreplayable"
 
-    raw["curation"].update({"state": "excluded", "snapshot_attested": False, "clean_attested": False,
-        "gold_status": None, "findings": [], "task_spec_sha256": None,
-        "case_exclusion": {"reason": "unreplayable", "note": None},
-    })
-    assert CaseDocument.model_validate(raw).curation.state == "excluded"
 
-def test_snapshot_requested_base_must_match_pull_request_base(raw: dict[str, Any]) -> None:
-    raw["snapshot"]["base_resolution"] = "merge_base_v1"
-    raw["snapshot"]["requested_base_sha"] = "c" * 40
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
+def test_case_findings_reject_invalid_content_locations_and_identity(subtests: pytest.Subtests) -> None:
+    """Authoring guards bound content, location and canonical identity independently."""
+    mutations: list[tuple[str, object]] = [
+        ("title", "x" * 501),
+        ("body", "y" * (8 * 1024 + 1)),
+        ("title", "bad\x00title"),
+        ("location", {"path": "/abs/path.py", "start_line": 2, "end_line": 2}),
+        ("location", {"path": "src/cache.py", "start_line": 5, "end_line": 2}),
+        ("finding_id", "0" * 64),
+    ]
+    for field, value in mutations:
+        with subtests.test(field=field, value=value):
+            raw = _valid_case_dict()
+            raw["curation"]["findings"][0][field] = value
+            with pytest.raises(ValidationError) as rejected:
+                CaseDocument.model_validate(raw)
+            if field == "finding_id":
+                assert "finding_id" in str(rejected.value)
 
-def test_unreplayable_snapshot_requires_error_and_null_bundle(raw: dict[str, Any]) -> None:
-    raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
-    raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
-        "clean_attested": False, "gold_status": None, "findings": [], "task_spec_sha256": None,
-    })
-    doc = CaseDocument.model_validate(raw)
-    assert doc.snapshot.status == "unreplayable"
-
-def test_unreplayable_with_ready_fields_rejected(raw: dict[str, Any]) -> None:
-    raw["snapshot"]["status"] = "unreplayable"
-    raw["snapshot"]["error"] = {"reason": "equal_trees", "detail": "no change"}
-    raw["snapshot"]["bundle_file"] = "snapshots/pr-000101-0123456789ab.bundle"  # must be null
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
-
-def test_finding_title_and_body_limits(raw: dict[str, Any]) -> None:
-    raw["curation"]["findings"][0]["title"] = "x" * 501
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
-    raw2 = _valid_case_dict()
-    raw2["curation"]["findings"][0]["body"] = "y" * (8 * 1024 + 1)
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw2)
-
-def test_finding_rejects_nul_in_title(raw: dict[str, Any]) -> None:
-    raw["curation"]["findings"][0]["title"] = "bad\x00title"
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
 
 def test_title_bound_is_unicode_characters_not_bytes() -> None:
     # "界" is 3 UTF-8 bytes; 500 chars = 1500 bytes. Passes under a char bound.
@@ -515,42 +547,25 @@ def test_finding_severity_declares_no_inline_level_literal() -> None:
     literal = next(arg for arg in get_args(annotation) if get_args(arg))
     assert get_args(literal) == get_args(severity.SeverityLevel)
 
-def test_finding_location_must_be_relative_and_ordered(raw: dict[str, Any]) -> None:
-    raw["curation"]["findings"][0]["location"] = {"path": "/abs/path.py", "start_line": 2, "end_line": 2}
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
-    raw2 = _valid_case_dict()
-    raw2["curation"]["findings"][0]["location"] = {"path": "src/cache.py", "start_line": 5, "end_line": 2}
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw2)
 
-def test_finding_id_sha256_and_duplicate_rejection() -> None:
-    f = _valid_case().curation.findings[0]
-    expected = derive_finding_id(f, case_id="pr-000101-0123456789ab")
-    assert f.finding_id == expected
-    # duplicate canonical finding in one case rejected
+
+def test_case_finding_identity_is_case_scoped_unique_and_legacy_compatible() -> None:
+    """Current IDs are canonical per case; legacy case documents retain their historical IDs."""
+    finding = _valid_case().curation.findings[0]
+    expected = derive_finding_id(finding, case_id="pr-000101-0123456789ab")
+    assert finding.finding_id == expected
+    assert expected != derive_finding_id(finding, case_id="pr-000102-0123456789ab")
     raw = _valid_case_dict()
     raw["curation"]["findings"].append(raw["curation"]["findings"][0])
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+    legacy = _valid_case_dict()
+    legacy["schema_version"] = 1
+    legacy["curation"]["findings"][0]["finding_id"] = "e" * 64
+    assert CaseDocument.model_validate(legacy).schema_version == 1
 
-def test_finding_id_is_case_scoped() -> None:
-    f = _valid_case().curation.findings[0]
-    id1 = derive_finding_id(f, case_id="pr-000101-0123456789ab")
-    id2 = derive_finding_id(f, case_id="pr-000102-0123456789ab")
-    assert id1 != id2                      # identical content, different case -> different id
 
-def test_v2_case_rejects_noncanonical_finding_id(raw: dict[str, Any]) -> None:
-    raw["curation"]["findings"][0]["finding_id"] = "0" * 64   # wrong digest
-    with pytest.raises(ValidationError) as ei:
-        CaseDocument.model_validate(raw)
-    assert "finding_id" in str(ei.value)
 
-def test_v1_legacy_case_loads_without_digest_check(raw: dict[str, Any]) -> None:
-    raw["schema_version"] = 1
-    raw["curation"]["findings"][0]["finding_id"] = "e" * 64   # legacy id, not case-scoped
-    doc = CaseDocument.model_validate(raw)                    # must load (digest gated on v2)
-    assert doc.schema_version == 1
 
 def test_historical_daydream_marker_cannot_be_gold(raw: dict[str, Any]) -> None:
     body = "looks fine"
@@ -585,52 +600,76 @@ def test_task_spec_approval_reports_nonready_current_and_stale(raw: dict[str, An
     assert approval.current_sha256 == digest
     assert approval.approved_sha256 == "0" * 64
 
-@pytest.mark.parametrize("kinds,expected", [([], "clean"), (["historical"], "historical"),
-    (["edited"], "historical"),              # all-edited historical evidence stays historical
-    (["authored"], "authored"), (["historical", "edited"], "historical"), (["authored", "historical"], "mixed"),
-    (["authored", "edited"], "mixed"),
-])
-def test_gold_mode_truth_table(kinds: Any, expected: Any) -> None:
-    findings = [Finding(finding_id="e" * 64, title=f"f{i}", body="b",
-                provenance=Provenance(
-                    kind=k, source_ids=["github:review_comment:1"] if k in ("historical", "edited") else [],
-                ))
-        for i, k in enumerate(kinds)
+def test_gold_mode_truth_table(subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[Any, Any]] = [
+        ([], "clean"),
+        (["historical"], "historical"),
+        (["edited"], "historical"),  # all-edited historical evidence stays historical
+        (["authored"], "authored"),
+        (["historical", "edited"], "historical"),
+        (["authored", "historical"], "mixed"),
+        (["authored", "edited"], "mixed"),
     ]
-    curation = Curation(state="draft", findings=findings)
-    assert derive_gold_mode(curation) == expected
+    for case_index, (kinds, expected) in enumerate(cases):
+        with subtests.test(kinds=kinds, expected=expected):
+            findings = [
+                Finding(
+                    finding_id="e" * 64,
+                    title=f"f{i}",
+                    body="b",
+                    provenance=Provenance(
+                        kind=k,
+                        source_ids=["github:review_comment:1"] if k in ("historical", "edited") else [],
+                    ),
+                )
+                for i, k in enumerate(kinds)
+            ]
+            curation = Curation(state="draft", findings=findings)
+            assert derive_gold_mode(curation) == expected
 
-@pytest.mark.parametrize("frm,to",
-    [("pending", "fetched"), ("pending", "fetch_failed"), ("fetch_failed", "fetched"),
-        ("fetch_failed", "fetch_failed"), ("fetched", "fetched"),
-    ],
-)
-def test_valid_pr_transitions(frm: Any, to: Any) -> None:
-    validate_pr_transition(frm, to)  # must not raise
 
-@pytest.mark.parametrize("frm,to",
-    [("fetched", "pending"),
-        ("fetched", "fetch_failed"),  # a fetched PR preserves linkage via latest_error
-        ("pending", "draft"),
-    ],
-)
-def test_invalid_pr_transition_rejected(frm: Any, to: Any) -> None:
-    with pytest.raises(TransitionError):
-        validate_pr_transition(frm, to)
+def test_state_transitions_admit_only_the_declared_workflow_edges(subtests: pytest.Subtests) -> None:
+    """Refresh preserves fetched linkage; case states cannot bypass required curation steps."""
+    pr_rows = [
+        ("pending", "fetched", True),
+        ("pending", "fetch_failed", True),
+        ("fetch_failed", "fetched", True),
+        ("fetch_failed", "fetch_failed", True),
+        ("fetched", "fetched", True),
+        ("fetched", "pending", False),
+        ("fetched", "fetch_failed", False),
+        ("pending", "draft", False),
+    ]
+    for before, after, allowed in pr_rows:
+        with subtests.test(entity="pull-request", before=before, after=after):
+            if allowed:
+                validate_pr_transition(before, after)
+            else:
+                with pytest.raises(TransitionError):
+                    validate_pr_transition(before, after)
+    case_rows = [
+        ("draft", "ready", True),
+        ("draft", "excluded", True),
+        ("draft", "unreplayable", True),
+        ("ready", "stale", True),
+        ("ready", "draft", True),
+        ("stale", "ready", True),
+        ("stale", "excluded", True),
+        ("unreplayable", "excluded", True),
+        ("excluded", "draft", True),
+        ("excluded", "unreplayable", True),
+        ("ready", "excluded", False),
+        ("stale", "draft", False),
+        ("draft", "stale", False),
+    ]
+    for before, after, allowed in case_rows:
+        with subtests.test(entity="case", before=before, after=after):
+            if allowed:
+                validate_case_transition(before, after)
+            else:
+                with pytest.raises(TransitionError):
+                    validate_case_transition(before, after)
 
-@pytest.mark.parametrize("frm,to",
-    [("draft", "ready"), ("draft", "excluded"), ("draft", "unreplayable"), ("ready", "stale"), ("ready", "draft"),
-        ("stale", "ready"), ("stale", "excluded"), ("unreplayable", "excluded"), ("excluded", "draft"),
-        ("excluded", "unreplayable"),
-    ],
-)
-def test_valid_case_transitions(frm: Any, to: Any) -> None:
-    validate_case_transition(frm, to)
-
-@pytest.mark.parametrize("frm,to", [("ready", "excluded"), ("stale", "draft"), ("draft", "stale")])
-def test_invalid_case_transition_rejected(frm: Any, to: Any) -> None:
-    with pytest.raises(TransitionError):
-        validate_case_transition(frm, to)
 
 def test_classify_validation_codes() -> None:
     assert classify_validation(ready=True, corrupt=False) == 0

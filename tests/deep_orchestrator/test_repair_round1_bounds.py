@@ -14,6 +14,7 @@ the round's own regression tests, so the bounds could have stayed decorative:
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -69,25 +70,22 @@ def test_scope_request_block_is_parsed_into_the_structured_request() -> None:
     assert parsed["evidence_source"] == "repair_turn"
 
 
-@pytest.mark.parametrize(
-    "output",
-    [
-        pytest.param("", id="empty"),
-        pytest.param("I need daydream/other.py edited, api.py:1 requires it.", id="prose_only"),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\n{{\"paths\": [\"a.py\"]}}\n", id="unterminated"
-        ),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\nnot json\n{SCOPE_REQUEST_END}\n", id="not_json"
-        ),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\n[\"a.py\"]\n{SCOPE_REQUEST_END}\n", id="not_an_object"
-        ),
-    ],
-)
-def test_unusable_scope_request_is_never_a_half_parsed_grant(output: str) -> None:
+def _case_unusable_scope_request_is_never_a_half_parsed_grant(output: str) -> None:
     """Fail closed in both directions: no block, or an unusable one, grants nothing."""
     assert parse_fix_scope_request(output) is None
+
+
+def test_unusable_scope_request_is_never_a_half_parsed_grant(subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "",
+        "I need daydream/other.py edited, api.py:1 requires it.",
+        f'{SCOPE_REQUEST_BEGIN}\n{{"paths": ["a.py"]}}\n',
+        f"{SCOPE_REQUEST_BEGIN}\nnot json\n{SCOPE_REQUEST_END}\n",
+        f'{SCOPE_REQUEST_BEGIN}\n["a.py"]\n{SCOPE_REQUEST_END}\n',
+    ]
+    for output in cases_0:
+        with subtests.test(output=output):
+            _case_unusable_scope_request_is_never_a_half_parsed_grant(output=output)
 
 
 def test_scope_clause_documents_the_exact_block_the_host_parses() -> None:

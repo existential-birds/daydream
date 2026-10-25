@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import stat
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 from daydream.benchmark.harbor import package as _pkg, run as run_mod
+from tests.harness.table_cases import isolated_case
 
 
 def _docker_ok() -> _pkg.DockerNetworkPolicyCapability:
@@ -447,24 +449,38 @@ def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) 
     assert m["daydream_version"] == "0.1.0"
     assert "reviewer_effort" in m
 
-@pytest.mark.parametrize(("extra_kwargs", "expected_profile_digest", "expected_effort"),
-    [({"profile_digest": "d" * 64, "reviewer_effort": "high"}, "d" * 64, "high"), ({}, None, None)],
-    ids=["present", "omitted"],
-)
-def test_ledger_records_reviewer_effort(
-    tmp_path: Path, extra_kwargs: dict[str, Any], expected_profile_digest: str | None, expected_effort: str | None,
-) -> None:
-    ws = _ws(tmp_path)
-    run_id = "run-1"
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
-                                  job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
-                                  **extra_kwargs)
-    run_mod.ledger_mark(ws, run_id, state="complete")
-    doc = run_mod._load_ledger(ws)
-    assert doc["runs"][0]["profile_digest"] == expected_profile_digest
-    # Issue #888: an omitted effort stays None on the entry (byte-stable for
-    # legacy callers); the objective reader surfaces it as None, never 0/"".
-    assert doc["runs"][0]["reviewer_effort"] == expected_effort
+def test_ledger_records_reviewer_effort(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[dict[str, Any], str | None, str | None]] = [
+        ({"profile_digest": "d" * 64, "reviewer_effort": "high"}, "d" * 64, "high"),
+        ({}, None, None),
+    ]
+    case_ids_0 = ["present", "omitted"]
+    for case_index, (extra_kwargs, expected_profile_digest, expected_effort) in enumerate(cases):
+        with subtests.test(
+            msg=case_ids_0[case_index],
+            extra_kwargs=extra_kwargs,
+            expected_profile_digest=expected_profile_digest,
+            expected_effort=expected_effort,
+        ):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                tmp_path = sandbox.tmp_path
+                ws = _ws(tmp_path)
+                run_id = "run-1"
+                run_mod.ledger_append_running(
+                    ws,
+                    run_id=run_id,
+                    compiled_lock_sha256="a" * 64,
+                    job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
+                    **extra_kwargs,
+                )
+                run_mod.ledger_mark(ws, run_id, state="complete")
+                doc = run_mod._load_ledger(ws)
+                assert doc["runs"][0]["profile_digest"] == expected_profile_digest
+                # Issue #888: an omitted effort stays None on the entry (byte-stable for
+                # legacy callers); the objective reader surfaces it as None, never 0/"".
+                assert doc["runs"][0]["reviewer_effort"] == expected_effort
+
 
 # Oracle mapping accepts the legacy calibration field without using it.
 

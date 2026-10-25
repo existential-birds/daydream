@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.blocked_mode import blocking_releaser
 from tests.harness.git_helpers import bare_remote, git, tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
+from tests.harness.table_cases import isolated_case
 from tests.test_artifact_visibility_integration import (
     _assert_frozen_outputs,
     _seed_visibility_canaries,
@@ -491,20 +493,34 @@ def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
     assert "formatter exploded" not in err
     assert "failed to create disposable read-only checkout" in out + err
 
-@pytest.mark.parametrize("verbose", [True, False], ids=["verbose-diagnoses", "default-hides"])
 def test_cli_main_pre_config_failure(
-    verbose: bool, git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    git_repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.commands.common._resolve_cli_observability", _denied_observability)
+    table_root = tmp_path
+    row_index = 0
+    source_git_repo = git_repo
+    cases: list[bool] = [True, False]
+    for verbose in cases:
+        row_index += 1
+        with subtests.test(verbose=verbose):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                git_repo = shutil.copytree(source_git_repo, tmp_path / "git_repo")
+                capsys.readouterr()
+                _silence(monkeypatch)
+                monkeypatch.setattr("daydream.commands.common._resolve_cli_observability", _denied_observability)
 
-    code = _cli_main_exit(monkeypatch, *(["--verbose"] if verbose else []), str(git_repo))
-    _out, err = capsys.readouterr()
+                code = _cli_main_exit(monkeypatch, *(["--verbose"] if verbose else []), str(git_repo))
+                _out, err = capsys.readouterr()
 
-    assert code == 1
-    assert ("RuntimeError" in err) is verbose
-    if verbose:
-        assert "observability boom" in err
+                assert code == 1
+                assert ("RuntimeError" in err) is verbose
+                if verbose:
+                    assert "observability boom" in err
 
 
 class _ExplodingStrError(RuntimeError):

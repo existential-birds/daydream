@@ -9,6 +9,7 @@ from daydream.dataset import LocalRecordStore
 from daydream.training.record_evidence import sessions_from_snapshot
 from tests.harness.adjudication import append_replies, judgment, record_store, reply_evidence, snapshot_id
 from tests.harness.scripts import cli_main
+from tests.harness.table_cases import isolated_case
 
 
 def command(store: LocalRecordStore, verb: str, *args: str, pin: str | None = None) -> int:
@@ -154,28 +155,32 @@ def test_cli_reopens_changed_evidence_without_reusing_human_judgment(tmp_path: P
     assert {capture["text"] for capture in row["reply_captures"]} == {"new reply\n", replies[1][1]}
 
 
-@pytest.mark.parametrize("batch", ["0", "-1", "bad"])
-def test_cli_invalid_batch_fails_before_state_reads(batch: str) -> None:
-    assert (
-        cli_main(
-            [
-                "corpus",
-                "adjudicate",
-                "label",
-                "--state-dir",
-                "/nonexistent",
-                "--batch",
-                batch,
-                "--disposition",
-                "accepted",
-                "--rationale",
-                "ok",
-                "--labeler",
-                "alice",
-            ]
-        )
-        == 2
-    )
+def test_cli_invalid_batch_fails_before_state_reads(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["0", "-1", "bad"]
+    for batch in cases:
+        with subtests.test(batch=batch):
+            assert (
+                cli_main(
+                    [
+                        "corpus",
+                        "adjudicate",
+                        "label",
+                        "--state-dir",
+                        "/nonexistent",
+                        "--batch",
+                        batch,
+                        "--disposition",
+                        "accepted",
+                        "--rationale",
+                        "ok",
+                        "--labeler",
+                        "alice",
+                    ]
+                )
+                == 2
+            )
 
 
 def test_cli_label_preserves_canonical_evidence_digest_scheme(tmp_path: Path) -> None:
@@ -225,15 +230,27 @@ def test_cli_automatic_decisive_population_excluded_from_default_queue_preserved
     assert len((out / "annotations.jsonl").read_text().splitlines()) == 3
 
 
-@pytest.mark.parametrize("verb", ["build", "materialize", "export", "preview"])
-def test_cli_derived_outputs_refuse_record_namespace_symlink_alias_without_mutation(tmp_path: Path, verb: str) -> None:
-    store = record_store(tmp_path / "records")
-    pin = snapshot_id(store)
-    alias = tmp_path / "alias"
-    alias.symlink_to(store.root / "runs", target_is_directory=True)
-    before = {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
-    output = ["--out-dir", str(alias)] if verb == "materialize" else ["--state-dir", str(alias)]
-    if verb == "export":
-        output += ["--out", str(tmp_path / "export.jsonl")]
-    assert command(store, verb, *output, pin=pin) == 1
-    assert {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()} == before
+def test_cli_derived_outputs_refuse_record_namespace_symlink_alias_without_mutation(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["build", "materialize", "export", "preview"]
+    for verb in cases:
+        row_index += 1
+        with subtests.test(verb=verb):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                store = record_store(tmp_path / "records")
+                pin = snapshot_id(store)
+                alias = tmp_path / "alias"
+                alias.symlink_to(store.root / "runs", target_is_directory=True)
+                before = {str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()}
+                output = ["--out-dir", str(alias)] if verb == "materialize" else ["--state-dir", str(alias)]
+                if verb == "export":
+                    output += ["--out", str(tmp_path / "export.jsonl")]
+                assert command(store, verb, *output, pin=pin) == 1
+                assert {
+                    str(p.relative_to(store.root)): p.read_bytes() for p in store.root.rglob("*") if p.is_file()
+                } == before

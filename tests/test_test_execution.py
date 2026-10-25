@@ -28,6 +28,7 @@ from daydream.test_execution import (
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.execution import test_execution_identity as _identity
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 
@@ -67,19 +68,21 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
     assert res.passed is False
     assert "boom" in res.merged_output
 
-@pytest.mark.parametrize(("config", "cli", "expected", "source"), [
-    ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
-    ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
-    ("pytest -x", "", ["pytest", "-x"], "config"),
-])
 def test_command_and_provenance_share_cli_over_config_precedence(
-    config: str, cli: str | None, expected: list[str], source: str,
+    subtests: pytest.Subtests,
 ) -> None:
-    cfg, run = SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli)
-    assert canonical_test_command(cfg, run) == expected
-    fact = resolve_test_command_fact(cfg, run)
-    assert fact.value == tuple(expected)
-    assert fact.source == source
+    cases: list[tuple[str, str | None, list[str], str]] = [
+        ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
+        ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
+        ("pytest -x", "", ["pytest", "-x"], "config"),
+    ]
+    for config, cli, expected, source in cases:
+        with subtests.test(config=config):
+            cfg, run = SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli)
+            assert canonical_test_command(cfg, run) == expected
+            fact = resolve_test_command_fact(cfg, run)
+            assert fact.value == tuple(expected)
+            assert fact.source == source
 
 def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
 
@@ -262,40 +265,59 @@ def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> 
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
     assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
 
-@pytest.mark.parametrize("cli", [None, "uv run pytest"])
-@pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])
 def test_recipe_round_trips_through_its_persisted_payload(
-    tmp_path: Path, cli: str | None, lockfile: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    if lockfile is not None:
-        (tmp_path / lockfile).write_text("version = 1\n")
-    recipe = _recipe(tmp_path, cli=cli)
-    deep = tmp_path / ".daydream" / "deep"
-    deep.mkdir(parents=True)
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[str | None] = [None, "uv.lock", "requirements.txt"]
+    for lockfile in cases_1:
+        cases_2: list[str | None] = [None, "uv run pytest"]
+        for cli in cases_2:
+            row_index += 1
+            with subtests.test(lockfile=lockfile, cli=cli):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+                    if lockfile is not None:
+                        (tmp_path / lockfile).write_text("version = 1\n")
+                    recipe = _recipe(tmp_path, cli=cli)
+                    deep = tmp_path / ".daydream" / "deep"
+                    deep.mkdir(parents=True)
 
-    persist_test_recipe(deep, recipe)
-    loaded = load_test_recipe(deep)
+                    persist_test_recipe(deep, recipe)
+                    loaded = load_test_recipe(deep)
 
-    assert loaded is not None
-    assert loaded.command.value == recipe.command.value
-    assert loaded.package.cwd_relative == recipe.package.cwd_relative
-    assert loaded.package.config_digest == recipe.package.config_digest
-    assert loaded == recipe
-    payload = recipe_to_payload(recipe)
-    assert json.loads(json.dumps(payload)) == payload
+                    assert loaded is not None
+                    assert loaded.command.value == recipe.command.value
+                    assert loaded.package.cwd_relative == recipe.package.cwd_relative
+                    assert loaded.package.config_digest == recipe.package.config_digest
+                    assert loaded == recipe
+                    payload = recipe_to_payload(recipe)
+                    assert json.loads(json.dumps(payload)) == payload
 
-@pytest.mark.parametrize("writer",
-    [lambda d: None, lambda d: (d / "test-recipe.json").write_text("{not json"),
+def test_load_test_recipe_is_fail_open(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Callable[[Path], object]] = [
+        lambda d: None,
+        lambda d: (d / "test-recipe.json").write_text("{not json"),
         lambda d: (d / "test-recipe.json").write_text('{"format_version": 999}'),
-    ],
-)
-def test_load_test_recipe_is_fail_open(tmp_path: Path, writer: Callable[[Path], object]) -> None:
-    deep = tmp_path / ".daydream" / "deep"
-    deep.mkdir(parents=True)
-    writer(deep)
+    ]
+    for writer in cases:
+        row_index += 1
+        with subtests.test(writer=writer):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                deep = tmp_path / ".daydream" / "deep"
+                deep.mkdir(parents=True)
+                writer(deep)
 
-    assert load_test_recipe(deep) is None
+                assert load_test_recipe(deep) is None
 
 def test_execution_identity_carries_every_reuse_component() -> None:
     identity = _identity(cwd_relative="services/api", interpreter="3.12")
@@ -308,32 +330,46 @@ def test_execution_identity_carries_every_reuse_component() -> None:
         "branch": "feature", "kind": "host", "outcome": "passed",
     }
 
-@pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
-def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
-    identity = _identity(outcome=outcome)
-    assert identity.reusable is False
+def test_only_a_passed_host_outcome_is_reusable(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["failed", "timed-out", "truncated"]
+    for outcome in cases:
+        with subtests.test(outcome=outcome):
+            identity = _identity(outcome=outcome)
+            assert identity.reusable is False
 
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
 
-@pytest.mark.parametrize(("raw", "reason", "source"), [
-    (None, "missing", "config"), ("", "missing", "config"), ("   ", "blank", "config"),
-    ("'secret-unclosed", "malformed", "config"), (123, "invalid-type", "config"), ('""', "empty-argv", "config"),
-    ("   ", "blank", "cli"), ("'secret-unclosed", "malformed", "cli"),
-    (123, "invalid-type", "cli"), ('""', "empty-argv", "cli"),
-])
-def test_unresolved_command_preserves_safe_diagnostic_and_source(raw: object, reason: str, source: str) -> None:
-    config = SimpleNamespace(test_command=raw if source == "config" else None)
-    run_config = SimpleNamespace(test_command=raw if source == "cli" else None)
-    fact = resolve_test_command_fact(config, run_config)
-    assert not fact.resolved
-    assert fact.source == "unresolved" and fact.value is None
-    assert fact.diagnostic is not None
-    assert fact.diagnostic.reason_code == reason
-    assert fact.diagnostic.source == source
-    assert "--test-command" in fact.diagnostic.message
-    assert "[tool.daydream]" in fact.diagnostic.message
-    assert "secret-unclosed" not in fact.diagnostic.message
+def test_unresolved_command_preserves_safe_diagnostic_and_source(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[object, str, str]] = [
+        (None, "missing", "config"),
+        ("", "missing", "config"),
+        ("   ", "blank", "config"),
+        ("'secret-unclosed", "malformed", "config"),
+        (123, "invalid-type", "config"),
+        ('""', "empty-argv", "config"),
+        ("   ", "blank", "cli"),
+        ("'secret-unclosed", "malformed", "cli"),
+        (123, "invalid-type", "cli"),
+        ('""', "empty-argv", "cli"),
+    ]
+    for raw, reason, source in cases:
+        with subtests.test(reason=reason):
+            config = SimpleNamespace(test_command=raw if source == "config" else None)
+            run_config = SimpleNamespace(test_command=raw if source == "cli" else None)
+            fact = resolve_test_command_fact(config, run_config)
+            assert not fact.resolved
+            assert fact.source == "unresolved" and fact.value is None
+            assert fact.diagnostic is not None
+            assert fact.diagnostic.reason_code == reason
+            assert fact.diagnostic.source == source
+            assert "--test-command" in fact.diagnostic.message
+            assert "[tool.daydream]" in fact.diagnostic.message
+            assert "secret-unclosed" not in fact.diagnostic.message
 
 
 def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> None:
@@ -343,19 +379,29 @@ def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> Non
     assert fact.diagnostic.reason_code == "blank" and fact.diagnostic.source == "cli"
 
 
-@pytest.mark.parametrize("value", [[], [""], [" "]])
-def test_loaded_recipe_with_empty_executable_remains_no_execution(tmp_path: Path, value: list[str]) -> None:
-    recipe = _recipe(tmp_path, cli="true")
-    deep = tmp_path / "deep"
-    deep.mkdir()
-    payload = recipe_to_payload(recipe)
-    payload["command"]["value"] = value
-    (deep / "test-recipe.json").write_text(json.dumps(payload))
-    loaded = load_test_recipe(deep)
-    assert loaded is not None and not loaded.command.resolved
-    assert loaded.command.diagnostic is not None
-    assert loaded.command.diagnostic.reason_code == "empty-argv"
-    assert loaded.command.diagnostic.source == "cli"
+def test_loaded_recipe_with_empty_executable_remains_no_execution(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[list[str]] = [[], [""], [" "]]
+    for value in cases:
+        row_index += 1
+        with subtests.test(value=value):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                recipe = _recipe(tmp_path, cli="true")
+                deep = tmp_path / "deep"
+                deep.mkdir()
+                payload = recipe_to_payload(recipe)
+                payload["command"]["value"] = value
+                (deep / "test-recipe.json").write_text(json.dumps(payload))
+                loaded = load_test_recipe(deep)
+                assert loaded is not None and not loaded.command.resolved
+                assert loaded.command.diagnostic is not None
+                assert loaded.command.diagnostic.reason_code == "empty-argv"
+                assert loaded.command.diagnostic.source == "cli"
 
 
 def test_legacy_unresolved_recipe_does_not_invent_original_provenance(tmp_path: Path) -> None:

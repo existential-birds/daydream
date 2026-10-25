@@ -32,6 +32,7 @@ from daydream.github_app import (
 from tests.harness.fake_gh import block_real_gh
 from tests.harness.git_helpers import refreshing_session
 from tests.harness.rsa import generate_rsa_pem
+from tests.harness.table_cases import isolated_case
 
 
 @pytest.fixture(autouse=True)
@@ -154,21 +155,29 @@ def test_secret_credential_values_are_hidden_from_repr() -> None:
     assert private_key not in repr(credentials)
     assert token not in repr(installation)
 
-@pytest.mark.parametrize(("env", "match"),
-    [({"DAYDREAM_APP_ID": "12345"}, "DAYDREAM_APP_PRIVATE_KEY"),
+def test_resolve_credentials_raises_on_partial_or_non_integer_config(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[dict[str, str], str]] = [
+        ({"DAYDREAM_APP_ID": "12345"}, "DAYDREAM_APP_PRIVATE_KEY"),
         ({"DAYDREAM_APP_PRIVATE_KEY": "x"}, "DAYDREAM_APP_ID"),
         ({"DAYDREAM_APP_ID": "not-an-int", "DAYDREAM_APP_PRIVATE_KEY": "x"}, "DAYDREAM_APP_ID"),
-    ],
-)
-def test_resolve_credentials_raises_on_partial_or_non_integer_config(
-    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], match: str
-) -> None:
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    with pytest.raises(ValueError, match=match):
-        resolve_credentials()
+    ]
+    for env, match in cases:
+        row_index += 1
+        with subtests.test(match=match):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+                monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+                for key, value in env.items():
+                    monkeypatch.setenv(key, value)
+                with pytest.raises(ValueError, match=match):
+                    resolve_credentials()
 
 def test_build_gh_env_returns_complete_sanitized_environment() -> None:
     base = {
@@ -367,14 +376,19 @@ def test_exchange_manifest_code_returns_credentials_and_slug() -> None:
         creds, slug = exchange_manifest_code(Path("."), "abc123", auth=auth)
     assert creds.app_id == 42 and "BEGIN RSA" in creds.private_key and slug == "acme-bot"
 
-@pytest.mark.parametrize(("payload", "match"),
-    [({"pem": "x", "slug": "acme-bot"}, "id"), ({"id": "not-int", "pem": "x", "slug": "s"}, "id")],
-)
-def test_exchange_manifest_code_raises_when_id_missing_or_not_int(payload: dict[str, str], match: str) -> None:
+def test_exchange_manifest_code_raises_when_id_missing_or_not_int(
+    subtests: pytest.Subtests,
+) -> None:
     """A missing or non-integer App id aborts naming the field — no placeholder."""
-    with patch("daydream.git_ops.gh_api", return_value=payload):
-        with pytest.raises(GitHubAppError, match=match):
-            exchange_manifest_code(Path("."), "abc123")
+    cases: list[tuple[dict[str, str], str]] = [
+        ({"pem": "x", "slug": "acme-bot"}, "id"),
+        ({"id": "not-int", "pem": "x", "slug": "s"}, "id"),
+    ]
+    for payload, match in cases:
+        with subtests.test(match=match):
+            with patch("daydream.git_ops.gh_api", return_value=payload):
+                with pytest.raises(GitHubAppError, match=match):
+                    exchange_manifest_code(Path("."), "abc123")
 
 def test_exchange_manifest_code_raises_when_pem_missing() -> None:
     """A conversion missing the PEM aborts naming the field — no placeholder key."""

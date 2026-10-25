@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,9 @@ from tests.deep_orchestrator.support import (
     _remote_identity_context,
 )
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import install_fake_gh
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import (
     _merge_item,
 )
@@ -67,18 +70,14 @@ async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Pat
     assert handoff["status"] == "unavailable"
     assert handoff["target"] is None
 
-@pytest.mark.parametrize(
-    ("head_repository", "pushed_repository", "configured_repository", "base_ref", "configured_pr",),
-    [("fork-user/project", "other-user/project", "base-user/project", "main", 7),
-        (None, "fork-user/project", "base-user/project", "main", 7),
-        ("fork-user/project", "fork-user/project", "wrong-user/project", "main", 7),
-        ("fork-user/project", "fork-user/project", "base-user/project", "feature", 7),
-        ("fork-user/project", "fork-user/project", "base-user/project", "main", 8),
-    ],
-)
-def test_remote_target_rejects_untrusted_identity_combinations(
-    tmp_path: Path, fake_gh: Any, head_repository: str | None, pushed_repository: str, configured_repository: str,
-    base_ref: str, configured_pr: int,
+def _case_remote_target_rejects_untrusted_identity_combinations(
+    tmp_path: Path,
+    fake_gh: Any,
+    head_repository: str | None,
+    pushed_repository: str,
+    configured_repository: str,
+    base_ref: str,
+    configured_pr: int,
 ) -> None:
     ctx, sha = _remote_identity_context(
         tmp_path, fake_gh, head_repository=head_repository, configured_repository=configured_repository,
@@ -86,6 +85,39 @@ def test_remote_target_rejects_untrusted_identity_combinations(
     )
     with pytest.raises(GitError):
         _resolve_remote_ci_target(ctx, PushReceipt("origin", "feature", sha, pushed_repository))
+
+
+def test_remote_target_rejects_untrusted_identity_combinations(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[str | None, str, str, str, int]] = [
+        ("fork-user/project", "other-user/project", "base-user/project", "main", 7),
+        (None, "fork-user/project", "base-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "wrong-user/project", "main", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "feature", 7),
+        ("fork-user/project", "fork-user/project", "base-user/project", "main", 8),
+    ]
+    case_index = 0
+    for head_repository, pushed_repository, configured_repository, base_ref, configured_pr in cases_0:
+        with (
+            subtests.test(
+                head_repository=head_repository,
+                pushed_repository=pushed_repository,
+                configured_repository=configured_repository,
+                base_ref=base_ref,
+                configured_pr=configured_pr,
+            ),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            _case_remote_target_rejects_untrusted_identity_combinations(
+                tmp_path=scenario.tmp_path,
+                fake_gh=install_fake_gh(scenario.tmp_path / "fake-gh-state", scenario.monkeypatch),
+                head_repository=head_repository,
+                pushed_repository=pushed_repository,
+                configured_repository=configured_repository,
+                base_ref=base_ref,
+                configured_pr=configured_pr,
+            )
+
 
 async def test_fix_cycle_malformed_related_stops_before_backend_and_clears_stale_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -217,10 +249,8 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     assert backend.read_only_calls == [True]
     assert outcomes["item:a"]["path"] == "b.py"
 
-@pytest.mark.parametrize("prior_verdict", [None, "resolved", "unresolved", "wrong_target"])
-@pytest.mark.parametrize("final_verdict", ["unresolved", "wrong_target", "regressed"])
-async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_verdict: str | None, final_verdict: str,
+async def _case_post_heal_actionable_verifier_stops_without_test_or_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_verdict: str | None, final_verdict: str
 ) -> None:
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
@@ -265,8 +295,29 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     assert phase_states["test"]["status"] == "failed"
     assert derive_pipeline_status("complete", None, phase_states, runs_fix=True, runs_test=True) == "failed"
 
-@pytest.mark.parametrize("terminal_mode", ["red", "exception"])
-async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
+
+async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str | None] = [None, "resolved", "unresolved", "wrong_target"]
+    cases_1: Sequence[str] = ["unresolved", "wrong_target", "regressed"]
+    case_index = 0
+    for prior_verdict in cases_0:
+        for final_verdict in cases_1:
+            with (
+                subtests.test(prior_verdict=prior_verdict, final_verdict=final_verdict),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                await _case_post_heal_actionable_verifier_stops_without_test_or_stage(
+                    tmp_path=scenario.tmp_path,
+                    monkeypatch=scenario.monkeypatch,
+                    prior_verdict=prior_verdict,
+                    final_verdict=final_verdict,
+                )
+
+
+async def _case_terminal_red_after_heal_restores_unrelated_and_protected_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_mode: str
 ) -> None:
     """A healer's red/exception exit is confined like a successful path."""
@@ -309,8 +360,21 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
     assert {("restore", "unrelated.py"), ("restore", "scratch.bin"), ("remove", "orphan.txt")} <= events
     assert git_ops.snapshot_index(repo) == state.initial_index
 
-@pytest.mark.parametrize("failure_mode", ["pass2_mutates", "unstable_test"])
-async def test_stabilization_stops_after_two_passes_without_third_or_heal(
+
+async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["red", "exception"]
+    case_index = 0
+    for terminal_mode in cases_0:
+        with subtests.test(terminal_mode=terminal_mode), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_terminal_red_after_heal_restores_unrelated_and_protected_state(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, terminal_mode=terminal_mode
+            )
+
+
+async def _case_stabilization_stops_after_two_passes_without_third_or_heal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_mode: str
 ) -> None:
 
@@ -351,6 +415,20 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     assert phase_states["test"]["status"] == "failed"
     assert derive_pipeline_status("complete", None, phase_states, runs_fix=True, runs_test=True) == "failed"
 
+
+async def test_stabilization_stops_after_two_passes_without_third_or_heal(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["pass2_mutates", "unstable_test"]
+    case_index = 0
+    for failure_mode in cases_0:
+        with subtests.test(failure_mode=failure_mode), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_stabilization_stops_after_two_passes_without_third_or_heal(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, failure_mode=failure_mode
+            )
+
+
 async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 
@@ -374,9 +452,8 @@ async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: P
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert "audit disk full" in failure["reason"]
 
-@pytest.mark.parametrize(("new_override", "expect_stop"), [(False, True), (True, False)])
-async def test_changed_tree_red_retest_requires_new_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_override: bool, expect_stop: bool,
+async def _case_changed_tree_red_retest_requires_new_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_override: bool, expect_stop: bool
 ) -> None:
     """A prior-tree red override cannot authorize a newly executed red result."""
 
@@ -406,6 +483,24 @@ async def test_changed_tree_red_retest_requires_new_override(
     verdict = json.loads((ctx.data["dd"] / "test-verdict.json").read_text())
     assert verdict["passed"] is False
     assert verdict["ignored"] is new_override
+
+
+async def test_changed_tree_red_retest_requires_new_override(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[tuple[bool, bool]] = [(False, True), (True, False)]
+    case_index = 0
+    for new_override, expect_stop in cases_0:
+        with (
+            subtests.test(new_override=new_override, expect_stop=expect_stop),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            await _case_changed_tree_red_retest_requires_new_override(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                new_override=new_override,
+                expect_stop=expect_stop,
+            )
+
 
 def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) -> None:
 

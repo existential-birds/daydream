@@ -37,6 +37,7 @@ from tests.harness.improve_backend import (
     install_capable_improve_backend,
     install_improve_stub,
 )
+from tests.harness.table_cases import isolated_case
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -64,20 +65,26 @@ PATH_REJECTS = ["a/b/./c", "..", "a/../b", "/abs/path", "a//b", "$()", "${x}",
 
 
 PATH_SCHEMAS = [
-    pytest.param(REPOSITORY_FILE_PATH_SCHEMA, id="file"), pytest.param(DIRECTORY_SCOPE_SCHEMA, id="directory"),
+    ("file", REPOSITORY_FILE_PATH_SCHEMA), ("directory", DIRECTORY_SCOPE_SCHEMA),
 ]
 
-@pytest.mark.parametrize("schema", PATH_SCHEMAS)
-@pytest.mark.parametrize("value", PATH_ACCEPTS)
-def test_path_schema_accepts(schema: dict[str, Any], value: str) -> None:
-    assert Draft202012Validator(schema).is_valid(value)
-    assert re.compile(schema["pattern"]).match(value)
+def test_path_schema_accepts(subtests: pytest.Subtests) -> None:
+    for schema_name, schema in PATH_SCHEMAS:
+        validator = Draft202012Validator(schema)
+        pattern = re.compile(schema["pattern"])
+        for value in PATH_ACCEPTS:
+            with subtests.test(schema=schema_name, value=value):
+                assert validator.is_valid(value)
+                assert pattern.match(value)
 
-@pytest.mark.parametrize("schema", PATH_SCHEMAS)
-@pytest.mark.parametrize("value", PATH_REJECTS)
-def test_path_schema_rejects(schema: dict[str, Any], value: str) -> None:
-    assert not Draft202012Validator(schema).is_valid(value)
-    assert not re.compile(schema["pattern"]).match(value)
+def test_path_schema_rejects(subtests: pytest.Subtests) -> None:
+    for schema_name, schema in PATH_SCHEMAS:
+        validator = Draft202012Validator(schema)
+        pattern = re.compile(schema["pattern"])
+        for value in PATH_REJECTS:
+            with subtests.test(schema=schema_name, value=value):
+                assert not validator.is_valid(value)
+                assert not pattern.match(value)
 
 def test_file_path_empty_and_length_bounds() -> None:
     # empty always rejected
@@ -132,15 +139,25 @@ def test_lexical_gates_reject_trailing_newline() -> None:
         assert not valid_repository_file_path(value)
         assert not valid_directory_scope_lexical(value)
 
-@pytest.mark.parametrize("value", MULTI_DOT_PATHS)
-def test_multi_dot_paths_are_accepted_by_schemas_and_validators(value: str, tmp_path: Path) -> None:
-    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
-    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(value)
-    assert valid_repository_file_path(value)
-    assert valid_directory_scope_lexical(value)
-    assert path_is_confined(tmp_path, value)
-    assert path_is_confined(tmp_path, value, directory_scope=True)
+def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = MULTI_DOT_PATHS
+    for value in cases:
+        row_index += 1
+        with subtests.test(value=value):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
+                assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
+                assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(value)
+                assert valid_repository_file_path(value)
+                assert valid_directory_scope_lexical(value)
+                assert path_is_confined(tmp_path, value)
+                assert path_is_confined(tmp_path, value, directory_scope=True)
 
 
 CONSISTENCY_ACCEPT = PATH_ACCEPTS + MULTI_DOT_PATHS

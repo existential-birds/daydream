@@ -32,164 +32,257 @@ from tests.harness.claude_sdk import scripted_client
 from tests.harness.codex_replay import make_mock_process_from_fixture as codex_fixture
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.osprey_jsonl import osprey_session
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.parametrize("failed", [False, True])
-async def test_claude_terminal_metadata_survives_billed_failure(monkeypatch: pytest.MonkeyPatch, failed: bool) -> None:
-    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30}
-    messages = [
-        AssistantMessage(content=[TextBlock("partial")], model="actual-model", usage=usage),
-        UserMessage(content=[ToolResultBlock("call", [{"type": "text", "text": "structured tool output"}])]),
-        ResultMessage(subtype="error_during_execution" if failed else "success", duration_ms=120,
-                      duration_api_ms=100, is_error=failed, num_turns=1, session_id="native-session",
-                      stop_reason="error" if failed else "end_turn", total_cost_usd=0.02, usage=usage,
-                      result="provider failed" if failed else "done"),
-    ]
-    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", scripted_client(messages))
-    events: list[Any] = []
-    try:
-        async for event in ClaudeBackend("requested-model").execute(Path("/tmp"), "actual prompt",
-                                                                   persist_session=False):
-            events.append(event)
-    except ClaudeAgentError:
-        assert failed
-    else:
-        assert not failed
-    cost = next(e for e in events if isinstance(e, CostEvent))
-    assert cost.input_tokens == 60
-    assert cost.cache_creation_tokens == 30
-    assert cost.cost_usd == 0.02
-    result = next(e for e in events if isinstance(e, ResultEvent))
-    assert result.session_id == "native-session"
-    assert result.finish_reason == ("error" if failed else "end_turn")
-    assert result.continuation is None
-    assert result.duration_ms == 120
-    assert result.duration_api_ms == 100
-    tool = next(e for e in events if isinstance(e, ToolResultEvent))
-    assert json.loads(tool.output) == [{"type": "text", "text": "structured tool output"}]
+async def test_claude_terminal_metadata_survives_billed_failure(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for failed in cases:
+        row_index += 1
+        with subtests.test(failed=failed):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                usage = {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 30,
+                }
+                messages = [
+                    AssistantMessage(content=[TextBlock("partial")], model="actual-model", usage=usage),
+                    UserMessage(
+                        content=[ToolResultBlock("call", [{"type": "text", "text": "structured tool output"}])]
+                    ),
+                    ResultMessage(
+                        subtype="error_during_execution" if failed else "success",
+                        duration_ms=120,
+                        duration_api_ms=100,
+                        is_error=failed,
+                        num_turns=1,
+                        session_id="native-session",
+                        stop_reason="error" if failed else "end_turn",
+                        total_cost_usd=0.02,
+                        usage=usage,
+                        result="provider failed" if failed else "done",
+                    ),
+                ]
+                monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", scripted_client(messages))
+                events: list[Any] = []
+                try:
+                    async for event in ClaudeBackend("requested-model").execute(
+                        Path("/tmp"), "actual prompt", persist_session=False
+                    ):
+                        events.append(event)
+                except ClaudeAgentError:
+                    assert failed
+                else:
+                    assert not failed
+                cost = next(e for e in events if isinstance(e, CostEvent))
+                assert cost.input_tokens == 60
+                assert cost.cache_creation_tokens == 30
+                assert cost.cost_usd == 0.02
+                result = next(e for e in events if isinstance(e, ResultEvent))
+                assert result.session_id == "native-session"
+                assert result.finish_reason == ("error" if failed else "end_turn")
+                assert result.continuation is None
+                assert result.duration_ms == 120
+                assert result.duration_api_ms == 100
+                tool = next(e for e in events if isinstance(e, ToolResultEvent))
+                assert json.loads(tool.output) == [{"type": "text", "text": "structured tool output"}]
 
-@pytest.mark.parametrize("failed", [False, True])
-async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) -> None:
-    msg = {"role": "assistant", "model": "actual-model", "provider": "actual-provider",
-           "content": [{"type": "text", "text": "done"}], "stopReason": "error" if failed else "stop",
-           "errorMessage": "provider failed", "usage": {"input": 10, "output": 5, "cacheRead": 20,
-                                                          "cacheWrite": 30, "cost": {"total": 0.02}}}
-    native = [{"type": "session", "id": "native-session"}, {"type": "turn_start"},
-              {"type": "message_end", "message": msg}, {"type": "turn_end", "message": msg},
-              {"type": "agent_end", "messages": []}, {"type": "agent_settled"}]
-    proc = FakeCliProcess([json.dumps(item) for item in native])
-    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
-    events: list[Any] = []
-    delivered_prompts: list[str] = []
-    async def spawn_child(*args: str, **kwargs: Any) -> Any:
-        assert args[-1].startswith("@/")
-        delivered_prompts.append(Path(args[-1][1:]).read_text(encoding="utf-8"))
-        return proc
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn_child) as spawn:
-        try:
-            async for event in PiBackend("requested-model").execute(Path("/tmp"), "actual prompt", schema,
-                                                                   persist_session=False):
-                events.append(event)
-        except PiError:
-            assert failed
-        else:
-            assert not failed
-    metric = next(e for e in events if isinstance(e, MetricsEvent))
-    assert metric.prompt_tokens == 60
-    assert metric.cache_creation_tokens == 30
-    assert metric.provider_name == "actual-provider"
-    assert metric.model_name == "actual-model"
-    assert metric.usage_scope == "message"
-    cost = next(e for e in events if isinstance(e, CostEvent))
-    assert (cost.input_tokens, cost.cached_tokens, cost.cache_creation_tokens) == (60, 20, 30)
-    result = next(e for e in events if isinstance(e, ResultEvent))
-    assert (result.model_name, result.provider_name, result.session_id) == (
-        "actual-model", "actual-provider", "native-session")
-    assert result.continuation is None
-    assert result.finish_reason == ("error" if failed else "stop")
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    assert delivered_prompts == [request.prompt]
-    assert not Path(spawn.call_args.args[-1][1:]).exists()
-    assert request.prompt.startswith("actual prompt")
-    assert request.output_schema == schema
-    assert request.system_prompt
+async def test_pi_actual_identity_cache_totals_and_failed_billing(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[bool] = [False, True]
+    for failed in cases:
+        with subtests.test(failed=failed):
+            msg = {
+                "role": "assistant",
+                "model": "actual-model",
+                "provider": "actual-provider",
+                "content": [{"type": "text", "text": "done"}],
+                "stopReason": "error" if failed else "stop",
+                "errorMessage": "provider failed",
+                "usage": {"input": 10, "output": 5, "cacheRead": 20, "cacheWrite": 30, "cost": {"total": 0.02}},
+            }
+            native = [
+                {"type": "session", "id": "native-session"},
+                {"type": "turn_start"},
+                {"type": "message_end", "message": msg},
+                {"type": "turn_end", "message": msg},
+                {"type": "agent_end", "messages": []},
+                {"type": "agent_settled"},
+            ]
+            proc = FakeCliProcess([json.dumps(item) for item in native])
+            schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+            events: list[Any] = []
+            delivered_prompts: list[str] = []
 
-@pytest.mark.parametrize(
-    ("native_identity", "expected_model", "expected_provider"),
-    [
+            async def spawn_child(*args: str, **kwargs: Any) -> Any:
+                assert args[-1].startswith("@/")
+                delivered_prompts.append(Path(args[-1][1:]).read_text(encoding="utf-8"))
+                return proc
+
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn_child) as spawn:
+                try:
+                    async for event in PiBackend("requested-model").execute(
+                        Path("/tmp"), "actual prompt", schema, persist_session=False
+                    ):
+                        events.append(event)
+                except PiError:
+                    assert failed
+                else:
+                    assert not failed
+            metric = next(e for e in events if isinstance(e, MetricsEvent))
+            assert metric.prompt_tokens == 60
+            assert metric.cache_creation_tokens == 30
+            assert metric.provider_name == "actual-provider"
+            assert metric.model_name == "actual-model"
+            assert metric.usage_scope == "message"
+            cost = next(e for e in events if isinstance(e, CostEvent))
+            assert (cost.input_tokens, cost.cached_tokens, cost.cache_creation_tokens) == (60, 20, 30)
+            result = next(e for e in events if isinstance(e, ResultEvent))
+            assert (result.model_name, result.provider_name, result.session_id) == (
+                "actual-model",
+                "actual-provider",
+                "native-session",
+            )
+            assert result.continuation is None
+            assert result.finish_reason == ("error" if failed else "stop")
+            request = next(e for e in events if isinstance(e, RequestEvent))
+            assert delivered_prompts == [request.prompt]
+            assert not Path(spawn.call_args.args[-1][1:]).exists()
+            assert request.prompt.startswith("actual prompt")
+            assert request.output_schema == schema
+            assert request.system_prompt
+
+async def test_codex_usage_scope_and_native_session(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[dict[str, str], str, str | None]] = [
         ({}, "requested-model", None),
         ({"model": "custom-response-model", "provider": "custom-provider"}, "custom-response-model", "custom-provider"),
-    ], ids=["provider-unavailable", "native-custom-provider"],
-)
-async def test_codex_usage_scope_and_native_session(
-    native_identity: dict[str, str], expected_model: str, expected_provider: str | None,
-) -> None:
-    native = [{"type": "thread.started", "thread_id": "native-thread"},
-              {"type": "turn.completed", **native_identity,
-               "usage": {"input_tokens": 60, "output_tokens": 5, "cached_input_tokens": 20}}]
-    proc = FakeCliProcess([json.dumps(item) for item in native])
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
-        events = [event async for event in CodexBackend("requested-model").execute(
-            Path("/tmp"), "actual prompt", persist_session=False)]
-    metric = next(e for e in events if isinstance(e, MetricsEvent))
-    assert metric.usage_scope == "invocation"
-    result = next(e for e in events if isinstance(e, ResultEvent))
-    assert result.session_id == "native-thread"
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    assert request.model_name == "requested-model"
-    assert request.provider_name is None  # Neither model names nor ambient config prove the provider.
-    cost = next(e for e in events if isinstance(e, CostEvent))
-    for response in (metric, cost, result):
-        assert response.model_name == expected_model
-        assert response.provider_name == expected_provider
-
-@pytest.mark.parametrize("failed", [False, True])
-async def test_osprey_terminal_usage_and_native_tool_metadata(failed: bool) -> None:
-    native = [
-        {"event": "protocol", "version": 2},
-        {"event": "session_start", "session_id": "native-session", "started_at": "2026-09-05T12:00:00Z",
-         "model": "actual-model", "provider": "actual-provider"},
-        {"event": "turn_start", "turn_id": "turn", "timestamp": "2026-09-05T12:00:01Z"},
-        {"event": "tool_call", "tool_call_id": "call", "tool_name": "read", "arguments": {}},
-        {"event": "tool_result", "tool_call_id": "call", "tool_name": "read", "status": "success",
-         "content": "output", "duration_ms": 37},
-        {"event": "turn_end", "turn_id": "turn", "usage_reported": True, "duration_ms": 80,
-         "prompt_tokens": 60, "completion_tokens": 5, "cached_tokens": 20, "cache_write_tokens": 30,
-         "thinking_tokens": 2, "cost_usd": "0.02"},
-        {"event": "session_end", "outcome": "failed" if failed else "completed",
-         "exit_code": 1 if failed else 0, "total_cost_usd": "0.02", "total_prompt_tokens": 60,
-         "total_completion_tokens": 5, "total_cached_tokens": 20, "total_cache_write_tokens": 30,
-         "total_thinking_tokens": 2, "session_wallclock_ms": 120},
     ]
-    proc = FakeCliProcess([json.dumps(item) for item in native], exit_code=1 if failed else 0)
-    events: list[Any] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
-        try:
-            async for event in OspreyBackend(osprey_binary="fake").execute(Path("/tmp"), "actual prompt"):
-                events.append(event)
-        except OspreyError:
-            assert failed
-        else:
-            assert not failed
-    cost = next(e for e in events if isinstance(e, CostEvent))
-    assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens) == (60, 5, 20, 30)
-    assert cost.reasoning_tokens == 2
-    assert cost.provider_name == "actual-provider"
-    metric = next(e for e in events if isinstance(e, MetricsEvent))
-    assert metric.started_at == "2026-09-05T12:00:01Z"
-    assert metric.duration_ms == 80
-    assert metric.cache_creation_tokens == 30
-    tool = next(e for e in events if isinstance(e, ToolResultEvent))
-    assert tool.duration_ms == 37
-    assert tool.status == "success"
-    result = next(e for e in events if isinstance(e, ResultEvent))
-    assert result.session_id == "native-session"
-    assert result.provider_name == "actual-provider"
-    assert result.finish_reason == ("failed" if failed else "completed")
-    assert result.duration_ms == 120
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    assert request.timestamp == "2026-09-05T12:00:00Z"
+    for native_identity, expected_model, expected_provider in cases:
+        with subtests.test(expected_model=expected_model):
+            native = [
+                {"type": "thread.started", "thread_id": "native-thread"},
+                {
+                    "type": "turn.completed",
+                    **native_identity,
+                    "usage": {"input_tokens": 60, "output_tokens": 5, "cached_input_tokens": 20},
+                },
+            ]
+            proc = FakeCliProcess([json.dumps(item) for item in native])
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
+                events = [
+                    event
+                    async for event in CodexBackend("requested-model").execute(
+                        Path("/tmp"), "actual prompt", persist_session=False
+                    )
+                ]
+            metric = next(e for e in events if isinstance(e, MetricsEvent))
+            assert metric.usage_scope == "invocation"
+            result = next(e for e in events if isinstance(e, ResultEvent))
+            assert result.session_id == "native-thread"
+            request = next(e for e in events if isinstance(e, RequestEvent))
+            assert request.model_name == "requested-model"
+            assert request.provider_name is None  # Neither model names nor ambient config prove the provider.
+            cost = next(e for e in events if isinstance(e, CostEvent))
+            for response in (metric, cost, result):
+                assert response.model_name == expected_model
+                assert response.provider_name == expected_provider
+
+async def test_osprey_terminal_usage_and_native_tool_metadata(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[bool] = [False, True]
+    for failed in cases:
+        with subtests.test(failed=failed):
+            native = [
+                {"event": "protocol", "version": 2},
+                {
+                    "event": "session_start",
+                    "session_id": "native-session",
+                    "started_at": "2026-09-05T12:00:00Z",
+                    "model": "actual-model",
+                    "provider": "actual-provider",
+                },
+                {"event": "turn_start", "turn_id": "turn", "timestamp": "2026-09-05T12:00:01Z"},
+                {"event": "tool_call", "tool_call_id": "call", "tool_name": "read", "arguments": {}},
+                {
+                    "event": "tool_result",
+                    "tool_call_id": "call",
+                    "tool_name": "read",
+                    "status": "success",
+                    "content": "output",
+                    "duration_ms": 37,
+                },
+                {
+                    "event": "turn_end",
+                    "turn_id": "turn",
+                    "usage_reported": True,
+                    "duration_ms": 80,
+                    "prompt_tokens": 60,
+                    "completion_tokens": 5,
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 30,
+                    "thinking_tokens": 2,
+                    "cost_usd": "0.02",
+                },
+                {
+                    "event": "session_end",
+                    "outcome": "failed" if failed else "completed",
+                    "exit_code": 1 if failed else 0,
+                    "total_cost_usd": "0.02",
+                    "total_prompt_tokens": 60,
+                    "total_completion_tokens": 5,
+                    "total_cached_tokens": 20,
+                    "total_cache_write_tokens": 30,
+                    "total_thinking_tokens": 2,
+                    "session_wallclock_ms": 120,
+                },
+            ]
+            proc = FakeCliProcess([json.dumps(item) for item in native], exit_code=1 if failed else 0)
+            events: list[Any] = []
+            with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
+                try:
+                    async for event in OspreyBackend(osprey_binary="fake").execute(Path("/tmp"), "actual prompt"):
+                        events.append(event)
+                except OspreyError:
+                    assert failed
+                else:
+                    assert not failed
+            cost = next(e for e in events if isinstance(e, CostEvent))
+            assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens) == (
+                60,
+                5,
+                20,
+                30,
+            )
+            assert cost.reasoning_tokens == 2
+            assert cost.provider_name == "actual-provider"
+            metric = next(e for e in events if isinstance(e, MetricsEvent))
+            assert metric.started_at == "2026-09-05T12:00:01Z"
+            assert metric.duration_ms == 80
+            assert metric.cache_creation_tokens == 30
+            tool = next(e for e in events if isinstance(e, ToolResultEvent))
+            assert tool.duration_ms == 37
+            assert tool.status == "success"
+            result = next(e for e in events if isinstance(e, ResultEvent))
+            assert result.session_id == "native-session"
+            assert result.provider_name == "actual-provider"
+            assert result.finish_reason == ("failed" if failed else "completed")
+            assert result.duration_ms == 120
+            request = next(e for e in events if isinstance(e, RequestEvent))
+            assert request.timestamp == "2026-09-05T12:00:00Z"
 
 async def test_claude_preserves_selected_native_model_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     terminal = ResultMessage(

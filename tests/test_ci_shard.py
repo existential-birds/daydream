@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.harness.table_cases import isolated_case
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci_shard.py"
 _PROFILE = "scripts/ci_test_durations.json"
 
@@ -179,81 +181,139 @@ def test_duration_partition_receipts_bind_the_shared_algorithm_and_exact_profile
         assert all(shards)
 
 
-@pytest.mark.parametrize("cheap_count", [3, 60], ids=["less-than-two-per-worker", "batched-load"])
 def test_four_workers_admit_the_four_heaviest_cases_before_any_finishes(
-    shard_artifacts: ShardProject, tmp_path: Path, cheap_count: int,
+    shard_artifacts: ShardProject,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """W1 ordering misses xdist batching several expensive cases onto one worker."""
-    original, env = shard_artifacts.repo, shard_artifacts.env
-    repo = tmp_path / "project"
-    shutil.copytree(original, repo)
-    heavy = [f"heavy_{index}" for index in range(4)]
-    _write_profile(repo, {f"tests/test_sample.py::test_{name}": 100.0 - index
-                          for index, name in enumerate(heavy)})
-    (repo / "tests/test_sample.py").write_text(
-        "import os\nimport time\nfrom pathlib import Path\nfrom sample import positive, negative\n"
-        "def _cover():\n"
-        "    assert (positive(1), positive(0), negative(-1), negative(0)) == (1, 0, -1, 0)\n"
-        "def _rendezvous(name):\n"
-        "    root = Path('admitted')\n"
-        "    root.mkdir(exist_ok=True)\n"
-        "    (root / (name + '-' + os.environ['PYTEST_XDIST_WORKER'])).mkdir()\n"
-        "    failed = root / 'failed'\n"
-        "    deadline = time.monotonic() + 15\n"
-        "    while len(list(root.glob('heavy_*'))) < 4 and not failed.exists():\n"
-        "        if time.monotonic() >= deadline:\n"
-        "            failed.touch()\n"
-        "            break\n"
-        "        time.sleep(0.01)\n"
-        "    assert not failed.exists(), 'expensive cases were queued behind another expensive case'\n"
-        "    assert len(list(root.glob('heavy_*'))) == 4\n"
-        "    _cover()\n"
-        + "".join(f"def test_{name}(): _rendezvous('{name}')\n" for name in heavy)
-        + "".join(f"def test_cheap_{index:02}(): _cover()\n" for index in range(cheap_count))
-    )
-    subprocess.run(["git", "add", "tests/test_sample.py", _PROFILE], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
-                    "commit", "-m", "concurrent scheduling fixture"],
-                   cwd=repo, env=env, check=True, capture_output=True)
-    result = _cli(repo, "run", "--index", "0", "--count", "1", "--workers", "4",
-                  "--output", "concurrent/shard-0", env=env)
-    assert result.returncode == 0, result.stdout + result.stderr
-    admitted = list((repo / "admitted").glob("heavy_*"))
-    assert len(admitted) == 4
-    assert len({path.name.rsplit("-", 1)[1] for path in admitted}) == 4
-    assert not (repo / "admitted/failed").exists()
-    manifest = json.loads((repo / "concurrent/shard-0/manifest.json").read_text())
-    assert len(manifest["collection"]) == 4 + cheap_count
-    assert set(manifest["selected"]) == set(manifest["reports"]) == set(manifest["collection"])
-    combined = _cli(repo, "combine", "--count", "1", "--input", "concurrent", env=env)
-    assert combined.returncode == 0, combined.stdout + combined.stderr
-    assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[int] = [3, 60]
+    for cheap_count in cases:
+        row_index += 1
+        with subtests.test(cheap_count=cheap_count):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                original, env = shard_artifacts.repo, shard_artifacts.env
+                repo = tmp_path / "project"
+                shutil.copytree(original, repo)
+                heavy = [f"heavy_{index}" for index in range(4)]
+                _write_profile(
+                    repo, {f"tests/test_sample.py::test_{name}": 100.0 - index for index, name in enumerate(heavy)}
+                )
+                (repo / "tests/test_sample.py").write_text(
+                    "import os\nimport time\nfrom pathlib import Path\nfrom sample import positive, negative\n"
+                    "def _cover():\n"
+                    "    assert (positive(1), positive(0), negative(-1), negative(0)) == (1, 0, -1, 0)\n"
+                    "def _rendezvous(name):\n"
+                    "    root = Path('admitted')\n"
+                    "    root.mkdir(exist_ok=True)\n"
+                    "    (root / (name + '-' + os.environ['PYTEST_XDIST_WORKER'])).mkdir()\n"
+                    "    failed = root / 'failed'\n"
+                    "    deadline = time.monotonic() + 15\n"
+                    "    while len(list(root.glob('heavy_*'))) < 4 and not failed.exists():\n"
+                    "        if time.monotonic() >= deadline:\n"
+                    "            failed.touch()\n"
+                    "            break\n"
+                    "        time.sleep(0.01)\n"
+                    "    assert not failed.exists(), 'expensive cases were queued behind another expensive case'\n"
+                    "    assert len(list(root.glob('heavy_*'))) == 4\n"
+                    "    _cover()\n"
+                    + "".join(f"def test_{name}(): _rendezvous('{name}')\n" for name in heavy)
+                    + "".join(f"def test_cheap_{index:02}(): _cover()\n" for index in range(cheap_count))
+                )
+                subprocess.run(["git", "add", "tests/test_sample.py", _PROFILE], cwd=repo, env=env, check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=CI",
+                        "-c",
+                        "user.email=ci@example.invalid",
+                        "commit",
+                        "-m",
+                        "concurrent scheduling fixture",
+                    ],
+                    cwd=repo,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                )
+                result = _cli(
+                    repo,
+                    "run",
+                    "--index",
+                    "0",
+                    "--count",
+                    "1",
+                    "--workers",
+                    "4",
+                    "--output",
+                    "concurrent/shard-0",
+                    env=env,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                admitted = list((repo / "admitted").glob("heavy_*"))
+                assert len(admitted) == 4
+                assert len({path.name.rsplit("-", 1)[1] for path in admitted}) == 4
+                assert not (repo / "admitted/failed").exists()
+                manifest = json.loads((repo / "concurrent/shard-0/manifest.json").read_text())
+                assert len(manifest["collection"]) == 4 + cheap_count
+                assert set(manifest["selected"]) == set(manifest["reports"]) == set(manifest["collection"])
+                combined = _cli(repo, "combine", "--count", "1", "--input", "concurrent", env=env)
+                assert combined.returncode == 0, combined.stdout + combined.stderr
+                assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
 
 
-@pytest.mark.parametrize("fault", ["zero-fallback", "negative-duration", "nonfinite-duration"])
 def test_run_rejects_invalid_timing_hints_before_publishing_evidence(
-    shard_artifacts: ShardProject, tmp_path: Path, fault: str,
+    shard_artifacts: ShardProject,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A zero fallback hides future work; invalid costs cannot define a reproducible layout."""
-    original, env = shard_artifacts.repo, shard_artifacts.env
-    repo = tmp_path / "project"
-    shutil.copytree(original, repo)
-    profile = json.loads((repo / _PROFILE).read_text())
-    if fault == "zero-fallback":
-        profile["fallback_seconds"] = 0
-    else:
-        profile["durations"]["tests/test_sample.py::test_a"] = (
-            -1.0 if fault == "negative-duration" else float("nan")
-        )
-    (repo / _PROFILE).write_text(json.dumps(profile))
-    subprocess.run(["git", "add", _PROFILE], cwd=repo, env=env, check=True)
-    subprocess.run(["git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
-                    "commit", "-m", "invalid timing fixture"], cwd=repo, env=env, check=True, capture_output=True)
-    result = _cli(repo, "run", "--index", "0", "--count", "1", "--workers", "1",
-                  "--output", "invalid-timing", env=env)
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert "ci-shard:" in result.stderr
-    assert not (repo / "invalid-timing/manifest.json").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["zero-fallback", "negative-duration", "nonfinite-duration"]
+    for fault in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                original, env = shard_artifacts.repo, shard_artifacts.env
+                repo = tmp_path / "project"
+                shutil.copytree(original, repo)
+                profile = json.loads((repo / _PROFILE).read_text())
+                if fault == "zero-fallback":
+                    profile["fallback_seconds"] = 0
+                else:
+                    profile["durations"]["tests/test_sample.py::test_a"] = (
+                        -1.0 if fault == "negative-duration" else float("nan")
+                    )
+                (repo / _PROFILE).write_text(json.dumps(profile))
+                subprocess.run(["git", "add", _PROFILE], cwd=repo, env=env, check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "user.name=CI",
+                        "-c",
+                        "user.email=ci@example.invalid",
+                        "commit",
+                        "-m",
+                        "invalid timing fixture",
+                    ],
+                    cwd=repo,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                )
+                result = _cli(
+                    repo, "run", "--index", "0", "--count", "1", "--workers", "1", "--output", "invalid-timing", env=env
+                )
+                assert result.returncode != 0, result.stdout + result.stderr
+                assert "ci-shard:" in result.stderr
+                assert not (repo / "invalid-timing/manifest.json").exists()
 
 
 def test_shards_cover_collection_and_combine_real_branch_data(
@@ -274,162 +334,315 @@ def test_shards_cover_collection_and_combine_real_branch_data(
     assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
 
 
-@pytest.mark.parametrize("fault", [
-    "missing-shard", "unexpected-shard", "missing-coverage", "corrupt-coverage", "wrong-checksum",
-    "wrong-head", "wrong-tree", "wrong-run", "wrong-attempt", "wrong-index", "wrong-profile", "wrong-algorithm",
-    "different-collection", "duplicate-test",
-    "wrong-selection", "missing-test", "missing-teardown", "missing-call", "failed-test", "failed-process",
-    "worker-crash", "line-only", "low-coverage",
-])
-@pytest.mark.parametrize("diagnostic", [False, True])
+def test_native_subtests_preserve_execution_receipts_and_failure_gates(
+    shard_artifacts: ShardProject, tmp_path: Path, subtests: pytest.Subtests,
+) -> None:
+    """Subtest reports share a parent ID; their failures must still block publication."""
+    for failing in (False, True):
+        with subtests.test(failing=failing):
+            repo = tmp_path / str(failing)
+            shutil.copytree(shard_artifacts.repo, repo)
+            with (repo / "tests/test_sample.py").open("a") as stream:
+                stream.write(
+                    "def test_contract(subtests):\n"
+                    "    for value in (0, 1):\n"
+                    "        with subtests.test(value=value):\n"
+                    f"            assert value != {1 if failing else 2}\n"
+                    "    with subtests.test(reason='prerequisite'):\n"
+                    "        pytest.skip('subtest prerequisite unavailable')\n"
+                )
+            env = shard_artifacts.env
+            subprocess.run(["git", "add", "tests/test_sample.py"], cwd=repo, env=env, check=True)
+            subprocess.run(["git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
+                            "commit", "-m", "subtest fixture"], cwd=repo, env=env, check=True, capture_output=True)
+            result = _cli(repo, "run", "--index", "0", "--count", "1", "--workers", "2",
+                          "--output", "subtest-artifacts/shard-0", env=env)
+            assert (result.returncode == 0) is not failing, result.stdout + result.stderr
+            manifest = json.loads((repo / "subtest-artifacts/shard-0/manifest.json").read_text())
+            parent = manifest["reports"]["tests/test_sample.py::test_contract"]
+            assert set(parent) == {"setup", "call", "teardown"}
+            assert parent["call"]["outcome"] == ("failed" if failing else "passed")
+            assert not any("duplicate" in error for error in manifest["errors"])
+            combined = _cli(repo, "combine", "--count", "1", "--input", "subtest-artifacts", env=env)
+            assert (combined.returncode == 0) is not failing, combined.stdout + combined.stderr
+            assert (repo / "coverage.xml").exists() is not failing
+
+
 def test_combine_rejects_incomplete_or_wrong_run_artifacts(
-    shard_artifacts: ShardProject, tmp_path: Path, fault: str, diagnostic: bool,
+    shard_artifacts: ShardProject,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Every fault starts from successfully executed artifacts, avoiding earlier false guards."""
-    from coverage import CoverageData
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[bool] = [False, True]
+    for diagnostic in cases_1:
+        cases_2: list[str] = [
+            "missing-shard",
+            "unexpected-shard",
+            "missing-coverage",
+            "corrupt-coverage",
+            "wrong-checksum",
+            "wrong-head",
+            "wrong-tree",
+            "wrong-run",
+            "wrong-attempt",
+            "wrong-index",
+            "wrong-profile",
+            "wrong-algorithm",
+            "different-collection",
+            "duplicate-test",
+            "wrong-selection",
+            "missing-test",
+            "missing-teardown",
+            "missing-call",
+            "failed-test",
+            "failed-process",
+            "worker-crash",
+            "line-only",
+            "low-coverage",
+        ]
+        for fault in cases_2:
+            row_index += 1
+            with subtests.test(diagnostic=diagnostic, fault=fault):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    from coverage import CoverageData
 
-    repo, env = shard_artifacts.repo, shard_artifacts.env
-    artifacts = tmp_path / "artifacts"
-    shutil.copytree(repo / "artifacts", artifacts)
-    shard = artifacts / "shard-0"
-    path = shard / "manifest.json"
-    manifest = json.loads(path.read_text())
-    if fault == "missing-shard":
-        shutil.rmtree(artifacts / "shard-1")
-    elif fault == "unexpected-shard":
-        (artifacts / "shard-2").mkdir()
-    elif fault == "missing-coverage":
-        (shard / "coverage").unlink()
-    elif fault == "corrupt-coverage":
-        (shard / "coverage").write_bytes(b"not sqlite")
-        manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
-    elif fault == "wrong-checksum":
-        manifest["coverage_sha256"] = "wrong"
-    elif fault == "wrong-profile":
-        manifest["partition_profile_sha256"] = "0" * 64
-    elif fault == "wrong-algorithm":
-        manifest["partition_algorithm"] = "unrecognized-partitioner"
-    elif fault in {"wrong-head", "wrong-tree", "wrong-run", "wrong-attempt", "wrong-index"}:
-        keys = {"wrong-head": "head", "wrong-tree": "tree", "wrong-run": "run_id",
-                "wrong-attempt": "run_attempt", "wrong-index": "index"}
-        key = keys[fault]
-        manifest[key] = "wrong"
-    elif fault in {"different-collection", "duplicate-test"}:
-        if fault == "duplicate-test":
-            manifest["collection"].append(manifest["collection"][0])
-        else:
-            # Change an unselected node while keeping this shard internally consistent.
-            manifest["collection"][1] = "tests/test_sample.py::test_b_changed"
-    elif fault == "wrong-selection":
-        manifest["selected"] = []
-    elif fault == "missing-test":
-        manifest["reports"].pop("tests/test_sample.py::test_a")
-    elif fault == "missing-teardown":
-        manifest["reports"]["tests/test_sample.py::test_a"].pop("teardown")
-    elif fault == "missing-call":
-        manifest["reports"]["tests/test_sample.py::test_a"].pop("call")
-    elif fault == "failed-test":
-        manifest["reports"]["tests/test_sample.py::test_a"]["call"]["outcome"] = "failed"
-    elif fault == "failed-process":
-        manifest["exitstatus"] = 1
-    elif fault == "worker-crash":
-        manifest["errors"] = ["worker died"]
-    else:
-        (shard / "coverage").unlink()
-        data = CoverageData(basename=str(shard / "coverage"))
-        if fault == "line-only":
-            data.add_lines({"sample/__init__.py": {1}})
-        else:
-            data.add_arcs({"sample/__init__.py": {(-1, 1), (1, -1)}})
-        data.write()
-        manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
-    path.write_text(json.dumps(manifest))
-    result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts),
-                  *(["--diagnostic"] if diagnostic else []), env=env)
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert "ci-shard:" in result.stderr or "coverage.exceptions.DataError" in result.stderr
-    if fault not in {"failed-test", "failed-process", "worker-crash", "low-coverage"}:
-        assert not (repo / "coverage.xml").exists()
+                    repo = tmp_path / "project"
+                    shutil.copytree(shard_artifacts.repo, repo)
+                    (repo / "coverage.xml").unlink(missing_ok=True)
+                    env = shard_artifacts.env
+                    artifacts = tmp_path / "artifacts"
+                    shutil.copytree(repo / "artifacts", artifacts)
+                    shard = artifacts / "shard-0"
+                    path = shard / "manifest.json"
+                    manifest = json.loads(path.read_text())
+                    if fault == "missing-shard":
+                        shutil.rmtree(artifacts / "shard-1")
+                    elif fault == "unexpected-shard":
+                        (artifacts / "shard-2").mkdir()
+                    elif fault == "missing-coverage":
+                        (shard / "coverage").unlink()
+                    elif fault == "corrupt-coverage":
+                        (shard / "coverage").write_bytes(b"not sqlite")
+                        manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
+                    elif fault == "wrong-checksum":
+                        manifest["coverage_sha256"] = "wrong"
+                    elif fault == "wrong-profile":
+                        manifest["partition_profile_sha256"] = "0" * 64
+                    elif fault == "wrong-algorithm":
+                        manifest["partition_algorithm"] = "unrecognized-partitioner"
+                    elif fault in {"wrong-head", "wrong-tree", "wrong-run", "wrong-attempt", "wrong-index"}:
+                        keys = {
+                            "wrong-head": "head",
+                            "wrong-tree": "tree",
+                            "wrong-run": "run_id",
+                            "wrong-attempt": "run_attempt",
+                            "wrong-index": "index",
+                        }
+                        key = keys[fault]
+                        manifest[key] = "wrong"
+                    elif fault in {"different-collection", "duplicate-test"}:
+                        if fault == "duplicate-test":
+                            manifest["collection"].append(manifest["collection"][0])
+                        else:
+                            # Change an unselected node while keeping this shard internally consistent.
+                            manifest["collection"][1] = "tests/test_sample.py::test_b_changed"
+                    elif fault == "wrong-selection":
+                        manifest["selected"] = []
+                    elif fault == "missing-test":
+                        manifest["reports"].pop("tests/test_sample.py::test_a")
+                    elif fault == "missing-teardown":
+                        manifest["reports"]["tests/test_sample.py::test_a"].pop("teardown")
+                    elif fault == "missing-call":
+                        manifest["reports"]["tests/test_sample.py::test_a"].pop("call")
+                    elif fault == "failed-test":
+                        manifest["reports"]["tests/test_sample.py::test_a"]["call"]["outcome"] = "failed"
+                    elif fault == "failed-process":
+                        manifest["exitstatus"] = 1
+                    elif fault == "worker-crash":
+                        manifest["errors"] = ["worker died"]
+                    else:
+                        (shard / "coverage").unlink()
+                        data = CoverageData(basename=str(shard / "coverage"))
+                        if fault == "line-only":
+                            data.add_lines({"sample/__init__.py": {1}})
+                        else:
+                            data.add_arcs({"sample/__init__.py": {(-1, 1), (1, -1)}})
+                        data.write()
+                        manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
+                    path.write_text(json.dumps(manifest))
+                    result = _cli(
+                        repo,
+                        "combine",
+                        "--count",
+                        "2",
+                        "--input",
+                        str(artifacts),
+                        *(["--diagnostic"] if diagnostic else []),
+                        env=env,
+                    )
+                    assert result.returncode != 0, result.stdout + result.stderr
+                    assert "ci-shard:" in result.stderr or "coverage.exceptions.DataError" in result.stderr
+                    if fault not in {"failed-test", "failed-process", "worker-crash", "low-coverage"}:
+                        assert not (repo / "coverage.xml").exists()
 
 
-@pytest.mark.parametrize(("mode", "static", "shards", "coverage", "success"), [
-    ("full", "success", "success", "success", True),
-    ("basic", "success", "skipped", "skipped", True),
-    ("reuse", "success", "skipped", "skipped", True),
-    ("unknown", "success", "skipped", "skipped", False),
-    ("full", "failure", "success", "success", False),
-    ("full", "success", "cancelled", "skipped", False),
-    ("full", "success", "skipped", "skipped", False),
-    ("full", "success", "success", "failure", False),
-    ("full", "success", "success", "cancelled", False),
-    ("basic", "cancelled", "skipped", "skipped", False),
-    ("reuse", "success", "failure", "skipped", False),
-    ("basic", "success", "success", "success", False),
-])
 def test_final_gate_propagates_dependency_outcomes(
-    mode: str, static: str, shards: str, coverage: str, success: bool,
+    subtests: pytest.Subtests,
 ) -> None:
     """Run with -S to prove the final status does not require installed dependencies."""
-    result = subprocess.run([
-        sys.executable, "-S", str(_SCRIPT), "gate", "--mode", mode, "--static-result", static,
-        "--shard-result", shards, "--coverage-result", coverage,
-    ], capture_output=True, text=True, check=False)
-    assert (result.returncode == 0) == success, result.stderr
+    cases: list[tuple[str, str, str, str, bool]] = [
+        ("full", "success", "success", "success", True),
+        ("basic", "success", "skipped", "skipped", True),
+        ("reuse", "success", "skipped", "skipped", True),
+        ("unknown", "success", "skipped", "skipped", False),
+        ("full", "failure", "success", "success", False),
+        ("full", "success", "cancelled", "skipped", False),
+        ("full", "success", "skipped", "skipped", False),
+        ("full", "success", "success", "failure", False),
+        ("full", "success", "success", "cancelled", False),
+        ("basic", "cancelled", "skipped", "skipped", False),
+        ("reuse", "success", "failure", "skipped", False),
+        ("basic", "success", "success", "success", False),
+    ]
+    for mode, static, shards, coverage, success in cases:
+        with subtests.test(mode=mode):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-S",
+                    str(_SCRIPT),
+                    "gate",
+                    "--mode",
+                    mode,
+                    "--static-result",
+                    static,
+                    "--shard-result",
+                    shards,
+                    "--coverage-result",
+                    coverage,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert (result.returncode == 0) == success, result.stderr
 
 
-@pytest.mark.parametrize(("mode", "baseline", "static", "success"), [
-    ("baseline", "success", "skipped", True),
-    ("baseline", "skipped", "skipped", False),
-    ("baseline", "cancelled", "skipped", False),
-    ("baseline", "failure", "skipped", False),
-    ("baseline", "success", "success", False),
-    ("basic", "success", "success", False),
-    ("reuse", "cancelled", "success", False),
-])
 def test_final_gate_requires_the_selected_baseline_job(
-    mode: str, baseline: str, static: str, success: bool,
+    subtests: pytest.Subtests,
 ) -> None:
-    result = subprocess.run([
-        sys.executable, "-S", str(_SCRIPT), "gate", "--mode", mode, "--baseline-result", baseline,
-        "--static-result", static, "--shard-result", "skipped", "--coverage-result", "skipped",
-    ], capture_output=True, text=True, check=False)
-    assert (result.returncode == 0) == success, result.stderr
+    cases: list[tuple[str, str, str, bool]] = [
+        ("baseline", "success", "skipped", True),
+        ("baseline", "skipped", "skipped", False),
+        ("baseline", "cancelled", "skipped", False),
+        ("baseline", "failure", "skipped", False),
+        ("baseline", "success", "success", False),
+        ("basic", "success", "success", False),
+        ("reuse", "cancelled", "success", False),
+    ]
+    for mode, baseline, static, success in cases:
+        with subtests.test(mode=mode):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-S",
+                    str(_SCRIPT),
+                    "gate",
+                    "--mode",
+                    mode,
+                    "--baseline-result",
+                    baseline,
+                    "--static-result",
+                    static,
+                    "--shard-result",
+                    "skipped",
+                    "--coverage-result",
+                    "skipped",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert (result.returncode == 0) == success, result.stderr
 
 
-@pytest.mark.parametrize("fault", [
-    "empty-selection", "stale-output", "dirty-checkout", "source-mutation",
-])
 def test_run_cannot_publish_success_for_failed_or_empty_execution(
-    shard_artifacts: ShardProject, tmp_path: Path, fault: str,
+    shard_artifacts: ShardProject,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    repo, env = shard_artifacts.repo, shard_artifacts.env
-    project = tmp_path / "project"
-    shutil.copytree(repo, project)
-    output = project / "rejected"
-    index, count = 0, 1
-    if fault in {"failing-test", "dirty-checkout", "source-mutation"}:
-        body = "def test_failure(): assert False\n"
-        if fault == "source-mutation":
-            body = ("from pathlib import Path\nfrom sample import positive\n"
-                    "def test_mutation():\n    assert positive(1) == 1\n"
-                    "    source = Path('sample/__init__.py')\n"
-                    "    source.write_text(source.read_text() + '# changed\\n')\n")
-        (project / "tests/test_sample.py").write_text(body)
-        if fault != "dirty-checkout":
-            subprocess.run(["git", "add", "tests/test_sample.py"], cwd=project, env=env, check=True)
-            subprocess.run(["git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
-                            "commit", "-m", "failing fixture"], cwd=project, env=env, check=True, capture_output=True)
-    elif fault == "empty-selection":
-        index, count = 5, 6
-    else:
-        output.mkdir()
-        (output / "sentinel").write_text("prior run")
-    result = _cli(project, "run", "--index", str(index), "--count", str(count), "--workers", "1",
-                  "--output", str(output), env=env)
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert not (output / "manifest.json").exists()
-    if fault == "stale-output":
-        assert (output / "sentinel").read_text() == "prior run"
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = [
+        "empty-selection",
+        "stale-output",
+        "dirty-checkout",
+        "source-mutation",
+    ]
+    for fault in cases:
+        row_index += 1
+        with subtests.test(fault=fault):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo, env = shard_artifacts.repo, shard_artifacts.env
+                project = tmp_path / "project"
+                shutil.copytree(repo, project)
+                output = project / "rejected"
+                index, count = 0, 1
+                if fault in {"failing-test", "dirty-checkout", "source-mutation"}:
+                    body = "def test_failure(): assert False\n"
+                    if fault == "source-mutation":
+                        body = (
+                            "from pathlib import Path\nfrom sample import positive\n"
+                            "def test_mutation():\n    assert positive(1) == 1\n"
+                            "    source = Path('sample/__init__.py')\n"
+                            "    source.write_text(source.read_text() + '# changed\\n')\n"
+                        )
+                    (project / "tests/test_sample.py").write_text(body)
+                    if fault != "dirty-checkout":
+                        subprocess.run(["git", "add", "tests/test_sample.py"], cwd=project, env=env, check=True)
+                        subprocess.run(
+                            [
+                                "git",
+                                "-c",
+                                "user.name=CI",
+                                "-c",
+                                "user.email=ci@example.invalid",
+                                "commit",
+                                "-m",
+                                "failing fixture",
+                            ],
+                            cwd=project,
+                            env=env,
+                            check=True,
+                            capture_output=True,
+                        )
+                elif fault == "empty-selection":
+                    index, count = 5, 6
+                else:
+                    output.mkdir()
+                    (output / "sentinel").write_text("prior run")
+                result = _cli(
+                    project,
+                    "run",
+                    "--index",
+                    str(index),
+                    "--count",
+                    str(count),
+                    "--workers",
+                    "1",
+                    "--output",
+                    str(output),
+                    env=env,
+                )
+                assert result.returncode != 0, result.stdout + result.stderr
+                assert not (output / "manifest.json").exists()
+                if fault == "stale-output":
+                    assert (output / "sentinel").read_text() == "prior run"
 
 
 def test_failed_suite_retains_diagnostic_coverage_without_success(

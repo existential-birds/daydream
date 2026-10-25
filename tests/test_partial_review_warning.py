@@ -8,27 +8,42 @@ import pytest
 from daydream.deep.artifacts import DeepArtifact
 from daydream.review_budget import review_warnings
 from tests.harness.review_result import review_coverage
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize("reason", [
-    "evidence incomplete: client.py unavailable",
-    "budget exhausted: review turn budget exhausted",
-    "RuntimeError: review provider unavailable",
-    "PermissionError: reviewer input inaccessible",
-])
-def test_failed_reviewer_remains_a_reported_warning(tmp_path: Path, reason: str) -> None:
-    coverage = review_coverage(scope_ids=("python",), phases=("arbiter",))
-    coverage.record_scope("python", "failed", reasons=("backend_failure",), diagnostic=reason)
-    coverage.record_phase("arbiter", "incomplete", reasons=("host_wall_budget_exhaustion",),
-                          diagnostic="wall budget exhausted")
-    path = DeepArtifact.REVIEW_COVERAGE.at(tmp_path)
-    path.write_text(json.dumps(coverage.to_dict()))
+def test_failed_reviewer_remains_a_reported_warning(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = [
+        "evidence incomplete: client.py unavailable",
+        "budget exhausted: review turn budget exhausted",
+        "RuntimeError: review provider unavailable",
+        "PermissionError: reviewer input inaccessible",
+    ]
+    for reason in cases:
+        row_index += 1
+        with subtests.test(reason=reason):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                coverage = review_coverage(scope_ids=("python",), phases=("arbiter",))
+                coverage.record_scope("python", "failed", reasons=("backend_failure",), diagnostic=reason)
+                coverage.record_phase(
+                    "arbiter",
+                    "incomplete",
+                    reasons=("host_wall_budget_exhaustion",),
+                    diagnostic="wall budget exhausted",
+                )
+                path = DeepArtifact.REVIEW_COVERAGE.at(tmp_path)
+                path.write_text(json.dumps(coverage.to_dict()))
 
-    assert review_warnings(tmp_path) == ("arbiter: wall budget exhausted", f"python: {reason}")
+                assert review_warnings(tmp_path) == ("arbiter: wall budget exhausted", f"python: {reason}")
 
-    coverage.record_scope("python", "complete")
-    path.write_text(json.dumps(coverage.to_dict()))
-    assert review_warnings(tmp_path) == ("arbiter: wall budget exhausted",)
+                coverage.record_scope("python", "complete")
+                path.write_text(json.dumps(coverage.to_dict()))
+                assert review_warnings(tmp_path) == ("arbiter: wall budget exhausted",)
 
 
 def test_synthesis_failure_is_a_distinct_phase_warning(tmp_path: Path) -> None:

@@ -5,16 +5,18 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 from daydream.runner import run
+from tests.conftest import make_sibling_frontier_target
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend
+from tests.harness.table_cases import isolated_case
 
 if TYPE_CHECKING:
     from daydream.run_config import RunConfig
@@ -67,14 +69,14 @@ def test_sibling_frontier_target_shape(sibling_frontier_target: Path) -> None:
     # Real, tree-sitter-parseable cross-file import edges are physically present.
     assert all("from core import core_helper" in (repo / f"mod{i}.py").read_text() for i in range(12))
 
-@pytest.mark.parametrize(('enabled', 'with_finding', 'parser_failed', 'frontier_max'),
-                         [(True, True, False, 8), (None, True, False, 2), (None, False, False, 8),
-                          (None, False, True, 8), (None, False, False, 0)],
-                         ids=['explicit', 'automatic', 'automatic-clean', 'automatic-parser-unavailable',
-                              'automatic-zero-frontier'])
-async def test_deep_canary_sharding_and_sibling_frontier(
-    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    enabled: bool | None, with_finding: bool, parser_failed: bool, frontier_max: int,
+async def _case_deep_canary_sharding_and_sibling_frontier(
+    sibling_frontier_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    enabled: bool | None,
+    with_finding: bool,
+    parser_failed: bool,
+    frontier_max: int,
 ) -> None:
     """Shards retain their byte/file limits, frontier context, and findings."""
     if parser_failed:
@@ -142,3 +144,34 @@ async def test_deep_canary_sharding_and_sibling_frontier(
     assert Counter(primary) == Counter(expected)
     structural = next(scope for scope in coverage['planned_scopes'] if scope['scope_id'] == 'structure')
     assert set(structural['files']) == expected
+
+
+async def test_deep_canary_sharding_and_sibling_frontier(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[bool | None, bool, bool, int]] = [
+        (True, True, False, 8),
+        (None, True, False, 2),
+        (None, False, False, 8),
+        (None, False, True, 8),
+        (None, False, False, 0),
+    ]
+    case_index = 0
+    for enabled, with_finding, parser_failed, frontier_max in cases_0:
+        with (
+            subtests.test(
+                enabled=enabled, with_finding=with_finding, parser_failed=parser_failed, frontier_max=frontier_max
+            ),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            sibling_frontier_target = make_sibling_frontier_target(scenario.tmp_path)
+            await _case_deep_canary_sharding_and_sibling_frontier(
+                sibling_frontier_target=sibling_frontier_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                enabled=enabled,
+                with_finding=with_finding,
+                parser_failed=parser_failed,
+                frontier_max=frontier_max,
+            )

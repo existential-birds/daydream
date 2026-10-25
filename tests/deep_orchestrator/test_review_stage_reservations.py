@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from tests.deep_orchestrator.test_review_investigation import (
     stage_ends,
 )
 from tests.harness.review_result import saved_coverage
+from tests.harness.table_cases import isolated_case
 
 
 class NativeStageBackend(StagedBackend, PiBackend):
@@ -31,10 +32,8 @@ class NativeStageBackend(StagedBackend, PiBackend):
             yield event
 
 
-@pytest.mark.parametrize('late_work', ['read-and-submit', 'inline', 'new-triage', 'overrun', 'retry',
-                                     'parallel-open', 'parallel-open-only'])
-async def test_prior_borrowing_preserves_later_native_stage_capacity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_work: str,
+async def _case_prior_borrowing_preserves_later_native_stage_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_work: str
 ) -> None:
     review = many_file_review(tmp_path, monkeypatch)
     backend = NativeStageBackend(review.repo)
@@ -129,6 +128,25 @@ async def test_prior_borrowing_preserves_later_native_stage_capacity(
     if incomplete:
         assert scopes(data)['python']['partial_evidence'] is True
         assert data['terminal_result']['analysis_state'] == 'incomplete'
+
+
+async def test_prior_borrowing_preserves_later_native_stage_capacity(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[str] = [
+        "read-and-submit",
+        "inline",
+        "new-triage",
+        "overrun",
+        "retry",
+        "parallel-open",
+        "parallel-open-only",
+    ]
+    case_index = 0
+    for late_work in cases_0:
+        with subtests.test(late_work=late_work), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_prior_borrowing_preserves_later_native_stage_capacity(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, late_work=late_work
+            )
 
 
 async def test_initial_native_structure_exhaustion_keeps_unsent_work_and_folded_alternatives_incomplete(

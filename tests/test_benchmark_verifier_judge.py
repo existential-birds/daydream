@@ -3,7 +3,7 @@ import asyncio
 import hashlib as _h
 import inspect
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1290,21 +1290,22 @@ async def test_claude_cli_parse_verdict_rejection_propagates_raw(sr_module: Any)
     assert len(client.runner.calls) == 1
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stdout_arg,needle",
-    [
-        ("", "empty output"),                                         # empty stdout
-        ("not json at all", "malformed output"),                      # malformed JSON
+async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any, subtests: pytest.Subtests) -> None:
+    cases: Sequence[tuple[str, str]] = [
+        ("", "empty output"),  # empty stdout
+        ("not json at all", "malformed output"),  # malformed JSON
         (json.dumps({"is_error": True, "type": "error"}), "cli reported error"),
         (json.dumps({"is_error": False, "type": "result"}), "missing result"),
-    ],
-)
-async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any, stdout_arg: str, needle: str) -> None:
-    sr = sr_module
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert needle in str(e.value)
-    assert len(client.runner.calls) == 1  # terminal -- no retry, no backoff
+    ]
+    for case_index, (stdout_arg, needle) in enumerate(cases):
+        with subtests.test(stdout_arg=stdout_arg, needle=needle):
+            sr = sr_module
+            client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
+            with pytest.raises(sr.VerifierError) as e:
+                await client.complete_json(user="u")
+            assert needle in str(e.value)
+            assert len(client.runner.calls) == 1  # terminal -- no retry, no backoff
+
 
 @pytest.mark.asyncio
 async def test_claude_cli_streaming_oversize_kills_child(sr_module: Any) -> None:

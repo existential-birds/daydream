@@ -21,6 +21,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 # The sanitized provider 429 and the healthy follow-up, replayed through the real
@@ -63,40 +64,53 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
     """Every attempt raises *error* — the retry-exhaustion and no-retry shapes."""
     return ScriptedBackend(events=[error])
 
-@pytest.mark.parametrize(
-    ("make_backend", "expected_output"),
-    [
+async def test_run_agent_retries_and_returns_the_successful_attempt(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[Any, str]] = [
         # First call raises a retryable PiError; second succeeds. Output is from the second call.
-        pytest.param(
+        (
             lambda: _fail_then_succeed(
-                PiError("429 Too Many Requests - rate limit exceeded", retryable=True), text="Review complete",
-            ), "Review complete", id="rate-limit",
+                PiError("429 Too Many Requests - rate limit exceeded", retryable=True),
+                text="Review complete",
+            ),
+            "Review complete",
         ),
         # Partial output from a failed attempt is discarded; only the final output is returned.
-        pytest.param(
+        (
             lambda: _fail_then_succeed(
-                PiError("429 overload", retryable=True), text="final text", partial="partial text",
-            ), "final text", id="partial-output-discarded",
+                PiError("429 overload", retryable=True),
+                text="final text",
+                partial="partial text",
+            ),
+            "final text",
         ),
         # Use the production Pi classifier so retrying a terminated stream stays covered.
-        pytest.param(
+        (
             lambda: _fail_then_succeed(
                 PiError(
                     "terminated",
                     retryable=_pi_retryable_for(category=_pi_error_category("terminated"), message="terminated"),
-                ), text="Review complete after retry",
-            ), "Review complete after retry", id="stream-drop",
+                ),
+                text="Review complete after retry",
+            ),
+            "Review complete after retry",
         ),
-    ],
-)
-async def test_run_agent_retries_and_returns_the_successful_attempt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_backend: Any, expected_output: str,
-) -> None:
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
-    backend = make_backend()
-    output, _, _ = await run_agent(backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW)
-    assert output == expected_output
-    assert backend.call_count == 2
+    ]
+    for make_backend, expected_output in cases:
+        row_index += 1
+        with subtests.test(expected_output=expected_output):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
+                backend = make_backend()
+                output, _, _ = await run_agent(backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW)
+                assert output == expected_output
+                assert backend.call_count == 2
 
 async def test_run_agent_no_retry_on_non_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
@@ -236,40 +250,37 @@ class _PermanentWithHigherCap(PiError):
 
     max_retries = 5
 
-@pytest.mark.parametrize(
-    ("error", "expected_calls"),
-    [
-        pytest.param(
-            PiError("model not found: gpt-5 (503)", retryable=True, category="SERVER_ERROR"), 1,
-            id="permanent-beats-transient-token",
-        ),
-        pytest.param(PiError("invalid api key: not configured", retryable=False, category="AUTH_CONFIG"), 1, id="auth"),
-        pytest.param(
-            PiError("response failed JSON schema validation", retryable=False, category="SCHEMA"), 1, id="schema",
-        ),
-        pytest.param(
-            _PermanentWithHigherCap("model not found: gpt-5", category="AUTH_CONFIG"), 1,
-            id="cap-override-cannot-raise",
-        ), pytest.param(PiError("429 rate limit exceeded", retryable=True, category="RATE_LIMIT"), 2, id="rate-limit"),
-    ],
-)
 async def test_failure_classification_decides_retries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: PiError, expected_calls: int,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Permanent conditions get zero retries; transient ones still retry."""
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-    backend = (
-        ScriptedBackend(events=[error])
-        if expected_calls == 1
-        else _fail_then_succeed(error, text="done")
-    )
-    if expected_calls == 1:
-        with pytest.raises(type(error)):
-            await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
-    else:
-        assert (await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW))[0] == "done"
-    assert backend.call_count == expected_calls
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[PiError, int]] = [
+        (PiError("model not found: gpt-5 (503)", retryable=True, category="SERVER_ERROR"), 1),
+        (PiError("invalid api key: not configured", retryable=False, category="AUTH_CONFIG"), 1),
+        (PiError("response failed JSON schema validation", retryable=False, category="SCHEMA"), 1),
+        (_PermanentWithHigherCap("model not found: gpt-5", category="AUTH_CONFIG"), 1),
+        (PiError("429 rate limit exceeded", retryable=True, category="RATE_LIMIT"), 2),
+    ]
+    for error, expected_calls in cases:
+        row_index += 1
+        with subtests.test(expected_calls=expected_calls):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+                monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+                backend = (
+                    ScriptedBackend(events=[error]) if expected_calls == 1 else _fail_then_succeed(error, text="done")
+                )
+                if expected_calls == 1:
+                    with pytest.raises(type(error)):
+                        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+                else:
+                    assert (await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW))[0] == "done"
+                assert backend.call_count == expected_calls
 
 class _HintError(RuntimeError):
     """A retryable transport failure that can carry a server-provided hint."""
@@ -280,30 +291,44 @@ class _HintError(RuntimeError):
         super().__init__(message)
         self.retry_after = retry_after
 
-@pytest.mark.parametrize(
-    ("pinned", "expected"),
-    [
-        pytest.param("cap", 30.0, id="pinned-to-cap"), pytest.param(0.0, 0.0, id="pinned-to-zero"),
-        pytest.param("hostile", 30.0, id="hostile-sample-is-clamped"),
-    ],
-)
 async def test_bounded_full_jitter_never_exceeds_the_cap(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pinned: object, expected: float
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """One retry at a fixed 30-second cap exposes any overshoot by a hostile jitter sampler."""
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    sampler = {"cap": lambda cap: cap, 0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", sampler)
-    backend = ScriptedBackend(
-        events=[_HintError("503 Service Unavailable")], retry_attempts=1, retry_base_delay_s=30.0,
-        retry_max_delay_s=60.0,
-    )
-    with pytest.raises(_HintError):
-        await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
-        )
-    assert slept == [pytest.approx(expected)]
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[object, float]] = [
+        ("cap", 30.0),
+        (0.0, 0.0),
+        ("hostile", 30.0),
+    ]
+    for pinned, expected in cases:
+        row_index += 1
+        with subtests.test(expected=expected):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+                slept = patch_retry_sleep(monkeypatch, fake)
+                sampler = {"cap": lambda cap: cap, 0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
+                monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", sampler)
+                backend = ScriptedBackend(
+                    events=[_HintError("503 Service Unavailable")],
+                    retry_attempts=1,
+                    retry_base_delay_s=30.0,
+                    retry_max_delay_s=60.0,
+                )
+                with pytest.raises(_HintError):
+                    await run_agent(
+                        backend,
+                        tmp_path,
+                        "go",
+                        phase=DaydreamPhase.FIX,
+                        wall_budget_s=10_000.0,
+                        retry_recovery_allowance_s=300.0,
+                    )
+                assert slept == [pytest.approx(expected)]
 
 async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -328,36 +353,49 @@ async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
     assert "server" in notice.lower() or "advertised" in notice.lower()  # hint wait is labelled
     assert notice.count("server-advertised wait") == 1  # the hint label is attached exactly once, never duplicated
 
-@pytest.mark.parametrize(
-    ("retry_after", "expected_slept", "stop"),
-    [
-        pytest.param(30.0, [30.0], None, id="valid-and-fits"),
-        pytest.param(600.0, [], "retry_hint_exceeds_budget", id="valid-but-too-long"),
-        pytest.param(0.0, [0.0], None, id="zero-is-honoured"),
-        pytest.param(None, [30.0], None, id="absent-degrades-to-jitter"),
-    ],
-)
 async def test_server_retry_hint_is_honoured_or_stops_insufficient_budget(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_after: float | None, expected_slept: list[float],
-    stop: str | None,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """Server hints replace jitter within budget; an unfittable hint stops the ladder."""
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    backend = ScriptedBackend(
-        events=[_HintError("503 Service Unavailable", retry_after=retry_after)], retry_attempts=1,
-        retry_base_delay_s=30.0, retry_max_delay_s=60.0,
-    )
-    with pytest.raises(_HintError):
-        await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
-        )
-    assert slept == [pytest.approx(s) for s in expected_slept]
-    if stop is None:
-        assert backend.call_count == 2
-    else:
-        assert backend.call_count == 1  # hint longer than the budget extends nothing
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[float | None, list[float], str | None]] = [
+        (30.0, [30.0], None),
+        (600.0, [], "retry_hint_exceeds_budget"),
+        (0.0, [0.0], None),
+        (None, [30.0], None),
+    ]
+    for retry_after, expected_slept, stop in cases:
+        row_index += 1
+        with subtests.test(retry_after=retry_after):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+                slept = patch_retry_sleep(monkeypatch, fake)
+                monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+                backend = ScriptedBackend(
+                    events=[_HintError("503 Service Unavailable", retry_after=retry_after)],
+                    retry_attempts=1,
+                    retry_base_delay_s=30.0,
+                    retry_max_delay_s=60.0,
+                )
+                with pytest.raises(_HintError):
+                    await run_agent(
+                        backend,
+                        tmp_path,
+                        "go",
+                        phase=DaydreamPhase.FIX,
+                        wall_budget_s=10_000.0,
+                        retry_recovery_allowance_s=300.0,
+                    )
+                assert slept == [pytest.approx(s) for s in expected_slept]
+                if stop is None:
+                    assert backend.call_count == 2
+                else:
+                    assert backend.call_count == 1  # hint longer than the budget extends nothing
+  # hint longer than the budget extends nothing
 
 class _MessageHintError(RuntimeError):
     """A retryable failure that carries its hint only in the message token."""
@@ -381,29 +419,45 @@ async def test_server_retry_hint_is_read_from_the_message_when_the_attribute_is_
     assert slept == [pytest.approx(45.0)]
     assert backend.call_count == 2
 
-@pytest.mark.parametrize(
-    "malformed",
-    [
-        pytest.param("30", id="string"), pytest.param(float("nan"), id="nan"), pytest.param(float("inf"), id="inf"),
-        pytest.param(-5.0, id="negative"),
-    ],
-)
 async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, malformed: Any
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
     """A present-but-invalid ``retry_after`` is ignored, never coerced to a delay."""
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    backend = ScriptedBackend(
-        events=[_HintError("503 Service Unavailable", retry_after=malformed)], retry_attempts=1,
-        retry_base_delay_s=30.0, retry_max_delay_s=60.0,
-    )
-    with pytest.raises(_HintError):
-        await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
-        )
-    assert slept == [pytest.approx(30.0)]  # jitter pinned to the cap, not the malformed value
+    table_root = tmp_path
+    row_index = 0
+    cases: list[Any] = [
+        "30",
+        float("nan"),
+        float("inf"),
+        -5.0,
+    ]
+    for malformed in cases:
+        row_index += 1
+        with subtests.test(malformed=malformed):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+                slept = patch_retry_sleep(monkeypatch, fake)
+                monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+                backend = ScriptedBackend(
+                    events=[_HintError("503 Service Unavailable", retry_after=malformed)],
+                    retry_attempts=1,
+                    retry_base_delay_s=30.0,
+                    retry_max_delay_s=60.0,
+                )
+                with pytest.raises(_HintError):
+                    await run_agent(
+                        backend,
+                        tmp_path,
+                        "go",
+                        phase=DaydreamPhase.FIX,
+                        wall_budget_s=10_000.0,
+                        retry_recovery_allowance_s=300.0,
+                    )
+                assert slept == [pytest.approx(30.0)]  # jitter pinned to the cap, not the malformed value
+  # jitter pinned to the cap, not the malformed value
 
 async def test_contradictory_retry_budgets_refuse_before_any_dispatch(tmp_path: Path) -> None:
     backend = ScriptedBackend(
@@ -494,46 +548,60 @@ async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None
     assert classify_failure(_HostileHint()).retries_allowed is True  # still classified
 
 
-@pytest.mark.parametrize(
-    ("second_lines", "allowance_s", "retries", "expected_sleep"),
-    [
+async def test_run_agent_honours_or_stops_on_a_server_hint(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[list[str], float, bool, list[Any]]] = [
         # The next attempt begins no earlier than the advertised delay, even when the configured
         # jitter maximum (4s) is smaller than the hint (10s).
-        pytest.param(list(_HEALTHY_LINES), 300.0, True, [pytest.approx(10.0)], id="hint-fits-waits-in-full"),
+        (list(_HEALTHY_LINES), 300.0, True, [pytest.approx(10.0)]),
         # An unfittable hint (10 > 5): exactly one attempt, one stop reason, no second spawn.
-        pytest.param(list(_ERROR_LINES), 5.0, False, [], id="hint-exceeds-budget-stops"),
-    ],
-)
-async def test_run_agent_honours_or_stops_on_a_server_hint(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_lines: list[str], allowance_s: float,
-    retries: bool, expected_sleep: list[Any],
-) -> None:
-    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, clock)
-    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(second_lines))]
-    spawned: list[int] = []
+        (list(_ERROR_LINES), 5.0, False, []),
+    ]
+    for second_lines, allowance_s, retries, expected_sleep in cases:
+        row_index += 1
+        with subtests.test(allowance_s=allowance_s):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+                slept = patch_retry_sleep(monkeypatch, clock)
+                procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(second_lines))]
+                spawned: list[int] = []
 
-    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
-        spawned.append(1)
-        return procs.pop(0)
+                async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+                    spawned.append(1)
+                    return procs.pop(0)
 
-    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
-    backend = PiBackend(model="glm-5.2")
-    backend.retry_attempts = 1
-    backend.retry_base_delay_s = 1.0
-    backend.retry_max_delay_s = 4.0
-    if retries:
-        out, _, _ = await run_agent(
-            cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-            wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,
-        )
-        assert out == "done"
-        assert len(spawned) == 2  # exactly one retry after the admission failure
-    else:
-        with pytest.raises(PiError):
-            await run_agent(
-                cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-                wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10 > 5
-            )
-        assert len(spawned) == 1  # no further attempt dispatched after the stop
-    assert slept == expected_sleep  # the full hint, or no shortened wait in its place
+                monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
+                backend = PiBackend(model="glm-5.2")
+                backend.retry_attempts = 1
+                backend.retry_base_delay_s = 1.0
+                backend.retry_max_delay_s = 4.0
+                if retries:
+                    out, _, _ = await run_agent(
+                        cast(Backend, backend),
+                        tmp_path,
+                        "p",
+                        phase=DaydreamPhase.FIX,
+                        wall_budget_s=10_000.0,
+                        retry_recovery_allowance_s=allowance_s,
+                    )
+                    assert out == "done"
+                    assert len(spawned) == 2  # exactly one retry after the admission failure
+                else:
+                    with pytest.raises(PiError):
+                        await run_agent(
+                            cast(Backend, backend),
+                            tmp_path,
+                            "p",
+                            phase=DaydreamPhase.FIX,
+                            wall_budget_s=10_000.0,
+                            retry_recovery_allowance_s=allowance_s,  # hint 10 > 5
+                        )
+                    assert len(spawned) == 1  # no further attempt dispatched after the stop
+                assert slept == expected_sleep  # the full hint, or no shortened wait in its place
+  # the full hint, or no shortened wait in its place

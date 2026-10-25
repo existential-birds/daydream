@@ -76,10 +76,14 @@ def _feature_repo(tmp_path: Path, name: str, initial: dict[str, str], changed: d
     return repo
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
+def make_git_repo(tmp_path: Path) -> Path:
     """Initialize a fresh git repo at tmp_path with one initial commit on `main`."""
     return _make_repo_with_main(tmp_path)
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    return make_git_repo(tmp_path)
 
 
 @pytest.fixture
@@ -97,13 +101,17 @@ def feature_branch_repo(tmp_path: Path) -> Path:
     return repo
 
 
-@pytest.fixture
-def deep_target(tmp_path: Path) -> Path:
+def make_deep_target(tmp_path: Path) -> Path:
     """Single-file Python diff that exercises the deep-review skip tier."""
     return _feature_repo(tmp_path, "deep_repo",
         {"foo.py": "def foo():\n    return 1\n"},
         {"foo.py": "def foo():\n    return 2\n"},
     )
+
+
+@pytest.fixture
+def deep_target(tmp_path: Path) -> Path:
+    return make_deep_target(tmp_path)
 
 
 @pytest.fixture
@@ -220,8 +228,7 @@ def improve_branch_two_services_target(tmp_path: Path) -> Path:
     return _improve_monorepo(tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog"))
 
 
-@pytest.fixture
-def multi_stack_target(tmp_path: Path) -> Path:
+def make_multi_stack_target(tmp_path: Path) -> Path:
     """Feature-branch diff with one Python, React, and Markdown file."""
     return _feature_repo(tmp_path, "multi_stack", {
         "api.py": "def hello():\n    return 'world'\n",
@@ -235,7 +242,11 @@ def multi_stack_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def shard_many_python_target(tmp_path: Path) -> Path:
+def multi_stack_target(tmp_path: Path) -> Path:
+    return make_multi_stack_target(tmp_path)
+
+
+def make_shard_many_python_target(tmp_path: Path) -> Path:
     """Three changed Python files plus docs, allowing max_files to force sharding."""
     before = {f"mod{i}.py": f"def f{i}():\n    return {i}\n" for i in range(3)}
     before["README.md"] = "# Project\n"
@@ -245,7 +256,11 @@ def shard_many_python_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def sibling_frontier_target(tmp_path: Path) -> Path:
+def shard_many_python_target(tmp_path: Path) -> Path:
+    return make_shard_many_python_target(tmp_path)
+
+
+def make_sibling_frontier_target(tmp_path: Path) -> Path:
     """Thirteen changed Python files with parseable cross-shard import edges.
 
     Twelve spokes import core_helper, forcing the sibling frontier to supply
@@ -266,6 +281,11 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def sibling_frontier_target(tmp_path: Path) -> Path:
+    return make_sibling_frontier_target(tmp_path)
+
+
+@pytest.fixture
 def rust_wire_target(tmp_path: Path) -> Path:
     """Rust and Markdown diff exercising Rust and generic wire-contract prompts."""
     return _feature_repo(tmp_path, "rust_wire", {
@@ -277,8 +297,7 @@ def rust_wire_target(tmp_path: Path) -> Path:
     })
 
 
-@pytest.fixture
-def tiny_diff_target(tmp_path: Path) -> Path:
+def make_tiny_diff_target(tmp_path: Path) -> Path:
     """Two-language diff small enough to combine stacks and skip merge/arbiter."""
     return _feature_repo(tmp_path, "tiny_diff", {
         "api.py": "def hello():\n    return 'world'\n",
@@ -287,6 +306,11 @@ def tiny_diff_target(tmp_path: Path) -> Path:
         "api.py": "def hello():\n    return 'universe'\n",
         "App.tsx": 'import React from "react"; export const App = () => <div>universe</div>;\n',
     })
+
+
+@pytest.fixture
+def tiny_diff_target(tmp_path: Path) -> Path:
+    return make_tiny_diff_target(tmp_path)
 
 
 @pytest.fixture

@@ -21,6 +21,7 @@ from daydream.backends.osprey import OspreyBackend, OspreyError
 from daydream.backends.pi import PiBackend, PiError
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.osprey_jsonl import osprey_session
+from tests.harness.table_cases import isolated_case
 
 DIAG = [f"diag-{i:02d}" for i in range(1, 26)]  # 25 > every capture window (codex/pi 20, osprey 10)
 
@@ -30,15 +31,24 @@ def _transport(monkeypatch: pytest.MonkeyPatch, proc: FakeCliProcess) -> CliTran
     return CliTransport("codex", ["codex"], limit=1024)
 
 
-@pytest.mark.parametrize(("returncode", "expected"), [(0, 0), (1, 1), (-15, -15)])
 async def test_reap_suppresses_transport_exit_and_returns_the_code(
-    monkeypatch: pytest.MonkeyPatch, returncode: int, expected: int
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    proc = FakeCliProcess([], exit_code=returncode)
-    transport = _transport(monkeypatch, proc)
-    await transport.start()
-    assert await reap(transport) == expected  # a non-zero exit must not escape as TransportExitError
-    assert proc.reaped
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[int, int]] = [(0, 0), (1, 1), (-15, -15)]
+    for returncode, expected in cases:
+        row_index += 1
+        with subtests.test(returncode=returncode):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                proc = FakeCliProcess([], exit_code=returncode)
+                transport = _transport(monkeypatch, proc)
+                await transport.start()
+                assert await reap(transport) == expected  # a non-zero exit must not escape as TransportExitError
+                assert proc.reaped
 
 
 async def test_teardown_is_idempotent_and_drops_the_transport(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,48 +65,51 @@ async def test_teardown_is_idempotent_and_drops_the_transport(monkeypatch: pytes
 
 # Shared parser coverage.
 
-@pytest.mark.parametrize(
-    ("raw", "expected", "warning"),
-    [
-        (None, 20, None),                                     # absent: silent default
-        ("5", 5, None),                                       # valid override
+def test_shared_nonnegative_int_parser(
+    caplog: pytest.LogCaptureFixture,
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str | None, int, str | None]] = [
+        (None, 20, None),  # absent: silent default
+        ("5", 5, None),  # valid override
         ("", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='' is not a valid integer; using default 20"),
         ("-1", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='-1' is negative; using default 20"),
         ("2.5", 20, "DAYDREAM_PI_RETRY_ATTEMPTS='2.5' is not a valid integer; using default 20"),
-    ], ids=["absent", "override", "empty", "negative", "not-an-int"],
-)
-def test_shared_nonnegative_int_parser(
-    caplog: pytest.LogCaptureFixture, raw: str | None, expected: int, warning: str | None
-) -> None:
-    environment = {} if raw is None else {"DAYDREAM_PI_RETRY_ATTEMPTS": raw}
-    with caplog.at_level(logging.WARNING):
-        assert _parsed_nonnegative_int(environment, "DAYDREAM_PI_RETRY_ATTEMPTS", 20) == expected
-    if warning is None:
-        assert caplog.text == ""          # a valid or absent value must not warn
-    else:
-        assert warning in caplog.text
+    ]
+    for raw, expected, warning in cases:
+        with subtests.test(raw=raw):
+            caplog.clear()
+            environment = {} if raw is None else {"DAYDREAM_PI_RETRY_ATTEMPTS": raw}
+            with caplog.at_level(logging.WARNING):
+                assert _parsed_nonnegative_int(environment, "DAYDREAM_PI_RETRY_ATTEMPTS", 20) == expected
+            if warning is None:
+                assert caplog.text == ""  # a valid or absent value must not warn
+            else:
+                assert warning in caplog.text
 
-@pytest.mark.parametrize(
-    ("raw", "expected", "warning"),
-    [
-        (None, 10.0, None), ("0.5", 0.5, None),
+def test_shared_nonnegative_float_parser(
+    caplog: pytest.LogCaptureFixture,
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str | None, float, str | None]] = [
+        (None, 10.0, None),
+        ("0.5", 0.5, None),
         ("", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='' is not a valid float; using default 10"),
         ("nan", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='nan' is not finite; using default 10"),
         ("inf", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='inf' is not finite; using default 10"),
         ("-1", 10.0, "DAYDREAM_PI_RETRY_BASE_DELAY_S='-1' is negative; using default 10"),
-    ], ids=["absent", "override", "empty", "nan", "inf", "negative"],
-)
-def test_shared_nonnegative_float_parser(
-    caplog: pytest.LogCaptureFixture, raw: str | None, expected: float, warning: str | None
-) -> None:
-    environment = {} if raw is None else {"DAYDREAM_PI_RETRY_BASE_DELAY_S": raw}
-    with caplog.at_level(logging.WARNING):
-        value = _parsed_nonnegative_float(environment, "DAYDREAM_PI_RETRY_BASE_DELAY_S", 10.0)
-    assert value == pytest.approx(expected)
-    if warning is None:
-        assert caplog.text == ""          # the check order is pinned: nan/inf are caught before the sign check
-    else:
-        assert warning in caplog.text
+    ]
+    for raw, expected, warning in cases:
+        with subtests.test(raw=raw):
+            caplog.clear()
+            environment = {} if raw is None else {"DAYDREAM_PI_RETRY_BASE_DELAY_S": raw}
+            with caplog.at_level(logging.WARNING):
+                value = _parsed_nonnegative_float(environment, "DAYDREAM_PI_RETRY_BASE_DELAY_S", 10.0)
+            assert value == pytest.approx(expected)
+            if warning is None:
+                assert caplog.text == ""  # the check order is pinned: nan/inf are caught before the sign check
+            else:
+                assert warning in caplog.text
 
 # Real drivers with only OS process spawning replaced.
 

@@ -161,36 +161,52 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
     assert isinstance(final_request.config, ClaudeRequestConfig)
     assert final_request.config.tools_count == 0
 
-@pytest.mark.parametrize("custom_config", [False, True])
-async def test_effective_finalization_configuration_reaches_exported_telemetry(custom_config: bool) -> None:
-    @dataclass(frozen=True)
-    class CustomConfig(PiRequestConfig):
-        private_data: str = "PRIVATE CONFIG"
-    request_config = (CustomConfig if custom_config else PiRequestConfig)(
-        finalization=True, no_tools=True, selected_tools_count=0,
-    )
-    exporter = InMemorySpanExporter()
-    registry = Registry()
-    registry.register_trace_exporter("memory", lambda _: exporter)
-    config = ObservabilityConfig(destinations=("memory",), capture_content=False)
-    async with trace_run(config, registry, flow="review") as run:
-        with agent_scope("review-finalize", backend="pi", model="fixture-model"):
-            async with attempt_scope(1) as attempt:
-                attempt.observe(RequestEvent(prompt="PRIVATE PROMPT", reasoning_effort="low", config=request_config, ))
-        run.finish(0)
-    span = next(span for span in exporter.get_finished_spans()
-                if (span.attributes or {}).get("daydream.span.kind") == "attempt")
-    attrs = dict(span.attributes or {})
-    if custom_config:
-        assert not any(key.startswith("daydream.request.config.") for key in attrs)
-    else:
-        assert attrs["daydream.request.config.finalization"] is True
-        assert attrs["daydream.request.config.no_tools"] is True
-        assert attrs["daydream.request.config.selected_tools_count"] == 0
-    assert attrs["gen_ai.request.reasoning_effort"] == "low"
-    assert "daydream.request.config.max_turns" not in attrs
-    assert "PRIVATE PROMPT" not in str(attrs)
-    assert "PRIVATE CONFIG" not in str(attrs)
+async def test_effective_finalization_configuration_reaches_exported_telemetry(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[bool] = [False, True]
+    for custom_config in cases:
+        with subtests.test(custom_config=custom_config):
+            @dataclass(frozen=True)
+            class CustomConfig(PiRequestConfig):
+                private_data: str = "PRIVATE CONFIG"
+
+            request_config = (CustomConfig if custom_config else PiRequestConfig)(
+                finalization=True,
+                no_tools=True,
+                selected_tools_count=0,
+            )
+            exporter = InMemorySpanExporter()
+            registry = Registry()
+            registry.register_trace_exporter("memory", lambda _: exporter)
+            config = ObservabilityConfig(destinations=("memory",), capture_content=False)
+            async with trace_run(config, registry, flow="review") as run:
+                with agent_scope("review-finalize", backend="pi", model="fixture-model"):
+                    async with attempt_scope(1) as attempt:
+                        attempt.observe(
+                            RequestEvent(
+                                prompt="PRIVATE PROMPT",
+                                reasoning_effort="low",
+                                config=request_config,
+                            )
+                        )
+                run.finish(0)
+            span = next(
+                span
+                for span in exporter.get_finished_spans()
+                if (span.attributes or {}).get("daydream.span.kind") == "attempt"
+            )
+            attrs = dict(span.attributes or {})
+            if custom_config:
+                assert not any(key.startswith("daydream.request.config.") for key in attrs)
+            else:
+                assert attrs["daydream.request.config.finalization"] is True
+                assert attrs["daydream.request.config.no_tools"] is True
+                assert attrs["daydream.request.config.selected_tools_count"] == 0
+            assert attrs["gen_ai.request.reasoning_effort"] == "low"
+            assert "daydream.request.config.max_turns" not in attrs
+            assert "PRIVATE PROMPT" not in str(attrs)
+            assert "PRIVATE CONFIG" not in str(attrs)
 
 def test_new_request_controls_preserve_existing_positional_config_arguments() -> None:
     expected = {

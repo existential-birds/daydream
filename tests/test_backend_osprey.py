@@ -37,32 +37,43 @@ from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.parametrize("sandbox", [False, True])
 async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
-    tmp_path: Path, sandbox: bool,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    target = (tmp_path / "model cwd with spaces").resolve()
-    target.mkdir()
-    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
-    fixture = install_protocol_cli(tmp_path / "external fixture", "osprey")
-    allowed = str(target / "source.py")
-    backend = OspreyBackend(
-        model="fixture-model", osprey_binary=str(fixture.executable),
-        sandbox=sandbox, allowed_roots=[allowed] if sandbox else (),
-    )
-    prompt = "Inspect the committed source only."
-    events = [event async for event in backend.execute(target, prompt)]
-    observation = assert_protocol_cli_invariants(fixture, target, prompt, events, backend)
-    argv = observation["argv"]
-    assert argv[:2] == ["agent", "--events-jsonl"]
-    assert ("--sandbox" in argv) is sandbox
-    if sandbox:
-        assert argv[argv.index("--allowed-root") + 1] == allowed
-    else:
-        assert "--allowed-root" not in argv
+    table_root = tmp_path
+    row_index = 0
+    cases: list[bool] = [False, True]
+    for sandbox in cases:
+        row_index += 1
+        with subtests.test(sandbox=sandbox):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                target = (tmp_path / "model cwd with spaces").resolve()
+                target.mkdir()
+                (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
+                fixture = install_protocol_cli(tmp_path / "external fixture", "osprey")
+                allowed = str(target / "source.py")
+                backend = OspreyBackend(
+                    model="fixture-model",
+                    osprey_binary=str(fixture.executable),
+                    sandbox=sandbox,
+                    allowed_roots=[allowed] if sandbox else (),
+                )
+                prompt = "Inspect the committed source only."
+                events = [event async for event in backend.execute(target, prompt)]
+                observation = assert_protocol_cli_invariants(fixture, target, prompt, events, backend)
+                argv = observation["argv"]
+                assert argv[:2] == ["agent", "--events-jsonl"]
+                assert ("--sandbox" in argv) is sandbox
+                if sandbox:
+                    assert argv[argv.index("--allowed-root") + 1] == allowed
+                else:
+                    assert "--allowed-root" not in argv
 
 def _over_limit_reader(payload: bytes) -> asyncio.StreamReader:
     reader = asyncio.StreamReader(limit=64)
@@ -389,22 +400,28 @@ async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
             OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_lines=["provider authentication failed"],
         )
 
-@pytest.mark.parametrize(
-    "events, message",
-    [
+async def test_successful_session_end_requires_a_quiescent_stream(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[list[dict[str, object]], str]] = [
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}], "active turn"),
         (
-            [{ "event": "tool_call", "tool_call_id": "c-1", "tool_name": "tool_search", "arguments": {}, }],
+            [
+                {
+                    "event": "tool_call",
+                    "tool_call_id": "c-1",
+                    "tool_name": "tool_search",
+                    "arguments": {},
+                }
+            ],
             "pending tool calls",
         ),
-    ],
-)
-async def test_successful_session_end_requires_a_quiescent_stream(
-    events: list[dict[str, object]], message: str,
-) -> None:
-    lines = osprey_session(*events)
-    with pytest.raises(OspreyError, match=message):
-        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+    ]
+    for events, message in cases:
+        with subtests.test(message=message):
+            lines = osprey_session(*events)
+            with pytest.raises(OspreyError, match=message):
+                await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 async def test_terminal_exit_code_must_match_process_status() -> None:
     lines = osprey_session()
@@ -428,59 +445,141 @@ async def test_negative_session_total_cost_is_rejected() -> None:
     with pytest.raises(OspreyError, match="total_cost_usd"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-@pytest.mark.parametrize(
-    "events, field",
-    [
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": -1, "prompt_tokens": 0, "completion_tokens": 0}], "duration_ms"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": False, "duration_ms": -1}], "duration_ms"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": -1, "completion_tokens": 0}], "prompt_tokens"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": -1}], "completion_tokens"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": -1}], "cached_tokens"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "thinking_tokens": -1}], "thinking_tokens"),
-        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": "-0.125"}], "cost_usd"),
-    ],
-)
-async def test_negative_osprey_telemetry_is_rejected(events: list[dict[str, object]], field: str) -> None:
-    lines = osprey_session(*events)
-    with pytest.raises(OspreyError, match=field):
-        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+async def test_negative_osprey_telemetry_is_rejected(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[list[dict[str, object]], str]] = [
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": -1,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                },
+            ],
+            "duration_ms",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {"event": "turn_end", "turn_id": "t-1", "usage_reported": False, "duration_ms": -1},
+            ],
+            "duration_ms",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": 0,
+                    "prompt_tokens": -1,
+                    "completion_tokens": 0,
+                },
+            ],
+            "prompt_tokens",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": -1,
+                },
+            ],
+            "completion_tokens",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": -1,
+                },
+            ],
+            "cached_tokens",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "thinking_tokens": -1,
+                },
+            ],
+            "thinking_tokens",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "usage_reported": True,
+                    "duration_ms": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost_usd": "-0.125",
+                },
+            ],
+            "cost_usd",
+        ),
+    ]
+    for events, field in cases:
+        with subtests.test(field=field):
+            lines = osprey_session(*events)
+            with pytest.raises(OspreyError, match=field):
+                await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-@pytest.mark.parametrize(
-    "events, message",
-    [
+async def test_invalid_turn_event_order_fails_closed(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[list[dict[str, object]], str]] = [
         (
             [
                 {
-                    "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0,
-                    "usage_reported": False, "duration_ms": 0,
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "usage_reported": False,
+                    "duration_ms": 0,
                 }
-            ], "turn_end without turn_start",
+            ],
+            "turn_end without turn_start",
         ),
         (
             [
                 {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
                 {"event": "turn_start", "turn_id": "t-2", "timestamp": "now"},
-            ], "turn_start before prior turn_end",
+            ],
+            "turn_start before prior turn_end",
         ),
-    ],
-)
-async def test_invalid_turn_event_order_fails_closed(events: list[dict[str, object]], message: str) -> None:
-    lines = osprey_session(*events)
-    with pytest.raises(OspreyProtocolError, match=message):
-        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+    ]
+    for events, message in cases:
+        with subtests.test(message=message):
+            lines = osprey_session(*events)
+            with pytest.raises(OspreyProtocolError, match=message):
+                await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     lines = osprey_session(
@@ -555,37 +654,41 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     assert request.session_source == "native"
     assert request.timestamp_source == "native"
 
-@pytest.mark.parametrize("temperature", [None, 0.7])
-async def test_osprey_temperature_telemetry_matches_explicit_option(temperature: float | None) -> None:
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
-    events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
-    argv = list(spawner.argvs[-1])
-    if temperature is None:
-        assert "--temperature" not in argv
-    else:
-        assert argv[argv.index("--temperature") + 1] == "0.7"
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, OspreyRequestConfig)
-    if temperature is None:
-        assert config.temperature is None
-    else:
-        assert config.temperature == 0.7
-    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
-    assert len(turn_ends) == 1
-    turn_end = turn_ends[0]
-    assert turn_end.message_id == "turn-1"
-    assert turn_end.model_name == "custom-model"
-    assert turn_end.provider_name == "openai-compatible"
-    assert turn_end.model_source == "native"
-    assert turn_end.provider_source == "native"
-    # Session outcome is not a model finish reason — stays unset.
-    assert turn_end.finish_reason is None
-    costs = [e for e in events if isinstance(e, CostEvent)]
-    assert len(costs) == 1
-    assert costs[0].measurement_source == "session"
-    # The base fixture session_end carries no cost -> no provenance claim.
-    assert costs[0].cost_source is None
+async def test_osprey_temperature_telemetry_matches_explicit_option(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[float | None] = [None, 0.7]
+    for temperature in cases:
+        with subtests.test(temperature=temperature):
+            backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
+            events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
+            argv = list(spawner.argvs[-1])
+            if temperature is None:
+                assert "--temperature" not in argv
+            else:
+                assert argv[argv.index("--temperature") + 1] == "0.7"
+            request = next(e for e in events if isinstance(e, RequestEvent))
+            config = request.config
+            assert isinstance(config, OspreyRequestConfig)
+            if temperature is None:
+                assert config.temperature is None
+            else:
+                assert config.temperature == 0.7
+            turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
+            assert len(turn_ends) == 1
+            turn_end = turn_ends[0]
+            assert turn_end.message_id == "turn-1"
+            assert turn_end.model_name == "custom-model"
+            assert turn_end.provider_name == "openai-compatible"
+            assert turn_end.model_source == "native"
+            assert turn_end.provider_source == "native"
+            # Session outcome is not a model finish reason — stays unset.
+            assert turn_end.finish_reason is None
+            costs = [e for e in events if isinstance(e, CostEvent)]
+            assert len(costs) == 1
+            assert costs[0].measurement_source == "session"
+            # The base fixture session_end carries no cost -> no provenance claim.
+            assert costs[0].cost_source is None
 
 
 async def test_osprey_resume_and_fork_continuation_modes() -> None:

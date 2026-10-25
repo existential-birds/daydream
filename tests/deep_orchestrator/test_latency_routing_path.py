@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ from daydream.deep.routing_record import read_routing_record, write_routing_reco
 from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
+from tests.conftest import make_multi_stack_target
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import _arbiter_stacks, _merged_items
@@ -24,6 +25,7 @@ from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.table_cases import isolated_case
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
 #: The pre-#732 ``.daydream/deep/`` artifact names for a forensic run, captured
@@ -428,9 +430,8 @@ async def test_precision_overlap_reuses_successful_shard_after_real_sibling_fail
     assert saved_coverage(deep).phases["arbiter"]["status"] == "complete"
 
 
-@pytest.mark.parametrize("stop", ["cancel", "deadline"])
-async def test_precision_overlap_closes_both_streams_without_publishing_completion(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+async def _case_precision_overlap_closes_both_streams_without_publishing_completion(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
     """Cancellation and inherited deadlines must unwind both live provider streams.
 
@@ -510,3 +511,20 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
                       or "you are the suppression reviewer" in call["prompt"].lower()]
         assert len(allowances) == 2 and all(0 < allowance <= 4 for allowance in allowances)
         assert allowances[0] == pytest.approx(allowances[1], abs=0.25)
+
+
+async def test_precision_overlap_closes_both_streams_without_publishing_completion(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["cancel", "deadline"]
+    case_index = 0
+    for stop in cases_0:
+        with subtests.test(stop=stop), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            multi_stack_target = make_multi_stack_target(scenario.tmp_path)
+            await _case_precision_overlap_closes_both_streams_without_publishing_completion(
+                multi_stack_target=multi_stack_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                stop=stop,
+            )

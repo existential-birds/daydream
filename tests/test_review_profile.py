@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from daydream import review_profile as rp
+from tests.harness.table_cases import isolated_case
 
 
 def _profile(body: str = "", *, source: str = "<string>") -> rp.ReviewProfile:
@@ -18,24 +19,34 @@ def test_review_deadline_is_profiled_and_validated() -> None:
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
 
-@pytest.mark.parametrize("seconds", [0, 900])
-def test_reviewer_investigation_budget_is_independent_and_changes_identity(seconds: int) -> None:
-    base = _profile("[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = 600")
-    configured = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = {seconds}")
-    assert configured.pipeline.reviewer_investigation_budget_s == seconds
-    assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
-    assert configured.to_canonical_dict() != base.to_canonical_dict()
-    assert configured.digest != base.digest
+def test_reviewer_investigation_budget_is_independent_and_changes_identity(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[int] = [0, 900]
+    for seconds in cases:
+        with subtests.test(seconds=seconds):
+            base = _profile("[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = 600")
+            configured = _profile(
+                f"[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = {seconds}"
+            )
+            assert configured.pipeline.reviewer_investigation_budget_s == seconds
+            assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
+            assert configured.to_canonical_dict() != base.to_canonical_dict()
+            assert configured.digest != base.digest
 
 
-@pytest.mark.parametrize("value", ["-1", "true", "false", "1.5", '"480"', "[]"])
-def test_invalid_reviewer_investigation_budget_names_field_and_source(value: str) -> None:
-    source = "/tmp/reviewer-profile.toml"
-    with pytest.raises(rp.ProfileError) as error:
-        _profile(f"[pipeline]\nreviewer_investigation_budget_s = {value}", source=source)
-    assert error.value.source == source
-    assert source in str(error.value)
-    assert "pipeline.reviewer_investigation_budget_s" in str(error.value)
+def test_invalid_reviewer_investigation_budget_names_field_and_source(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["-1", "true", "false", "1.5", '"480"', "[]"]
+    for value in cases:
+        with subtests.test(value=value):
+            source = "/tmp/reviewer-profile.toml"
+            with pytest.raises(rp.ProfileError) as error:
+                _profile(f"[pipeline]\nreviewer_investigation_budget_s = {value}", source=source)
+            assert error.value.source == source
+            assert source in str(error.value)
+            assert "pipeline.reviewer_investigation_budget_s" in str(error.value)
 
 
 # Task 2 (R4): canonical serialization + deterministic digest.
@@ -65,14 +76,18 @@ reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s
     assert implicit.digest == explicit.digest
 
 # Task 3 (R3): fail-closed validation.
-@pytest.mark.parametrize(("body", "unknown_key"), [
-    ("bogus = 1", "bogus"),
-    ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds"),
-])
-def test_unknown_key_fails_closed_naming_source(body: str, unknown_key: str) -> None:
-    with pytest.raises(rp.ProfileError) as e:
-        _profile(body, source="/tmp/profile.toml")
-    assert "/tmp/profile.toml" in str(e.value) and unknown_key in str(e.value)
+def test_unknown_key_fails_closed_naming_source(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str]] = [
+        ("bogus = 1", "bogus"),
+        ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds"),
+    ]
+    for body, unknown_key in cases:
+        with subtests.test(body=body):
+            with pytest.raises(rp.ProfileError) as e:
+                _profile(body, source="/tmp/profile.toml")
+            assert "/tmp/profile.toml" in str(e.value) and unknown_key in str(e.value)
 
 def test_unsupported_schema_version_fails_closed() -> None:
     with pytest.raises(rp.ProfileError) as e:
@@ -96,19 +111,31 @@ def test_forbidden_host_fields_rejected() -> None:
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
 
 
-@pytest.mark.parametrize("kind", ["per_stack", "structural", "generic_fallback"])
-@pytest.mark.parametrize("custom", [False, True])
-def test_composed_review_search_guidance_is_independent_of_strategy(tmp_path: Path, kind: str, custom: bool) -> None:
-    # Shipped builder contract: strategies tune judgment without removing shared
-    # search scope. Existing profile parsing tests cannot prove prompt composition.
-    from daydream.deep import prompts
-    from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
-    from tests.harness.review_profile import prompt_paths
+def test_composed_review_search_guidance_is_independent_of_strategy(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases_1: list[bool] = [False, True]
+    for custom in cases_1:
+        cases_2: list[str] = ["per_stack", "structural", "generic_fallback"]
+        for kind in cases_2:
+            row_index += 1
+            with subtests.test(custom=custom, kind=kind):
+                with isolated_case(table_root, str(row_index)) as case:
+                    tmp_path = case.tmp_path
+                    from daydream.deep import prompts
+                    from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
+                    from tests.harness.review_profile import prompt_paths
 
-    strategy = ("Custom judgment policy" if custom
-        else rp.build_default_profile().strategies[f"discovery.{kind}"].content)
-    kwargs = {"stack_name": "python"} if kind == "per_stack" else {}
-    builder = getattr(prompts, f"build_{kind}_prompt")
-    prompt = builder(strategy=strategy, files=["src/main.py"], **prompt_paths(tmp_path), **kwargs)
-    assert strategy in prompt
-    assert REPOSITORY_SEARCH_GUIDANCE in prompt
+                    strategy = (
+                        "Custom judgment policy"
+                        if custom
+                        else rp.build_default_profile().strategies[f"discovery.{kind}"].content
+                    )
+                    kwargs = {"stack_name": "python"} if kind == "per_stack" else {}
+                    builder = getattr(prompts, f"build_{kind}_prompt")
+                    prompt = builder(strategy=strategy, files=["src/main.py"], **prompt_paths(tmp_path), **kwargs)
+                    assert strategy in prompt
+                    assert REPOSITORY_SEARCH_GUIDANCE in prompt

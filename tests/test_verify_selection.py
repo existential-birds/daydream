@@ -42,8 +42,11 @@ def _item(item_uid: str, **over: object) -> dict[str, object]:
 def _provenance(uid: str, *, verdict_bound: bool = True, revised_fields: tuple[str, ...] = ()) -> RecordProvenance:
     return RecordProvenance(uid, ("arbiter",), verdict_bound, True, revised_fields)
 
-@pytest.mark.parametrize(("item_over", "prov", "expected_reason"),
-    [({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
+def test_every_mandatory_select_branch_is_reachable(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[dict[str, object], RecordProvenance | None, str]] = [
+        ({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
         ({"description": "auth token check missing"}, _provenance("item:1"), "risk_category:security"),
         ({"confidence": "MEDIUM"}, _provenance("item:1"), "weak_evidence:confidence"),
         ({"evidence": "n/a"}, _provenance("item:1"), "weak_evidence:placeholder_evidence"),
@@ -51,16 +54,17 @@ def _provenance(uid: str, *, verdict_bound: bool = True, revised_fields: tuple[s
         ({}, None, "unadjudicated:no_provenance"),
         ({}, _provenance("item:1", verdict_bound=False), "unadjudicated:verdict_unbound"),
         ({}, _provenance("item:1", revised_fields=("severity",)), "materially_revised"),
-    ],
-)
-def test_every_mandatory_select_branch_is_reachable(
-    item_over: dict[str, object], prov: RecordProvenance | None, expected_reason: str
-) -> None:
-    decisions = select_items([_item("item:1", **item_over)], provenance={} if prov is None else {"item:1": prov},
-        diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
-    )
-    assert decisions[0].selected is True
-    assert decisions[0].reason_code == expected_reason
+    ]
+    for item_over, prov, expected_reason in cases:
+        with subtests.test(expected_reason=expected_reason):
+            decisions = select_items(
+                [_item("item:1", **item_over)],
+                provenance={} if prov is None else {"item:1": prov},
+                diff_text="",
+                config=SelectionConfig(verify_all=False, extra_categories=()),
+            )
+            assert decisions[0].selected is True
+            assert decisions[0].reason_code == expected_reason
 
 def test_only_a_strong_adjudicated_routine_item_skips() -> None:
     # The diff is present and readable but never covers the cited file (a.py), so

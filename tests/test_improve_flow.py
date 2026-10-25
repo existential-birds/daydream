@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 from collections import Counter
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -62,7 +62,7 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
-from tests.conftest import improve_fixture_test_command_anchor
+from tests.conftest import _improve_monorepo, improve_fixture_test_command_anchor
 from tests.deep_orchestrator.support import _forbidden_input, _scan_trajectory_extra
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
@@ -91,6 +91,7 @@ from tests.harness.improve_backend import (
 )
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
+from tests.harness.table_cases import isolated_case
 from tests.harness.trajectory import (
     assert_dispatch_children,
     dispatch_encloses_children,
@@ -135,12 +136,14 @@ def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowConte
 _UNSUPPORTED_IMPROVE_BACKENDS = ("codex", "pi", "osprey")
 _UNSUPPORTED_IMPROVE_SELECTIONS = ("global", "recon", "audit", "vet", "plan_write",)
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("backend_name", _UNSUPPORTED_IMPROVE_BACKENDS)
-@pytest.mark.parametrize("selection", _UNSUPPORTED_IMPROVE_SELECTIONS)
-async def test_unsupported_improve_backend_fails_atomic_preflight(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig, backend_name: str, selection: str, tmp_path: Path,
+async def _case_unsupported_improve_backend_fails_atomic_preflight(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    backend_name: str,
+    selection: str,
+    tmp_path: Path,
 ) -> None:
     execute_calls: list[str] = []
 
@@ -177,6 +180,33 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     assert len(output) < 5_000
     assert head_sha(improve_monorepo_target) == before_head
     assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+@pytest.mark.anyio
+async def test_unsupported_improve_backend_fails_atomic_preflight(
+    capsys: pytest.CaptureFixture[str], make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = _UNSUPPORTED_IMPROVE_BACKENDS
+    cases_1: Sequence[str] = _UNSUPPORTED_IMPROVE_SELECTIONS
+    case_index = 0
+    for backend_name in cases_0:
+        for selection in cases_1:
+            with (
+                subtests.test(backend_name=backend_name, selection=selection),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                capsys.readouterr()
+                improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+                await _case_unsupported_improve_backend_fails_atomic_preflight(
+                    improve_monorepo_target=improve_monorepo_target,
+                    monkeypatch=scenario.monkeypatch,
+                    capsys=capsys,
+                    make_config=make_config,
+                    backend_name=backend_name,
+                    selection=selection,
+                    tmp_path=scenario.tmp_path,
+                )
 
 
 @pytest.mark.parametrize("intent_profile", [False, True], ids=["packaged-profile", "intent-only-profile"])
@@ -259,10 +289,11 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     assert _git_status_porcelain(repo) == ""
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("survey_fails", [False, True], ids=["guidance-retained", "survey-best-effort"])
-async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+async def _case_custom_improve_survey_uses_compatible_two_pass_fallback(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
     survey_fails: bool,
 ) -> None:
     """A custom survey still runs, and its guidance survives a recon that omits it."""
@@ -309,9 +340,26 @@ async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("terminal", ["cancelled", "failed"])
-async def test_combined_discovery_terminal_closes_lifecycle_and_snapshot(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, terminal: str,
+async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for survey_fails in cases_0:
+        with subtests.test(survey_fails=survey_fails), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_custom_improve_survey_uses_compatible_two_pass_fallback(
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                survey_fails=survey_fails,
+            )
+
+
+async def _case_combined_discovery_terminal_closes_lifecycle_and_snapshot(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, terminal: str
 ) -> None:
     """Discovery teardown must close the real snapshot before any audit starts."""
     repo = improve_monorepo_target
@@ -347,6 +395,25 @@ async def test_combined_discovery_terminal_closes_lifecycle_and_snapshot(
     assert ends[0]["metadata"] == {"stage": "combined"}
     assert ends[0]["status"] == terminal
     assert not improve_artifact(repo, "report.md").exists()
+
+
+@pytest.mark.anyio
+async def test_combined_discovery_terminal_closes_lifecycle_and_snapshot(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["cancelled", "failed"]
+    case_index = 0
+    for terminal in cases_0:
+        with subtests.test(terminal=terminal), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_combined_discovery_terminal_closes_lifecycle_and_snapshot(
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                terminal=terminal,
+            )
+
 
 @pytest.mark.anyio
 async def test_improve_git_environment_refusal_names_key_without_value(
@@ -513,10 +580,8 @@ def _make_unborn_improve_repo(tmp_path: Path) -> Path:
     git(repo, "add", ".gitignore", "tracked.bin")
     return repo
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("staged", [True, False], ids=["staged", "unstaged"])
-async def test_full_improve_snapshots_directory_to_file_change(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, staged: bool,
+async def _case_full_improve_snapshots_directory_to_file_change(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, staged: bool
 ) -> None:
     repo = improve_monorepo_target
     nested = repo / "x"
@@ -550,6 +615,25 @@ async def test_full_improve_snapshots_directory_to_file_change(
     assert git_ops.staged_patch(repo) == before_patch
     assert git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
     assert (repo / "x").read_bytes() == payload
+
+
+@pytest.mark.anyio
+async def test_full_improve_snapshots_directory_to_file_change(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [True, False]
+    case_index = 0
+    for staged in cases_0:
+        with subtests.test(staged=staged), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_full_improve_snapshots_directory_to_file_change(
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                staged=staged,
+            )
+
 
 @pytest.mark.anyio
 async def test_full_improve_denies_glob_through_inward_then_outward_symlink(
@@ -685,15 +769,13 @@ async def test_audit_dispatch_interval_cancelling_two_blocked_auditors(
     assert end["status"] == "cancelled"
     assert end["reason_code"] == "cancelled"
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(("config_fields", "message"),
-    [({"improve_focus": "branch"}, "--focus branch requires a commit anchor"),
-        ({"improve_plan_description": "add checks"}, "requires a planned-at commit"),
-    ],
-)
-async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], make_config: MakeConfig,
-    config_fields: dict[str, Any], message: str,
+async def _case_unborn_commit_anchored_improve_modes_fail_before_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+    config_fields: dict[str, Any],
+    message: str,
 ) -> None:
     repo = _make_unborn_improve_repo(tmp_path)
     factory_calls: list[object] = []
@@ -703,6 +785,33 @@ async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
     assert factory_calls == []
     assert message in capsys.readouterr().out
     assert git_ops.is_unborn_head(repo)
+
+
+@pytest.mark.anyio
+async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
+    capsys: pytest.CaptureFixture[str], make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[dict[str, Any], str]] = [
+        ({"improve_focus": "branch"}, "--focus branch requires a commit anchor"),
+        ({"improve_plan_description": "add checks"}, "requires a planned-at commit"),
+    ]
+    case_index = 0
+    for config_fields, message in cases_0:
+        with (
+            subtests.test(config_fields=config_fields, message=message),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            capsys.readouterr()
+            await _case_unborn_commit_anchored_improve_modes_fail_before_backend(
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                capsys=capsys,
+                make_config=make_config,
+                config_fields=config_fields,
+                message=message,
+            )
+
 
 def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> None:
     source = tmp_path / "source"
@@ -724,10 +833,8 @@ def test_vet_rejection_preserves_null_unborn_anchor() -> None:
     assert kept == []
     assert rejected[0]["rejected_at_sha"] is None
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("selected_count", [0, 2])
-async def test_unborn_plan_write_never_constructs_a_writer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int,
+async def _case_unborn_plan_write_never_constructs_a_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected_count: int
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
@@ -770,6 +877,19 @@ async def test_unborn_plan_write_never_constructs_a_writer(
     for entry in [*result["failed"], *result["diagnostics"]]:
         assert "UNBORN_PLAN_ANCHOR_UNAVAILABLE" in json.dumps(entry)
     assert not (source / "daydream_plans").exists()
+
+
+@pytest.mark.anyio
+async def test_unborn_plan_write_never_constructs_a_writer(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    cases_0: Sequence[int] = [0, 2]
+    case_index = 0
+    for selected_count in cases_0:
+        with subtests.test(selected_count=selected_count), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            await _case_unborn_plan_write_never_constructs_a_writer(
+                tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, selected_count=selected_count
+            )
+
 
 @pytest.mark.anyio
 async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
@@ -1102,10 +1222,11 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
         )
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("fail_shared_docs", [False, True])
-async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+async def _case_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
     fail_shared_docs: bool,
 ) -> None:
     """Root-only dispatch passed despite duplicated primary work and unreadable ownership.
@@ -1178,6 +1299,25 @@ async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_
 
 
 @pytest.mark.anyio
+async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[bool] = [False, True]
+    case_index = 0
+    for fail_shared_docs in cases_0:
+        with subtests.test(fail_shared_docs=fail_shared_docs), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                fail_shared_docs=fail_shared_docs,
+            )
+
+
+@pytest.mark.anyio
 async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
@@ -1207,12 +1347,13 @@ async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot
     assert all(path.startswith(".daydream/") for path in _untracked(repo) if "manifest" in path)
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["quick", "standard"])
-@pytest.mark.parametrize("initialized", [False, True])
-async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    effort: str, initialized: bool,
+async def _case_submodule_references_do_not_block_owned_files_or_claim_nested_content(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
+    effort: str,
+    initialized: bool,
 ) -> None:
     """Gitlinks are tracked paths, but the independent snapshot has no nested bytes.
 
@@ -1256,6 +1397,31 @@ async def test_submodule_references_do_not_block_owned_files_or_claim_nested_con
     assert [item for doc in documents for item in doc.get("submodule_references", [])] == [reference]
     assert (head_sha(repo), _git_status_porcelain(repo)) == before
     assert (repo / relative / "nested.py").exists() is initialized
+
+
+@pytest.mark.anyio
+async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["quick", "standard"]
+    cases_1: Sequence[bool] = [False, True]
+    case_index = 0
+    for effort in cases_0:
+        for initialized in cases_1:
+            with (
+                subtests.test(effort=effort, initialized=initialized),
+                isolated_case(tmp_path, str(case_index)) as scenario,
+            ):
+                case_index += 1
+                improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+                await _case_submodule_references_do_not_block_owned_files_or_claim_nested_content(
+                    improve_monorepo_target=improve_monorepo_target,
+                    monkeypatch=scenario.monkeypatch,
+                    tmp_path=scenario.tmp_path,
+                    make_config=make_config,
+                    effort=effort,
+                    initialized=initialized,
+                )
 
 
 @pytest.mark.anyio
@@ -1801,10 +1967,11 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     assert {finding["provenance"] for finding in vetted["findings"]} <= {"introduced", "inherited",}
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("replacement", ["symlink-to-file", "file-to-symlink", "file-to-gitlink"])
-async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+async def _case_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
+    improve_branch_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_config: MakeConfig,
     replacement: str,
 ) -> None:
     """Only final deletions are diff-only assignments; type replacements survive.
@@ -1875,10 +2042,28 @@ async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missi
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("effort", ["standard", "deep"])
-async def test_branch_fanout_reverses_completion_without_changing_delivered_results(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    effort: str,
+async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["symlink-to-file", "file-to-symlink", "file-to-gitlink"]
+    case_index = 0
+    for replacement in cases_0:
+        with subtests.test(replacement=replacement), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_branch_target = _improve_monorepo(
+                scenario.tmp_path, "improve_branch_target", branch_changes=("billing",)
+            )
+            await _case_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
+                improve_branch_target=improve_branch_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                replacement=replacement,
+            )
+
+
+async def _case_branch_fanout_reverses_completion_without_changing_delivered_results(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig, effort: str
 ) -> None:
     """Branch scheduling must retain tier/backend limits and deterministic delivery.
 
@@ -1938,12 +2123,33 @@ async def test_branch_fanout_reverses_completion_without_changing_delivered_resu
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("effort", "backend_capacity", "tier_capacity"),
-    [("quick", 3, None), ("standard", 1, None), ("deep", 3, 1), ("standard", 3, 2)],
-)
-async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    effort: str, backend_capacity: int, tier_capacity: int | None,
+async def test_branch_fanout_reverses_completion_without_changing_delivered_results(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["standard", "deep"]
+    case_index = 0
+    for effort in cases_0:
+        with subtests.test(effort=effort), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_branch_target = _improve_monorepo(
+                scenario.tmp_path, "improve_branch_target", branch_changes=("billing",)
+            )
+            await _case_branch_fanout_reverses_completion_without_changing_delivered_results(
+                improve_branch_target=improve_branch_target,
+                monkeypatch=scenario.monkeypatch,
+                tmp_path=scenario.tmp_path,
+                make_config=make_config,
+                effort=effort,
+            )
+
+
+async def _case_branch_fanout_preserves_serial_limits_and_quick_filtering(
+    improve_branch_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    effort: str,
+    backend_capacity: int,
+    tier_capacity: int | None,
 ) -> None:
     """One category group still obeys each independently selected serial ceiling."""
     if tier_capacity is not None:
@@ -1968,6 +2174,36 @@ async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
         report = improve_artifact(improve_branch_target, "report.md").read_text()
         assert "Non-HIGH-confidence findings dropped by tier: 8" in report
         assert "Lowest-leverage findings dropped by tier cap: 10" in report
+
+
+@pytest.mark.anyio
+async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, int, int | None]] = [
+        ("quick", 3, None),
+        ("standard", 1, None),
+        ("deep", 3, 1),
+        ("standard", 3, 2),
+    ]
+    case_index = 0
+    for effort, backend_capacity, tier_capacity in cases_0:
+        with (
+            subtests.test(effort=effort, backend_capacity=backend_capacity, tier_capacity=tier_capacity),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            improve_branch_target = _improve_monorepo(
+                scenario.tmp_path, "improve_branch_target", branch_changes=("billing",)
+            )
+            await _case_branch_fanout_preserves_serial_limits_and_quick_filtering(
+                improve_branch_target=improve_branch_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                effort=effort,
+                backend_capacity=backend_capacity,
+                tier_capacity=tier_capacity,
+            )
 
 
 @pytest.mark.anyio
@@ -2006,10 +2242,8 @@ async def test_branch_fanout_isolates_failures_and_drops_missing_verdicts(
     assert backend.audit_root is not None and not backend.audit_root.exists()
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("phase", ["audit", "vet"])
-async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, phase: str,
+async def _case_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, phase: str
 ) -> None:
     """Cancellation with running and queued siblings must close the real run evidence."""
     repo = improve_branch_target
@@ -2045,6 +2279,26 @@ async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanu
     assert [child["content"] for child in dispatch["observation"]["results"]] == [
         f"Dispatched to {descriptor}" for descriptor in descriptors]
     assert dispatch_encloses_children(dispatch, repo)
+
+
+@pytest.mark.anyio
+async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["audit", "vet"]
+    case_index = 0
+    for phase in cases_0:
+        with subtests.test(phase=phase), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_branch_target = _improve_monorepo(
+                scenario.tmp_path, "improve_branch_target", branch_changes=("billing",)
+            )
+            await _case_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
+                improve_branch_target=improve_branch_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+                phase=phase,
+            )
 
 
 @pytest.mark.anyio
@@ -2234,10 +2488,8 @@ _PLAN_FILE_BY_TITLE = {
     "Security finding": "001-security-finding.md", "high-leverage-title": "002-high-leverage-title.md",
 }
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("slow_title", sorted(_PLAN_FILE_BY_TITLE))
-async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, slow_title: str, make_config: MakeConfig,
+async def _case_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, slow_title: str, make_config: MakeConfig
 ) -> None:
     """Both completion orders must land plans incrementally with identical selection-based numbering."""
     backend = IncrementalPlanBackend(improve_monorepo_target, slow_title=slow_title,)
@@ -2255,6 +2507,25 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     for filename in _PLAN_FILE_BY_TITLE.values():
         assert f"({filename})" in index
+
+
+@pytest.mark.anyio
+async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = sorted(_PLAN_FILE_BY_TITLE)
+    case_index = 0
+    for slow_title in cases_0:
+        with subtests.test(slow_title=slow_title), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                slow_title=slow_title,
+                make_config=make_config,
+            )
+
 
 @pytest.mark.anyio
 async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_order(
@@ -3138,11 +3409,24 @@ def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> Non
     assert kept[0]["partition"] == "catalog"
     assert kept[0]["fingerprint"] != "original"
 
-@pytest.mark.parametrize("citation", ["../outside.py:1", "missing.py:1", "valid.py:3", "valid.py:2:3",],)
-def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path, citation: str,) -> None:
+def _case_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path, citation: str) -> None:
     (tmp_path / "valid.py").write_text("first\nsecond\n")
     stamped = _stamp_finding({"evidence": [citation]}, "correctness", [], [], repo=tmp_path,)
     assert stamped is None
+
+
+def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["../outside.py:1", "missing.py:1", "valid.py:3", "valid.py:2:3"]
+    case_index = 0
+    for citation in cases_0:
+        with subtests.test(citation=citation), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            _case_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(
+                tmp_path=scenario.tmp_path, citation=citation
+            )
+
 
 def test_stamp_finding_rejects_evidence_crossing_a_symlink(tmp_path: Path,) -> None:
     outside = tmp_path.parent / f"outside-{tmp_path.name}"
@@ -3222,28 +3506,12 @@ def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) 
     )
     assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [("python", ["services/api/inner/main.py"])]
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(("file_config", "expected_tiers"),
-    [
-        # Plan authoring runs on the top model tier at max reasoning; recon does not.
-        pytest.param(None,
-            {"plan-writer": ("claude-opus-5", "max"), "vet": ("claude-opus-5", "xhigh"),
-                "audit": ("claude-sonnet-5", "high"), "recon": ("claude-sonnet-5", "low"),
-            }, id="built-in-defaults",
-        ),
-        # A ``[tool.daydream.phases.plan_write]`` table still wins over those
-        # defaults, and unrelated phases keep their own.
-        pytest.param(
-            DaydreamFileConfig(phases={"plan_write": {"model": "claude-sonnet-5", "reasoning_effort": "medium"}}),
-            {"plan-writer": ("claude-sonnet-5", "medium"), "recon": ("claude-sonnet-5", "low"),
-                "vet": ("claude-opus-5", "xhigh"),
-            }, id="phase-table-override",
-        ),
-    ],
-)
-async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
-    file_config: DaydreamFileConfig | None, expected_tiers: dict[str, tuple[str, str]], improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+async def _case_improve_phases_resolve_their_own_model_and_reasoning_tier(
+    file_config: DaydreamFileConfig | None,
+    expected_tiers: dict[str, tuple[str, str]],
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     calls = install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target, file_config=file_config)
@@ -3251,6 +3519,47 @@ async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
     tiers = _tiers_by_marker(calls)
     for marker, expected in expected_tiers.items():
         assert tiers[marker] == {expected}, marker
+
+
+@pytest.mark.anyio
+async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
+    make_config: MakeConfig, tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[DaydreamFileConfig | None, dict[str, tuple[str, str]]]] = [
+        (
+            None,
+            {
+                "plan-writer": ("claude-opus-5", "max"),
+                "vet": ("claude-opus-5", "xhigh"),
+                "audit": ("claude-sonnet-5", "high"),
+                "recon": ("claude-sonnet-5", "low"),
+            },
+        ),
+        (
+            DaydreamFileConfig(phases={"plan_write": {"model": "claude-sonnet-5", "reasoning_effort": "medium"}}),
+            {
+                "plan-writer": ("claude-sonnet-5", "medium"),
+                "recon": ("claude-sonnet-5", "low"),
+                "vet": ("claude-opus-5", "xhigh"),
+            },
+        ),
+    ]
+    case_index = 0
+    for file_config, expected_tiers in cases_0:
+        with (
+            subtests.test(file_config=file_config, expected_tiers=expected_tiers),
+            isolated_case(tmp_path, str(case_index)) as scenario,
+        ):
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_improve_phases_resolve_their_own_model_and_reasoning_tier(
+                file_config=file_config,
+                expected_tiers=expected_tiers,
+                improve_monorepo_target=improve_monorepo_target,
+                monkeypatch=scenario.monkeypatch,
+                make_config=make_config,
+            )
+
 
 @pytest.mark.anyio
 async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(

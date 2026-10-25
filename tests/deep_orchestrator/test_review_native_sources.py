@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import tracemalloc
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from daydream.git_ops.source import frozen_source
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, candidate
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
+from tests.harness.table_cases import isolated_case
 
 
 class PiBackend(StagedBackend):
@@ -59,10 +61,8 @@ async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
     assert (repo / 'modern.py').exists()
 
 
-@pytest.mark.parametrize('change', ['deleted', 'renamed', 'pure-rename'])
-@pytest.mark.parametrize('broken', [False, True], ids=['compatible', 'consumer-defect'])
-async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, broken: bool,
+async def _case_before_source_is_furnished_as_a_private_ordinary_file_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, broken: bool
 ) -> None:
     repo = tmp_path / 'before_source'
     renamed = change != 'deleted'
@@ -142,3 +142,18 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     assert not (repo / old_path).exists()
     assert (repo / 'modern.py').is_file() is renamed
     assert tracked_source_state(repo) == before
+
+
+async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[str] = ["deleted", "renamed", "pure-rename"]
+    cases_1: Sequence[bool] = [False, True]
+    case_index = 0
+    for change in cases_0:
+        for broken in cases_1:
+            with subtests.test(change=change, broken=broken), isolated_case(tmp_path, str(case_index)) as scenario:
+                case_index += 1
+                await _case_before_source_is_furnished_as_a_private_ordinary_file_input(
+                    tmp_path=scenario.tmp_path, monkeypatch=scenario.monkeypatch, change=change, broken=broken
+                )

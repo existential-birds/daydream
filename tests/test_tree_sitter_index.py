@@ -22,6 +22,7 @@ from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
 from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_language, _diagram_def_query_for_language
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
+from tests.harness.table_cases import isolated_case
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -84,9 +85,13 @@ _SHARED_FIXTURES: dict[str, str] = {
     "package/feature/__init__.py": "",
 }
 
-@pytest.mark.parametrize(
-    "api_rel, files, expected_import_path",
-    [
+def test_python_multilevel_relative_imports(
+    tmp_path: Path,
+    subtests: pytest.Subtests,
+) -> None:
+    table_root = tmp_path
+    row_index = 0
+    cases: list[tuple[str, dict[str, str], str | set[str]]] = [
         # `from ..models` in package/feature/api.py resolves to the parent package.
         (
             "package/feature/api.py",
@@ -95,7 +100,8 @@ _SHARED_FIXTURES: dict[str, str] = {
                 "package/feature/api.py": (
                     '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
                 ),
-            }, "package/models.py",
+            },
+            "package/models.py",
         ),
         # `from ...models` in package/feature/nested/api.py resolves to the grandparent package.
         (
@@ -106,7 +112,8 @@ _SHARED_FIXTURES: dict[str, str] = {
                 "package/feature/nested/api.py": (
                     '"""API module."""\nfrom ...models import User\n\ndef get_user():\n    return User()\n'
                 ),
-            }, "package/models.py",
+            },
+            "package/models.py",
         ),
         # Capture the whole statement to resolve both __init__.py and the sibling module.
         (
@@ -115,32 +122,34 @@ _SHARED_FIXTURES: dict[str, str] = {
             | {
                 "package/feature/api.py": ('"""API module."""\nfrom . import something\n\nthing = something.thing\n'),
                 "package/feature/something.py": "",
-            }, {"package/feature/__init__.py", "package/feature/something.py"},
+            },
+            {"package/feature/__init__.py", "package/feature/something.py"},
         ),
         # `from ....something import name` with 4+ dots ascends to the great-grandparent package.
         (
             "package/feature/nested/deep/api.py",
             _SHARED_FIXTURES
             | {
-                "package/feature/nested/__init__.py": "", "package/feature/nested/deep/__init__.py": "",
+                "package/feature/nested/__init__.py": "",
+                "package/feature/nested/deep/__init__.py": "",
                 "package/something.py": '"""Ancestor sibling module."""\n\nthing = 1\n',
-                "package/feature/nested/deep/api.py": (
-                    '"""API module."""\nfrom ....something import thing\n\nthing\n'
-                ),
-            }, "package/something.py",
+                "package/feature/nested/deep/api.py": ('"""API module."""\nfrom ....something import thing\n\nthing\n'),
+            },
+            "package/something.py",
         ),
-    ],
-)
-def test_python_multilevel_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str | set[str],
-) -> None:
-    repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo)
-    imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
-    if isinstance(expected_import_path, str):
-        assert imports_pairs == {(expected_import_path, "imports")}
-    else:
-        assert imports_pairs == {(p, "imports") for p in expected_import_path}
+    ]
+    for api_rel, files, expected_import_path in cases:
+        row_index += 1
+        with subtests.test(api_rel=api_rel):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                repo = _materialize(tmp_path, files)
+                results = detect_affected_files(_modified_diff(api_rel), repo)
+                imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
+                if isinstance(expected_import_path, str):
+                    assert imports_pairs == {(expected_import_path, "imports")}
+                else:
+                    assert imports_pairs == {(p, "imports") for p in expected_import_path}
 
 @pytest.mark.parametrize(
     "api_rel, files, expected_import_paths",
@@ -581,18 +590,25 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
     }
 
 
-@pytest.mark.parametrize(
-    ("path", "expected"),
-    [
-        ("pkg/mod.py", "python"), ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
+def test_language_for_path_maps_supported_suffixes(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[tuple[str, str | None]] = [
+        ("pkg/mod.py", "python"),
+        ("src/a.ts", "typescript"),
+        ("src/a.tsx", "tsx"),
         # .js is parsed by the TypeScript grammar, .jsx by the TSX grammar.
-        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"), ("cmd/main.go", "go"), ("src/lib.rs", "rust"),
-        ("README.md", None), ("Makefile", None),
+        ("src/a.js", "javascript"),
+        ("src/a.jsx", "tsx"),
+        ("cmd/main.go", "go"),
+        ("src/lib.rs", "rust"),
+        ("README.md", None),
+        ("Makefile", None),
         ("src/a.PY", None),  # suffix matching is case-sensitive
-    ],
-)
-def test_language_for_path_maps_supported_suffixes(path: str, expected: str | None) -> None:
-    assert language_for_path(path) == expected
+    ]
+    for path, expected in cases:
+        with subtests.test(path=path):
+            assert language_for_path(path) == expected
 
 
 def test_definitions_in_file_typescript_covers_every_diagram_pattern(tmp_path: Path) -> None:
@@ -792,9 +808,13 @@ def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
         2, 4, 9, 12, 15, 18, 21, 23, 25, 28, 29, 31, 33, 35, 39
     ]
 
-@pytest.mark.parametrize("grammar", ["tsx", "javascript"])
-def test_branch_lines_other_grammars_match_typescript_on_the_same_source(grammar: str) -> None:
-    assert branch_statement_lines(grammar, TYPESCRIPT_CF) == branch_statement_lines("typescript", TYPESCRIPT_CF)
+def test_branch_lines_other_grammars_match_typescript_on_the_same_source(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["tsx", "javascript"]
+    for grammar in cases:
+        with subtests.test(grammar=grammar):
+            assert branch_statement_lines(grammar, TYPESCRIPT_CF) == branch_statement_lines("typescript", TYPESCRIPT_CF)
 
 def test_branch_lines_tsx_jsx_component() -> None:
     # 2 = if_statement, 5 = ternary_expression in a JSX return.
@@ -833,9 +853,11 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
     assert branch_statement_lines("typescript", b"function f( {\n  if (a) {\n") == []
 
 
-@pytest.mark.parametrize(
-    ("language_id", "line"),
-    [
+def test_is_branch_line_reports_switch_container_lines(
+    subtests: pytest.Subtests,
+) -> None:
+    """Container lines count as branches even when the count query reports cases."""
+    cases: list[tuple[str, int]] = [
         ("python", 24),  # match x:
         ("typescript", 30),  # switch (t) {
         ("typescript", 32),  # nested switch (q) {
@@ -844,13 +866,12 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
         ("go", 31),  # switch t := v.(type) {
         ("go", 35),  # select {
         ("rust", 21),  # match v {
-    ],
-)
-def test_is_branch_line_reports_switch_container_lines(language_id: str, line: int) -> None:
-    """Container lines count as branches even when the count query reports cases."""
-    source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
-    assert is_branch_line(language_id, source, line) is True
-    assert line not in branch_statement_lines(language_id, source)
+    ]
+    for language_id, line in cases:
+        with subtests.test(language_id=language_id):
+            source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
+            assert is_branch_line(language_id, source, line) is True
+            assert line not in branch_statement_lines(language_id, source)
 
 def test_is_branch_line_false_for_a_plain_statement() -> None:
     assert is_branch_line("python", PYTHON_CF, 1) is False
@@ -880,26 +901,30 @@ def test_executable_statement_line_rejects_python_non_code_lines() -> None:
     assert not tree_sitter_index.is_executable_statement_line("python", source, 4)
     assert tree_sitter_index.is_executable_statement_line("python", source, 5)
 
-@pytest.mark.parametrize("language_id", ["typescript", "tsx", "javascript"])
-def test_executable_statement_lines_typescript_grammars(language_id: str) -> None:
-    source = (
-        b"function resolve(value: number) {\n"
-        b'  "description";\n'
-        b"  // describe the assignment\n"
-        b"\n"
-        b"  const result = compute(value);\n"
-        b"  emit(result);\n"
-        b"  if (result) {\n"
-        b"    result += 1;\n"
-        b"  }\n"
-        b"  for (const item of results) {\n"
-        b"    consume(item);\n"
-        b"  }\n"
-        b"  return result;\n"
-        b"}\n"
-    )
+def test_executable_statement_lines_typescript_grammars(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = ["typescript", "tsx", "javascript"]
+    for language_id in cases:
+        with subtests.test(language_id=language_id):
+            source = (
+                b"function resolve(value: number) {\n"
+                b'  "description";\n'
+                b"  // describe the assignment\n"
+                b"\n"
+                b"  const result = compute(value);\n"
+                b"  emit(result);\n"
+                b"  if (result) {\n"
+                b"    result += 1;\n"
+                b"  }\n"
+                b"  for (const item of results) {\n"
+                b"    consume(item);\n"
+                b"  }\n"
+                b"  return result;\n"
+                b"}\n"
+            )
 
-    assert _executable_lines(language_id, source) == [1, 5, 6, 7, 8, 10, 11, 13]
+            assert _executable_lines(language_id, source) == [1, 5, 6, 7, 8, 10, 11, 13]
 
 def test_executable_statement_lines_go() -> None:
     source = (
@@ -955,19 +980,23 @@ def test_executable_statement_line_fails_closed_without_a_parser(monkeypatch: py
     assert not tree_sitter_index.is_executable_statement_line(None, source, 0)
     assert not tree_sitter_index.is_executable_statement_line(None, source, 999)
 
-@pytest.mark.parametrize("language_id", sorted(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES))
-def test_executable_statement_node_types_exist_in_grammar(language_id: str) -> None:
-    parser = get_parser(language_id)
-    assert parser is not None
-    language = parser.language
-    assert language is not None
-    named_types = {
-        language.node_kind_for_id(kind_id)
-        for kind_id in range(language.node_kind_count)
-        if language.node_kind_is_named(kind_id)
-    }
+def test_executable_statement_node_types_exist_in_grammar(
+    subtests: pytest.Subtests,
+) -> None:
+    cases: list[str] = sorted(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES)
+    for language_id in cases:
+        with subtests.test(language_id=language_id):
+            parser = get_parser(language_id)
+            assert parser is not None
+            language = parser.language
+            assert language is not None
+            named_types = {
+                language.node_kind_for_id(kind_id)
+                for kind_id in range(language.node_kind_count)
+                if language.node_kind_is_named(kind_id)
+            }
 
-    assert tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES[language_id] <= named_types
+            assert tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES[language_id] <= named_types
 
 
 def test_terminal_lines_python_return_raise_and_exit_calls() -> None:

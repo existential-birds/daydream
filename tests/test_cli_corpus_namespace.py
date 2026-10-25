@@ -8,6 +8,7 @@ from daydream.dataset import LocalRecordStore
 from tests.harness.dataset import observation, run_record
 from tests.harness.record_projection import seed_projection_store
 from tests.harness.scripts import cli_main
+from tests.harness.table_cases import isolated_case
 
 
 def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -18,16 +19,29 @@ def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -
     assert "checkpoint" not in output
 
 
-@pytest.mark.parametrize("verb", ["publish-state", "resume-state", "publish-final", "download-final"])
 def test_retired_annotation_commands_rejected_without_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str,
+    tmp_path: Path,
+    subtests: pytest.Subtests,
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    directories = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
-    assert cli_main(["corpus", "adjudicate", verb]) == 2
-    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
-    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == directories
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["publish-state", "resume-state", "publish-final", "download-final"]
+    for verb in cases:
+        row_index += 1
+        with subtests.test(verb=verb):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                monkeypatch = case.monkeypatch
+                monkeypatch.chdir(tmp_path)
+                before = {
+                    path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+                }
+                directories = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+                assert cli_main(["corpus", "adjudicate", verb]) == 2
+                assert {
+                    path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+                } == before
+                assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == directories
 
 
 def test_retired_hydration_command_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,20 +92,38 @@ def test_record_build_cli_without_license_configuration(tmp_path: Path) -> None:
     assert not (output / "license-report.json").exists()
 
 
-@pytest.mark.parametrize("flag", ["--license-policy", "--allow-copyleft"])
 def test_record_build_cli_rejects_removed_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    subtests: pytest.Subtests,
 ) -> None:
-    store = seed_projection_store(tmp_path, dispositions=("accepted",))
-    snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
-    output = tmp_path / "out"
-    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", snapshot["snapshot_id"],
-            "--out", str(output / "corpus.jsonl")]
-    assert cli_main([*args, flag, "unused"]) == 2
-    assert f"unrecognized arguments: {flag}" in capsys.readouterr().err
-    assert not output.exists()
-    assert cli_main(args) == 0
-    assert (output / "_SUCCESS").exists()
+    table_root = tmp_path
+    row_index = 0
+    cases: list[str] = ["--license-policy", "--allow-copyleft"]
+    for flag in cases:
+        row_index += 1
+        with subtests.test(flag=flag):
+            with isolated_case(table_root, str(row_index)) as case:
+                tmp_path = case.tmp_path
+                capsys.readouterr()
+                store = seed_projection_store(tmp_path, dispositions=("accepted",))
+                snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+                output = tmp_path / "out"
+                args = [
+                    "corpus",
+                    "build",
+                    "--store",
+                    str(store.root),
+                    "--snapshot-id",
+                    snapshot["snapshot_id"],
+                    "--out",
+                    str(output / "corpus.jsonl"),
+                ]
+                assert cli_main([*args, flag, "unused"]) == 2
+                assert f"unrecognized arguments: {flag}" in capsys.readouterr().err
+                assert not output.exists()
+                assert cli_main(args) == 0
+                assert (output / "_SUCCESS").exists()
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str]) -> None:

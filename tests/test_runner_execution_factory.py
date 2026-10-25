@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,14 +17,18 @@ from daydream.backends import AUDIT_ROOT_ISOLATION, BackendExecutionInput
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
-from tests.conftest import ExtDir
+from tests.conftest import ExtDir, _improve_monorepo
 from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
+from tests.harness.table_cases import isolated_case
 
 
-@pytest.mark.parametrize(("flow", "injected"), [("factory-probe", True), ("improve", True), ("factory-probe", False)])
-async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
-    flow: str, injected: bool, improve_monorepo_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def _case_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
+    flow: str,
+    injected: bool,
+    improve_monorepo_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     ext_dir: ExtDir,
 ) -> None:
     """Embedded/custom flows without provenance must not add repository or PR discovery requests."""
@@ -124,3 +129,22 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
     trajectory = (tmp_path / "trajectory.json").read_text()
     assert "factory-owned-private-key" not in trajectory
     assert "parent-private-key" not in trajectory
+
+
+async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
+    tmp_path: Path, subtests: pytest.Subtests
+) -> None:
+    cases_0: Sequence[tuple[str, bool]] = [("factory-probe", True), ("improve", True), ("factory-probe", False)]
+    case_index = 0
+    for flow, injected in cases_0:
+        with subtests.test(flow=flow, injected=injected), isolated_case(tmp_path, str(case_index)) as scenario:
+            case_index += 1
+            improve_monorepo_target = _improve_monorepo(scenario.tmp_path, "improve_monorepo_target")
+            await _case_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
+                flow=flow,
+                injected=injected,
+                improve_monorepo_target=improve_monorepo_target,
+                tmp_path=scenario.tmp_path,
+                monkeypatch=scenario.monkeypatch,
+                ext_dir=ExtDir(scenario.tmp_path, scenario.monkeypatch),
+            )

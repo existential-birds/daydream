@@ -6,6 +6,8 @@ preserving bounded-container order and independent limit counters."""
 from __future__ import annotations
 
 import base64
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +21,7 @@ from opentelemetry.trace import Link, SpanContext, TraceFlags, TraceState
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
 from tests.harness.otlp import attributes, exporting_provider, otlp_collector
+from tests.harness.table_cases import isolated_case
 
 _FLAGS_HAS_IS_REMOTE = 256
 _FLAGS_IS_REMOTE = 512
@@ -112,17 +115,32 @@ def test_wire_repairs_span_flags(monkeypatch: pytest.MonkeyPatch) -> None:
             wire = _vendor_wire(monkeypatch, vendor, [span])[0]
             assert wire.get("flags", 0) == expected, vendor
 
-@pytest.mark.parametrize("remote_sampled", [(False, False), (False, True), (True, False), (True, True)])
-def test_wire_repairs_link_flags_and_trace_state(monkeypatch: pytest.MonkeyPatch, remote_sampled: tuple[bool, bool]
-) -> None:
-    remote, sampled = remote_sampled
-    link = Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=remote, sampled=sampled, state_entries=[("vendor", "1")]))
-    span = _span(links=[link])
-    expected = _FLAGS_HAS_IS_REMOTE | (_FLAGS_IS_REMOTE if remote else 0) | (_FLAGS_SAMPLED if sampled else 0)
-    for vendor in _VENDORS:
-        wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-        assert wire["links"][0].get("flags", 0) == expected, vendor
-        assert wire["links"][0]["traceState"] == "vendor=1", vendor
+def test_wire_repairs_link_flags_and_trace_state(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[tuple[bool, bool]] = [(False, False), (False, True), (True, False), (True, True)]
+    for case_index, remote_sampled in enumerate(cases):
+        with subtests.test(remote_sampled=remote_sampled):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                remote, sampled = remote_sampled
+                link = Link(
+                    _ctx(
+                        _LINK_TRACE_ID,
+                        _LINK_SPAN_ID,
+                        is_remote=remote,
+                        sampled=sampled,
+                        state_entries=[("vendor", "1")],
+                    )
+                )
+                span = _span(links=[link])
+                expected = (
+                    _FLAGS_HAS_IS_REMOTE | (_FLAGS_IS_REMOTE if remote else 0) | (_FLAGS_SAMPLED if sampled else 0)
+                )
+                for vendor in _VENDORS:
+                    wire = _vendor_wire(monkeypatch, vendor, [span])[0]
+                    assert wire["links"][0].get("flags", 0) == expected, vendor
+                    assert wire["links"][0]["traceState"] == "vendor=1", vendor
+
 
 def test_wire_keeps_duplicate_position_links_with_distinct_flags_and_state(monkeypatch: pytest.MonkeyPatch,) -> None:
     links = [Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=False, sampled=True, state_entries=[("a", "1")])),
@@ -151,56 +169,74 @@ def test_wire_preserves_identity_order_and_fields_for_all_destinations(monkeypat
         assert wires[0]["kind"] == "SPAN_KIND_INTERNAL", vendor
         assert wires[0].get("droppedAttributesCount", 0) == 0, vendor
 
-@pytest.mark.parametrize("pressure", ["attributes", "events", "links", "event_attributes", "link_attributes"],)
-def test_wire_preserves_exact_dropped_counters_under_limit_pressure(monkeypatch: pytest.MonkeyPatch, pressure: str,
-) -> None:
-    span: ReadableSpan
-    if pressure == "attributes":
-        attrs = BoundedAttributes(maxlen=2, attributes={"a": 1, "b": 2, "c": 3})
-        span = _span(attributes=attrs)
-    elif pressure == "events":
-        events: BoundedList[Event] = BoundedList(2)
-        for index in range(3):
-            try:
-                events.append(Event(f"e{index}"))
-            except Exception:
-                pass
-        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
-            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=events, links=BoundedList(0),
-        )
-    elif pressure == "links":
-        links: BoundedList[Link] = BoundedList(2)
-        for index in range(3):
-            try:
-                links.append(Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID + index)))
-            except Exception:
-                pass
-        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
-            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=BoundedList(0), links=links,
-        )
-    elif pressure == "event_attributes":
-        event = Event("e", attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}))
-        span = _span(events=[event])
-    else:
-        link = Link(
-            _ctx(_LINK_TRACE_ID, _LINK_SPAN_ID), attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}),
-        )
-        span = _span(links=[link])
-    for vendor in _VENDORS:
-        wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-        if pressure == "attributes":
-            assert wire["droppedAttributesCount"] == 1, vendor
-            assert wire.get("droppedEventsCount", 0) == 0 and wire.get("droppedLinksCount", 0) == 0, vendor
-        elif pressure == "events":
-            assert wire["droppedEventsCount"] == 1, vendor
-            assert len(wire["events"]) == 2, vendor  # the two surviving events
-        elif pressure == "links":
-            assert wire["droppedLinksCount"] == 1, vendor
-            assert len(wire["links"]) == 2, vendor
-        elif pressure == "event_attributes":
-            assert wire["events"][0]["droppedAttributesCount"] == 1, vendor
-        else:
-            assert wire["links"][0]["droppedAttributesCount"] == 1, vendor
+def test_wire_preserves_exact_dropped_counters_under_limit_pressure(tmp_path: Path, subtests: pytest.Subtests) -> None:
+    case_root = tmp_path
+    cases: Sequence[str] = ["attributes", "events", "links", "event_attributes", "link_attributes"]
+    for case_index, pressure in enumerate(cases):
+        with subtests.test(pressure=pressure):
+            with isolated_case(case_root, str(case_index)) as sandbox:
+                monkeypatch = sandbox.monkeypatch
+                span: ReadableSpan
+                if pressure == "attributes":
+                    attrs = BoundedAttributes(maxlen=2, attributes={"a": 1, "b": 2, "c": 3})
+                    span = _span(attributes=attrs)
+                elif pressure == "events":
+                    events: BoundedList[Event] = BoundedList(2)
+                    for index in range(3):
+                        try:
+                            events.append(Event(f"e{index}"))
+                        except Exception:
+                            pass
+                    span = ReadableSpan(
+                        name="span",
+                        context=_ctx(_TRACE_ID, _SPAN_ID),
+                        parent=None,
+                        resource=Resource({"service.name": "daydream-test"}),
+                        attributes={},
+                        events=events,
+                        links=BoundedList(0),
+                    )
+                elif pressure == "links":
+                    links: BoundedList[Link] = BoundedList(2)
+                    for index in range(3):
+                        try:
+                            links.append(Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID + index)))
+                        except Exception:
+                            pass
+                    span = ReadableSpan(
+                        name="span",
+                        context=_ctx(_TRACE_ID, _SPAN_ID),
+                        parent=None,
+                        resource=Resource({"service.name": "daydream-test"}),
+                        attributes={},
+                        events=BoundedList(0),
+                        links=links,
+                    )
+                elif pressure == "event_attributes":
+                    event = Event("e", attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}))
+                    span = _span(events=[event])
+                else:
+                    link = Link(
+                        _ctx(_LINK_TRACE_ID, _LINK_SPAN_ID),
+                        attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}),
+                    )
+                    span = _span(links=[link])
+                for vendor in _VENDORS:
+                    wire = _vendor_wire(monkeypatch, vendor, [span])[0]
+                    if pressure == "attributes":
+                        assert wire["droppedAttributesCount"] == 1, vendor
+                        assert wire.get("droppedEventsCount", 0) == 0 and wire.get("droppedLinksCount", 0) == 0, vendor
+                    elif pressure == "events":
+                        assert wire["droppedEventsCount"] == 1, vendor
+                        assert len(wire["events"]) == 2, vendor  # the two surviving events
+                    elif pressure == "links":
+                        assert wire["droppedLinksCount"] == 1, vendor
+                        assert len(wire["links"]) == 2, vendor
+                    elif pressure == "event_attributes":
+                        assert wire["events"][0]["droppedAttributesCount"] == 1, vendor
+                    else:
+                        assert wire["links"][0]["droppedAttributesCount"] == 1, vendor
+
 
 def test_vendor_wire_attributes_survive_additions_on_the_wire(monkeypatch: pytest.MonkeyPatch,) -> None:
     with otlp_collector() as receiver:
