@@ -219,53 +219,41 @@ def test_workspace_inventory_keeps_each_unowned_child_generic(tmp_path: Path) ->
 
 
 def test_mixed_frontend_and_repository_infrastructure_routes_separately(tmp_path: Path) -> None:
-    """Shelfspace #2826's Node/CI changes must not inflate the React review."""
+    """Only React is present: repository defaults cannot hide behind another language."""
     frontend = ["frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
         "frontend/app/components/shelf/ShelfNameInput.tsx",
-        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx",
+        "frontend/tests/components/taste-reveal/RevealFlowContainer.test.tsx", "frontend/App.tsx",
     ]
+    react_files = frontend + ["package.json", "tsconfig.json", "frontend/fixtures/data.json", "frontend/Makefile"]
     infrastructure = [".github/workflows/daydream.yml", "Makefile", "docs/README.md",
-        "docs/daydream-review.md", "quality-workspaces.json",
+        "docs/daydream-review.md", "quality-workspaces.json", "quality.json",
         "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
+        "scripts/check.cjs", "scripts/ci/check.mjs", "frontend/helpers.mjs",
     ]
-    files = frontend + infrastructure
     for path in frontend:
         target = tmp_path / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('import React from "react"; export const View = () => <div/>;')
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
+    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
+    files = react_files + infrastructure
     stacks = {stack.stack_name: stack.files for stack in detect_stacks(files, target_dir=tmp_path)}
-    assert set(stacks["react"]) == set(frontend)
+    assert set(stacks["react"]) == set(react_files)
     assert set(stacks["generic"]) == set(infrastructure)
     assert set(stacks["structure"]) == set(files)
 
-
-def test_infrastructure_defaults_preserve_explicit_and_nested_ownership(tmp_path: Path) -> None:
-    registry = Registry()
-    registry.add_stack(StackRule("build", ("scripts/custom.cjs",)))
-    react_files = ["frontend/App.tsx", "package.json", "tsconfig.json",
-        "frontend/fixtures/data.json", "frontend/Makefile",
-    ]
-    generic_files = ["Makefile", "quality.json", "scripts/check.cjs", "scripts/ci/check.mjs", "frontend/helpers.mjs"]
-    (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend/App.tsx").write_text('import React from "react"; const App = () => <div/>;')
-    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
-    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
-    stacks = {stack.stack_name: stack.files
-        for stack in detect_stacks(react_files + generic_files + ["scripts/custom.cjs"],
-                                  registry=registry, target_dir=tmp_path)
-    }
-    assert set(stacks["react"]) == set(react_files)
-    assert set(stacks["generic"]) == set(generic_files)
-    assert stacks["build"] == ["scripts/custom.cjs"]
 
 
 def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
     """A sibling React file and root dependency cannot overwrite another package or an explicit rule."""
     bodies = {
         "package.json": {"workspaces": ["packages/*"], "dependencies": {"react": "*"}},
+        "tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}},
         "packages/react/package.json": {"dependencies": {"react": "*"}},
         "packages/vue/package.json": {"dependencies": {"vue": "*"}},
         "packages/node/package.json": {},
+        "packages/web/package.json": {},
+        "packages/web/tsconfig.json": {"extends": "../../tsconfig.json"},
         "packages/react/tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}},
         "packages/vue/tsconfig.json": {"compilerOptions": {"jsxImportSource": "vue"}},
     }
@@ -274,14 +262,17 @@ def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
         dest = tmp_path / path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(body))
-    for package in ("react", "vue", "node"):
+    for package in ("react", "vue", "node", "web"):
         path = f"packages/{package}/App.tsx"
         (tmp_path / path).write_text("export const App = () => <div/>;")
         files.append(path)
     registry = Registry()
     registry.add_stack(StackRule("custom", ("packages/react/tsconfig.json", "packages/node/package.json")))
     scopes = {s.stack_name: s.files for s in detect_stacks(files, target_dir=tmp_path, registry=registry)}
-    assert scopes["react"] == ["package.json", "packages/react/App.tsx", "packages/react/package.json"]
+    assert scopes["react"] == [
+        "package.json", "packages/react/App.tsx", "packages/react/package.json",
+        "packages/web/App.tsx", "packages/web/tsconfig.json", "tsconfig.json",
+    ]
     assert scopes["custom"] == ["packages/node/package.json", "packages/react/tsconfig.json"]
     assert scopes["generic"] == sorted(set(files) - set(scopes["react"]) - set(scopes["custom"]))
     assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
@@ -303,17 +294,6 @@ def test_framework_missing_safe_open_capability_falls_back(
     assert Counter(path for stack in primary for path in stack.files) == Counter(files)
     assert next(stack.files for stack in result if stack.stack_name == "structure") == files
 
-
-def test_local_tsconfig_extends(tmp_path: Path) -> None:
-    """Declarative local inheritance establishes JSX while nearer package boundaries stop root defaults."""
-    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
-    (tmp_path / "package.json").write_text('{"workspaces":["packages/*"],"dependencies":{"react":"*"}}')
-    (tmp_path / "packages/web").mkdir(parents=True)
-    (tmp_path / "packages/web/package.json").write_text("{}")
-    (tmp_path / "packages/web/tsconfig.json").write_text('{"extends":"../../tsconfig.json"}')
-    (tmp_path / "packages/web/App.tsx").write_text("const App = () => <div/>;")
-    scopes = {s.stack_name: s.files for s in detect_stacks(["packages/web/App.tsx"], target_dir=tmp_path)}
-    assert scopes["react"] == ["packages/web/App.tsx"]
 
 
 @pytest.mark.parametrize("limit", ["source-count", "source-bytes", "metadata-count", "metadata-bytes", "total-bytes"])
@@ -364,18 +344,6 @@ def test_explicit_config_rule_survives_language_promotion() -> None:
     assert scopes["python"] == ["main.py"]
 
 
-def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
-    """The fan-out cap includes shards and unsplit stacks; all files remain assigned once."""
-    # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
-    py = StackAssignment(stack_name="python", files=[f"p{i}.py" for i in range(12)])
-    rs = StackAssignment(stack_name="rust", files=[f"r{i}.rs" for i in range(12)])
-    out = shard_stacks([py, rs], "", max_files=2, max_bytes=10**9, fanout_cap=4, frontier_max=8)
-    # Total review tasks (shards + unsplit stacks) never exceeds the cap.
-    assert len(out) <= 4
-    # Everything still assigned exactly once.
-    union = [f for s in out for f in s.files]
-    assert sorted(union) == sorted([f"p{i}.py" for i in range(12)] + [f"r{i}.rs" for i in range(12)])
-
 
 def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> None:
     """One oversized file stays unsplit with its original name, leaving cap reduction to other stacks."""
@@ -388,13 +356,18 @@ def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> 
     )
     huge = StackAssignment(stack_name="python", files=["big.py"])
     many = StackAssignment(stack_name="rust", files=[f"r{i}.rs" for i in range(12)])
-    out = shard_stacks([huge, many], big_diff, max_files=2, max_bytes=100, fanout_cap=4, frontier_max=8)
+    go = StackAssignment(stack_name="go", files=[f"g{i}.go" for i in range(12)])
+    out = shard_stacks([huge, many, go], big_diff, max_files=2, max_bytes=100, fanout_cap=4, frontier_max=8)
     # The single-shard stack stays unsplit under its original name.
     assert any(s.stack_name == "python" and s.files == ["big.py"] for s in out)
     # Total tasks (shards + unsplit) never exceed the cap.
     assert len(out) <= 4
     union = [f for s in out for f in s.files]
-    assert sorted(union) == sorted(["big.py"] + [f"r{i}.rs" for i in range(12)])
+    assert sorted(union) == sorted(["big.py"] + [f"r{i}.rs" for i in range(12)] + [f"g{i}.go" for i in range(12)])
+    rust_files = [f for s in out if s.stack_name.partition("#")[0] == "rust" for f in s.files]
+    go_files = [f for s in out if s.stack_name.partition("#")[0] == "go" for f in s.files]
+    assert sorted(rust_files) == sorted(f"r{i}.rs" for i in range(12))
+    assert sorted(go_files) == sorted(f"g{i}.go" for i in range(12))
 
 
 def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap() -> None:
@@ -434,33 +407,27 @@ def test_shard_stacks_fail_open_without_graph() -> None:
 
 
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
-    """Resolve absolute and relative Python imports; unknown grammars remain singleton nodes."""
-    (tmp_path / "a.py").write_text("import b\n")
-    (tmp_path / "b.py").write_text("x = 1\n")
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "mod.py").write_text("from .util import helper\n")
-    (tmp_path / "pkg" / "util.py").write_text("def helper(): pass\n")
-    (tmp_path / "notes.txt").write_text("no grammar\n")
-    graph = build_import_graph(["a.py", "b.py", "pkg/mod.py", "pkg/util.py", "notes.txt"], Path(tmp_path))
-    assert "b.py" in graph["a.py"]  # absolute import edge resolved
-    assert graph["b.py"] == set()  # no outgoing edge
-    assert "pkg/util.py" in graph["pkg/mod.py"]  # 'from .util import helper' edge
-    assert "notes.txt" in graph  # unknown grammar -> fail-open singleton
+    """One native graph resolves each language and retains no-edge/unknown siblings."""
+    bodies = {
+        "a.py": "import b\n", "b.py": "x = 1\n",
+        "pkg/mod.py": "from .util import helper\n", "pkg/util.py": "def helper(): pass\n",
+        "notes.txt": "no grammar\n",
+        "a.ts": 'import { b } from "./b"\n', "b.ts": "export const b = 1;\n",
+        "a.go": 'package a\nimport "b"\n', "b.go": "package b\n",
+        "a.rs": "use b::c;\n", "b.rs": "pub fn c() {}\n",
+    }
+    for name, source in bodies.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+    graph = build_import_graph(list(bodies), tmp_path)
+    assert graph == {
+        "a.py": {"b.py"}, "b.py": set(),
+        "pkg/mod.py": {"pkg/util.py"}, "pkg/util.py": set(), "notes.txt": set(),
+        "a.ts": {"b.ts"}, "b.ts": set(), "a.go": {"b.go"}, "b.go": set(),
+        "a.rs": {"b.rs"}, "b.rs": set(),
+    }
 
-
-def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None:
-    """Resolve TypeScript, Go, and Rust edges as well as Python."""
-    (tmp_path / "a.ts").write_text('import { b } from "./b"\n')
-    (tmp_path / "b.ts").write_text("export const b = 1;\n")
-    (tmp_path / "a.go").write_text('package a\nimport "b"\n')
-    (tmp_path / "b.go").write_text("package b\n")
-    (tmp_path / "a.rs").write_text("use b::c;\n")
-    (tmp_path / "b.rs").write_text("pub fn c() {}\n")
-    files = ["a.ts", "b.ts", "a.go", "b.go", "a.rs", "b.rs"]
-    graph = build_import_graph(files, Path(tmp_path))
-    assert "b.ts" in graph["a.ts"]  # './b' resolves to sibling b.ts
-    assert "b.go" in graph["a.go"]  # go import path -> b.go
-    assert "b.rs" in graph["a.rs"]  # rust 'use b::c' -> module file b.rs
 
 
 @pytest.mark.parametrize('cap', [0, 1, 3, 4])
