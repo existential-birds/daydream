@@ -567,7 +567,13 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
                     f"stdout={stdout}\nstderr={stderr}"
                 )
             time.sleep(0.05)
-        assert ready.exists(), "signal fixture did not expose two live sibling invocations"
+        if not ready.exists():
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=10)
+            pytest.fail(
+                "signal fixture did not expose two live sibling invocations\n"
+                f"stdout={stdout}\nstderr={stderr}"
+            )
 
         os.kill(proc.pid, signum)
         stdout, stderr = proc.communicate(timeout=10)
