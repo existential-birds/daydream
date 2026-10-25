@@ -92,10 +92,8 @@ def test_corrupt_job_record_is_not_read_as_an_empty_job(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
 ) -> None:
     """Requirement 28: an uncaptured repair is a repair that never happened."""
-    silence_console("daydream.ui")
     init_repo(tmp_path)
     (tmp_path / "allowed.py").write_text("-- original\n")
     git(tmp_path, "add", "allowed.py")
@@ -146,10 +144,8 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
 @pytest.mark.asyncio
 async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
 ) -> None:
     """Requirements 25/28: cleanup can never erase the only copy."""
-    silence_console("daydream.ui")
     init_repo(tmp_path)
     (tmp_path / "allowed.py").write_text("-- original\n")
     (tmp_path / "migrations").mkdir()
