@@ -133,12 +133,6 @@ def _forbid_pr_post(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.param('supervisor = "rules"\nsupervisor_deny_globs = ["vendor/**"]\n',
                  [("vendor/generated.py", "high", "drop this finding"), ("src/app.py", "low", "keep this finding")],
                  {}, "drop", [("keep this finding", "low")], id="rules-drop-denied-file"),
-    pytest.param('supervisor = "llm"\n', [("api.py", "high", "drop by llm"), ("App.tsx", "low", "keep by llm")],
-                 {1: {"action": "drop", "reason": "duplicate"}, 2: {"action": "allow", "reason": "confirmed"}},
-                 "drop", [("keep by llm", "low")], id="llm-drop-canonical-id"),
-    pytest.param('supervisor = "llm"\n', [("api.py", "high", "downgrade me")],
-                 {1: {"action": "edit", "reason": "less severe", "severity": "low"}},
-                 "edit", [("downgrade me", "low")], id="llm-edit-severity"),
     pytest.param('supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n',
                  [("api.py", "high", "drop everything")], {}, "drop", [], id="rules-drop-all"),
 ])
@@ -174,29 +168,44 @@ async def test_supervision_transforms_canonical_items_before_findings_export(
 
 async def test_supervise_hold_excluded_but_rendered(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    tmp_path: Path,
 ) -> None:
-    """Held findings leave the actionable items but remain visible in the report."""
-
-    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
-    stub.merge_items = [_merge_item(1, "vendor/generated.py", "high", desc="hold this finding"),
-        _merge_item(2, "src/app.py", "low", desc="keep this finding"),
+    """One native verdict population drops, edits, holds and retains independent findings."""
+    stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="drop by llm"),
+        _merge_item(2, "App.tsx", "high", desc="downgrade me"),
+        _merge_item(3, "vendor/generated.py", "high", desc="hold this finding"),
+        _merge_item(4, "src/app.py", "low", desc="keep this finding"),
     ]
     stub.supervise_verdicts = {
-        1: {"action": "hold", "reason": "needs human review"}, 2: {"action": "allow", "reason": "confirmed"},
+        1: {"action": "drop", "reason": "duplicate"},
+        2: {"action": "edit", "reason": "less severe", "severity": "low"},
+        3: {"action": "hold", "reason": "needs human review"},
+        4: {"action": "allow", "reason": "confirmed"},
     }
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
-
-    rc = await run(make_config(multi_stack_target, file_config=load_file_config(multi_stack_target)))
-
-    assert rc == 0
+    out, trajectory = tmp_path / "findings.json", tmp_path / "trajectory.json"
+    _forbid_pr_post(monkeypatch)
+    assert await run(_findings_out_config(
+        make_config, multi_stack_target, out, trajectory, monkeypatch=monkeypatch,
+    )) == 0
     payload = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
-    actionable = [item["description"] for item in payload["items"]]
-    held = [item["description"] for item in payload["held"]]
-    assert "keep this finding" in actionable
-    assert "hold this finding" in held
+    assert [(item["description"], item["severity"]) for item in payload["items"]] == [
+        ("downgrade me", "low"), ("keep this finding", "low"),
+    ]
+    assert [item["description"] for item in payload["held"]] == ["hold this finding"]
+    assert [(finding["title"], finding["severity"]) for finding in json.loads(out.read_text())["findings"]] == [
+        ("downgrade me", "low"), ("keep this finding", "low"),
+    ]
+    events = _scan_phase_events(multi_stack_target / ".daydream", trajectory, "supervisor_verdict")
+    assert {(event["metadata"]["finding_id"], event["metadata"]["action"]) for event in events} == {
+        (1, "drop"), (2, "edit"), (3, "hold"),
+    }
+    starts = _scan_phase_events(multi_stack_target / ".daydream", trajectory, "phase_start")
+    assert any(event.get("metadata", {}).get("stage") == "supervise" for event in starts)
     report = (multi_stack_target / ".review-output.md").read_text()
-    assert "Held Findings" in report
-    assert "hold this finding" in report
+    assert "Held Findings" in report and "hold this finding" in report
 
 
 
@@ -272,113 +281,52 @@ async def test_run_deep_renders_prescan_summary_not_json(
     assert "OpenAPI First" in out  # convention surfaced by the summary
     assert '{"conventions"' not in out and "pattern-scanner" not in out  # no raw JSON envelope
 
-async def test_parallel_fix_applies_all_disjoint_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    stub: StubBackend,
-) -> None:
-    files = ["f1.py", "f2.py", "f3.py", "f4.py"]
-    _add_to_reviewed_diff(multi_stack_target, files)
-    stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 0
-    prompts = [call["prompt"] for call in stub.calls if call["prompt"].lower().startswith("fix this")]
-    for f in files:
-        assert any(f in prompt for prompt in prompts), f"no fixer dispatched for {f}"
-
-async def test_long_fix_is_not_turn_capped(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute, stub: StubBackend,
-) -> None:
-
-    stub.fix_turns_needed = 200
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high"), _merge_item(3, "App.tsx", "medium"),
-    ]
-
-    exit_code = await run(
-        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
-    )
-
-    assert exit_code == 0
-    fix_calls = [call for call in stub.calls if call["prompt"].lower().startswith(("fix this", "fix these"))]
-    assert any("api.py" in call["prompt"] for call in fix_calls)
-    assert any("App.tsx" in call["prompt"] for call in fix_calls)
-    assert all(call["max_turns"] is None for call in fix_calls)
-
-    run_dir = _only_archived_run(archive_dir)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "complete"
-    assert not manifest["fix_failures"]
-
 async def test_parallel_fix_same_file_no_race(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    stub: StubBackend,
+    stub: StubBackend, archive_dir: Path,
 ) -> None:
-    """3 items on ONE file + 1 on another. The 3 same-file findings collapse into ONE batched fix turn that
-    addresses every marker in severity order, while the other file's group runs concurrently. The
-    read-modify-write append + anyio.sleep(0) makes any cross-file race deterministic; per-file partitioning
-    keeps shared.py's markers ordered and intact."""
+    """Same-file, overlapping-file and disjoint groups retain markers without a turn cap.
+
+    Real read/modify/write and an event-loop yield expose a split same-file race;
+    independent literal batch sizes expose lost footprint grouping.
+    """
 
     shared = multi_stack_target / "shared.py"
-    _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
+    _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py", "a.py", "b.py", "c.py"])
     stub.fix_append_path = shared
+    stub.fix_turns_needed = 200
     stub.merge_items = [
         _merge_item(1, "shared.py", "high", desc="marker-1"), _merge_item(2, "shared.py", "medium", desc="marker-2"),
-        _merge_item(3, "shared.py", "low", desc="marker-3"), _merge_item(4, "other.py", "high", desc="other"),
+        _merge_item(3, "shared.py", "low", desc="marker-3"),
+        _merge_item(4, "a.py", "high"),
+        {**_merge_item(5, "b.py", "high"), "related_files": ["a.py"]},
+        _merge_item(6, "c.py", "high", desc="disjoint-c"), _merge_item(7, "other.py", "high", desc="other"),
     ]
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
+    exit_code = await run(make_config(
+        multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,
+    ))
     assert exit_code == 0
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
     fix_prompts = _fix_prompts(stub)
-    assert len(fix_prompts) == 2
+    assert len(fix_prompts) == 4
     batches = [prompt for prompt in fix_prompts if prompt.startswith("Fix these 3 issues")]
     assert len(batches) == 1
     assert [line.strip() for line in batches[0].splitlines() if line.strip().startswith(("1. ", "2. ", "3. "))] == [
         "1. marker-1", "2. marker-2", "3. marker-3",
     ]
+    overlapping = [prompt for prompt in fix_prompts if prompt.startswith("Fix these 2 issues")]
+    assert len(overlapping) == 1
+    assert "a.py" in overlapping[0] and "b.py" in overlapping[0]
     singles = [prompt for prompt in fix_prompts if prompt.startswith("Fix this issue:")]
-    assert len(singles) == 1
-    assert singles[0].splitlines()[1] == "other"
-    assert all(marker not in singles[0] for marker in ("marker-1", "marker-2", "marker-3"))
-
-async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    stub: StubBackend,
-) -> None:
-    """A finding whose footprint intersects another group is dispatched to ONE
-    agent owning both -- observable as ONE batched fix turn covering both files,
-    not two per-file turns."""
-
-    _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
-    stub.merge_items = [_merge_item(1, "a.py", "high"), {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
-        _merge_item(3, "c.py", "high"),
-    ]
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 0
-    # a.py and b.py findings fixed in ONE batched turn (footprint union);
-    # c.py is a separate per-finding turn. Only the model-retained set dispatches.
-    fix_calls = [c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") or c["prompt"].lower().startswith("fix these")
-    ]
-    batched = [c for c in fix_calls if "fix these" in c["prompt"].lower()]
-    assert len(batched) == 1  # a.py and b.py fixed together, not two per-file turns
-    assert "issues in " in batched[0]["prompt"]
-    assert len(fix_calls) == 2  # merged {a,b} group + c.py
-
-async def test_fix_verify_turn_is_read_only(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    stub: StubBackend,
-) -> None:
-    """AC: verification is strictly read-only. The stub records ``read_only``
-    per call (stub_backend.py:276), so the real-path run must show every
-    fix-verify turn arriving with ``read_only=True``."""
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 0
-    verify_calls = [c for c in stub.calls if "fix-verify" in c["prompt"]]
-    assert verify_calls, "expected a fix-verify turn"
-    assert all(c["read_only"] is True for c in verify_calls)
+    assert len(singles) == 2
+    by_description = {prompt.splitlines()[1]: prompt for prompt in singles}
+    assert set(by_description) == {"other", "disjoint-c"}
+    assert all(marker not in by_description["other"] for marker in ("marker-1", "marker-2", "marker-3"))
+    fix_calls = [call for call in stub.calls if call["prompt"].startswith(("Fix this issue", "Fix these"))]
+    assert all(call["max_turns"] is None for call in fix_calls)
+    manifest = json.loads((_only_archived_run(archive_dir) / "manifest.json").read_text())
+    assert manifest["status"] == "complete"
+    assert not manifest["fix_failures"]
 
 async def test_fix_verify_uses_verify_backend_key_through_runner(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -400,6 +348,7 @@ async def test_fix_verify_uses_verify_backend_key_through_runner(
     verifier_calls = [call for call in calls if "fix-verify" in call["prompt"]]
     assert verifier_calls
     assert {call["model"] for call in verifier_calls} == {"verify-model-sentinel"}
+    assert all(call["read_only"] is True for call in verifier_calls)
     assert all(call["model"] != "registered-step-sentinel" for call in verifier_calls)
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]

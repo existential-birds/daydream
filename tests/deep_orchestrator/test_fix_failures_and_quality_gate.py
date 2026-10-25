@@ -48,43 +48,6 @@ def _arrange(
     mute_side_effects(commit=commit)
 
 
-async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back, its partial content saved, and the
-    archived run is marked ``partial``."""
-
-    _arrange(monkeypatch, mute_side_effects)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fix_partial_then_maxturns = "App.tsx"
-    stub.fix_edit_line = "# retained successful group\n"
-    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high")]
-    pre_fix_apptsx = (multi_stack_target / "App.tsx").read_text()
-    exit_code = await run(
-        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
-    )
-    assert exit_code == 1  # dropped fix group => nonzero
-
-    # (b) the successful group's authorized edit survives; its old out-of-scope
-    # sentinel does not.
-    assert "# retained successful group" in (multi_stack_target / "api.py").read_text()
-    assert not (multi_stack_target / ".fixed-api_py").exists()
-
-    # (c) failed group reverted to pre-fix content; broken edit gone.
-    apptsx_after = (multi_stack_target / "App.tsx").read_text()
-    assert apptsx_after == pre_fix_apptsx
-    assert _PARTIAL_FIX_MARKER not in apptsx_after
-    patches = list((multi_stack_target / ".daydream" / "partial-fixes").glob("*.patch"))
-    assert patches == []
-
-    # (a) manifest records the failure and is no longer "complete".
-    run_dir = _only_archived_run(archive_dir)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "partial"
-    assert manifest["fix_failures"], "manifest must record the dropped fix group"
-    assert any("App.tsx" in key for key in manifest["fix_failures"])
-
 async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -139,6 +102,7 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_orphan_file = "store/uuid.go"
     stub.fix_edit_line = "# retained successful fix\n"
+    app_before = (multi_stack_target / "App.tsx").read_bytes()
     scratch = multi_stack_target / "owner-scratch.bin"
     scratch.write_bytes(b"\x00owner-original")
     stub.fix_damage_protected_file = "owner-scratch.bin"
@@ -153,31 +117,22 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     assert "# retained successful fix" in (multi_stack_target / "api.py").read_text()
     assert not (multi_stack_target / "store" / "uuid.go").exists()
     assert scratch.read_bytes() == b"\x00owner-original"
+    assert (multi_stack_target / "App.tsx").read_bytes() == app_before
+    assert _PARTIAL_FIX_MARKER not in (multi_stack_target / "App.tsx").read_text()
+    assert not (multi_stack_target / ".fixed-api_py").exists()
+    assert list((multi_stack_target / ".daydream" / "partial-fixes").glob("*.patch")) == []
 
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     # The archive is partial, but there is no surviving leftover.  The durable
     # policy audit records both confinement operations.
     assert manifest["status"] == "partial"
+    assert manifest["fix_failures"]
+    assert any("App.tsx" in key for key in manifest["fix_failures"])
     assert manifest["fix_leftover_untracked"] is None
     run_audit = json.loads((run_dir / "deep" / "fix-footprint.json").read_text())
     restored = {event["path"] for event in run_audit["events"] if event["action"] in {"remove", "restore"}}
     assert {"store/uuid.go", "owner-scratch.bin"} <= restored
-
-async def test_fix_quality_gate_persists_verbosity_regression(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    assert await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects) == 0
-    assert "def choose(x):" in (multi_stack_target / "api.py").read_text()
-    gate = _read_quality_gate(multi_stack_target)
-    manifest = json.loads((_only_archived_run(archive_dir) / "manifest.json").read_text())
-    assert manifest["fix_quality_gate"] == gate
-    assert gate["enabled"] is True
-    entry = gate["rounds"][0]["per_file"]["api.py"]
-    assert entry["verbosity_after"] > entry["verbosity_before"]
-    assert entry["flagged"] is True
-
 
 @pytest.mark.parametrize("threshold,flagged", [
     pytest.param(100.0, False, id="tolerant"), pytest.param(0.0, True, id="strict"),
@@ -281,6 +236,11 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     assert exit_code == 0
     alpha_gate = _read_quality_gate(alpha)
     assert alpha_gate["session_id"]
+    assert "def choose(x):" in (alpha / "api.py").read_text()
+    assert alpha_gate["enabled"] is True
+    entry = alpha_gate["rounds"][0]["per_file"]["api.py"]
+    assert entry["verbosity_after"] > entry["verbosity_before"]
+    assert entry["flagged"] is True
 
     beta = _build_gate_target(tmp_path, "gate_beta")
     exit_code = await _run_quality_gate_fixture(beta, monkeypatch, make_config, mute_side_effects)
@@ -298,8 +258,8 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     by_session = {m["session_id"]: m for m in manifests}
     assert alpha_gate["session_id"] in by_session
     assert beta_gate["session_id"] in by_session
-    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] == alpha_gate["session_id"]
-    assert by_session[beta_gate["session_id"]]["fix_quality_gate"]["session_id"] == beta_gate["session_id"]
+    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"] == alpha_gate
+    assert by_session[beta_gate["session_id"]]["fix_quality_gate"] == beta_gate
     # The two verdicts are distinct artifacts: alpha's manifest never carries beta's verdict.
     assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] != beta_gate["session_id"]
 

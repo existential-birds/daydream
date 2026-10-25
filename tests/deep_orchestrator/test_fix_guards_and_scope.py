@@ -277,7 +277,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    files = ["f1.py", "f2.py", "f3.py"]
+    files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     fix_marker = "\n# fixed before commit\n"
