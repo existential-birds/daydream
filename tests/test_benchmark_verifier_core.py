@@ -324,14 +324,3 @@ def test_score_review_axis_absent_never_imputes() -> None:
     assert reward.location_exact == 0 and reward.location_near == 0   # no counts, not imputed
     assert reward.location_credit == 0.0
     assert reward.severity_present == 0 and reward.severity_mean_distance == 0.0
-
-
-def test_aggregate_metrics_axis_rates_zero_when_no_pairs() -> None:
-    m = vc.aggregate_metrics([])
-    for tier in ("exact", "near", "file", "miss"):
-        assert m[f"location_{tier}_rate"] == 0.0
-    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
-    assert m["severity_exact_rate"] == 0.0
-    assert m["severity_within_1_rate"] == 0.0
-    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 0.0
-    assert m["total_location_exact"] == 0 and m["total_severity_exact"] == 0

@@ -262,6 +262,13 @@ def test_aggregate_metrics_empty_rows_score_one() -> None:
     assert m["task_count"] == 0
     assert (m["micro_precision"], m["micro_recall"], m["micro_f1"]) == (1.0, 1.0, 1.0)
     assert m["mean_task_score"] == 1.0 and m["clean_accuracy"] == 1.0
+    for tier in ("exact", "near", "file", "miss"):
+        assert m[f"location_{tier}_rate"] == 0.0
+    assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
+    assert m["severity_exact_rate"] == 0.0
+    assert m["severity_within_1_rate"] == 0.0
+    assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 0.0
+    assert m["total_location_exact"] == 0 and m["total_severity_exact"] == 0
 
 
 def test_aggregate_metrics_zero_scored_rows_headline_rates_are_one() -> None:
