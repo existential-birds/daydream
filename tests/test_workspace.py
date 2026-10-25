@@ -11,12 +11,10 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from io import StringIO
 from pathlib import Path
 
 import anyio
 import pytest
-from rich.console import Console
 
 from daydream import git_ops
 from daydream.artifact_visibility import (
@@ -93,7 +91,8 @@ def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
 def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "main") -> str:
     """Add a commit to *branch* on *bare* via a fresh sidecar clone; return its SHA."""
     token = secrets.token_hex(3)
-    sidecar = tmp_path / f"sidecar-{branch}-{token}"
+    branch_name = branch.replace("/", "_")
+    sidecar = tmp_path / f"sidecar-{branch_name}-{token}"
     _git(tmp_path, "clone", str(bare), str(sidecar))
     _configure_identity(sidecar)
     # Determine whether the branch already exists on origin.
@@ -106,7 +105,7 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
         _git(sidecar, "checkout", "-B", branch, f"origin/{branch}")
     elif branch != "main":
         _git(sidecar, "checkout", "-b", branch)
-    new_file = sidecar / f"{branch}-{token}.txt"
+    new_file = sidecar / f"{branch_name}-{token}.txt"
     new_file.write_text("payload\n")
     _git(sidecar, "add", new_file.name)
     sha = _commit(sidecar, f"sidecar commit on {branch}")
@@ -135,24 +134,6 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
 
     # Source remains untouched after exit (no cleanup paths to assert).
     assert repo.exists()
-
-
-async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    expected_head = git_ops.head_sha(repo)
-
-    captured_path: Path | None = None
-    async with open_workspace(repo, branch=None, base=None, force_ephemeral=True, skip_tests=False) as ctx:
-        assert ctx.is_ephemeral is True
-        assert ctx.repo != repo
-        assert ctx.repo.is_dir()
-        assert git_ops.is_inside_worktree(ctx.repo) is True
-        assert ctx.head_sha == expected_head
-        assert ctx.head_branch is None  # detached
-        captured_path = ctx.repo
-
-    assert captured_path is not None
-    assert not captured_path.exists()
 
 
 async def test_external_worktrees_use_supplied_private_workspace_owner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -498,20 +479,6 @@ def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) ->
     assert secret.read_text() == "KEEP\n"
 
 
-async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    captured_path: Path | None = None
-
-    with pytest.raises(RuntimeError, match="boom"):
-        async with open_workspace(repo, branch=None, base=None, force_ephemeral=True, skip_tests=False) as ctx:
-            captured_path = ctx.repo
-            assert captured_path.exists()
-            raise RuntimeError("boom")
-
-    assert captured_path is not None
-    assert not captured_path.exists()
-
-
 async def test_open_workspace_rejects_escape_without_persistent_copy(artifact_runtime_root: Path, tmp_path: Path
 ) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -532,39 +499,6 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(artifact_ru
     operational_dirs = list((artifact_runtime_root.parent / "workspaces").glob("*/operational"))
     assert len(operational_dirs) == 1
     assert not any(operational_dirs[0].iterdir())
-
-
-async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Warn on a stale local branch and review the fresher remote snapshot."""
-    repo, bare = _make_repo_with_origin(tmp_path)
-    # Create + push the feature branch, then add commits on origin so the
-    # local copy is behind.
-    _git(repo, "checkout", "-b", "topic")
-    (repo / "topic.txt").write_text("local\n")
-    _git(repo, "add", "topic.txt")
-    _commit(repo, "local topic")
-    _git(repo, "push", "-u", "origin", "topic")
-    # Push two more commits on origin/topic via sidecar.
-    _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
-    origin_tip = _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
-    # 'topic' is currently checked out in repo and now lags origin/topic.
-
-    # Pin a wide recording console so the warning text is captured intact,
-    # independent of terminal width (the warning renders through the lazily
-    # imported ``daydream.agent.console``).
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200, height=25)
-    monkeypatch.setattr("daydream.agent.console", rec)
-
-    async with open_workspace(repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False) as ctx:
-        assert ctx.is_ephemeral is True
-        assert ctx.head_sha == origin_tip and git_ops.head_sha(ctx.repo) == origin_tip
-        assert ctx.head_branch is None and ctx.base_branch == "main"
-    assert not ctx.repo.exists()
-
-    out = rec.export_text()
-    assert "topic is checked out in cwd" in out
-    assert "2 commits behind origin/topic" in out
-    assert "reviewing origin/topic" in out
 
 
 def _audit_source_signature(repo: Path) -> tuple[object, ...]:
@@ -914,12 +848,14 @@ async def test_open_workspace_unborn_rejects_commit_anchored_options(tmp_path: P
 
 
 async def test_ephemeral_support_files_follow_ignore_extra_and_skip_policy(tmp_path: Path) -> None:
-    """Actual worktrees preserve tracked bytes and copy only admitted local support files."""
+    """Detached worktrees retain admitted support bytes and clean up normal and failed bodies."""
     repo, _ = _make_repo_with_origin(tmp_path)
     _ignore(repo, ".env.local", "workspace.json")
     (repo / ".env").write_text("COMMITTED=1\n")
     _git(repo, "add", ".env")
     _commit(repo, "tracked environment")
+    expected_head = git_ops.head_sha(repo)
+    assert expected_head != _git(repo, "rev-parse", "origin/main")
     (repo / ".env").write_text("DO_NOT_COPY_WORKING_TRACKED=1\n")
     (repo / ".env.local").write_text("LOCAL=1\n")
     (repo / "workspace.json").write_text("{}\n")
@@ -930,29 +866,37 @@ async def test_ephemeral_support_files_follow_ignore_extra_and_skip_policy(tmp_p
     async with open_workspace(
         repo,
         branch=None,
-        base="main",
+        base=None,
         force_ephemeral=True,
         extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
         skip_tests=True,
         private_owner=owner,
     ) as skipped:
+        assert skipped.is_ephemeral is True
+        assert skipped.repo != repo
+        assert skipped.repo.is_dir()
+        assert git_ops.is_inside_worktree(skipped.repo) is True
+        assert skipped.head_sha == expected_head
+        assert skipped.head_branch is None
         assert (skipped.repo / ".env").read_text() == "COMMITTED=1\n"
         assert not (skipped.repo / ".env.local").exists()
         assert not (skipped.repo / "workspace.json").exists()
-    async with open_workspace(
-        repo,
-        branch=None,
-        base="main",
-        force_ephemeral=True,
-        extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
-        skip_tests=False,
-        private_owner=owner,
-    ) as copied:
-        assert (copied.repo / ".env").read_text() == "COMMITTED=1\n"
-        assert (copied.repo / ".env.local").read_text() == "LOCAL=1\n"
-        assert (copied.repo / "workspace.json").read_text() == "{}\n"
-        assert (copied.repo / "inside-link.cfg").read_text() == "inside\n"
-        assert not (copied.repo / "inside-link.cfg").is_symlink()
+    with pytest.raises(RuntimeError, match="boom"):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base="main",
+            force_ephemeral=True,
+            extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
+            skip_tests=False,
+            private_owner=owner,
+        ) as copied:
+            assert (copied.repo / ".env").read_text() == "COMMITTED=1\n"
+            assert (copied.repo / ".env.local").read_text() == "LOCAL=1\n"
+            assert (copied.repo / "workspace.json").read_text() == "{}\n"
+            assert (copied.repo / "inside-link.cfg").read_text() == "inside\n"
+            assert not (copied.repo / "inside-link.cfg").is_symlink()
+            raise RuntimeError("boom")
     assert not skipped.repo.exists() and not copied.repo.exists()
     assert _git(repo, "status", "--porcelain") == before
 

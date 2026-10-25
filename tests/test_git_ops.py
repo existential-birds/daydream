@@ -309,12 +309,25 @@ def test_independent_snapshot_redacts_malformed_git_environment_names(
     newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
     oversized_name = "GIT_CONFIG_" + "S" * 500
     private_value = "PRIVATE_ENV_VALUE_SENTINEL"
+    for key in tuple(os.environ):
+        if key.startswith("GIT_CONFIG"):
+            monkeypatch.delenv(key)
+    for index in range(30):
+        monkeypatch.setenv(f"GIT_TRACE_TEST_{index:02d}", "PRIVATE")
     monkeypatch.setenv(newline_name, private_value)
     monkeypatch.setenv(oversized_name, private_value)
     with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
         git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
     message = str(raised.value)
-    assert "2 invalid Git variable names" in message
+    # The 320-byte diagnostic budget admits these 16 safe names before the 20-name cap.
+    assert message == (
+        "snapshot refuses inherited Git repository, configuration, diff, or trace overrides; offending variables: "
+        "GIT_TRACE_TEST_00, GIT_TRACE_TEST_01, GIT_TRACE_TEST_02, GIT_TRACE_TEST_03, "
+        "GIT_TRACE_TEST_04, GIT_TRACE_TEST_05, GIT_TRACE_TEST_06, GIT_TRACE_TEST_07, "
+        "GIT_TRACE_TEST_08, GIT_TRACE_TEST_09, GIT_TRACE_TEST_10, GIT_TRACE_TEST_11, "
+        "GIT_TRACE_TEST_12, GIT_TRACE_TEST_13, GIT_TRACE_TEST_14, GIT_TRACE_TEST_15; "
+        "and 14 more; 2 invalid Git variable names"
+    )
     assert newline_name not in message
     assert oversized_name not in message
     assert private_value not in message
@@ -366,23 +379,6 @@ raise SystemExit(9)
     assert len(proc.stdout) < 500
     assert proc.stderr == ""
     assert not destination.exists()
-
-
-def test_independent_snapshot_bounds_git_environment_name_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                                      repo: Path,
-) -> None:
-    for index in range(30):
-        monkeypatch.setenv(f"GIT_TRACE_TEST_{index:02d}", "PRIVATE")
-    with pytest.raises(git_ops.SnapshotPreparationError) as raised:
-        git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
-    message = str(raised.value)
-    assert "GIT_TRACE_TEST_00" in message
-    assert "GIT_TRACE_TEST_15" in message
-    assert "GIT_TRACE_TEST_16" not in message
-    assert "and 14 more" in message
-    assert "PRIVATE" not in message
-    assert len(message) < 500
 
 
 def test_independent_snapshot_known_git_violation_skips_exec_path_probe(
@@ -1001,8 +997,7 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
     [
         ("6O", 60, "DAYDREAM_GH_TIMEOUT_SECONDS='6O' is not a valid integer; using default 60"),
         ("0", 60, "DAYDREAM_GH_TIMEOUT_SECONDS='0' must be positive; using default 60"),
-        ("7", 7, None),
-    ], ids=["malformed", "zero", "valid"],
+    ], ids=["malformed", "zero"],
 )
 def test_run_gh_timeout_environment_validation(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, repo: Path, env_value: str,
@@ -1028,8 +1023,7 @@ def test_run_gh_timeout_environment_validation(
         ("", 3, "DAYDREAM_GH_TIMEOUT_RETRIES='' is not a valid integer; using default 2"),
         ("-1", 3, "DAYDREAM_GH_TIMEOUT_RETRIES='-1' is negative; using default 2"),
         ("0", 1, None),
-        ("1", 2, None),
-    ], ids=["empty-warns", "negative-warns", "zero-valid", "one-valid"],
+    ], ids=["empty-warns", "negative-warns", "zero-valid"],
 )
 def test_read_only_gh_retry_environment_validation(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, repo: Path, env_value: str | None,
@@ -1056,20 +1050,24 @@ def test_read_only_gh_retry_environment_validation(
 
 
 def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
-    monkeypatch: pytest.MonkeyPatch, repo: Path,
+    monkeypatch: pytest.MonkeyPatch, repo: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "1")
     ok = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="octocat/hello\n", stderr="")
     # Case 1: transient timeout (1st attempt) then success on the retry.
     calls = {"n": 0}
-    monkeypatch.setattr(subprocess, "run", _flaky_timeout_run(calls, ok, cmd=["gh"], timeout=60))
+    monkeypatch.setattr(subprocess, "run", _flaky_timeout_run(calls, ok, cmd=["gh"], timeout=7))
     assert git_ops.gh_repo_view(repo) == ("octocat", "hello")
     assert calls["n"] == 2  # timed out once, then succeeded
     # Case 2: every attempt times out -> GitTimeoutError after retries+1 tries.
     calls["n"] = 0
-    monkeypatch.setattr(subprocess, "run", _timeout_run(cmd=["gh"], timeout=60, calls=calls))
-    with pytest.raises(git_ops.GitTimeoutError):
+    monkeypatch.setattr(subprocess, "run", _timeout_run(cmd=["gh"], timeout=7, calls=calls))
+    with pytest.raises(git_ops.GitTimeoutError) as exc:
         git_ops.gh_pr_diff(repo, 7)
-    assert calls["n"] == git_process._gh_retries() + 1
+    assert calls["n"] == 2
+    assert str(exc.value) == "gh pr diff 7 timed out after 7s (2 attempts)"
+    assert "DAYDREAM_GH_TIMEOUT" not in caplog.text
 
 
 def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -1491,19 +1489,19 @@ def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("blobless", "filter_present"), [(True, True), (False, False)],
+    ("blobless", "expected_flags"), [(True, ["--filter=blob:none", "--no-local"]), (False, [])],
     ids=["blobless_passes_filter_flag", "default_no_filter_flag"],
 )
 def test_clone_filter_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blobless: bool, filter_present: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blobless: bool, expected_flags: list[str],
 ) -> None:
     captured: dict[str, list[str]] = {}
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
-    git_ops.clone("https://example.com/repo.git", tmp_path / "out", blobless=blobless)
-    assert ("--filter=blob:none" in captured["cmd"]) is filter_present
+    git_ops.clone("https://example.com/repo.git", tmp_path / "out", blobless=blobless, no_local=blobless)
+    assert captured["cmd"] == ["git", "clone", *expected_flags, "https://example.com/repo.git", str(tmp_path / "out")]
 
 
 @pytest.mark.parametrize(
