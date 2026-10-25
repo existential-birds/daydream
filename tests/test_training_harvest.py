@@ -722,11 +722,13 @@ def test_cli_local_commit_signal_is_not_pr_posterior(
     assert not annotation["has_posterior"] and json.loads(annotation["reward_json"]).get("posterior_cost") is None
 
 
-@pytest.mark.parametrize(
-    "remote", ["https://token-value@github.com/owner/repo.git", "https://evil.example/owner/repo.git"]
-)
+@pytest.mark.parametrize(("remote", "clone_root", "expected"), [
+    ("https://token-value@github.com/owner/repo.git", None, Path("cache/repos/owner/repo")),
+    ("https://token-value@github.com/owner/repo.git", "clones", Path("clones/owner/repo")),
+    ("https://evil.example/owner/repo.git", None, None),
+], ids=["default-root", "explicit-root", "untrusted-host"])
 def test_cli_clone_uses_allowed_credential_free_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote: str, clone_root: str | None, expected: Path | None,
 ) -> None:
     import shutil
 
@@ -744,8 +746,11 @@ def test_cli_clone_uses_allowed_credential_free_identity(
     monkeypatch.setenv("DAYDREAM_GIT_TOKEN", "out-of-band-token")
     monkeypatch.setattr(git_ops, "clone_with_token", clone)
     monkeypatch.setattr(git_ops, "gh_api", github(store, ("applied",)))
-    assert harvest_cli(store, tmp_path / "cache") == 0
-    assert bool(destinations) == ("github.com" in remote)
+    extra = ("--repo-clone-root", str(tmp_path / clone_root)) if clone_root is not None else ()
+    assert harvest_cli(store, tmp_path / "cache", *extra) == 0
+    assert destinations == ([tmp_path / expected] if expected is not None else [])
+    if expected is not None:
+        assert (tmp_path / expected / ".git").is_dir()
     if "evil.example" in remote:
         assert not (tmp_path / "cache" / "repos" / "owner" / "repo").exists()
 

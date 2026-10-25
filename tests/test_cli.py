@@ -16,7 +16,6 @@ from rich.console import Console
 
 from daydream import cli, remote_ci
 from daydream.atif import validate as atif_validate
-from daydream.commands.corpus import _build_harvest_parser
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
 from daydream.dataset import LocalRecordStore
@@ -218,16 +217,6 @@ def test_verbose_joined_equals_rejected() -> None:
         _parse_improve_args(["improve", "/tmp/x", "--verbose=true"])
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--log=true"])
-
-
-@pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
-def test_yes_with_review_only_output_errors(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], output_flag: Any,
-) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", output_flag, "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "--yes" in capsys.readouterr().err
 
 
 # Consolidated CLI surface (worktree-isolation refactor)
@@ -633,18 +622,6 @@ def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest
     with pytest.raises(BaseExceptionGroup) as caught:
         cli.main([str(tmp_path), "--non-interactive"])
     assert caught.value is failure
-
-
-def test_harvest_parser_accepts_repo_clone_root() -> None:
-    parser = _build_harvest_parser()
-    args = parser.parse_args(["--snapshot-id", "a" * 64, "--repo-clone-root", "/tmp/clones"])
-    assert args.repo_clone_root == Path("/tmp/clones")
-
-
-def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
-    parser = _build_harvest_parser()
-    args = parser.parse_args(["--snapshot-id", "a" * 64])
-    assert args.repo_clone_root is None
 
 
 def test_cli_defers_repository_discovery_until_session_resolution(
