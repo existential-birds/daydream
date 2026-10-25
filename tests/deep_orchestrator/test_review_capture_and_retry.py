@@ -79,11 +79,19 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
 
 
 def part_identity(parts: list[dict[str, Any]]) -> str:
-    """Pin every original assignment field while normalizing freshly created Git revisions."""
+    """Validate raw selector bindings, then pin every field with stable Git/source identities."""
     normalized = copy.deepcopy(parts)
     for part in normalized:
-        for reference in part['source_refs']:
-            reference['revision'] = reference['side']
+        for reference, option in zip(part['source_refs'], part['source_options'], strict=True):
+            identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
+            assert option == {
+                'source_id': 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                                                 separators=(',', ':')).encode()).hexdigest(),
+                **{key: reference[key] for key in ('path', 'side', 'source_range')}, 'basis': 'supplied_diff',
+            }
+            reference['revision'] = identity['revision'] = reference['side']
+            option['source_id'] = 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                                                       separators=(',', ':')).encode()).hexdigest()
     return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':')).encode()).hexdigest()
 
@@ -465,16 +473,17 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     assert [part['part_index'] for part in assignments] == list(range(1, len(assignments) + 1))
     assert b''.join(fragments) == expected_body
     identities = {
-        ('medium-file', False): 'c3cb237aa7d541ca2ba90f11a24b431b59aa9e206a0b3604ac7f700bf622d0ef',
-        ('medium-file', True): '8c08383148792020a99f0cca9bb8864f17dfa03d92709732d3594e54370801c1',
-        ('oversized-hunk', False): 'ca39014e9198a8b6f4cfc4988b5e40262181d89c91aa470bb77b70e1b88f9796',
-        ('oversized-hunk', True): 'ce7a626e36f3ab5b13b1f536d3e8b82c4b4833715a6063c83a23fe731dcedfbf',
-        ('unicode-line', False): '059e5e7459c7cf1dd2402609c78678ea16bb5a3a0fe6eaa4752efa6a5f0b6c1d',
-        ('unicode-separators', True): '3fc0493b93126e84667c65ef6fa19a12d250094cd7ff53ed18ea10b43b84f902',
+        ('medium-file', False): 'f7152979cd363204e5becab9d196e0e7ed7623b5407486570a24e2900cfc45aa',
+        ('medium-file', True): 'e6468c52adce5efc2653816806e2372e4b5b118e2fbbd6f29af05ffc613dbab2',
+        ('oversized-hunk', False): 'c9aa574299966799aa1d7576825c115a0ce49c09757576abd0ded8862ac42fd7',
+        ('oversized-hunk', True): '27b526e6ad60e233d1ee4ce3739ac376f4c8b178fc3cbe08f79a5fafe2448bc5',
+        ('unicode-line', False): '5076f0e2419ce49c2bb285322c3c007c07063ab54bbd194c9528d60a1fa01186',
+        ('unicode-line', True): '0084da754194fc863c9110681831548dc1d87239d179a9723a5a4e0943044c9d',
+        ('unicode-separators', True): '15db9083b444b1b3d13beac69b9859cb04db304d5ac3f2be673ba873416bfe57',
     }
     assert part_identity(assignments) == identities[payload, sandbox]
     if sandbox:
-        old_calls = {'medium-file': 2, 'oversized-hunk': 8, 'unicode-separators': 4}
+        old_calls = {'medium-file': 2, 'oversized-hunk': 8, 'unicode-line': 4, 'unicode-separators': 4}
         assert len(stage_ends(review, 'python')) < old_calls[payload]
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
     if unicode:

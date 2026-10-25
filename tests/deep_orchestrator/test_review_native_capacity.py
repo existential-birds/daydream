@@ -99,8 +99,8 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
     assert assignment_units == (87 if inline else 48)
     if not wired:
         assert part_identity(original_parts) == (
-            '1bce80a2a82762289d9663dd38cbb730b13218f4058ce01b65fdbb91f524d02b' if inline else
-            '9dab8a79d66313a9b9d8f4dafdbd68bf392ff9915109a582ffeccb2f54812c5d')
+            'b7ffdded77bde58734507239644a02736dfa1ad536f3b87ee4f4f83134b966d9' if inline else
+            'f2db6343fff423e67434d336e9548fb6d2930470a24b447457878430fc9543de')
     if inline:
         assert max(inline_sizes) > 12 * 1024
         assert len(stage_ends(review, 'python')) < 37
