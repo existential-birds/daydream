@@ -614,12 +614,17 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: P
 
 def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    body = "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
+    historical = (
+        "title: Handle pull/999 regressions\n"
+        "body: references o/r and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+    )
+    body = historical + "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
     _inject_body(ws, case_id, body)
     lock = compile_workspace(ws)
     key = next(iter(lock["cases"]))
     instr = (ws / "harbor" / key / "instruction.md").read_text()
     inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    assert historical in inner
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-7f3c" not in outside
     assert instr.count("</historical_pr_context>") == 1
@@ -774,16 +779,6 @@ def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> Non
     assert "case-abcdef123456/README.md" in msg           # names the file
     assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
 
-def test_leakage_scan_permits_bounded_block_raw_text() -> None:
-    instr = (
-        "assignment text\n"
-        "<historical_pr_context>\n"
-        "title: Handle pull/999 regressions\n"
-        "body: references o/r and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
-        "</historical_pr_context>\n"
-    )
-    build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
-
 def test_leakage_scan_rejects_clean_readme() -> None:
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
@@ -929,24 +924,6 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> No
     assert "Task.md" in str(rejected.value)
 
 
-def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """The OpenRouter workspace resolves both persisted allowlists to
-    ``openrouter.ai``; the compiled task.toml carries that host in both egress
-    boundaries and the control-plane leakage scan does not flag a bare
-    legitimate hostname.
-    """
-
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    raw = storage.load_yaml_strict(ws / "benchmark.yaml")
-    raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
-    raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
-    lock = build.compile_workspace(ws)          # must not raise a leakage CompileError
-    key = next(iter(lock["cases"]))
-    doc = tomllib.loads((ws / "harbor" / key / "task.toml").read_bytes().decode())
-    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
-    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
-
 def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
@@ -964,9 +941,23 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     lock_a = build.compile_workspace(ws)
     digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
-    raw["privacy"]["reviewer_allowed_hosts"] = ["other.example"]
+    raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
     storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
     lock_b = build.compile_workspace(ws)
     digest_b = lock_b["files"][next(iter(lock_b["cases"])) + "/task.toml"]
     assert digest_a != digest_b
     assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs
+    key = next(iter(lock_b["cases"]))
+    task_path = ws / "harbor" / key / "task.toml"
+    doc = tomllib.loads(task_path.read_text())
+    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
+
+    raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    lock_c = build.compile_workspace(ws)
+    doc = tomllib.loads(task_path.read_text())
+    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+    assert lock_b["files"][key + "/task.toml"] != lock_c["files"][key + "/task.toml"]
+    assert lock_b != lock_c
