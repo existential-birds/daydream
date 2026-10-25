@@ -46,17 +46,12 @@ distinct. Never infer provider root causes or missing tools from absent telemetr
 
 ## Pi host-tool lifecycle evidence
 
-Bound host-tool calls retain native request/result IDs and genuine native roles
-through the existing tool and generation projections. A host authorization error
-is a tool result, so a corrected request remains in the same native history.
-Host admission does not emit synthetic tool events or provider billing.
-
-Invocation lifecycle observations distinguish authority closure, native
-settlement, and aggregate cleanup across callbacks, read processes, and the
-endpoint. Cleanup runs before those observations freeze, including cancellation
-and setup failure.
-Missing native settlement remains incomplete even when the host read succeeded;
-missing cleanup proof cannot be inferred from a suppressed late result.
+Host requests/rejections retain native IDs, roles and generation history;
+admission creates no synthetic tool events or billing. Lifecycle observations
+separately record authority closure, native settlement and aggregate cleanup of
+callbacks, readers and endpoint, after cleanup on every exit path. A successful
+read cannot establish native settlement; suppressing a late result cannot prove
+cleanup. See [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
 
 ## Codex lifecycle evidence
 

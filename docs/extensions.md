@@ -126,56 +126,35 @@ and pointered issues. Legacy Markdown-only output blocks plan publication.
 
 ## Invocation-scoped Pi host tools
 
-Trusted callers may pass an explicit `host_tools` binding to `run_agent`.
-Install the `host-tools` extra to select the official SDK's bundled FastMCP:
-`uv tool install --editable '.[host-tools]'`. Repository checks install all extras.
-Definitions and schemas describe the operation; grants, deadlines, counters,
-transport credentials, and callbacks belong to that single invocation. The first
-operation reads an explicitly permitted regular file. This seam does not select
-captured review sources or admit findings; those remain Review responsibilities.
-Binding lifetime does not determine the lifetime of a review assignment.
+Trusted callers may pass `host_tools` to `run_agent` for one explicitly granted
+file read. Definitions are immutable; paths, deadlines, counters, credentials
+and callbacks belong to the invocation. Captured-source selection and review
+admission remain in #1627; binding lifetime does not own assignment lifetime.
 
-| Harness/version | Required host-tool capability |
-|---|---|
-| Pi 1.4.0 on POSIX | Native direct MCP through the official Python MCP SDK's bundled FastMCP; ordinary and read-only invocations |
-| Claude, Codex, Osprey | Explicit host-tool bindings are unsupported; ordinary calls remain supported |
+Install `uv tool install --editable '.[host-tools]'` for official `mcp==1.30.0`
+and its bundled FastMCP. Bound calls require exactly Pi 1.4.0, POSIX no-follow
+file opens, and fresh ordinary/read-only invocations. Other backends, disabled
+tools, finalization and continued sessions reject required bindings before model
+work. Ordinary calls retain their version behavior and support SDK 2 consumers,
+including RL; an unavailable compatible host runtime rejects explicitly.
 
-Bound calls require Pi 1.4.0 exactly; other versions reject before provider work.
-Calls without a host binding retain their existing version behavior. CI installs
-the same verified version for the native contract tests.
+Readiness requires the intended native endpoint's successful initialize/tool-list
+exchange and actual active names, schemas and direct exposure. Configuration
+overrides and missing/disabled tools fail before provider work. Improve still
+requires Claude's independent snapshot-root guard.
 
-The extra pins official `mcp==1.30.0`. MCP 2 removes bundled FastMCP, so ordinary
-calls can coexist with consumers requiring SDK 2, while a requested binding
-without the supported SDK rejects before model work. The standalone RL lock
-retains its SDK 2 dependency; its changes only synchronize extra metadata.
+Authorization errors return correlated native tool results, allowing correction
+within the original wall/tool allowance; bound calls are not replayed as fresh
+attempts. Synchronous supervision observes native events and cannot authorize
+host operations. See [lifetime and limits](runtime.md#pi-host-tool-lifetime-and-limits).
 
-The operation requires directory-relative no-follow file opens on POSIX. Bound
-calls reject unsupported platforms before model work. Daydream does not replay a
-bound invocation in a fresh attempt; native provider recovery remains subject to
-the original host deadline and cumulative tool allowance.
+Provider, model, settings and authentication remain native. The #1620 delivery
+review uses the current default, verified on 2026-10-24 as `nous` /
+`deepseek/deepseek-v4.1-flash-1017`, without overrides or settings changes.
 
-Native provider, model, settings, and authentication remain in Pi's existing
-configuration path. The issue #1620 delivery review uses the current native
-default, verified on 2026-10-24 as `nous` /
-`deepseek/deepseek-v4.1-flash-1017`, without a model override or settings change.
-
-Pi proves the intended endpoint's native initialization/tool-list exchange and
-checks actual active tool names, schemas, and direct exposure before provider
-work. Failed initialization, configuration overrides, disabled or missing tools,
-and incompatible required modes fail explicitly. Tools-disabled, finalization,
-and continued-session calls cannot request this binding. Improve still requires
-Claude's independently enforced snapshot-root guard.
-
-The host checks authorization and finite bounds before filesystem work. A native
-schema-valid request can still be rejected, and a correlated native error lets
-Pi correct it within the original allowance. Ordinary synchronous supervision
-remains an observation of native events; it is not the host operation's
-authorization boundary. See [host-tool lifetime and limits](runtime.md#pi-host-tool-lifetime-and-limits).
-
-This optional keyword is additive under extension API 8. Existing prompt
-overrides, sanctioned inputs, and real `diff_path`/adjacent `hunk-index.json`
-semantics retain their contracts. No extension migration or cache-version change
-is required.
+The optional keyword is additive under extension API 8, requiring no migration
+or cache change. Prompt overrides, sanctioned inputs and real `diff_path` /
+adjacent `hunk-index.json` semantics retain their contracts.
 
 ## Tool supervision
 

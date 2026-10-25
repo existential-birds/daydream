@@ -30,34 +30,27 @@ because a failed replacement may preserve an older complete artifact.
 
 ## Pi host-tool lifetime and limits
 
-A requested Pi host-tool binding grants one invocation an exact set of file
-paths and a finite absolute deadline. Registration does not grant directory-wide
-access. The operation returns complete UTF-8 contents; non-UTF-8 files reject.
-The host validates the schema, operation, path, open authority, remaining
-capacity, and deadline before reading. Component-wise no-follow opens reject
-symlink traversal, and reads require regular files. A separate read process
-allows cancellation to end filesystem work before evidence freezes.
+A binding grants exact file paths and a finite absolute deadline. The host
+checks schema, operation, path, open authority, capacity and deadline before
+reading. Component-wise no-follow opens require regular files; only complete
+UTF-8 contents return. An isolated read process lets cancellation end filesystem
+work before evidence freezes.
 
-Definition/schema, transport frames, arguments, results, item counts, cumulative
-calls/work, callback lifetime, concurrent requests, and reads have finite limits.
-Overflow rejects the whole result; it never returns a truncated authoritative
-file. Serialized MCP read results stay below Pi's direct MCP truncation threshold.
-The server does not queue excess callbacks. Native admission charges each tool
-call once, including rejection; delivery of the same native event cannot charge
-it again. Progress and retries cannot renew authority or its allowance.
+Definitions/schemas, frames, arguments, serialized results, items, cumulative
+calls, callback lifetime and concurrent requests/reads have finite bounds.
+Results stay below Pi's direct MCP truncation threshold; overflow rejects whole
+results and excess callbacks are not queued. Native admission charges each call once,
+including rejections. Events, progress and retries cannot replenish allowances.
 
-Close authority before awaiting shutdown. Join or isolate read processes,
-callbacks, and evidence writers before recorder/span finalization. Record
-authority closure, native settlement, and cleanup independently: endpoint
-shutdown, a successful tool, assistant prose, or child exit alone cannot establish
-native completion. Bound host-tool invocations require positive native settlement
-even when no structured output schema was requested. Preserve observed usage and
-truthful failure/incomplete outcomes on every exit path.
+Close authority before shutdown and join/isolate callbacks, read processes and
+writers before finalizing evidence. Bound calls require positive native
+settlement even without an output schema; tool success, prose, endpoint shutdown
+and child exit cannot establish it. Preserve usage and truthful incomplete
+outcomes; see [lifecycle evidence](observability.md#pi-host-tool-lifecycle-evidence).
 
-The endpoint and credentials are private invocation capabilities, excluded from
-persisted configuration and public request evidence. Cached backend instances
-do not own sibling grants or callbacks. Enforcement does not require recording
-or tracing. See [the supported capability table](extensions.md#invocation-scoped-pi-host-tools).
+Endpoint credentials stay outside persisted configuration/public evidence.
+Cached backends do not own sibling grants. Enforcement works without recording
+or tracing. See [supported capabilities](extensions.md#invocation-scoped-pi-host-tools).
 
 ## Validation and repair
 

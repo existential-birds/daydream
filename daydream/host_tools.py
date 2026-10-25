@@ -11,7 +11,6 @@ import asyncio
 import json
 import math
 import os
-import re
 import sys
 from collections.abc import Coroutine
 from dataclasses import dataclass
@@ -28,13 +27,6 @@ class HostToolDefinition:
     name: str
     description: str
     schema_json: str
-
-    def __post_init__(self) -> None:
-        if (not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", self.name)
-                or not 1 <= len(self.description.encode()) <= 1024 or len(self.schema_json.encode()) > 4096):
-            raise ValueError("invalid bounded host-tool definition")
-        if not isinstance(json.loads(self.schema_json), dict):
-            raise ValueError("host-tool schema must be an object")
 
     def schema(self) -> dict[str, Any]:
         """Return a fresh schema; callers cannot mutate the shared definition."""
@@ -109,7 +101,7 @@ class HostToolBinding:
         self.cleanup_complete = False
         self._claimed = False
         self._call_limit = limits.max_calls
-        self._admitted: dict[str, str | None] = {}
+        self._admitted: set[str] = set()
         self._pending: dict[str, list[str]] = {}
         self._callbacks: set[asyncio.Task[Any]] = set()
         self._children: set[asyncio.subprocess.Process] = set()
@@ -156,7 +148,6 @@ class HostToolBinding:
         self._charge(call_id, name)
         if name == NATIVE_READ_FILE:
             key = self._arguments_key(arguments)
-            self._admitted[call_id] = key
             self._pending.setdefault(key, []).append(call_id)
 
     def reject_admission(self, call_id: Any, name: Any) -> None:
@@ -181,7 +172,7 @@ class HostToolBinding:
             self.close_authority()
             raise self._reject("Host-tool call capacity exhausted")
         self.calls += 1
-        self._admitted[call_id] = None
+        self._admitted.add(call_id)
         if self.calls > self._call_limit:
             raise self._reject("Original cumulative tool allowance exhausted")
 
@@ -284,9 +275,7 @@ class HostToolBinding:
         self._children.add(proc)
         if not self.authority_open or task in self._abandoned_spawns:
             self._kill(proc)
-            cleanup = asyncio.create_task(self._reap(proc))
-            self._late_cleanup.add(cleanup)
-            cleanup.add_done_callback(self._finish_late_cleanup)
+            self.track_cleanup(self._reap(proc))
 
     def _finish_late_cleanup(self, task: asyncio.Task[None]) -> None:
         self._late_cleanup.discard(task)

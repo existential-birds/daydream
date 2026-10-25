@@ -116,10 +116,9 @@ class PiHostToolServer:
                     raise RuntimeError("Host MCP endpoint failed to start")
                 await asyncio.sleep(0.01)
 
-    async def _reply(self, send: Send, status: int, value: dict[str, Any], *, max_bytes: int | None = None) -> None:
+    async def _reply(self, send: Send, status: int, value: dict[str, Any]) -> None:
         data = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
-        limit = min(self.binding.limits.max_frame_bytes, max_bytes) if max_bytes is not None else (
-            self.binding.limits.max_frame_bytes)
+        limit = min(self.binding.limits.max_frame_bytes, self.binding.limits.max_result_bytes)
         if len(data) > limit:
             # Reject the whole response, never shorten an authoritative identity.
             status = 413
@@ -227,8 +226,7 @@ class PiHostToolServer:
                             or not isinstance(arguments["path"], str)
                             or not 1 <= len(arguments["path"]) <= 2048):
                         await self._reply(send, 200, {"jsonrpc": "2.0", "id": value.get("id"), "result": {
-                            "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}},
-                            max_bytes=self.binding.limits.max_result_bytes)
+                            "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}})
                         return
                 replayed = False
 

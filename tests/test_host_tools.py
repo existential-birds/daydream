@@ -45,33 +45,32 @@ async def _native_call(client: httpx.AsyncClient, arguments: Any, *, call_id: st
     return result
 
 
-@pytest.mark.parametrize("fault", ["missing", "extra", "number", "array", "null", "params-array"])
+@pytest.mark.parametrize("fault", ["missing", "extra", "number", "array", "null", "params-array", "unicode-id"])
 async def test_http_schema_rejections_precede_sdk_coercion(tmp_path: Path, fault: str) -> None:
-    """The HTTP owner must reject malformed original shapes before FastMCP can coerce them.
-
-    Native Pi validates its own tools first, so native journeys cannot exercise a malicious raw MCP caller.
-    """
+    """Raw schema/Unicode-ID errors stay exact and bounded; native validation hides SDK coercion/escaping."""
     path = tmp_path.resolve() / "allowed"
     path.write_text("secret bytes")
-    binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
+    binding = HostToolBinding((path,), deadline=time.monotonic() + 10, limits=HostToolLimits(max_frame_bytes=512))
     arguments: Any = {"missing": {}, "extra": {"path": str(path), "other": True}, "number": {"path": 42},
-                      "array": [], "null": None, "params-array": {"path": str(path)}}[fault]
+                      "array": [], "null": None, "params-array": {"path": str(path)}, "unicode-id": {}}[fault]
     async with _endpoint(binding) as (_, client):
         params: Any = [] if fault == "params-array" else {"name": "read_file", "arguments": arguments}
-        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": "malformed", "method": "tools/call",
-                                                 "params": params})
-        assert response.status_code == 200
-        result = response.json()["result"]
-        assert result["isError"] is True and "Invalid host read schema" in json.dumps(result)
+        call_id = "界" * 100 if fault == "unicode-id" else "malformed"
+        frame = json.dumps({"jsonrpc": "2.0", "id": call_id, "method": "tools/call", "params": params},
+                           ensure_ascii=False).encode()
+        assert len(frame) < binding.limits.max_frame_bytes
+        response = await client.post("/mcp", content=frame, headers={"Content-Type": "application/json"})
+        assert len(response.content) <= binding.limits.max_frame_bytes
+        assert response.status_code == 200 and response.json()["id"] == call_id
+        assert response.json()["result"] == {
+            "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}
     assert binding.calls == 0 and binding.cleanup_complete
 
 
-@pytest.mark.parametrize("fault", ["json", "frame", "items", "depth", "unauthorized", "http-capacity"])
+@pytest.mark.parametrize("fault", ["json", "frame", "items", "depth", "unauthorized", "http-capacity",
+                                  "unicode-path", "unicode-key", "unicode-id"])
 async def test_http_admission_bounds_reject_before_tool_work(tmp_path: Path, fault: str) -> None:
-    """A real HTTP client cannot bypass finite parsing/request bounds or transport credentials.
-
-    The SDK and normal native frames never establish limits for malformed, oversized or excess transport work.
-    """
+    """Raw frames cannot bypass limits, credentials or UTF-8 charging; ordinary native calls miss these inputs."""
     limits = HostToolLimits(max_frame_bytes=512, max_items=16, max_http_requests=2)
     binding = HostToolBinding((tmp_path.resolve() / "allowed",), deadline=time.monotonic() + 10, limits=limits)
     async with _endpoint(binding) as (_, client):
@@ -83,61 +82,31 @@ async def test_http_admission_bounds_reject_before_tool_work(tmp_path: Path, fau
             response = await client.post("/admit", json={"values": list(range(20))})
         elif fault == "depth":
             response = await client.post("/admit", content=b'{"v":' + b"[" * 18 + b"0" + b"]" * 18 + b"}")
+        elif fault.startswith("unicode-"):
+            packet: dict[str, Any] = {"id": "unicode", "name": NATIVE_READ_FILE, "arguments": {"path": "unused"}}
+            if fault == "unicode-path":
+                packet["arguments"]["path"] = "\ud800"
+            elif fault == "unicode-key":
+                packet["arguments"] = {"\ud800": True}
+            elif fault == "unicode-id":
+                packet["id"] = "\ud800"
+            response = await client.post("/admit", content=json.dumps(packet).encode(),
+                                         headers={"Content-Type": "application/json"})
         elif fault == "unauthorized":
             response = await client.get("/status", headers={"Authorization": "Bearer wrong"})
         else:
             assert (await client.get("/status")).status_code == 200
             assert (await client.get("/status")).status_code == 200
             response = await client.get("/status")
-        assert response.status_code == {"json": 400, "frame": 413, "items": 200, "depth": 200,
-                                        "unauthorized": 403, "http-capacity": 429}[fault]
-        if fault in {"items", "depth"}:
-            assert response.json()["allowed"] is False
-        assert binding.authority_open is (fault in {"unauthorized", "http-capacity"})
-    assert binding.calls == 0 and binding.cleanup_complete
-
-
-async def test_correlated_rejection_cannot_expand_response_past_frame_bound(tmp_path: Path) -> None:
-    """A bounded UTF-8 request ID cannot expand into an oversized escaped error response.
-
-    Normal ASCII native IDs miss JSON escaping expansion at the manual schema-rejection response boundary.
-    """
-    limits = HostToolLimits(max_frame_bytes=512)
-    binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10, limits=limits)
-    frame = json.dumps({"jsonrpc": "2.0", "id": "界" * 100, "method": "tools/call",
-                        "params": {"name": "read_file", "arguments": {}}}, ensure_ascii=False).encode()
-    assert len(frame) < limits.max_frame_bytes
-    async with _endpoint(binding) as (_, client):
-        response = await client.post("/mcp", content=frame, headers={"Content-Type": "application/json"})
+        assert response.status_code == {
+            "json": 400, "frame": 413, "items": 200, "depth": 200, "unauthorized": 403, "http-capacity": 429,
+            "unicode-path": 200, "unicode-key": 200, "unicode-id": 200,
+        }[fault]
         assert len(response.content) <= limits.max_frame_bytes
-        assert response.status_code == 200 and response.json()["id"] == "界" * 100
-        assert response.json()["result"] == {
-            "isError": True, "content": [{"type": "text", "text": "Invalid host read schema"}]}
-    assert binding.calls == 0 and binding.cleanup_complete
-
-
-@pytest.mark.parametrize("field", ["path", "key", "id"])
-async def test_escaped_invalid_unicode_is_a_bounded_frame_rejection(tmp_path: Path, field: str) -> None:
-    """ASCII JSON escapes must not smuggle unencodable strings into authority or result processing.
-
-    Valid UTF-8 native calls and byte-overflow cases miss escaped unpaired-surrogate strings and object keys.
-    A malformed argument still consumes its bounded identity; an unencodable identity closes authority instead.
-    """
-    binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10)
-    packet: dict[str, Any] = {"id": "unicode", "name": NATIVE_READ_FILE, "arguments": {"path": "unused"}}
-    if field == "id":
-        packet["id"] = "\ud800"
-    elif field == "key":
-        packet["arguments"] = {"\ud800": True}
-    else:
-        packet["arguments"]["path"] = "\ud800"
-    async with _endpoint(binding) as (_, client):
-        response = await client.post("/admit", content=json.dumps(packet).encode(),
-                                     headers={"Content-Type": "application/json"})
-        assert response.status_code == 200 and response.json()["allowed"] is False
-        assert len(response.content) <= binding.limits.max_frame_bytes
-        assert binding.authority_open is (field != "id")
-    assert binding.calls == (0 if field == "id" else 1) and binding.cleanup_complete
+        if fault in {"items", "depth"} or fault.startswith("unicode-"):
+            assert response.json()["allowed"] is False
+        assert binding.authority_open is (fault in {"unauthorized", "http-capacity", "unicode-path", "unicode-key"})
+    assert binding.calls == int(fault in {"unicode-path", "unicode-key"}) and binding.cleanup_complete
 
 
 async def test_readiness_requires_successful_sdk_results(tmp_path: Path) -> None:
@@ -163,11 +132,7 @@ async def test_readiness_requires_successful_sdk_results(tmp_path: Path) -> None
 async def test_read_child_ignores_untrusted_working_directory_and_python_startup_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A granted read starts trusted helper code without executing repository Python startup code.
-
-    Normal granted-file reads run from the trusted checkout and miss cwd package shadowing and
-    PYTHONPATH startup hooks that execute before the helper's filesystem gate.
-    """
+    """Actual child startup must ignore cwd/PYTHONPATH code; normal reads run from the trusted checkout."""
     root = tmp_path.resolve()
     allowed = root / "permitted"
     expected = "ONLY_THE_TRUSTED_READER_MAY_RETURN_THIS\n"
@@ -199,10 +164,7 @@ async def test_read_child_ignores_untrusted_working_directory_and_python_startup
 async def test_host_read_preserves_exact_grant_and_rejects_non_authoritative_results(
     tmp_path: Path, fault: str,
 ) -> None:
-    """Real child reads cannot follow links, escape exact grants or truncate authoritative bytes.
-
-    A valid small native read does not cover adversarial filesystem identities or serialized-result expansion.
-    """
+    """Real reads reject escapes, links and inexact results; the valid native journey misses filesystem faults."""
     root = tmp_path.resolve()
     real = root / "real"
     real.mkdir()
@@ -244,10 +206,7 @@ async def test_host_read_preserves_exact_grant_and_rejects_non_authoritative_res
 
 
 async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path: Path) -> None:
-    """Duplicate IDs, oversized arguments and spent allowance deny later effects without recharging IDs.
-
-    Native normal calls supply distinct IDs and bounded arguments, missing the direct admission protocol risks.
-    """
+    """Duplicate/oversized IDs spend once without renewal; ordinary native calls do not probe direct admission."""
     path = tmp_path.resolve() / "source"
     path.write_text("uncharged bytes")
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10,
@@ -277,10 +236,7 @@ async def test_host_admissions_are_once_only_bounded_and_never_renewed(tmp_path:
 async def test_revoked_or_expired_authority_cannot_start_admitted_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str,
 ) -> None:
-    """Admission cannot keep a grant alive after closure or the original absolute deadline.
-
-    Successful native settlement closes after work; it misses an admitted call arriving after revocation.
-    """
+    """Admission cannot retain expired/revoked authority; successful settlement only closes after work."""
     path = tmp_path.resolve() / "source"
     path.write_text("must not reach caller")
     binding = HostToolBinding((path,), deadline=time.monotonic() + 10)
@@ -300,10 +256,7 @@ async def test_revoked_or_expired_authority_cannot_start_admitted_read(
 async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str,
 ) -> None:
-    """Closing/timing out a blocked real read joins its child and denies queued or late work.
-
-    CLI teardown tests do not own callback child processes, prospective read concurrency or late filesystem effects.
-    """
+    """Close/expire a blocked real read and reject queued work; CLI teardown does not own callback children."""
     root = tmp_path.resolve()
     path = root / "source"
     path.write_text("must never be returned")
@@ -363,10 +316,7 @@ async def test_active_read_is_reaped_and_concurrent_work_is_not_queued(
 async def test_cancelled_late_spawn_never_receives_read_gate_and_is_joined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real helper returned after cancellation remains inert and is reaped before closure completes.
-
-    The active-read case starts after spawn returns, missing cancellation between OS process creation and ownership.
-    """
+    """Reap an inert late-returned child; active-read cancellation misses the gap before spawn ownership."""
     source = tmp_path.resolve() / "source"
     source.write_text("LATE_SPAWN_MUST_NEVER_READ_OR_RETURN_THIS\n")
     spawned, release, authority_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()

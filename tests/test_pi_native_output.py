@@ -49,6 +49,7 @@ class _NativeProvider:
     requests: list[dict[str, Any]] = field(default_factory=list)
     turns: list[list[tuple[str, str, dict[str, Any]]]] = field(default_factory=list)
     choose: Callable[[dict[str, Any]], list[tuple[str, str, dict[str, Any]]]] | None = None
+    text: str | None = None
 
 
 @pytest.fixture
@@ -71,7 +72,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
             index = len(fixture.requests) - 1
             batch = (fixture.choose(request) if fixture.choose is not None else
                      fixture.turns[index] if index < len(fixture.turns) else [])
-            delta: dict[str, Any] = {"role": "assistant", "content": f"Native reasoning {index}."}
+            delta: dict[str, Any] = {"role": "assistant", "content": fixture.text or f"Native reasoning {index}."}
             if batch:
                 delta["tool_calls"] = [{"index": i, "id": call_id, "type": "function",
                     "function": {"name": name, "arguments": json.dumps(arguments)}}
@@ -104,12 +105,9 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 async def test_native_host_rejection_correction_records_exact_bytes_without_output_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, read_only: bool,
 ) -> None:
-    """MCP authority rejects an existing forbidden file and permits correction in the same allowance.
+    """Real MCP corrects a forbidden path and records exact bytes within the original allowance.
 
-    Structured-output and replay tests miss actual native MCP exposure, correlated rejection history,
-    exact host bytes, prospective charging and recorder finalization without an output schema.
-    A shared fake clock also catches real-time arithmetic rejecting a valid host deadline during native setup.
-    """
+    Replays miss native exposure/history and cleanup; a fake clock catches mixed deadline domains."""
     fake = FakeClock(monotonic_value=100).install(monkeypatch)
     root = tmp_path.resolve()
     allowed, forbidden = root / "permitted.txt", root / "forbidden.txt"
@@ -167,41 +165,16 @@ async def test_native_host_rejection_correction_records_exact_bytes_without_outp
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 30
 
 
-@pytest.mark.parametrize("sdk", ["missing", "2.0.0"])
-async def test_required_native_host_binding_rejects_incompatible_optional_sdk_before_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, sdk: str,
-) -> None:
-    """An explicit binding fails actionably before native/provider work when its SDK is unavailable.
-
-    The ordinary fresh-process import test protects optionality, but cannot prove fail-closed required behavior.
-    """
-    def installed_version(distribution: str) -> str:
-        if sdk == "missing":
-            raise PackageNotFoundError(distribution)
-        return sdk
-
-    monkeypatch.setattr("daydream.backends.pi.version", installed_version)
-    binding = HostToolBinding((tmp_path.resolve() / "source",), deadline=time.monotonic() + 10)
-    backend = PiBackend(model="output-model")
-    with pytest.raises(PiError, match=r"daydream\[host-tools\].*mcp==1\.30\.0") as failure:
-        await run_agent(backend, tmp_path, "Require the optional host operation.", phase=DaydreamPhase.REVIEW,
-                        host_tools=binding, persist_session=False, progress_callback=lambda _: None)
-    assert failure.value.category == "HOST_TOOLS"
-    assert native_provider.requests == []
-    assert backend._transports == [] and binding.calls == 0
-    assert not binding.authority_open and binding.cleanup_complete
-
-
 @pytest.mark.parametrize("fault", ["missing-tool", "wrong-schema", "slow-list", "disabled", "missing-init",
                                   "failed-init", "slow-init", "missing-extension", "broken-extension",
-                                  "unsupported-capability", "unsupported-version", "unsupported-platform"])
+                                  "unsupported-capability", "unsupported-version", "unsupported-platform",
+                                  "sdk-missing", "sdk-2"])
 async def test_native_host_readiness_failure_never_reaches_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
 ) -> None:
-    """Actual native loadout/setup faults must stop before a counted provider request.
+    """Counted native requests catch swallowed setup errors, missing loadout and unavailable optional SDKs.
 
-    A host self-probe or argv assertion misses disabled/absent tools and swallowed extension errors.
-    """
+    Host self-probes, argv assertions and preloaded SDK modules cannot establish this barrier."""
     root = tmp_path.resolve()
     allowed = root / "permitted.txt"
     allowed.write_text("permitted")
@@ -225,6 +198,12 @@ async def test_native_host_readiness_failure_never_reaches_provider(
             (native_provider.config / "mcp.json").write_text(json.dumps({"mcpServers": {"daydream_host": {
                 "url": server.url + "/mcp", "enabled": False}}}))
         monkeypatch.setattr(PiHostToolServer, "start", start_disabled)
+    elif fault.startswith("sdk-"):
+        def installed_version(distribution: str) -> str:
+            if fault == "sdk-missing":
+                raise PackageNotFoundError(distribution)
+            return "2.0.0"
+        monkeypatch.setattr("daydream.backends.pi.version", installed_version)
     elif fault in {"missing-init", "failed-init", "slow-init"}:
         handle = PiHostToolServer.__call__
 
@@ -234,26 +213,16 @@ async def test_native_host_readiness_failure_never_reaches_provider(
                 return
             message = await receive()
             value = json.loads(message.get("body", b"{}"))
-            if value.get("method") == "initialize":
-                reached.append(fault)
-                if fault == "slow-init":
-                    await asyncio.Event().wait()
-                body = json.dumps({"jsonrpc": "2.0", "id": value.get("id"),
-                    "error": {"code": -32603, "message": "Initialization deliberately failed"}}).encode()
-                await send({"type": "http.response.start", "status": 404 if fault == "missing-init" else 200,
-                    "headers": [(b"content-type", b"application/json"),
-                                (b"content-length", str(len(body)).encode())]})
-                await send({"type": "http.response.body", "body": body})
-                return
-            first = True
-
-            async def replay() -> Any:
-                nonlocal first
-                if first:
-                    first = False
-                    return message
-                return await receive()
-            await handle(server, scope, replay, send)
+            assert value.get("method") == "initialize"
+            reached.append(fault)
+            if fault == "slow-init":
+                await asyncio.Event().wait()
+            body = json.dumps({"jsonrpc": "2.0", "id": value.get("id"),
+                "error": {"code": -32603, "message": "Initialization deliberately failed"}}).encode()
+            await send({"type": "http.response.start", "status": 404 if fault == "missing-init" else 200,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode())]})
+            await send({"type": "http.response.body", "body": body})
         monkeypatch.setattr(PiHostToolServer, "__call__", faulty_initialize)
     elif fault in {"missing-extension", "broken-extension", "unsupported-capability"}:
         assets = root / "faulty-assets"
@@ -279,10 +248,11 @@ async def test_native_host_readiness_failure_never_reaches_provider(
             f"else:\n os.execv({native_pi!r}, [{native_pi!r}, *sys.argv[1:]])\n")
         executable.chmod(0o700)
         monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    backend = PiBackend(model="output-model")
     started = time.monotonic()
     with pytest.raises((PiError, StreamStalledError, NotImplementedError)) as failure:
         async with asyncio.timeout(8):
-            await run_agent(PiBackend(model="output-model"), root, "Must fail before model work.",
+            await run_agent(backend, root, "Must fail before model work.",
                 phase=DaydreamPhase.REVIEW, persist_session=False, host_tools=binding,
                 progress_callback=lambda _: None)
     assert native_provider.requests == []
@@ -294,6 +264,10 @@ async def test_native_host_readiness_failure_never_reaches_provider(
         assert isinstance(failure.value, PiError) and "verified Pi 1.4.0" in str(failure.value)
     elif fault == "unsupported-platform":
         assert isinstance(failure.value, NotImplementedError)
+    elif fault.startswith("sdk-"):
+        assert isinstance(failure.value, PiError) and failure.value.category == "HOST_TOOLS"
+        assert "daydream[host-tools]" in str(failure.value) and "mcp==1.30.0" in str(failure.value)
+        assert backend._transports == [] and binding.cleanup_complete
     assert time.monotonic() - started < 8
     assert binding.calls == 0 and not binding.authority_open and not binding.native_settled
 
@@ -301,10 +275,7 @@ async def test_native_host_readiness_failure_never_reaches_provider(
 async def test_native_same_schema_config_override_cannot_impersonate_intended_server(
     tmp_path: Path, native_provider: _NativeProvider,
 ) -> None:
-    """Native initialize/list must belong to this invocation, even when an override's schema matches.
-
-    Missing-tool/schema failures cannot detect accepting another endpoint with identical declarations.
-    """
+    """Reject a real same-schema override; missing-tool/schema tests cannot distinguish endpoint identity."""
     root = tmp_path.resolve()
     allowed = root / "permitted.txt"
     allowed.write_text("never requested")
@@ -333,10 +304,7 @@ async def test_native_same_schema_config_override_cannot_impersonate_intended_se
 async def test_required_host_binding_rejects_unsupported_mode_before_provider(
     tmp_path: Path, native_provider: _NativeProvider, mode: str,
 ) -> None:
-    """Explicit host requirements cannot silently degrade to ordinary or tool-free calls.
-
-    Existing no-binding mode tests prove legacy behavior, but never request required MCP authority.
-    """
+    """Required authority fails before dispatch; no-binding mode tests cannot catch silent degradation."""
     from daydream.backends import ContinuationToken
     from tests.harness.backend import ScriptedBackend
 
@@ -368,12 +336,9 @@ async def test_required_host_binding_rejects_unsupported_mode_before_provider(
 async def test_native_schema_rejection_spends_original_host_allowance(
     tmp_path: Path, native_provider: _NativeProvider, allowance: int, invalid_arguments: dict[str, Any],
 ) -> None:
-    """Native validation failures consume capacity before any corrected filesystem effect.
+    """Native schema and item/depth failures spend capacity before corrected filesystem effects.
 
-    The Python authorization journey has valid native schemas and cannot catch charging after native validation
-    or outer transport rejection of item/depth arguments before the native tool_call hook.
-    Drive the adapter directly so run_agent's later observer cannot accidentally enforce the asserted admission.
-    """
+    Direct adapter calls prevent run_agent's later observer from accidentally enforcing admission."""
     allowed = tmp_path.resolve() / "permitted.txt"
     expected = "ONLY_ADMITTED_CORRECTION_MAY_READ_THIS\n"
     allowed.write_text(expected)
@@ -403,10 +368,7 @@ async def test_native_schema_rejection_spends_original_host_allowance(
 async def test_native_host_tools_compose_with_structured_submission_and_shared_accounting(
     tmp_path: Path, native_provider: _NativeProvider,
 ) -> None:
-    """Host MCP and the final-output extension coexist in a real read-only staged invocation.
-
-    Independent output-only and host-only journeys miss extension composition and double charging.
-    """
+    """Real extensions compose without double charges; separate host/output journeys miss this interaction."""
     allowed = tmp_path.resolve() / "permitted.txt"
     allowed.write_text("composition bytes\n")
     output = {"verdict": "complete", "findings": []}
@@ -435,10 +397,7 @@ async def test_native_host_tools_compose_with_structured_submission_and_shared_a
 async def test_native_duplicate_call_identity_cannot_repeat_host_effect_or_charge(
     tmp_path: Path, native_provider: _NativeProvider,
 ) -> None:
-    """A reused native ID is rejected before a second host effect and is emitted/charged once.
-
-    Unique-ID correction journeys cannot detect replaying one callback admission or duplicate native accounting.
-    """
+    """Reused native IDs cannot repeat effects or charges; unique-ID correction does not cover replay."""
     allowed = tmp_path.resolve() / "source"
     allowed.write_text("first read only\n")
     call = ("same-native-id", NATIVE_READ_FILE, {"path": str(allowed)})
@@ -466,11 +425,9 @@ async def test_native_duplicate_call_identity_cannot_repeat_host_effect_or_charg
 async def test_native_cached_backend_cancellation_joins_callback_before_freeze_and_preserves_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
 ) -> None:
-    """An active real MCP read child ends before evidence freezes while a cached-backend sibling continues.
+    """Cancel a real MCP child before evidence freezes while a cached-backend sibling continues.
 
-    Existing CLI cancellation tests have no host callback and cannot prove writer joins, authority revocation
-    or sibling resource ownership across two genuine native sessions.
-    """
+    Ordinary CLI cancellation has no callback writer or sibling authority to join and isolate."""
     root = tmp_path.resolve()
     blocked_path, surviving_path = root / "blocked", root / "surviving"
     blocked_path.write_text("CANCELLED_BYTES_MUST_NEVER_RETURN")
@@ -564,11 +521,9 @@ async def test_native_cached_backend_cancellation_joins_callback_before_freeze_a
 async def test_native_bound_calls_without_output_schema_require_positive_settlement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, missing: str,
 ) -> None:
-    """Real callback success/final prose/zero exit cannot hide missing native settlement or an active tool.
+    """Drop one real event: callback success, prose and zero exit cannot substitute for native settlement.
 
-    Historical structured-output replay checks miss strict settlement for host bindings without an output schema.
-    Drop one actual transport event; every provider choice, callback and other native event remains real.
-    """
+    Output-only replay tests do not cover host-bound calls without a schema."""
     original = CliTransport.lines
 
     async def lose_event(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
@@ -604,53 +559,18 @@ async def test_native_bound_calls_without_output_schema_require_positive_settlem
 
 @pytest.mark.parametrize('native', [True, False], ids=['native', 'validation-optout'])
 async def test_installed_pi_submits_native_structured_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool,
+    tmp_path: Path, native_provider: _NativeProvider, native: bool,
 ) -> None:
-    native_pi = shutil.which("pi")
-    if native_pi is None or shutil.which("node") is None:
-        pytest.skip("The installed official Pi CLI and Node are required for native tool loading.")
-    config = tmp_path / "isolated-pi-config"
-    config.mkdir()
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(config))
-    for name in ("PI_API_KEY", "NOUS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-
-    class Provider(_QuietHTTPHandler):
-        def do_POST(self) -> None:
-            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            assert not any('Live native Pi attempt budget:' in json.dumps(message)
-                           for message in request['messages'])
-            output = {"verdict": "complete", "findings": []}
-            deltas: list[dict[str, Any]] = [
-                {"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{
-                    "index": 0, "id": "native-output-001", "type": "function",
-                    "function": {"name": "structured_output", "arguments": json.dumps(output)},
-                }]}, "finish_reason": None}]},
-                {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
-            ]
-            if not native:
-                deltas[0]['choices'][0]['delta'] = {'role': 'assistant', 'content': json.dumps(output)}
-                deltas[1]['choices'][0]['finish_reason'] = 'stop'
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            for payload in deltas:
-                self.wfile.write(("data: " + json.dumps({
-                    "id": "native-output", "object": "chat.completion.chunk", "created": 1,
-                    "model": "output-model", **payload}) + "\n\n").encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-
-    with _loopback_http_server(Provider) as base_url:
-        (config / "models.json").write_text(json.dumps({"providers": {"output-fixture": {
-            "baseUrl": f"{base_url}/v1", "api": "openai-completions",
-            "apiKey": "synthetic-loopback-only", "models": [{"id": "output-model", "reasoning": False,
-                "input": ["text"], "contextWindow": 32768, "maxTokens": 8192}]}}}))
-        monkeypatch.setenv("PI_PROVIDER", "output-fixture")
-        events = [event async for event in PiBackend(model="output-model").execute(
-            tmp_path, "Return the requested result.", output_schema=_SCHEMA, read_only=True, persist_session=False,
-            validate_structured_output=native, tool_call_budget=None if native else 8)]
+    output = {"verdict": "complete", "findings": []}
+    if native:
+        native_provider.turns = [[("native-output-001", "structured_output", output)]]
+    else:
+        native_provider.text = json.dumps(output)
+    events = [event async for event in PiBackend(model="output-model").execute(
+        tmp_path, "Return the requested result.", output_schema=_SCHEMA, read_only=True, persist_session=False,
+        validate_structured_output=native, tool_call_budget=None if native else 8)]
+    assert all('Live native Pi attempt budget:' not in json.dumps(request['messages'])
+               for request in native_provider.requests)
 
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert isinstance(request.config, PiRequestConfig)
@@ -671,27 +591,20 @@ async def test_installed_pi_submits_native_structured_output(
                          ids=['ample', 'submission-only', 'batch-exhausted', 'batch-overdrawn',
                               'initial-only', 'unbounded', 'bounded-recovery', 'exhausted-no-recovery'])
 async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowance: int | None, submit: bool,
+    tmp_path: Path, native_provider: _NativeProvider, allowance: int | None, submit: bool,
 ) -> None:
     """Actual wire requests catch custom notes becoming users or dropping genuine history.
 
     The immediate-submission journey misses threshold transitions, failed/invalid batch
     charges and missing-submission recovery at an unchanged remaining allowance.
     """
-    if shutil.which('pi') is None or shutil.which('node') is None:
-        pytest.skip('The installed official Pi CLI and Node are required for native tool loading.')
-    config = tmp_path / 'isolated-pi-config'
-    config.mkdir()
-    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(config))
-    for name in ('PI_API_KEY', 'NOUS_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
-        monkeypatch.delenv(name, raising=False)
     source = 'Captured source\n'
     (tmp_path / 'source.txt').write_text(source)
     prompt = 'Investigate the supplied source and submit the result.'
     assignment = {'objective': 'first_pass', 'target_ids': ['target-source'], 'candidate_ids': ['candidate-source']}
     policy = 'Stable original system policy: preserve this exact instruction.'
     instructions = policy + '\nDaydream final-submission assignment: ' + json.dumps(assignment)
-    requests: list[dict[str, Any]] = []
+    requests = native_provider.requests
     output = {'verdict': 'complete', 'findings': []}
     batches: list[list[tuple[str, str, dict[str, Any]]]] = [
         [('read-a', 'read', {'path': 'source.txt'}), ('read-missing', 'read', {'path': 'missing.txt'}),
@@ -702,41 +615,15 @@ async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged
         [('final-submit', 'structured_output', output)] if submit else [],
     ]
 
-    class Provider(_QuietHTTPHandler):
-        def do_POST(self) -> None:
-            requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
-            index = len(requests) - 1
-            batch = batches[index]
-            assistant_delta: dict[str, Any] = {
-                'role': 'assistant', 'content': f'Original assistant reasoning summary {index}.'}
-            if batch:
-                assistant_delta['tool_calls'] = [
-                    {'index': index, 'id': call_id, 'type': 'function',
-                     'function': {'name': name, 'arguments': json.dumps(arguments)}}
-                    for index, (call_id, name, arguments) in enumerate(batch)]
-            deltas: list[dict[str, Any]] = [
-                {'choices': [{'index': 0, 'delta': assistant_delta, 'finish_reason': None}]},
-                {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if batch else 'stop'}],
-                 'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}},
-            ]
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/event-stream')
-            self.end_headers()
-            for delta in deltas:
-                self.wfile.write(('data: ' + json.dumps({'id': 'pacing-output', 'object': 'chat.completion.chunk',
-                    'created': 1, 'model': 'output-model', **delta}) + '\n\n').encode())
-            self.wfile.write(b'data: [DONE]\n\n')
-            self.wfile.flush()
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        index = len(requests) - 1
+        native_provider.text = f'Original assistant reasoning summary {index}.'
+        return batches[index]
 
-    with _loopback_http_server(Provider) as base_url:
-        (config / 'models.json').write_text(json.dumps({'providers': {'output-fixture': {
-            'baseUrl': f'{base_url}/v1', 'api': 'openai-completions', 'apiKey': 'synthetic-loopback-only',
-            'models': [{'id': 'output-model', 'reasoning': False, 'input': ['text'],
-                        'contextWindow': 32768, 'maxTokens': 8192}]}}}))
-        monkeypatch.setenv('PI_PROVIDER', 'output-fixture')
-        events = [event async for event in PiBackend(model='output-model').execute(
-            tmp_path, prompt, output_schema=_SCHEMA, review_instructions=instructions,
-            read_only=True, persist_session=False, tool_call_budget=allowance)]
+    native_provider.choose = choose
+    events = [event async for event in PiBackend(model='output-model').execute(
+        tmp_path, prompt, output_schema=_SCHEMA, review_instructions=instructions,
+        read_only=True, persist_session=False, tool_call_budget=allowance)]
 
     assert len(requests) == len(batches)
     completions: dict[str, str] = {}

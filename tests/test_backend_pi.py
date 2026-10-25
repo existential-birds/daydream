@@ -83,11 +83,7 @@ from tests.harness.trajectory import make_recorder
 def test_ordinary_pi_fresh_process_does_not_require_optional_host_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ordinary Pi remains importable and executable when bundled FastMCP is unavailable.
-
-    In-process backend tests preload modules from the all-extras environment, hiding eager imports that
-    break consumers such as the independently locked RL project using MCP 2.
-    """
+    """Ordinary Pi executes without the optional runtime; preloaded all-extras modules hide eager imports."""
     fixture = install_protocol_cli(tmp_path / "external", "pi")
     target = tmp_path / "repo"
     target.mkdir()
@@ -96,30 +92,19 @@ def test_ordinary_pi_fresh_process_does_not_require_optional_host_runtime(
     monkeypatch.delenv("PI_API_KEY", raising=False)
     script = '''
 import asyncio
-import importlib.abc
 import sys
 from pathlib import Path
 import claude_agent_sdk
-import mcp.types
-
-# SDK 1's mandatory Claude SDK dependency itself imports bundled FastMCP.
-# Bootstrap that independent dependency, then make the optional component
-# unavailable before any Daydream import. No Daydream module is preloaded.
+import mcp.server
+# Bootstrap the mandatory Claude dependency, then forbid the optional runtime.
+assert not any(name == "daydream" or name.startswith("daydream.") for name in sys.modules)
 for name in tuple(sys.modules):
     if name.startswith("mcp.server.fastmcp"):
-        del sys.modules[name]
+        sys.modules[name] = None
 for name in ("FastMCP", "fastmcp"):
-    if hasattr(mcp.server, name):
-        delattr(mcp.server, name)
-assert not any(name == "daydream" or name.startswith("daydream.") for name in sys.modules)
-
-class MissingOptionalRuntime(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "daydream.host_tools_server" or fullname.startswith("mcp.server.fastmcp"):
-            raise ImportError("bundled FastMCP is unavailable in this environment")
-        return None
-
-sys.meta_path.insert(0, MissingOptionalRuntime())
+    vars(mcp.server).pop(name, None)
+sys.modules["daydream.host_tools_server"] = None
+sys.modules["mcp.server.fastmcp"] = None
 from daydream.backends.pi import PiBackend
 from daydream.backends import ResultEvent, TextEvent
 
@@ -130,8 +115,8 @@ async def main():
     assert [event.text for event in events if isinstance(event, TextEvent)] == ["CURRENT_REASONING_CANARY"]
 
 asyncio.run(main())
-assert "daydream.host_tools_server" not in sys.modules
-assert "mcp.server.fastmcp" not in sys.modules
+assert sys.modules["daydream.host_tools_server"] is None
+assert sys.modules["mcp.server.fastmcp"] is None
 '''
     result = subprocess.run([sys.executable, "-c", script, str(target)], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
