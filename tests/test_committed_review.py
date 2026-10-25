@@ -6,6 +6,7 @@ cases exercise semantic revisions and whole-admission failures once at Review.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,17 +17,20 @@ from typing import Any
 import pytest
 
 from daydream import clock, git_ops
+from daydream.backends import MetricsEvent, TextEvent
 from daydream.backends.pi import PiBackend
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
-from daydream.host_tools import HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hunk_index import write_hunk_index
 from daydream.review_budget import ReviewLimits
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
+from daydream.trajectory import get_current_recorder
 from tests.harness.git_helpers import git, seed_feature_branch, work_context
+from tests.harness.trajectory import root_trajectory
 
 
 @pytest.fixture
@@ -247,7 +251,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 
 
 @pytest.mark.parametrize(
-    "challenge", ["missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install"]
+    "challenge", ["missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled"]
 )
 async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
@@ -259,10 +263,14 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     This scripts only the external execution boundary and calls the real host
     admission, Git workspace, recorder and output owners. Installed native tests
     own transport accounting/history; old flow tests never enter this program.
+    Cancellation is a distinct BaseException exit: accepted concerns, recorded
+    usage and interrupted coverage must survive artifact-session teardown.
     """
     from daydream import agent
 
     dispatches: list[dict[str, Any]] = []
+    challenge_started = asyncio.Event()
+    bindings: list[HostToolBinding] = []
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         assignment = json.loads(
@@ -272,11 +280,23 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"]}
         )
         binding = kwargs["host_tools"]
+        bindings.append(binding)
         binding.configure_schema(kwargs["output_schema"])
         binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
         if assignment["kind"] == "challenge" and challenge == "timeout":
             raise TimeoutError("native challenge deadline")
         async with binding.session():
+            if assignment["kind"] == "challenge" and challenge == "cancelled":
+                recorder = get_current_recorder()
+                assert recorder is not None
+                async with recorder.invocation(phase=kwargs["phase"]) as invocation:
+                    invocation.observe(TextEvent(text="Counterevidence search is in progress."))
+                    invocation.observe(MetricsEvent(
+                        message_id="observed-challenge", prompt_tokens=17, completion_tokens=3,
+                        cached_tokens=None, cost_usd=0.002,
+                    ))
+                    challenge_started.set()
+                    await asyncio.Event().wait()
             selectors = {
                 part["target_id"]: [
                     {
@@ -343,14 +363,50 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             real_link(source, destination, **kwargs)
 
         monkeypatch.setattr(os, "link", fail_output_install)
-    result = await run_committed_review(
-        CommittedReviewRequest(
-            repo,
-            review_inputs.revision["merge_base_sha"],
-            config=RunConfig(backend="pi", output_mode="review"),
-            limits=ReviewLimits(90, 12, 10),
-        )
+    request = CommittedReviewRequest(
+        repo,
+        review_inputs.revision["merge_base_sha"],
+        config=RunConfig(backend="pi", output_mode="review"),
+        limits=ReviewLimits(90, 12, 10),
     )
+    if challenge == "cancelled":
+        task = asyncio.create_task(run_committed_review(request))
+        started = asyncio.create_task(challenge_started.wait())
+        ready, _ = await asyncio.wait({task, started}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
+        if started not in ready:
+            started.cancel()
+            await asyncio.gather(started, return_exceptions=True)
+            if task.done():
+                pytest.fail(f"Challenge never started: {task.result().to_dict()['execution']}")
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            pytest.fail("Challenge did not start within the test deadline")
+        task.cancel("caller interrupted challenge")
+        with pytest.raises(asyncio.CancelledError, match="caller interrupted challenge"):
+            await task
+        # Read only after both the program and artifact session have exited.
+        value = json.loads((repo / ".daydream/committed-review.json").read_text())
+        validate_committed_result(value)
+        assert value["analyzed_revision"] == review_inputs.revision
+        assert value["terminal_result"]["pipeline_state"] == "cancelled"
+        assert value["terminal_result"]["analysis_state"] == "incomplete"
+        assert "interruption" in value["terminal_result"]["reason_codes"]
+        assert value["claims"][0]["disposition"] == "unresolved" and value["findings"] == []
+        interrupted = value["execution"][-1]
+        assert interrupted == {
+            "assignment": "challenge", "accepted": False, "settled": False,
+            "cleanup_complete": True, "reason": "interruption",
+        }
+        assert all(not binding.authority_open and binding.cleanup_complete for binding in bindings)
+        report = (repo / ".review-output.md").read_text()
+        assert value["run_id"] in report and "Unresolved concerns" in report and "interruption" in report
+        trajectory = root_trajectory(repo)
+        assert trajectory["session_id"] == value["run_id"] and trajectory["extra"]["partial"]
+        assert trajectory["final_metrics"]["total_prompt_tokens"] == 17
+        assert trajectory["final_metrics"]["total_cost_usd"] == 0.002
+        return
+    result = await run_committed_review(request)
     value = result.to_dict()
     assert result.output_installed is (challenge != "output-install")
     assert result.capture_state == "complete"

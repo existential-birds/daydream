@@ -7,6 +7,7 @@ existing lifetimes. Route/default cutover is deliberately owned by later work.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import uuid
@@ -280,7 +281,7 @@ class Review:
             )
         else:
             coverage.record_phase("no_diff", "complete", noop=True)
-        pipeline = "failed" if reasons else "completed"
+        pipeline = "cancelled" if ReasonCode.INTERRUPTION.value in reasons else "failed" if reasons else "completed"
         terminal = coverage.finalize(pipeline)
         result = {
             "schema_version": 1,
@@ -392,6 +393,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         git_ops.worktree_add(source, captured_root, original.head_sha, detach=True)
         work = replace(original, repo=captured_root, is_ephemeral=True, run_id=run_id)
         try:
+            git_ops.validate_committed_worktree(captured_root, original.head_sha)
             with bind_run_context(context):
                 async with open_artifact_session(work, session_id=run_id, owner=owner) as session:
                     session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
@@ -399,7 +401,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                     trajectory = session.register_trajectory_output(None)
                     capture = _RunWriteCapture(session_id=run_id)
                     artifacts = _RunArtifacts(session, owner, trajectory, capture, None)
-                    diff = git_ops.diff(captured_root, original.base_sha, original.head_sha)
+                    diff = git_ops.committed_diff(captured_root, original.base_sha, original.head_sha)
                     import hashlib
 
                     revision = AnalyzedRevision(
@@ -451,6 +453,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                         source_kind=profile.source_kind,
                         digest=profile.digest,
                     )
+                    cancellation: asyncio.CancelledError | None = None
                     try:
                         async with recorder:
                             if files:
@@ -486,6 +489,10 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                                         diff_path=diff_path,
                                         profile=settings,
                                     )
+                    except asyncio.CancelledError as exc:
+                        # Recorder exit retains interrupted native evidence before
+                        # finalization. The caller still receives its cancellation.
+                        cancellation = exc
                     finally:
                         for backend in backends.values():
                             with anyio.CancelScope(shield=True):
@@ -501,28 +508,38 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                                             "reason": ReasonCode.BACKEND_FAILURE.value,
                                         }
                                     )
-                    payload = review.seal(settings)
-                    output_error: str | None = None
-                    installed = False
-                    capture_state = (
-                        "complete" if capture.final is not None and capture.validation_error is None else "failed"
-                    )
                     try:
-                        with anyio.CancelScope(shield=True):
-                            if clock.monotonic() >= finish:
-                                raise TimeoutError("finalization allowance exhausted before output staging")
-                            write_committed_review_output(session, payload)
-                            selected = capture.final or capture.partial
-                            frozen = session.freeze(selected) if selected is not None else session.freeze_unproduced()
-                            if clock.monotonic() >= finish:
-                                raise TimeoutError("finalization allowance exhausted before installation")
-                            session.finalize_frozen(frozen, disposition=ArtifactDisposition.PARTIAL_EVIDENCE)
-                            installed = True
-                    except Exception as exc:
-                        output_error = type(exc).__name__
-                    return CommittedReviewResult(
-                        canonical_json(payload), installed, capture_state, output_error=output_error
-                    )
+                        payload = review.seal(settings)
+                        output_error: str | None = None
+                        installed = False
+                        capture_state = (
+                            "failed" if capture.validation_error is not None else
+                            "complete" if capture.final is not None else
+                            "partial" if capture.partial is not None else "failed"
+                        )
+                        try:
+                            with anyio.CancelScope(shield=True):
+                                if clock.monotonic() >= finish:
+                                    raise TimeoutError("finalization allowance exhausted before output staging")
+                                write_committed_review_output(session, payload)
+                                selected = capture.final or capture.partial
+                                frozen = (
+                                    session.freeze(selected) if selected is not None else session.freeze_unproduced()
+                                )
+                                if clock.monotonic() >= finish:
+                                    raise TimeoutError("finalization allowance exhausted before installation")
+                                session.finalize_frozen(frozen, disposition=ArtifactDisposition.PARTIAL_EVIDENCE)
+                                installed = True
+                        except Exception as exc:
+                            output_error = type(exc).__name__
+                        return CommittedReviewResult(
+                            canonical_json(payload), installed, capture_state, output_error=output_error
+                        )
+                    finally:
+                        if cancellation is not None:
+                            # Successful publication must precede session teardown;
+                            # a failed installation leaves prior public bytes intact.
+                            raise cancellation
         finally:
             with anyio.CancelScope(shield=True):
                 git_ops.worktree_remove(source, captured_root, force=True)
@@ -591,6 +608,9 @@ async def _dispatch(
                 reason = ReasonCode.EVIDENCE_INCOMPLETE.value
         elif not binding.accepted:
             reason = ReasonCode.MISSING_OUTPUT.value
+    except asyncio.CancelledError:
+        reason = ReasonCode.INTERRUPTION.value
+        raise
     except Exception as exc:
         reason = reason_for_exception(exc).value
     finally:

@@ -41,7 +41,10 @@ strategies; protected host obligations cannot be disabled by profile prose.
 
 The package-level committed-review program owns one captured committed change,
 its complete planned targets, admitted semantic claim revisions and challenge
-obligations. It uses native Pi investigation followed by a distinct native
+obligations. Native regular files must match raw committed blob identities;
+checkout filters or EOL transforms that change those bytes cause refusal before
+model work. The diff uses exact commit endpoints without working-tree changes,
+external diff drivers or text conversion. It uses native Pi investigation followed by a distinct native
 conversation seeking counterevidence for every proposed publication claim.
 Confidence and investigation completion cannot waive challenge. A changed claim,
 trigger, consequence, location or supporting grounds requires fresh challenge;
@@ -53,7 +56,9 @@ challenge leaves unfinished work. Discovery cannot consume the protected
 challenge and finalization allowance. Admission validates a complete submission
 before synchronously rechecking authority, revisions and shared limits at install;
 closing authority precedes cleanup and sealing. Accepted work survives later
-native settlement failure.
+native settlement failure. Task cancellation seals and installs interrupted
+coverage and retained concerns under the protected finalization allowance, then
+propagates cancellation to the caller; it does not restore judgments in a later run.
 
 The run's artifact session installs `committed-review.json` with schema version 1:
 canonical claims and challenge evidence, typed terminal coverage, run ID, captured
