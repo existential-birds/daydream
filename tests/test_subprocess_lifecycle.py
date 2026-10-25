@@ -39,27 +39,18 @@ async def _spawn_holder() -> asyncio.subprocess.Process:
     return proc
 
 async def test_terminate_process_kills_whole_group() -> None:
-    """Grandchildren cannot outlive the CLI: the whole group dies on terminate."""
+    """A live group is reaped with its pipes closed, then teardown safely repeats."""
+    base = fd_count()
     proc = await _spawn_holder()
     pgid = os.getpgid(proc.pid)
     assert pgid == proc.pid  # session leader => pid is the group id
 
     await terminate_process(proc)
-    await wait_for_process_group_gone(pgid)
-
-async def test_terminate_process_releases_fds() -> None:
-    """No fd growth after an aborted run, even with a grandchild holding the pipe."""
-    base = fd_count()
-    proc = await _spawn_holder()
-    await terminate_process(proc)
+    await asyncio.gather(
+        wait_for_process_group_gone(pgid), wait_for_fd_baseline(base),
+    )
+    await terminate_process(proc)  # cancel + finally may both close the same process
     await wait_for_fd_baseline(base)
-
-async def test_terminate_process_is_idempotent() -> None:
-    """Calling terminate twice (cancel + finally both fire) is a no-op."""
-    proc = await _spawn_holder()
-    await terminate_process(proc)
-    await terminate_process(proc)  # must not raise
-
 
 async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None:
     """Actual direct-child exit bounds cleanup even when an escaped writer retains stdout."""
@@ -71,6 +62,7 @@ async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None
         "print(writer.pid, flush=True)\n"
         "time.sleep(60)\n"
     )
+    base = fd_count()
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-c", child, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT, start_new_session=True,
@@ -86,6 +78,7 @@ async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None
         async with asyncio.timeout(3):
             await asyncio.shield(cleanup)
         assert proc.returncode == -signal.SIGKILL
+        await wait_for_fd_baseline(base, timeout_s=5)
     finally:
         # The escaped session intentionally cannot be cleaned by killpg(proc.pid).
         # Release it even when the baseline remains blocked in proc.wait().
