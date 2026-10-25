@@ -18,15 +18,6 @@ def _current_database(root: Path) -> None:
     index.upsert_run(root, make_manifest(session_id="historical", repo_slug="org/repo"))
 
 
-def test_local_diagnostic_index_records_runs_without_annotation_tables(tmp_path: Path) -> None:
-    _current_database(tmp_path)
-    with closing(sqlite3.connect(tmp_path / "index.db")) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
-        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
-        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
-            ("historical", "complete", "unknown", "org/repo")]
-
-
 @pytest.mark.parametrize("unsupported", [
     "old", "future", "zero-populated", "old-empty", "future-empty", "missing-runs",
     "missing-column", "missing-index", "wrong-index", "wrong-default", "wrong-type",
@@ -108,6 +99,10 @@ def test_local_diagnostic_writes_preserve_unrelated_history(tmp_path: Path) -> N
     _current_database(tmp_path)
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
+        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
+            ("historical", "complete", "unknown", "org/repo")]
         connection.execute("ALTER TABLE runs ADD COLUMN retired_metric REAL")
         connection.execute("UPDATE runs SET retired_metric = 0.75")
         connection.execute("CREATE TABLE historical_notes (note TEXT)")

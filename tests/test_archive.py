@@ -736,36 +736,28 @@ def test_phase_start_without_terminal_artifact_is_partial(tmp_path: Path) -> Non
     assert states["remote_ci"] == {"ran": True, "status": "partial"}
 
 
-def test_remote_advisory_failure_is_detail_not_hard_failure(tmp_path: Path) -> None:
-    advisory = CIObservation(source="check_run", context="Optional Linux", app_id=11, state="fail", raw_state="failure",
-        url="https://github.com/example/project/actions/runs/8", diagnostic="optional job failed",
-    )
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, advisory=(advisory,))
-    remote = _derive_push_remote_states(tmp_path)["remote_ci"]
-    assert remote["status"] == "succeeded"
-    assert remote["details"]["advisory_failures"] == ["Optional Linux"]
-
-
 def test_archive_required_success_with_pending_advisory_is_succeeded(
     target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     recorder = _MockRecorder(session_id="advisory-pending-session")
     config = make_config(target, archive=True, pr_repo="example/project", pr_number=42)
-    advisory = CIObservation(
-        source="check_run", context="Optional Linux", app_id=11, state="pending", raw_state="in_progress",
+    advisory = (CIObservation(
+        source="check_run", context="Optional macOS", app_id=11, state="pending", raw_state="in_progress",
         url="https://github.com/example/project/actions/runs/8", diagnostic=None,
-    )
+    ), CIObservation(
+        source="check_run", context="Optional Linux", app_id=11, state="fail", raw_state="failure",
+        url="https://github.com/example/project/actions/runs/8", diagnostic="optional job failed",
+    ))
     _write_deep(target, "test-verdict.json", {"session_id": recorder.session_id, "passed": True})
     _write_push_verdict(target, session_id=recorder.session_id)
-    _write_remote_verdict(target, session_id=recorder.session_id, advisory=(advisory,))
+    _write_remote_verdict(target, session_id=recorder.session_id, advisory=advisory)
     artifact = target / ".daydream" / "deep" / "remote-ci-verdict.json"
     payload = json.loads(artifact.read_text())
     evaluated = evaluate_remote_ci(RemoteCISnapshot(
             target=RemoteCITarget(target_dir=target, **payload["target"]), binding=PRCIBinding(**payload["binding"]),
             policy=RequiredPolicy((RequiredContext("Build", 10),), True),
             active_workflows=({"id": 7, "state": "active"},), head_observations=(),
-            merge_observations=(CIObservation(**payload["required_observations"][0]), advisory),
+            merge_observations=(CIObservation(**payload["required_observations"][0]), *advisory),
         ), elapsed=20, stable_polls=2, limits=RemoteCILimits(),
     )
     assert evaluated.status == "passed"
@@ -785,9 +777,11 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     run_dir = archive_dir / "runs" / recorder.session_id
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["phase_states"]["remote_ci"]["status"] == "succeeded"
+    assert manifest["phase_states"]["remote_ci"]["details"]["advisory_failures"] == ["Optional Linux"]
     assert manifest["pipeline_status"] == "succeeded"
     copied = json.loads((run_dir / "deep" / "remote-ci-verdict.json").read_text())
-    assert copied["advisory_observations"][0]["state"] == "pending"
+    assert [(row["context"], row["state"]) for row in copied["advisory_observations"]] == [
+        ("Optional macOS", "pending"), ("Optional Linux", "fail")]
 
 
 def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) -> None:
