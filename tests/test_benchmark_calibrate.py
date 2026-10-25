@@ -2,7 +2,9 @@ import asyncio
 import json
 import re
 import stat
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -80,8 +82,17 @@ def test_every_pair_renders_within_24kib() -> None:
         prompt = sr.render_pair_prompt(p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE)
         assert len(prompt.encode("utf-8")) <= 24 * 1024
 
-def test_loader_resolves_sibling_verifier_core() -> None:
+def test_loader_resolves_sibling_verifier_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cold loads preserve existing module registrations and cache the canonical judge."""
+    prior_judge = ModuleType("score_review")
+    monkeypatch.setattr(calibrate, "_TEMPLATE_CACHE", {})
+    monkeypatch.setitem(sys.modules, "score_review", prior_judge)
+    monkeypatch.delitem(sys.modules, "verifier_core", raising=False)
+
     sr = calibrate._load_judge_template()
+    assert sr is not prior_judge
+    assert sys.modules["score_review"] is prior_judge
+    assert "verifier_core" not in sys.modules
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
     # The asset's bare import must resolve to the canonical host module.
@@ -90,6 +101,9 @@ def test_loader_resolves_sibling_verifier_core() -> None:
     verdict = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "known verifier call"})
     assert isinstance(verdict, sr.verifier_core.Verdict)
     assert verdict.match is True and verdict.confidence == 0.9
+    assert calibrate._load_judge_template() is sr
+    assert sys.modules["score_review"] is prior_judge
+    assert "verifier_core" not in sys.modules
 
 def test_client_builder_threads_http_seam() -> None:
     fake, calls = _scripted_http([{"match": False, "confidence": 0.2, "reasoning": "n"}])
