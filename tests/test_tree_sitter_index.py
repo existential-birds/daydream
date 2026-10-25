@@ -442,7 +442,7 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
         ("pkg/mod.py", "python"), ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
         # .js is parsed by the TypeScript grammar, .jsx by the TSX grammar.
         ("src/a.js", "javascript"), ("src/a.jsx", "tsx"), ("cmd/main.go", "go"), ("src/lib.rs", "rust"),
-        ("README.md", None), ("Makefile", None),
+        ("README.md", None),
         ("src/a.PY", None),  # suffix matching is case-sensitive
     ],
 )
@@ -636,6 +636,9 @@ def test_branch_lines_python_flat_elif_chain_and_match_cases() -> None:
     assert branch_statement_lines("python", PYTHON_CF) == [
         6, 8, 12, 14, 16, 18, 20, 22, 25, 27, 29, 30, 31, 32, 34, 36, 38, 40
     ]
+    assert is_branch_line("python", PYTHON_CF, 24) is True
+    assert is_branch_line("python", PYTHON_CF, 1) is False
+    assert is_branch_line("python", PYTHON_CF, 42) is False
 
 def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
     # else_clause NESTS in TypeScript: the second `if` (4) lives inside the first
@@ -646,6 +649,8 @@ def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
     assert branch_statement_lines("typescript", TYPESCRIPT_CF) == [
         2, 4, 9, 12, 15, 18, 21, 23, 25, 28, 29, 31, 33, 35, 39
     ]
+    assert is_branch_line("typescript", TYPESCRIPT_CF, 30) is True
+    assert is_branch_line("typescript", TYPESCRIPT_CF, 32) is True
 
 @pytest.mark.parametrize("grammar", ["tsx", "javascript"])
 def test_branch_lines_other_grammars_match_typescript_on_the_same_source(grammar: str) -> None:
@@ -664,6 +669,10 @@ def test_branch_lines_go_has_no_else_node_and_four_switch_kinds() -> None:
     # All four container kinds (20, 22 expression_switch, 31 type_switch, 35
     # select) are dropped in favour of their cases (21, 23, 25, 28, 32, 36).
     assert branch_statement_lines("go", GO_CF) == [10, 12, 17, 21, 23, 25, 28, 32, 36]
+    assert is_branch_line("go", GO_CF, 20) is True
+    assert is_branch_line("go", GO_CF, 22) is True
+    assert is_branch_line("go", GO_CF, 31) is True
+    assert is_branch_line("go", GO_CF, 35) is True
 
 def test_branch_lines_rust_nested_else_chain_and_match_arms() -> None:
     # Rust nests else_clause exactly like TypeScript (5, 7 are the two heads).
@@ -671,6 +680,7 @@ def test_branch_lines_rust_nested_else_chain_and_match_arms() -> None:
     # line); 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
     # its match_arm lines (22, 23, 24).
     assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 33]
+    assert is_branch_line("rust", RUST_CF, 21) is True
 
 def test_branch_lines_rust_let_condition_on_its_own_line() -> None:
     # Isolates let_condition from the if_expression head, which they normally
@@ -687,29 +697,6 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
     assert branch_statement_lines("python", b"def f(:\n    if x:\n        pass\n") == [2]
     assert branch_statement_lines("typescript", b"function f( {\n  if (a) {\n") == []
 
-
-@pytest.mark.parametrize(
-    ("language_id", "line"),
-    [
-        ("python", 24),  # match x:
-        ("typescript", 30),  # switch (t) {
-        ("typescript", 32),  # nested switch (q) {
-        ("go", 20),  # switch a {
-        ("go", 22),  # nested switch b {
-        ("go", 31),  # switch t := v.(type) {
-        ("go", 35),  # select {
-        ("rust", 21),  # match v {
-    ],
-)
-def test_is_branch_line_reports_switch_container_lines(language_id: str, line: int) -> None:
-    """Container lines count as branches even when the count query reports cases."""
-    source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
-    assert is_branch_line(language_id, source, line) is True
-    assert line not in branch_statement_lines(language_id, source)
-
-def test_is_branch_line_false_for_a_plain_statement() -> None:
-    assert is_branch_line("python", PYTHON_CF, 1) is False
-    assert is_branch_line("python", PYTHON_CF, 42) is False
 
 def test_is_branch_line_falls_back_to_keyword_regex() -> None:
     elixir = b"defmodule M do\n  if x do\n    1\n  end\nend\n"

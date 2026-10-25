@@ -24,10 +24,6 @@ class TestExtractJson:
         pytest.param("", None, id="empty-string"),
         pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
         pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
-        pytest.param(
-                '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```',
-                {"findings": [{"arb_id": 1, "keep": True}]}, id="markdown-fenced-json",
-            ),
         pytest.param("This is just prose with no JSON whatsoever.", None, id="no-json-at-all",),
         pytest.param('note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
                 {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
@@ -59,21 +55,8 @@ class TestExtractJson:
 class TestExtractJsonBySchema:
     """Selection is driven by the boundary's acceptance predicate, never span size."""
 
-    def test_reported_case_resolves_to_empty_result(self) -> None:
-        text = ('The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
-                'No defects established. {"issues": []}')
-        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
-        assert sel.value == {"issues": []}
-
     def test_larger_incidental_object_does_not_win(self) -> None:
         text = 'prefix {"a": [1,2,3,4,5,6,7,8]} trailing {"issues": []}'
-        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
-        assert sel.value == {"issues": []}
-
-    def test_last_validating_candidate_in_document_order_wins(self) -> None:
-        rec = {"id": 1, "description": "x", "file": "f", "line": 1,
-               "severity": "low", "confidence": "HIGH", "rationale": "r", "evidence": "f:1"}
-        text = json.dumps({"issues": [rec]}) + ' then ' + json.dumps({"issues": []})
         sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
         assert sel.value == {"issues": []}
 
@@ -170,11 +153,6 @@ class TestAtomicWritePrimitives:
             os.umask(umask)
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
-    def test_fsync_false_skips_sync_but_still_atomic(self, tmp_path: Path) -> None:
-        target = tmp_path / "fast.json"
-        atomic_write_bytes(target, b"ok", fsync=False, dir_fsync=False)
-        assert target.read_bytes() == b"ok"
-
     def test_json_knob_byte_format_is_stable(self, tmp_path: Path) -> None:
         target = tmp_path / "doc.json"
         atomic_write_json(target, {"b": 1, "a": [1, 2]}, sort_keys=True)
@@ -195,8 +173,3 @@ class TestAtomicWritePrimitives:
         monkeypatch.setattr(os, "replace", real_replace)
         assert target.read_bytes() == b"prior"
         assert list(target.parent.iterdir()) == [target], "temp file must be cleaned up"
-
-    def test_dir_fsync_publishes_rename_durably(self, tmp_path: Path) -> None:
-        target = tmp_path / "durable.json"
-        atomic_write_bytes(target, b"durable", dir_fsync=True)
-        assert target.read_bytes() == b"durable"

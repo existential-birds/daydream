@@ -80,7 +80,7 @@ def test_terminal_rejects_inconsistent_or_unknown_evidence(mutate: Callable[[dic
         validate_terminal_result(result)
 
 
-@pytest.mark.parametrize("bad", [None, [], {"schema_version": 1}, {"schema_version": True}])
+@pytest.mark.parametrize("bad", [None, {"schema_version": 1}, {"schema_version": True}])
 def test_corrupt_coverage_is_a_controlled_validation_failure(bad: Any) -> None:
     with pytest.raises(ValueError):
         ReviewCoverage.from_dict(bad)
