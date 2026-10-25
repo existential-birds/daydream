@@ -416,6 +416,10 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
                             )
                         )
                         with case.monkeypatch.context() as poison:
+                            # Refuse this row's override, independently of Git's hook environment.
+                            for name in tuple(os.environ):
+                                if name.startswith("GIT_"):
+                                    poison.delenv(name, raising=False)
                             poison.setenv(variable, value)
                             with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
                                 git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
@@ -623,14 +627,20 @@ def test_independent_snapshot_preserves_safe_config_and_independent_objects(
                 tmp_path = case.tmp_path
                 monkeypatch = case.monkeypatch
                 repo = shutil.copytree(source_repo, tmp_path / "repo")
-                count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-                monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", "commit.gpgsign")
-                monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", signing)
-                monkeypatch.setenv("GIT_CONFIG_COUNT", str(count + 1))
+                # Exercise absent GIT_EXEC_PATH even when pytest runs inside a Git hook.
+                for name in tuple(os.environ):
+                    if name.startswith("GIT_"):
+                        monkeypatch.delenv(name, raising=False)
+                monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+                monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+                monkeypatch.setenv("GIT_CONFIG_VALUE_0", signing)
+                monkeypatch.setenv("GIT_CONFIG_KEY_1", "core.excludesFile")
+                monkeypatch.setenv("GIT_CONFIG_VALUE_1", "/dev/null")
                 before = dict(os.environ)
                 snapshot = git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
                 assert dict(os.environ) == before
                 assert _git(snapshot.repo, "config", "--get", "commit.gpgsign") == signing
+                assert _git(snapshot.repo, "config", "--get", "core.excludesFile") == "/dev/null"
                 assert _git(snapshot.repo, "rev-parse", "HEAD") == _git(repo, "rev-parse", "HEAD")
                 _git(snapshot.repo, "fsck", "--full", "--no-dangling")
                 assert any((snapshot.repo / ".git" / "objects").rglob("*.pack"))
