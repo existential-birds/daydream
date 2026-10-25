@@ -36,10 +36,10 @@ def _rec(uid: str, file: str, line: int, severity: str = "medium") -> dict[str, 
     return {"uid": uid, "file": file, "line": line, "severity": severity}
 
 def test_a_location_is_never_split_across_groups() -> None:
-    records = [_rec(f"py:{i}", "api.py", 10 if i < 3 else 20) for i in range(1, 5)]
-    groups = partition_arbiter_targets(records, [0, 1, 2, 3], edges={}, max_targets=2)
+    records = [_rec(f"py:{i}", "api.py", 10 if i < 5 else 20) for i in range(1, 6)]
+    groups = partition_arbiter_targets(records, [0, 1, 2, 3, 4], edges={}, max_targets=2)
     same_location = [g for g in groups if "py:1" in g.target_uids][0]
-    assert {"py:1", "py:2", "py:3"} <= set(same_location.target_uids)
+    assert {"py:1", "py:2", "py:3", "py:4"} <= set(same_location.target_uids)
 
 
 def test_groups_are_order_independent_and_identity_is_stable() -> None:
