@@ -113,16 +113,6 @@ async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry
     assert current_run_context() is None
 
 
-@pytest.mark.anyio
-async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> None:
-    context = RunContext(InteractionPolicy(quiet=True))
-    backend = ScriptedBackend(events=[RuntimeError("boom")], retry_attempts=0)
-    with pytest.raises(RuntimeError, match="boom"):
-        await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW, run_context=context)
-    assert context.active_backends() == ()
-    assert active_backends() == ()
-
-
 async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
     class InjectedInterrupt(BaseException):
         pass
