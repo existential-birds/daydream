@@ -425,34 +425,12 @@ def test_group_worktree_rollback_preserves_sibling_index_entry(git_repo: Path) -
     assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
     assert git_ops.snapshot_index(git_repo) == sibling_index
 
-def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_warning(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _seed(git_repo, {"allowed.py": b"allowed\n", "outside.py": b"owner\n"})
-    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
-    index_before = git_ops.snapshot_index(git_repo)
-    (git_repo / "outside.py").write_bytes(b"unauthorized\n")
-    gh_record = _install_scope_boundary_shims(
-        tmp_path, monkeypatch, fail_diff_path="outside.py", watched_paths=("outside.py",),
-    )
-    result = _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True)
-
-    assert result.mutated is True
-    assert (git_repo / "outside.py").read_bytes() == b"owner\n"
-    assert git_ops.snapshot_index(git_repo) == index_before
-    assert not gh_record.exists()
-    assert [(event.action, event.path) for event in footprint.events][-1] == ("restore", "outside.py",)
-    warning_output = capsys.readouterr().out
-    assert "continuing to" in warning_output
-    assert "restoration without filing" in warning_output
-    assert "SECRET_TOKEN" not in warning_output
-    assert "outside.py" not in warning_output
-
 def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_residuals(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _seed(git_repo, {"allowed.py": b"allowed\n", "outside-a.py": b"owner a\n", "outside-b.py": b"owner b\n"},)
     footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
+    index_before = git_ops.snapshot_index(git_repo)
     (git_repo / "outside-a.py").write_bytes(b"unauthorized a\n")
     (git_repo / "outside-b.py").write_bytes(b"unauthorized b\n")
     gh_record = _install_scope_boundary_shims(
@@ -463,12 +441,22 @@ def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_res
     assert result.mutated is True
     assert (git_repo / "outside-a.py").read_bytes() == b"owner a\n"
     assert (git_repo / "outside-b.py").read_bytes() == b"owner b\n"
+    assert git_ops.snapshot_index(git_repo) == index_before
+    assert [(event.action, event.path) for event in footprint.events if event.origin == "guard"] == [
+        ("restore", "outside-a.py"), ("restore", "outside-b.py"),
+    ]
+    assert gh_record.is_file()
     calls = [json.loads(line) for line in gh_record.read_text().splitlines()]
     assert len(calls) == 1
     assert calls[0]["watched"] == {"outside-a.py": b"owner a\n".hex(), "outside-b.py": b"owner b\n".hex()}
     assert "outside-b.py" in calls[0]["body"]
     assert "+unauthorized b" in calls[0]["body"]
     assert "outside-a.py" not in calls[0]["body"]
+    warning_output = capsys.readouterr().out
+    assert "continuing to" in warning_output
+    assert "restoration without filing" in warning_output
+    assert "SECRET_TOKEN" not in warning_output
+    assert "outside-a.py" not in warning_output
 
 def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_effort(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
