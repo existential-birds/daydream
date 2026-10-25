@@ -44,7 +44,7 @@ class HostToolRejected(Exception):
 
 
 HostToolFailureCode = Literal[
-    "input_unavailable", "authority_closed", "deadline_expired", "capacity_exhausted",
+    "input_unavailable", "evidence_incomplete", "authority_closed", "deadline_expired", "capacity_exhausted",
     "native_correlation", "native_readiness", "invalid_frame", "callback_failed", "invalid_result",
 ]
 

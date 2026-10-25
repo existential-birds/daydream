@@ -490,7 +490,7 @@ class ReviewInvestigation:
                     if binding is not None and binding.fatal_error is not None:
                         self._continuable_failure = False
                         self.failure_diagnostic = str(binding.fatal_error)
-                        if binding.fatal_error.code == 'input_unavailable':
+                        if binding.fatal_error.code in {'input_unavailable', 'evidence_incomplete'}:
                             self.reason = 'evidence_incomplete'
                 else:
                     actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
@@ -669,8 +669,10 @@ class ReviewInvestigation:
             if admitting:
                 self.assertion_failure_class = 'admission_failure'
                 self.assertion_failure_diagnostic = (
-                    'contradictions: this stage cannot replace a previously closed judgment; '
-                    'remove the conflicting new assertion or leave its candidate unresolved.')
+                    'contradictions: source evidence contradicts a previously closed judgment; '
+                    'retained findings stay admitted and affected work remains incomplete.')
+                if native_sources:
+                    raise HostToolFatal(self.assertion_failure_diagnostic, code='evidence_incomplete')
             return None, 'evidence_incomplete'
         can_prepare = (
             'notes' in output and isinstance(raw_targets, list) and isinstance(raw_decisions, list)

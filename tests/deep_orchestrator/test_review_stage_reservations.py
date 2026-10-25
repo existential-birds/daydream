@@ -93,13 +93,15 @@ class NativeStageBackend(StagedBackend, PiBackend):
 
 
 @pytest.mark.parametrize('fault', ['foreign-source', 'invalid-judgment', 'not-reviewed-reason',
-                                 'prior-admitted', 'handoff-bytes'])
+                                 'prior-admitted', 'handoff-bytes', 'foreign-contradiction',
+                                 'duplicate-contradiction'])
 async def test_native_correction_admits_only_the_valid_whole_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     """Transport feedback alone misses actionable domain corrections that preserve prior state and shared capacity."""
     from daydream.review_investigation import HANDOFF_MAX_BYTES, ReviewInvestigation
 
+    triage = fault in {'foreign-contradiction', 'duplicate-contradiction'}
     review = many_file_review(tmp_path, monkeypatch, count=9 if fault == 'prior-admitted' else 1, docs_count=0)
     backend = NativeStageBackend(review.repo)
     backend.fanout_concurrency = 1
@@ -118,8 +120,10 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     @backend.script()
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         nonlocal checked
-        if fault == 'prior-admitted' and not stage['progress']:
+        if (fault == 'prior-admitted' and not stage['progress']) or (triage and stage['stage'] == 'first_pass'):
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            if triage:
+                output['candidates'].append(candidate())
             yield ToolStartEvent(id='submit', name='structured_output', input=output)
             yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
             return
@@ -128,6 +132,9 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
             yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
             return
         checked = True
+        if triage:
+            output['candidates'] = [candidate(candidate_id=item['candidate_id'], disposition='rejected')
+                                    for item in stage['candidates']]
         binding = backend.calls[-1]['host_tools']
         investigation = investigations['python']
 
@@ -153,8 +160,9 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
         monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', tight_limit)
         bad = deepcopy(output)
         bad['notes'] = 'REJECTED SEMANTIC NOTE'
-        bad['candidates'] = [candidate(disposition='confirmed', finding=dict(
-            record(), description='Rejected defect'))]
+        if not triage:
+            bad['candidates'] = [candidate(disposition='confirmed', finding=dict(
+                record(), description='Rejected defect'))]
         if fault == 'foreign-source':
             bad['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
         elif fault in {'invalid-judgment', 'prior-admitted'}:
@@ -163,20 +171,27 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
             bad['targets'][0].update(status='not_reviewed', reason='', evidence_refs=[])
         elif fault == 'handoff-bytes':
             bad['notes'] += 'x' * HANDOFF_MAX_BYTES
+        elif triage:
+            closed_id, = stage['closed_candidate_ids']
+            bad['contradictions'] = ['foreign-candidate'] if fault == 'foreign-contradiction' else [closed_id] * 2
         try:
             yield ToolStartEvent(id='rejected-submit', name='structured_output', input=bad)
             yield ToolResultEvent(id='rejected-submit', output='Receipt.', is_error=False)
             assert binding.accepted is False and binding.possibly_accepted is False
+            assert binding.fatal_error is None
             assert retained_state() == before, 'rejected plans must preserve all admitted state and shared capacity'
             if fault == 'handoff-bytes':
                 assert investigation.assertion_failure_class == 'admission_failure'
-            if fault != 'prior-admitted':
+            if fault != 'prior-admitted' and not triage:
                 output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             yield ToolStartEvent(id='corrected-submit', name='structured_output', input=output)
             yield ToolResultEvent(id='corrected-submit', output='Submitted.', is_error=False)
             assert binding.accepted is True
             assert binding.accepted_result is not None
-            assert binding.accepted_result['targets'][0]['evidence_refs'][0]['role'] == 'assigned'
+            if triage:
+                assert binding.accepted_result['targets'] == []
+            else:
+                assert binding.accepted_result['targets'][0]['evidence_refs'][0]['role'] == 'assigned'
             assert investigation.target_progress == expected
             assert sum(investigation.coverage._target_decision_bytes.values()) == tight_limit
             accepted = retained_state()
@@ -190,11 +205,11 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     assert checked
     python_stages = [event['metadata'] for event in stage_ends(review, 'python')]
     assert all(item['admitted'] for item in python_stages)
-    corrected = python_stages[1 if fault == 'prior-admitted' else 0]
+    corrected = python_stages[1 if fault == 'prior-admitted' or triage else 0]
     assert corrected['submission_starts'] == 2
     assert corrected['failed_submissions'] == 1
     assert corrected['successful_submissions'] == 1
-    assert corrected['admitted_candidate_count'] == 1
+    assert corrected['admitted_candidate_count'] == (2 if triage else 1)
     assert 'REJECTED SEMANTIC NOTE' not in str(data)
     assert all('REJECTED SEMANTIC NOTE' not in call['prompt'] for call in backend.calls)
     assert all('source_id' not in str(decision) for decision in scopes(data)['python']['target_decisions'])
@@ -219,19 +234,24 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
         assert 'candidates[0].grounds' in diagnostic and 'nonblank' in diagnostic and 'supply' in diagnostic
     elif fault == 'not-reviewed-reason':
         assert 'targets[0].reason' in diagnostic and 'not_reviewed' in diagnostic and 'supply' in diagnostic
+    elif triage:
+        assert 'contradictions' in diagnostic and 'unique previously closed_candidate_ids' in diagnostic
+        assert 'remove duplicate or foreign IDs' in diagnostic
     else:
         assert str(HANDOFF_MAX_BYTES) in diagnostic and 'cumulative' in diagnostic and 'shorten' in diagnostic
 
 
 @pytest.mark.parametrize('fault', ['corrupt-canonical', 'delete-canonical', 'target-capacity', 'handoff-capacity',
-                                 'handoff-byte-capacity', 'triage-byte-capacity', 'triage-byte-correction'])
+                                 'handoff-byte-capacity', 'triage-byte-capacity', 'triage-byte-correction',
+                                 'closed-contradiction'])
 async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    """Bounds need required triage rows and projections; optional payload shrink must still admit within capacity."""
+    """Native corrections cannot erase failed inputs, retained-capacity bounds or valid closed contradictions."""
     from daydream import review_investigation
 
-    triage = fault.startswith('triage-')
+    contradiction = fault == 'closed-contradiction'
+    triage = fault.startswith('triage-') or contradiction
     correction = fault == 'triage-byte-correction'
     review = many_file_review(tmp_path, monkeypatch, count=1 if triage else 9, docs_count=0,
                              supporting_sources={'a': 'X\n'} if triage else None)
@@ -265,7 +285,8 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             if triage:
                 output['candidates'].extend(candidate(file='a', line=1, trigger='x', consequence='x', grounds='x')
                                             for _ in range(8))
-                output['notes'] = 'x' * (62_000 if correction else 62_800)
+                if not contradiction:
+                    output['notes'] = 'x' * (62_000 if correction else 62_800)
             if fault == 'handoff-byte-capacity':
                 # One admitted large note leaves too little room for the next
                 # stage's unavoidable host progress, even with no optional text.
@@ -291,7 +312,19 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             assert stage['stage'] == 'triage'
             output.update(notes='', supporting_files=[], candidates=[candidate(
                 candidate_id=item['candidate_id'], file='a', line=1, trigger='x', consequence='x', grounds='x',
-                disposition='unresolved') for item in stage['candidates']])
+                disposition='rejected' if contradiction else 'unresolved') for item in stage['candidates']])
+            if contradiction:
+                closed_id, = stage['closed_candidate_ids']
+                output.update(notes='api.py:2 already returns a greeting accepted by callers.',
+                              contradictions=[closed_id])
+                yield ToolStartEvent(id='contradicted-submit', name='structured_output', input=output)
+                yield ToolResultEvent(id='contradicted-submit', output='Submitted.', is_error=False)
+                # A correctable rejection would let the provider erase its
+                # counterexample and falsely declare this review complete.
+                output['contradictions'] = []
+                yield ToolStartEvent(id='cleared-submit', name='structured_output', input=output)
+                yield ToolResultEvent(id='cleared-submit', output='Submitted.', is_error=False)
+                return
             if correction:
                 before = deepcopy(investigations['python'].handoff)
                 bad = {**output, 'notes': 'OPTIONAL_TRIAGE_TEXT' * 300}
@@ -326,8 +359,9 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
         assert failed.accepted is False and failed.possibly_accepted is False
         fatal = failed.fatal_error
         assert fatal is not None and fatal.code == (
+            'evidence_incomplete' if contradiction else
             'capacity_exhausted' if fault.endswith('capacity') else 'input_unavailable') and fatal.preacceptance is True
-        if not fault.endswith('capacity'):
+        if not fault.endswith('capacity') and not contradiction:
             assert type(fatal.__cause__).__name__ == 'SanctionedInputUnavailable'
             assert 'canonical-diff' in str(fatal)
         assert 'Changing the submission cannot resolve' in str(fatal)
@@ -339,8 +373,25 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert [item['admitted'] for item in metadata] == [True, correction]
     assert all(item['attempt'] == 1 for item in metadata)
+    if contradiction:
+        assert metadata[-1]['stop_reason'] == 'evidence_incomplete'
+        assert metadata[-1]['submission_starts'] == metadata[-1]['failed_submissions'] == 1
+        assert metadata[-1]['observed_tool_starts'] == 2
+        assert len(investigations['python'].handoff['notes']) == 1
+        root = read_trajectory(review.tmp / 'trajectory.json')
+        children = [read_trajectory(review.repo / '.daydream' / summary['sibling_trajectory_ref'])
+                    for summary in root['extra']['subtrajectories'] if summary.get('sibling_trajectory_ref')]
+        results = [result for child in children for step in child['steps']
+                   for result in (step.get('observation') or {}).get('results', [])
+                   if result['source_call_id'] == 'contradicted-submit']
+        rejected, = results
+        assert rejected['extra']['is_error'] is True
+        assert 'source evidence contradicts a previously closed judgment' in rejected['content']
+        assert 'Changing the submission cannot resolve' in rejected['content']
     persisted = saved_coverage(review.repo / '.daydream/deep').to_dict()['stack_outcomes']
-    assert next(item for item in persisted if item['scope_id'] == 'python')['target_decisions'] == admitted
+    persisted_scope = next(item for item in persisted if item['scope_id'] == 'python')
+    assert persisted_scope['target_decisions'] == admitted
+    assert persisted_scope['status'] == scope['status'] and persisted_scope['reason_codes'] == scope['reason_codes']
 
 
 @pytest.mark.parametrize('order', ['closure-first', 'acceptance-first'])

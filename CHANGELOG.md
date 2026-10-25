@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **pi:** explain rejected source selectors and review submissions with concrete
   corrections, and stop native continuation/retry when frozen inputs, host
-  authority or cumulative capacity make correction impossible. Preserve terminal
+  authority, cumulative capacity or valid closed-judgment contradictions make
+  correction impossible. Preserve terminal
   host diagnostics, prior accepted work and incomplete coverage
   ([#1620](https://github.com/existential-birds/daydream/issues/1620)).
 - **pi:** retain accepted findings across later native failures, reject mixed or

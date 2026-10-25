@@ -64,6 +64,12 @@ recaptures changed bytes under earlier judgments. Unknown callback failures are
 indeterminate, even when raised as `ValueError`; never infer safe replay from a
 native error flag or missing receipt.
 
+A valid contradiction of a previously closed reviewer judgment is terminal
+`evidence_incomplete`. Preserve prior findings and decisions, stop native
+continuation and retry, and never invite removing the contradiction to obtain
+complete coverage. Foreign or duplicate contradiction IDs remain correctable
+payload faults.
+
 Ordinary transient preacceptance retries use existing cumulative policy. The
 binding owns the first terminal failure and cannot reopen after it. `/admit` and
 `/submit` enforce readiness, correlation, authority, deadline and cumulative
