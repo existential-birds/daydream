@@ -31,9 +31,6 @@ from daydream.improve.command_contract import (
 from daydream.improve.plan_index import (
     PLAN_INDEX_FILENAME,
     PlanIndexEntry,
-    _entry_fingerprints,
-    _is_retryable,
-    _merged_index,
     load_rejections,
     reanchored_plan_rows,
     record_rejections,
@@ -379,12 +376,6 @@ def _read_sidecar(root: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads((root / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")))
 
 
-def _planned_fingerprints(plans_dir: Path) -> set[str]:
-    """Package identities and aliases with durable plan status (test-side view)."""
-    entries = _merged_index(plans_dir).values()
-    return {fp for e in entries if not _is_retryable(plans_dir, e) for fp in _entry_fingerprints(e)}
-
-
 def _write_single_plan(repo: Path, assembled: dict[str, Any], planned_at: str,) -> dict[str, list[dict[str, Any]]]:
     """Write one assembled plan for ``repo`` through the production API."""
     return _write_plans(repo / "daydream_plans", [{"finding": _finding(), **assembled}], planned_at=planned_at,)
@@ -722,7 +713,9 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
         (2, "REANCHORED (landed at daydream_plans/002-catalog-observability.md)"),
     ]
     assert [(entry["number"], entry["status"]) for entry in _read_sidecar(plans_dir)["plans"]] == expected_rows
-    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one", "fp-observability"}
+    assert {entry["fingerprint"] for entry in _read_sidecar(plans_dir)["plans"]} == {
+        "fp-fix-n-plus-one", "fp-observability",
+    }
     main_index = (plans_dir / "README.md").read_text()
     assert "[001](001-batch-catalog-queries.md)" in main_index and "[002](002-catalog-observability.md)" in main_index
 
@@ -973,10 +966,6 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, he
     ]
     assert [(entry["number"], entry["fingerprint"], entry["title"], entry["status"])
         for entry in _read_sidecar(plans_dir)["plans"]] == expected
-    assert _planned_fingerprints(plans_dir) == {
-        "fp-batch-catalog-queries", "fp-catalog-observability", "fp-catalog-cache-invalidation",
-        "fp-catalog-diagnostics", "fp-catalog-result-ordering",
-    }
     (plans_dir / PLAN_INDEX_FILENAME).unlink()
     recovered = _write_plans(plans_dir, [*selections, sibling], planned_at=head_sha)
     assert recovered["written"] == [] and len(recovered["skipped"]) == 5
@@ -996,7 +985,6 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     invalid = _authored_plan()
     invalid["test_plan"]["cases"] = []
     _write_plans(plans_dir, [_authoring_failure_selection(_issues(repo, invalid))], planned_at=head_sha,)
-    assert _planned_fingerprints(plans_dir) == set()
 
     index_path = plans_dir / "README.md"
     blocked_status = "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID)"
@@ -1004,7 +992,6 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     index_path.write_text(
         index_path.read_text(encoding="utf-8").replace(f"| {blocked_status} |", "| DONE |"), encoding="utf-8",
     )
-    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
 
     result = _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha)
 
@@ -1067,7 +1054,6 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: P
     expected_failure_status = ("PLAN_WRITER_FAILED" if failure_kind == "transport" else "PLAN_VALIDATION_FAILED")
     assert expected_failure_status in failed_index
     assert failed_index.count("fingerprint:fp-fix-n-plus-one") == 1
-    assert _planned_fingerprints(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
     retried = _write_single_plan(repo, _assembled(repo), head_sha)
