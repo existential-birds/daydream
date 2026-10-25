@@ -704,6 +704,46 @@ def test_public_model_reflects_pi_settings_before_execute(pi_workspace: Path) ->
     backend = PiBackend(cwd=pi_workspace)
     assert backend.model == "gpt-5.6-luna"
 
+
+async def test_frozen_pi_selection_pins_native_defaults_but_leaves_auth_refresh_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot dispatch must not replace the configured provider or reload selection.
+
+    Existing settings tests defer selection to native Pi; their argv assertions
+    miss a review snapshot losing the original workspace's defaults between phases.
+    """
+    agent_dir = tmp_path / "pi-agent"
+    agent_dir.mkdir()
+    settings = agent_dir / "settings.json"
+    settings.write_text(json.dumps({"defaultProvider": "nous", "defaultModel": "global-model",
+                                    "defaultThinkingLevel": "low"}))
+    original = tmp_path / "original"
+    (original / ".pi").mkdir(parents=True)
+    (original / ".pi/settings.json").write_text(json.dumps({"defaultModel": "deepseek/deepseek-v4.1-flash"}))
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.delenv("PI_THINKING", raising=False)
+    backend = PiBackend(cwd=original)
+    selection = backend.freeze_selection(original)
+    assert selection["requested_thinking"] == "low"
+    monkeypatch.setenv("PI_PROVIDER", "other-provider")
+    monkeypatch.setenv("NOUS_API_KEY", "refreshed-loopback-credential")
+    (agent_dir / "auth.json").write_text('{"refreshed": true}')
+    args, process = await _run_and_capture_args(backend, cwd=snapshot)
+    assert args[args.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+    assert args[args.index("--provider") + 1] == "nous"
+    assert args[args.index("--thinking") + 1] == "low"
+    assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
+    assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"
+    settings.write_text(json.dumps({"defaultProvider": "another-run"}))
+    with pytest.raises(PiError, match="start a new run"):
+        async for _ in backend.execute(snapshot, "Review captured source"):
+            pass
+
+
 async def test_explicit_model_overrides_pi_settings(pi_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     backend = PiBackend(model="custom-model")

@@ -29,6 +29,8 @@ from daydream.backends import (
 )
 from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
+from daydream.committed_review import CommittedReviewRequest, run_committed_review
+from daydream.committed_review_model import validate_committed_result
 from daydream.host_tools import HostToolBinding
 from daydream.host_tools_server import PiHostToolServer
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -39,6 +41,7 @@ from daydream.review_source_refs import (
     part_source_mapping,
     source_options,
 )
+from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
@@ -63,7 +66,7 @@ class _NativeProvider:
 def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_NativeProvider]:
     """Real installed Pi talks only to a counted, scripted loopback provider."""
     if shutil.which("pi") is None or shutil.which("node") is None:
-        pytest.skip("The installed official Pi CLI and Node are required for native tool loading.")
+        pytest.fail("The installed official Pi CLI and Node are required for native tool loading.")
     config = tmp_path / "isolated-host-pi"
     config.mkdir()
     (config / "settings.json").write_text(json.dumps({"retry": {"enabled": False, "maxRetries": 0}}))
@@ -113,6 +116,125 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
                         "contextWindow": 32768, "maxTokens": 8192}]}}}))
         monkeypatch.setenv("PI_PROVIDER", "output-fixture")
         yield fixture
+
+
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive"])
+async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
+) -> None:
+    """The production program challenges confident proposals in a fresh native context.
+
+    Existing native transport journeys call run_agent directly: they cannot catch
+    Review skipping challenge, sharing investigator history, or losing its sealed
+    findings/coverage/report/trajectory when composing the committed Git entry.
+    """
+    repo = tmp_path / "committed-source"
+    original = "def ratio(total, count):\n    return total / count\n"
+    captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
+                "def ratio(total, count):\n    return 0 if count == 0 else total / count\n")
+    head = seed_feature_branch(repo, base={"ratio.py": original}, feature={"ratio.py": captured})
+    base = git(repo, "rev-parse", "main")
+    working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
+               if case == "defect" else captured)
+    if case == "defect":
+        (repo / "ratio.py").write_text(working)
+    # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
+    # rather than bypassing their resolution with a test-only explicit backend.
+    settings = native_provider.config / "settings.json"
+    settings.write_text(json.dumps({"defaultProvider": "output-fixture", "defaultModel": "output-model",
+                                    "defaultThinkingLevel": "off", "retry": {"enabled": False, "maxRetries": 0}}))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    assignments_seen: list[dict[str, Any]] = []
+    histories: dict[str, list[dict[str, Any]]] = {}
+    counterevidence = "The captured count == 0 guard returns zero before division; the proposed trigger cannot fail."
+
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        users = [message for message in request["messages"] if message["role"] == "user"]
+        assert len(users) == 1
+        content = users[0]["content"]
+        text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content)
+        assignment = json.loads(text.split("\nCommitted review assignment:\n", 1)[1].split(
+            "\nEnd committed review assignment.\n", 1)[0])
+        kind = assignment["kind"]
+        tools = [message for message in request["messages"] if message["role"] == "tool"]
+        if not tools:
+            assignments_seen.append(assignment)
+            histories[kind] = request["messages"]
+            return [(f"{kind}-read", "read", {"path": str(Path(assignment["captured_root"]) / "ratio.py")})]
+        assert len(tools) == 1 and tools[0]["tool_call_id"] == f"{kind}-read"
+        assert tools[0]["content"] == captured
+        refs_by_target = {part["target_id"]: [{"source_id": next(
+            option["source_id"] for option in part["source_options"] if option["side"] == "new"),
+            "source_range": None, "basis": "supplied_diff"}] for part in assignment["assignments"]}
+        refs = next(iter(refs_by_target.values()))
+        if kind == "discovery":
+            claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Division can fail", "payload": {
+                "claim": "The changed denominator divides by zero.",
+                "trigger": "Call ratio(5, 1)." if case == "defect" else "Call ratio(5, 0).",
+                "consequence": "A normal input raises ZeroDivisionError.",
+                "grounds": "Investigator is confident and considers its investigation complete.",
+                "file": "ratio.py", "line": 2, "evidence_refs": refs}}
+            payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",
+                                    "evidence_refs": target_refs} for target_id, target_refs in refs_by_target.items()],
+                       "claims": [] if case == "empty" else [claim]}
+        else:
+            assert kind == "challenge" and len(assignment["claims"]) == 1
+            claim = assignment["claims"][0]
+            payload = {"verdicts": [{"uid": claim["uid"], "revision": claim["revision"],
+                "verdict": "confirmed" if case == "defect" else "rejected",
+                "grounds": "At count=1 the captured denominator is zero." if case == "defect" else counterevidence,
+                "evidence_refs": refs}], "claims": []}
+        return [(f"{kind}-submit", "structured_output", payload)]
+
+    native_provider.choose = choose
+    result = await run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
+        limits=ReviewLimits(90, 12, 12)))
+    assert result.complete and result.output_installed and result.capture_state == "complete"
+    value = result.to_dict()
+    validate_committed_result(value)
+    assert value["analyzed_revision"]["head_sha"] == head
+    assert value["analyzed_revision"]["merge_base_sha"] == base
+    assert value["terminal_result"]["analysis_state"] == "complete"
+    assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
+    expected_kinds = ["discovery"] if case == "empty" else ["discovery", "challenge"]
+    assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
+    assert len(native_provider.requests) == 2 * len(expected_kinds)
+    assert all(request["model"] == "output-model" for request in native_provider.requests)
+    if case != "empty":
+        assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
+        assert "discovery-read" not in json.dumps(histories["challenge"])
+        assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
+        claim = value["claims"][0]
+        assert claim["source_uids"] == [] and claim["revision"] == 1
+        assert claim["disposition"] == ("confirmed" if case == "defect" else "rejected")
+        assert claim["challenge_evidence"][0]["revision"] == 1
+        assert len(value["findings"]) == int(case == "defect")
+        if case == "false-positive":
+            assert claim["challenge_evidence"][0]["grounds"] == counterevidence
+    else:
+        assert value["claims"] == value["findings"] == []
+    assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
+    report = (repo / ".review-output.md").read_text()
+    assert head in report and base in report and value["planned_work_id"] in report
+    assert ("Division can fail" in report) == (case != "empty")
+    if case == "false-positive":
+        assert counterevidence in report and "Rejected concerns" in report
+    trajectory = json.loads((repo / ".daydream/runs" / value["run_id"] / "trajectory.json").read_text())
+    calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
+    assert [call["tool_call_id"] for call in calls] == [
+        f"{kind}-{action}" for kind in expected_kinds for action in ("read", "submit")]
+    invocations = trajectory["extra"]["subtrajectories"]
+    assert len(invocations) == len(expected_kinds)
+    assert len({invocation["invocation_id"] for invocation in invocations}) == len(expected_kinds)
+    assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
+    generations = [generation for invocation in invocations
+                   for generation in invocation["generation_lifecycle"]["drafts"]]
+    assert all(generation["model_name"] == "output-model" and generation["provider_name"] == "output-fixture"
+               for generation in generations)
+    assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
+               for execution in value["execution"])
+    assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
 
 
 async def test_native_stock_pagination_and_corrected_source_submission_are_admitted_once(

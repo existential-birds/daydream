@@ -35,7 +35,7 @@ from daydream.reviews.rendering import (
 )
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.runner import _emit_findings_from_items
+from daydream.runner import _write_findings_for_parsed
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
@@ -373,7 +373,7 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
 
     output = tmp_path / "findings.json"
     config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
-    assert _emit_findings_from_items(
+    assert _write_findings_for_parsed(
         git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS, terminal_result=terminal_result(head_sha=head),
         captured_pr=info, snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
     ) == 0
@@ -384,7 +384,7 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
     output.unlink()
     row["headRefOid"] = "f" * 40
     with pytest.raises(GitError, match="bad object"):
-        _emit_findings_from_items(
+        _write_findings_for_parsed(
             git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
             terminal_result=terminal_result(head_sha="f" * 40), captured_pr=replace(info, head_sha="f" * 40),
             snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),

@@ -68,6 +68,7 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 | `flows/`, `extensions/` | Ordered/gated flow execution and the per-run extension registry |
 | `deep/`, `improve/` | Flow assembly and domain steps; `deep/state.py` validates the shared `FlowContext.data` mapping |
 | `agent.py`, `agent_output.py`, `agent_retry.py` | Backend lifecycle/budgets, host result selection/validation, retry policy |
+| `committed_review*` | Explicit committed-review request/result, semantic claim revisions, mandatory fresh challenge and sealed output |
 | `backends/` | Native transport and the common `Backend` / `AgentEvent` contract |
 | `trajectory/`, `observability/` | Recorded evidence, generation billing ownership, and per-run tracing |
 | `artifact_visibility.py`, `artifacts/`, `workspace.py` | Private artifact ownership, finalization/recovery, and operational worktrees |
@@ -95,6 +96,13 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
   `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
+- The committed-review callable owns assignments, admitted claim revisions,
+  challenge obligations and derived coverage. Every proposed publication claim
+  needs fresh counterevidence-seeking challenge against captured source in a
+  distinct native context. Semantic revisions renew that obligation; absent or
+  failed verdicts retain unresolved concerns. CLI route/default cutover and
+  remaining flow retirement have separate owners; read
+  [its runtime contract](docs/runtime.md#committed-review-requestresult).
 - Keep changing budgets, pacing, and progress state authoritative on the host.
   Do not send orchestration nudges as user messages, including SDK custom messages
   that serialize as user turns. Put stable policy in system/developer instructions;

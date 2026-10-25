@@ -28,6 +28,47 @@ publication target. A moved PR head fails before export. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
 because a failed replacement may preserve an older complete artifact.
 
+## Committed-review request/result
+
+`daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
+is the production package entry. It defaults to native Pi and review-only policy;
+`config` resolves global/file and `review`/`arbiter` phase overrides before work.
+It freezes requested native model/provider/thinking selections, retains native
+credential refresh, and rejects later settings/model-registry changes. Requested
+settings and native observations in the trajectory remain distinct evidence.
+The resolved profile supplies `discovery.generic_fallback` and `arbitration`
+strategies; protected host obligations cannot be disabled by profile prose.
+
+The package-level committed-review program owns one captured committed change,
+its complete planned targets, admitted semantic claim revisions and challenge
+obligations. It uses native Pi investigation followed by a distinct native
+conversation seeking counterevidence for every proposed publication claim.
+Confidence and investigation completion cannot waive challenge. A changed claim,
+trigger, consequence, location or supporting grounds requires fresh challenge;
+presentation-only title changes preserve the semantic revision.
+
+Confirmed findings, substantively rejected concerns with their counterevidence,
+and unresolved concerns remain distinct in the sealed result. Missing or failed
+challenge leaves unfinished work. Discovery cannot consume the protected
+challenge and finalization allowance. Admission validates a complete submission
+before synchronously rechecking authority, revisions and shared limits at install;
+closing authority precedes cleanup and sealing. Accepted work survives later
+native settlement failure.
+
+The run's artifact session installs `committed-review.json` with schema version 1:
+canonical claims and challenge evidence, typed terminal coverage, run ID, captured
+head/base/diff identity and planned-work identity share one atomic JSON write.
+The report is staged before that write. The session owns final publication and
+preserves competing bytes on conflict. Required-output installation, native
+settlement, review completion, capture and external delivery have independent
+outcomes. The existing findings envelope 2 and terminal-result schema 1 retain
+their contracts; this package-level entry does not change CLI routing.
+`CommittedReviewResult.to_dict()` returns a copy of the sealed payload;
+`output_installed` reports public installation, and `capture_state` reports the
+trajectory snapshot independently. Dataset upload/external exports and delivery
+are left to route/consumer integration; explicitly requested unsupported export
+routes fail before model dispatch.
+
 ## Pi host-tool lifetime and limits
 
 Pi keeps its stock read/search tools, offsets and pagination. Existing private

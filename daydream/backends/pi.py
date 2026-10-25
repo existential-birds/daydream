@@ -20,6 +20,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, ExitStack
+from dataclasses import dataclass
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -162,6 +163,22 @@ def _configured_pi_model(
         if model:
             return model
     return None
+
+
+@dataclass(frozen=True)
+class _PiSelection:
+    model: str
+    provider: str
+    thinking: str
+    agent_dir: Path
+    inputs: tuple[tuple[Path, str | None], ...]
+
+
+def _selection_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
 
 
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
@@ -569,6 +586,7 @@ class PiBackend:
         self._model_override = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
+        self._frozen_selection: _PiSelection | None = None
         # ``.model`` must be resolved at construction (runner/recorder read it
         # before execute); cache the settings lookup so execute() need not
         # re-read settings.json for the same workspace.
@@ -599,6 +617,65 @@ class PiBackend:
             self.retry_base_delay_s = _pi_retry_base_delay()
             self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
+
+    def freeze_selection(self, cwd: Path) -> dict[str, str]:
+        """Pin native selection for one review while leaving credential refresh live.
+
+        Ordinary callers continue to defer to native settings. Committed reviews
+        resolve project/global defaults before creating their snapshot, pass exact
+        native flags thereafter, and require a new run when configuration changes.
+        Requested selection is not evidence that the native provider honored it.
+        """
+        if self._frozen_selection is not None:
+            self._check_frozen_selection()
+            return self._selection_metadata(self._frozen_selection)
+        environment = self._execution_input.child_environment() if self._execution_input else os.environ.copy()
+        agent_dir = (self._execution_input.pi_agent_dir if self._execution_input else None) or Path(
+            environment.get("PI_CODING_AGENT_DIR", str(Path(environment.get("HOME", str(Path.home()))) / ".pi/agent"))
+        )
+        settings_paths = (cwd / ".pi/settings.json", agent_dir / "settings.json")
+        settings: dict[str, str] = {}
+        inputs: list[tuple[Path, str | None]] = []
+        for path in reversed(settings_paths):
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                inputs.append((path, None))
+                continue
+            inputs.append((path, hashlib.sha256(raw).hexdigest()))
+            try:
+                value = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel"):
+                item = value.get(key)
+                if isinstance(item, str) and item.strip():
+                    settings[key] = item.strip()
+        self.model = self._model_override or settings.get("defaultModel") or DEFAULT_PI_MODEL
+        _, separator, model_thinking = (self._model_override or "").rpartition(":")
+        if not separator or model_thinking not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
+            model_thinking = ""
+        self._frozen_selection = _PiSelection(
+            self.model,
+            environment.get("PI_PROVIDER") or settings.get("defaultProvider") or _PI_DEFAULT_PROVIDER,
+            self.reasoning_effort or environment.get("PI_THINKING") or model_thinking
+            or settings.get("defaultThinkingLevel") or "medium",
+            agent_dir,
+            (*inputs, (agent_dir / "models.json", _selection_digest(agent_dir / "models.json"))),
+        )
+        return self._selection_metadata(self._frozen_selection)
+
+    @staticmethod
+    def _selection_metadata(selection: _PiSelection) -> dict[str, str]:
+        return {"requested_model": selection.model, "requested_provider": selection.provider,
+                "requested_thinking": selection.thinking}
+
+    def _check_frozen_selection(self) -> None:
+        selection = self._frozen_selection
+        if selection is not None and any(_selection_digest(path) != digest for path, digest in selection.inputs):
+            raise PiError("Pi configuration changed after review selection; start a new run", category="AUTH_CONFIG")
 
     async def _require_host_tools_version(self, cwd: Path, environment: dict[str, str],
                                          binding: HostToolBinding) -> None:
@@ -710,13 +787,19 @@ class PiBackend:
                     ),
                 )
         self.model = self._model_override if self._model_override is not None else configured_model or DEFAULT_PI_MODEL
-        if self._model_override is not None or configured_model is None:
+        if self._frozen_selection is not None:
+            self._check_frozen_selection()
+            configured_model = self._frozen_selection.model
+            self.model = configured_model
+        if self._model_override is not None or configured_model is None or self._frozen_selection is not None:
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
             if self._execution_input is not None
             else os.environ.get("PI_PROVIDER")
         )
+        if self._frozen_selection is not None:
+            provider = self._frozen_selection.provider
         if provider is None and configured_model is None:
             provider = _PI_DEFAULT_PROVIDER
             if self._model_override is not None and self.model.casefold().startswith("glm-"):
@@ -760,6 +843,10 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
+        if self._frozen_selection is not None:
+            selection = self._frozen_selection
+            thinking = selection.thinking
+            child_env["PI_CODING_AGENT_DIR"] = str(selection.agent_dir)
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:
@@ -1044,6 +1131,7 @@ class PiBackend:
                 # size-independent transport as the user prompt.
                 index = args.index("--append-system-prompt") + 1
                 args[index] = str(_write_prompt_attachment(system_prompt, attachments))
+            self._check_frozen_selection()
             transport = CliTransport(
                 "pi",
                 args,

@@ -61,6 +61,22 @@ A successful callback cannot establish native settlement; suppressing a late
 result cannot prove cleanup. See
 [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
 
+## Committed-review evidence
+
+The committed-review program records investigation and each fresh challenge as
+separate native invocations through the run's recorder. Original captured source,
+claim UID and semantic revision identify challenge work; a same-conversation
+second look cannot discharge it. Retained challenge verdicts include substantive
+grounds and canonical source references. Missing verdicts and native failures
+remain unfinished work rather than rejection evidence.
+
+The sealed result records admission, native settlement and cleanup independently
+for each assignment. A completed process or accepted submission cannot establish
+review completion. Close authority and join or isolate callback/evidence writers
+before freezing the run. Required JSON output, report, trajectory, capture and
+external delivery have separate outcomes; an output failure cannot erase admitted
+findings or make a prior run appear to be the current successful result.
+
 ## Codex lifecycle evidence
 
 Success requires the latest public turn's completion, stdout EOF, and an

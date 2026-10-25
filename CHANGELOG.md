@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **review:** add a package-level committed-review request/result program using
+  native Pi with mandatory fresh challenge of every publication claim. Retain
+  semantic revisions, rejection evidence and unresolved concerns, and install
+  run/source-bound findings with typed coverage atomically
+  ([#1645](https://github.com/existential-birds/daydream/issues/1645)). Existing
+  CLI routing and extension contracts are unchanged; this is additive functionality.
+
 - **pi:** admit review submissions inside the native terminal tool, with
   correctable source selectors and host-built canonical references while keeping
   stock reads, search and pagination
