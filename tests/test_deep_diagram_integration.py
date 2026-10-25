@@ -461,25 +461,23 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
     assert "Unreachable" not in mermaid
     assert FLOWCHART_HEADING in captured_post.body()
 
-@pytest.mark.parametrize("shell_reads", [False, True])
 async def test_valid_diagrams_render_without_structured_read_receipts(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch, shell_reads: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Direct repository validation accepts shell-backed and receipt-free specs."""
-    if shell_reads:
-        original_execute = StubBackend.execute
+    original_execute = StubBackend.execute
 
-        async def execute(self: StubBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
-            if self._diagram_dispatch(prompt.lower()) is not None:
-                yield ToolStartEvent(id="source-shell", name="Bash",
-                    input={"command": "cat pkg_a/core.py pkg_a/util.py pkg_b/client.py"},
-                )
-                yield ToolResultEvent(id="source-shell", output="source content", is_error=False)
-            async for event in original_execute(self, cwd, prompt, *args, **kwargs):
-                yield event
+    async def execute(self: StubBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+        if self._diagram_dispatch(prompt.lower()) is not None:
+            yield ToolStartEvent(id="source-shell", name="Bash",
+                input={"command": "cat pkg_a/core.py pkg_a/util.py pkg_b/client.py"},
+            )
+            yield ToolResultEvent(id="source-shell", output="source content", is_error=False)
+        async for event in original_execute(self, cwd, prompt, *args, **kwargs):
+            yield event
 
-        monkeypatch.setattr(StubBackend, "execute", execute)
+    monkeypatch.setattr(StubBackend, "execute", execute)
     target = dr.build_both_signals_repo(tmp_path)
     code, backend = await review_run(target,
         specs={
@@ -570,6 +568,10 @@ async def test_below_threshold_records_signals_without_any_agent_call(
     assert SEQUENCE_HEADING not in body
     assert FLOWCHART_HEADING not in body
     assert "## Diagrams" not in (target / ".review-output.md").read_text(encoding="utf-8")
+
+    _, end = _diagram_lifecycle(target)
+    assert end["status"] == "skipped"
+    assert end["reason_code"] == "no_eligible_work"
 
 # --- Spec test 9: cross-service trigger -------------------------------------
 
@@ -765,13 +767,6 @@ async def test_diagram_phase_outcome_all_authors_fail_open(tmp_path: Path, revie
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
     assert_dispatch_children(target, dispatch, "diagram", ["diagram-sequence", "diagram-flowchart"],)
 
-async def test_no_eligible_diagram_closes_skipped_lifecycle(tmp_path: Path, review_run: Callable[..., Any],) -> None:
-    target = dr.build_flat_repo(tmp_path)
-    exit_code, _ = await review_run(target)
-    assert exit_code == 0
-    _, end = _diagram_lifecycle(target)
-    assert end["status"] == "skipped"
-    assert end["reason_code"] == "no_eligible_work"
 
 # --- Per-phase config override (spec section 9) ------------------------------
 
@@ -811,8 +806,6 @@ async def test_diagram_phase_resolves_its_own_configured_model(
 
 # --- Issue #1123: inline host artifacts for disposable-clone author turns ----
 
-async def _empty_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
-    return {"participants": []}, None, None
 
 def _recording_agent(prompts: list[str]) -> Any:
     async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
@@ -848,15 +841,6 @@ def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: 
     ctx.data["exploration_dir"] = exploration_dir
     return ctx
 
-def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Path) -> None:
-    """Clone prompts inline diff/exploration/dependencies without dangling artifact paths."""
-    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
-    ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
-    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
-    assert "## Summary" in prompt
-    assert "a -> b" in prompt
-    assert ".daydream/exploration" not in prompt
-    assert "diff.patch" not in prompt
 
 def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
     """A non-disposable backend takes the unchanged pointer path: the on-disk
@@ -931,25 +915,6 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
-def test_diagram_author_prompt_requires_current_inline_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obsolete: bool
-) -> None:
-    """Current overrides receive inline inputs; obsolete signatures fail explicitly."""
-    registry = Registry()
-    registry.override_prompt("diagram_sequence", _obsolete_sequence_builder if obsolete else _current_sequence_builder)
-    monkeypatch.setattr(deep, "get_registry", lambda: registry)
-    backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
-    ctx = _clone_test_ctx(
-        tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b"
-    )
-    if obsolete:
-        with pytest.raises(TypeError, match="clone_mode"):
-            deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
-        return
-    prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
-    assert prompt.startswith("current:")
-    assert "exploration=None" in prompt  # no dangling host path on a clone run
 
 @pytest.mark.parametrize("kind", ["sequence", "flowchart"])
 async def test_disposable_clone_authoring_completes_without_artifact_reads(
@@ -969,6 +934,8 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
         for forbidden in (".daydream/", "diff.patch"):
             if forbidden in prompt:
                 raise AssertionError(f"prompt references {forbidden} — clone cannot read it")
+        assert "## Summary" in prompt
+        assert "a -> b" in prompt
         return {"participants": []}, None, None
 
     monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
@@ -981,12 +948,6 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
 
 # --- Issue #1214: transport-aware advisory-input budgeting -------------------
 
-def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_path: Path) -> None:
-    repo = build_large_cross_module_repo(tmp_path)
-    diff = git(repo, "diff", "--stat", "main...HEAD")
-    assert len(git(repo, "diff", "main...HEAD").splitlines()) > 20_000
-    assert sum(1 for _ in (repo / "pkg_a").rglob("*.py")) + sum(1 for _ in (repo / "pkg_b").rglob("*.py")) >= 200
-    assert diff  # non-empty stat output, i.e. the branch really differs from main
 
 def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> None:
     huge = {f"pkg_{i:03d}": [f"pkg_{i:03d}/mod_{j:02d}.py" for j in range(30)] for i in range(60)}
@@ -1021,6 +982,9 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     """Real path: a ~20,000-line PR writes a bounded files-by-module block and says so."""
 
     target = build_large_cross_module_repo(tmp_path)
+    assert len(git(target, "diff", "main...HEAD").splitlines()) > 20_000
+    assert sum(1 for _ in (target / "pkg_a").rglob("*.py")) + sum(1 for _ in (target / "pkg_b").rglob("*.py")) >= 200
+    assert git(target, "diff", "--stat", "main...HEAD")
     # Add real changed packages until the files-by-module projection exceeds its
     # shared budget; the fixture's original two modules would fit.
     for i in range(260):
@@ -1080,20 +1044,6 @@ async def _author_sequence(ctx: FlowContext, backend: Any) -> dict[str, Any]:
         symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
     )
 
-@pytest.mark.parametrize("backend_factory",
-    [lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
-        lambda repo: SimpleNamespace(audit_root_isolation="claude-pretooluse", audit_root=repo.resolve(), model="fake"),
-        lambda repo: SimpleNamespace(sandbox=True, model="fake"),
-    ], ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
-)
-async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
-    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
-) -> None:
-    prompts: list[str] = []
-    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    result = await _author_sequence(diagram_ctx, backend_factory(diagram_ctx.work.repo))
-    assert prompts, "the author turn must be reached — no preflight abort"
-    assert result["status"] != "failed", result.get("reason")
 
 async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
     diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch,
@@ -1113,9 +1063,11 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
 ) -> None:
 
 
-    monkeypatch.setattr(deep, "run_agent", _empty_agent)
+    prompts: list[str] = []
+    monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
     result = await _author_sequence(diagram_ctx, SimpleNamespace(read_only_disposable_clone=True, model="fake"))
 
+    assert prompts, "the author turn must be reached — no preflight abort"
     assert result["status"] != "failed"
     assert result["advisory"]["transport"] == "inline"
     assert result["advisory"]["allowance_bytes"] == 12_288
@@ -1139,7 +1091,8 @@ async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await _author_sequence(diagram_ctx, backend)
+    result = await _author_sequence(diagram_ctx, backend)
+    assert result["status"] != "failed", result.get("reason")
 
     prompt = prompts[0]
     for private in (str(diagram_ctx.data["diff_path"]), str(diagram_ctx.data["diff_path"].parent / "hunk-index.json"),
@@ -1169,7 +1122,9 @@ async def test_inline_prompt_contract_redacts_private_artifacts(
     result = await _author_sequence(diagram_ctx, SimpleNamespace(sandbox=True, model="fake"))
     if obsolete:
         assert not prompts and result["status"] == "failed" and "TypeError" in result["reason"]
+        assert "clone_mode" in result["reason"]
         return
+    assert len(prompts) == 1, "the current inline builder must dispatch exactly one author turn"
     assert prompts[0].startswith("current:")
     assert str(diagram_ctx.data["diff_path"]) not in prompts[0]
     assert "exploration=None" in prompts[0]

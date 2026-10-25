@@ -467,17 +467,6 @@ def test_sequence_participant_cap_drops_orphaned_messages(repo: Path, symbols: R
     assert check_for(report, "message", "10").grounded
 
 
-def test_sequence_message_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
-    spec = _wide_sequence(2)
-    template = spec["messages"][0]
-    spec["messages"] = [{**template, "evidence": dict(template["evidence"]), "label": f"step {index}"}
-        for index in range(DIAGRAM_MAX_MESSAGES + 5)
-    ]
-    report = run_sequence(repo, symbols, spec)
-
-    assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
-    assert report.spec_final["messages"][-1]["label"] == f"step {DIAGRAM_MAX_MESSAGES - 1}"
-    assert report.omit_reasons == []
 
 
 def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
@@ -507,6 +496,7 @@ def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoS
 
     assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
     assert not any(m["label"].startswith("changed") for m in report.spec_final["messages"])
+    assert report.spec_final["messages"][-1]["label"] == f"step {DIAGRAM_MAX_MESSAGES - 1}"
     assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
 
 
@@ -693,14 +683,6 @@ def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
     return {"root": {"file": "pkg/big.py", "name": "big", "line": 1}, "nodes": nodes, "edges": edges}
 
 
-def test_flowchart_node_cap_trims_the_tail_and_keeps_rendering(repo: Path, symbols: RepoSymbols) -> None:
-    report = run_flowchart(repo, symbols, _tall_flowchart(end_last=False))
-
-    assert report.ungrounded() == []
-    assert len(report.spec_final["nodes"]) == DIAGRAM_MAX_NODES
-    assert report.omit_reasons == []
-    assert report.spec_final["nodes"][0]["id"] == "NSTART"
-    assert len(report.spec_final["edges"]) == DIAGRAM_MAX_NODES - 1
 
 
 def test_flowchart_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
@@ -723,6 +705,10 @@ def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: Repo
     ids = [node["id"] for node in report.spec_final["nodes"]]
     assert ids[0] == "NSTART"
     assert len(ids) == DIAGRAM_MAX_NODES
+
+    assert report.ungrounded() == []
+    assert report.omit_reasons == []
+    assert len(report.spec_final["edges"]) == DIAGRAM_MAX_NODES - 1
 
 
 # --- Vocabulary contracts ----------------------------------------------------

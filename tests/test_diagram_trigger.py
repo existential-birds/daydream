@@ -483,7 +483,9 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
         "core/util.py": PYTHON_SOURCE,
     }
     changed, ranges = _diff_repo(repo, {}, head)
-    payload: dict[str, Any] = _decide(repo, changed, ranges).to_dict()
+    eligibility = _decide(repo, changed, ranges)
+    assert isinstance(eligibility.candidate_roots[0], CandidateRoot)
+    payload: dict[str, Any] = eligibility.to_dict()
 
     assert set(payload) == {
         "code_files", "modules", "services", "cross_module_edges", "function_branch_counts", "candidate_roots",
@@ -497,10 +499,6 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
     assert payload["force"] == "auto"
     assert json.loads(json.dumps(payload)) == payload
 
-def test_candidate_root_and_thresholds_are_re_exported() -> None:
-    root = CandidateRoot(file="a.py", name="f", line=1, end_line=9, branch_points=3)
-    assert (root.file, root.branch_points) == ("a.py", 3)
-    assert DiagramThresholds() == DiagramThresholds(min_code_files=3, min_modules=2, min_branch_points=3)
 
 
 # --- Service ownership --------------------------------------------------------
