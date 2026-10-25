@@ -108,6 +108,7 @@ async def test_tools_disabled_bridge_does_not_leak_to_fix_or_change_finalization
     assert final_request.reasoning_effort == "low"
     assert final_request.config is not None and final_request.config.finalization is True
     assert backend.reasoning_effort == "high"
+    assert not (target / ".daydream" / "trajectory.json").exists()
 
 async def test_tools_disabled_request_fails_before_dispatch_on_unsupported_backend(tmp_path: Path) -> None:
     backend = ScriptedBackend()

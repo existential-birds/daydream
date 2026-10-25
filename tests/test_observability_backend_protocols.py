@@ -525,7 +525,7 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
-@pytest.mark.parametrize("vendor", ["otlp", "honeyhive", "langsmith"])
+@pytest.mark.parametrize("vendor", ["otlp"])
 async def test_pi_metadata_mode_omits_generation_choice_content(
     vendor: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,

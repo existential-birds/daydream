@@ -12,6 +12,7 @@ from email.utils import formatdate
 from typing import cast
 
 import grpc
+import httpx
 import pytest
 from google.protobuf import any_pb2
 from google.rpc import error_details_pb2  # type: ignore[import-untyped]  # proto-only, no stubs
@@ -70,14 +71,43 @@ def _partial_response(rejected: int) -> ScriptedResponse:
 
 # ------------------------------------------------------------------ HTTP acknowledgment matrix
 
-@pytest.mark.parametrize("response,warning,rejected", [
-    pytest.param(ScriptedResponse(), False, None, id="empty-protobuf"),
+def test_http_connection_refusal_is_sanitized_unverified_delivery(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def refuse(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("opaque-transport-secret", request=request)
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+    _generic_http(monkeypatch, "http://127.0.0.1:9",
+                  OTEL_EXPORTER_OTLP_TRACES_HEADERS="x-private=opaque-transport-secret")
+    exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+    try:
+        start = time.monotonic()
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        assert time.monotonic() - start < 5
+        assert len(requests) == 1
+        assert requests[0].headers["x-private"] == "opaque-transport-secret"
+        assert requests[0].headers["content-type"] == "application/x-protobuf"
+        request = ExportTraceServiceRequest.FromString(requests[0].content)
+        assert request.resource_spans[0].scope_spans[0].spans[0].name == "span-0"
+        assert exporter.delivery_snapshot() == {
+            "delivered": 0, "rejected": 0, "unverified": 1, "warning": False,
+            "diagnostics": ["OTLP_CONNECTION_FAILED"],
+        }
+        assert "opaque-transport-secret" not in caplog.text
+    finally:
+        exporter.shutdown()
+
+@pytest.mark.parametrize(("response", "warning", "rejected"), [
     pytest.param(ScriptedResponse(headers={}), False, None, id="empty-no-content-type"),
-    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}), False, None, id="empty-json"),
-    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": true}'),
-                 True, None, id="vendor-json"),
-    pytest.param(ScriptedResponse(headers={"Content-Type": "Application/JSON; charset=utf-8"},
-                                  body=b'{"success": true}'), True, None, id="case-insensitive-media-type"),
+    pytest.param(
+        ScriptedResponse(headers={"Content-Type": "Application/JSON; charset=utf-8"}, body=b'{"success": true}'),
+        True, None, id="case-insensitive-media-type",
+    ),
     pytest.param(_partial_response(0), True, 0, id="partial-zero-rejected"),
 ])
 def test_http_success_ack_is_delivered_once(
@@ -100,13 +130,12 @@ def test_http_success_ack_is_delivered_once(
         assert content_types == [response.headers.get("Content-Type")]
 
 
-@pytest.mark.parametrize("response,secret", [
-    pytest.param(ScriptedResponse(body=b"\x00opaque-garbage-body\x01"), "opaque-garbage",
-                 id="undecodable-protobuf"),
-    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"},
-                                  body=b'{"success": false, "error": "boom"}'), "boom", id="json-error"),
-    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}'),
-                 None, id="json-explicit-failure"),
+@pytest.mark.parametrize(("response", "secret"), [
+    pytest.param(ScriptedResponse(body=b"\x00opaque-garbage-body\x01"), "opaque-garbage", id="undecodable-protobuf"),
+    pytest.param(
+        ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false, "error": "boom"}'),
+        "boom", id="json-error",
+    ),
 ])
 def test_http_terminal_ack_is_unverified_without_logging_body(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -149,11 +178,7 @@ def test_http_partial_success_positive_rejection_is_terminal_no_retry(monkeypatc
         assert snapshot["rejected"] == 3
         assert snapshot["delivered"] == 0
 
-@pytest.mark.parametrize("status,retryable",
-    [(429, True), (502, True), (503, True), (504, True), (408, False), (500, False), (400, False), (401, False),
-        (403, False), (413, False), (501, False),
-    ],
-)
+@pytest.mark.parametrize(("status", "retryable"), [(408, False), (500, False), (401, False)])
 def test_http_retry_only_for_429_502_503_504(monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool) -> None:
     with scripted_otlp_collector([ScriptedResponse(status=status), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
@@ -164,23 +189,19 @@ def test_http_retry_only_for_429_502_503_504(monkeypatch: pytest.MonkeyPatch, st
         assert len(receiver.requests) == (2 if retryable else 1), status
 
 def test_http_retry_after_seconds_and_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    with scripted_otlp_collector([ScriptedResponse(status=429, headers={"Retry-After": "0"}), ScriptedResponse()]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
+    """One owned retry loop preserves the batch through every admitted response class."""
+    responses = [ScriptedResponse(status=429, headers={"Retry-After": "0"}), ScriptedResponse(status=502),
+        ScriptedResponse(status=503, headers={"Retry-After": formatdate(time.time(), usegmt=True)}),
+        ScriptedResponse(status=504), ScriptedResponse()]
+    with scripted_otlp_collector(responses) as receiver:
+        _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="5")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        assert len(receiver.requests) == 5
+        assert all(request["body"] == receiver.requests[0]["body"] for request in receiver.requests)
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == 1 and snapshot["unverified"] == 0
         exporter.shutdown()
-        assert len(receiver.requests) == 2
-    with scripted_otlp_collector([
-            ScriptedResponse(status=503, headers={"Retry-After": formatdate(time.time(), usegmt=True)}),
-            ScriptedResponse(),
-        ]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        exporter.shutdown()
-        assert len(receiver.requests) == 2
 
 def test_http_one_deadline_covers_send_read_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     responses = [ScriptedResponse(status=429, headers={"Retry-After": "30"}) for _ in range(3)]

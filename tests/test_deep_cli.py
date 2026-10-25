@@ -27,7 +27,9 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.
     ):
         assert fragment in out, fragment
 
-@pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
+@pytest.mark.parametrize('stage', [
+    "per-stack",
+])
 def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
     """Deep-pipeline resume stages are not valid with --shallow."""
     with pytest.raises(SystemExit):

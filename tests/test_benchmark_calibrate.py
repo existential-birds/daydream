@@ -1,32 +1,24 @@
-import asyncio
 import json
 import re
 import stat
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 
 import daydream.benchmark.harbor.calibrate as cal
 from daydream.benchmark import cli
-from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.benchmark.harbor import calibrate, verifier_core as canonical_vc
 from daydream.benchmark.harbor.calibrate import (
     _build_calibration_client,
-    _build_receipt,
-    _class_balanced_accuracy,
-    _invalidation_inputs,
     _judge_host_from_env,
-    _judge_pairs,
     _load_fixture,
     _load_judge_template,
     _load_provenance,
     _load_workspace_allowlist,
-    _majority_label,
-    _pass_gate,
-    _per_pair_stable,
     _validate_workspace_host,
-    _write_receipt,
     run_calibration,
 )
 
@@ -74,29 +66,23 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
     assert labels.count("match") == 12 and labels.count("nonmatch") == 12
     assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
 
-def test_every_pair_renders_within_24kib() -> None:
-    sr = _load_judge_template()
-    for p in _load_fixture():
-        prompt = sr.render_pair_prompt(p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE)
-        assert len(prompt.encode("utf-8")) <= 24 * 1024
-
-def test_loader_resolves_sibling_verifier_core() -> None:
+def test_loader_resolves_sibling_verifier_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare-name collision must survive temporary template imports and cache hits."""
+    foreign = ModuleType("score_review")
+    monkeypatch.setattr(calibrate, "_TEMPLATE_CACHE", {})
+    monkeypatch.setitem(sys.modules, "score_review", foreign)
+    monkeypatch.delitem(sys.modules, "verifier_core", raising=False)
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
     # The asset's bare import must resolve to the canonical host module.
     assert sr.verifier_core is canonical_vc
+    assert calibrate._load_judge_template() is sr
+    assert sys.modules["score_review"] is foreign and "verifier_core" not in sys.modules
 
     verdict = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "known verifier call"})
     assert isinstance(verdict, sr.verifier_core.Verdict)
     assert verdict.match is True and verdict.confidence == 0.9
-
-def test_client_builder_threads_http_seam() -> None:
-    fake, calls = _scripted_http([{"match": False, "confidence": 0.2, "reasoning": "n"}])
-    client = _build_calibration_client(_env(), http=fake)
-    raw = asyncio.run(client.complete_json(user="<p>"))
-    assert calls == [1]                      # the fake seam was used, not a real socket
-    assert raw == {"match": False, "confidence": 0.2, "reasoning": "n"}
 
 def test_client_builder_fails_closed_without_model_or_key() -> None:
     sr = _load_judge_template()
@@ -125,91 +111,9 @@ def test_out_of_allowlist_host_rejected(tmp_path: Path, ws_factory: Any) -> None
         _validate_workspace_host(allow, "evil.example")
     _validate_workspace_host(allow, "127.0.0.1")  # in-allowlist passes
 
-def test_judge_pairs_makes_exactly_72_calls() -> None:
-    sr = _load_judge_template()
-    pairs = _load_fixture()
-    fake, calls = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
-    client = sr.OpenAIJudgeClient("k", "m", base_url="http://127.0.0.1:9", http=fake)
-    per_pair = _judge_pairs(sr, client, pairs, attempts=3)
-    assert len(per_pair) == 24
-    assert all(len(runs) == 3 for runs in per_pair)
-    assert calls[0] == 72
-    assert all(r.match is True and r.confidence == 0.9 for runs in per_pair for r in runs)
-
-
-@pytest.fixture(scope="module")
-def sr() -> Any:
-    return _load_judge_template()
-
-
-def _v(sr: Any, match: Any, conf: Any) -> Any:
-    return sr.verifier_core.Verdict(gold_id="g", candidate_id="c", match=match, confidence=conf, reasoning="x")
-
-
-def test_majority_and_stability(sr: Any) -> None:
-    assert _majority_label([_v(sr, True, .9), _v(sr, True, .8), _v(sr, False, .6)]) is True
-    assert _majority_label([_v(sr, False, .3), _v(sr, False, .2), _v(sr, True, .9)]) is False
-    flips = [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)]  # retained [T,F,T]
-    stable = [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .5)]  # retained [T,T,F]
-    assert _per_pair_stable(flips, sr.verifier_core.CONFIDENCE_THRESHOLD) is False
-    assert _per_pair_stable(stable, sr.verifier_core.CONFIDENCE_THRESHOLD) is True
-
-def test_balanced_accuracy_and_confusion(sr: Any) -> None:
-    assert _class_balanced_accuracy({"tp": 12, "fp": 0, "tn": 12, "fn": 0}) == pytest.approx(1.0)
-    assert _class_balanced_accuracy({"tp": 9, "fp": 3, "tn": 12, "fn": 0}) == pytest.approx(0.9)
-    pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}, {"label": "nonmatch"}]
-    majority = [True, False, True, False]  # gold-majority disagreement on pairs 1 and 2
-    runs = [
-        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, False, .1)],
-        [_v(sr, False, .1), _v(sr, False, .1), _v(sr, True, .9)],
-        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, False, .1)],
-        [_v(sr, False, .1), _v(sr, False, .1), _v(sr, False, .1)],
-    ]
-    assert [_majority_label(r) for r in runs] == majority
-    _, failures, matrix, _ = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
-    assert matrix == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
-    assert failures["majority"] == [1, 2]
-
-def test_pass_gate_reports_instability_only(sr: Any) -> None:
-    pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}]
-    runs = [
-        [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)], [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .9)],
-        [_v(sr, False, .2), _v(sr, False, .2), _v(sr, False, .2)],
-    ]
-    passed, failures, _, _ = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
-    assert passed is False
-    assert list(failures) == ["instability"]
-    assert 0 in failures["instability"]
-
-
 def _env() -> dict[str, Any]:
     return {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9"}
-
-
-def test_invalidation_inputs_and_determinism() -> None:
-    sr, pairs = _load_judge_template(), _load_fixture()
-    a = _invalidation_inputs(_env(), pairs, sr)
-    b = _invalidation_inputs(_env(), pairs, sr)
-    assert a == b
-
-def test_receipt_written_atomic_0600_and_current(tmp_path: Path) -> None:
-    sr, pairs = _load_judge_template(), _load_fixture()
-    receipt = _build_receipt(sr, pairs, _env(), passed=True,
-                             balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
-                             disagreements=[])
-    _write_receipt(tmp_path, receipt)
-    assert (tmp_path / "runtime" / "calibration-receipt.json").exists()
-    assert stat.S_IMODE((tmp_path / "runtime" / "calibration-receipt.json").stat().st_mode) == 0o600
-
-def test_receipt_has_no_credentials_or_source() -> None:
-    sr, pairs = _load_judge_template(), _load_fixture()
-    receipt = _build_receipt(sr, pairs, _env(), passed=True,
-                             balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
-                             disagreements=[])
-    text = json.dumps(receipt)
-    assert "sk-ant-" not in text and "sk-or-" not in text and "Bearer " not in text
-    assert "DAYDREAM_JUDGE_API_KEY" not in text and "Cache key not tenant-scoped" not in text
 
 
 @pytest.fixture
@@ -247,6 +151,8 @@ def _scripted_http(responses: Any) -> tuple[Any, ...]:
 
     class Fake:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+            user = next(message["content"] for message in json["messages"] if message["role"] == "user")
+            assert len(user.encode("utf-8")) <= 24 * 1024
             v = responses[i[0] % len(responses)]
             i[0] += 1
             body = {"choices": [{"message": {"content": _jsonlib.dumps(v)}}]}
@@ -293,7 +199,9 @@ class TestCalibrateAcceptance:
         responses = _scripted_responses(_load_fixture())
         assert len(responses) == 72
         fake, counter = _scripted_http(responses)
-        code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
+        workspace = ws_factory(tmp_path)
+        env = {**_env(), "DAYDREAM_JUDGE_API_KEY": "sk-or-CALIBRATION_SECRET_SENTINEL"}
+        code = run_calibration(workspace, yes=True, env=env, http=fake)
         assert code == 0
         assert (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
         assert counter[0] == 72
@@ -301,15 +209,37 @@ class TestCalibrateAcceptance:
         assert not re.search(r"sk-ant-|sk-or-|Bearer |x-api-key", receipt)
         assert "Cache key not tenant-scoped" not in receipt
         assert "DAYDREAM_JUDGE_API_KEY" not in receipt
+        assert env["DAYDREAM_JUDGE_API_KEY"] not in receipt
+        receipt_path = workspace / "runtime" / "calibration-receipt.json"
+        assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+        first = json.loads(receipt)
+        assert first["result"]["confusion_matrix"] == {"tp": 12, "fp": 0, "tn": 12, "fn": 0}
+        assert first["result"]["balanced_accuracy"] == 1.0
+        pairs = first["result"]["disagreements"]
+        assert [pair["pair_index"] for pair in pairs] == list(range(24))
+        assert [pair["per_run_retained"] for pair in pairs] == [[True] * 3] * 12 + [[False] * 3] * 12
+        assert run_calibration(workspace, yes=True, env=env, http=fake) == 0
+        second = json.loads(receipt_path.read_text())
+        assert (second["inputs"], second["result"]) == (first["inputs"], first["result"])
+        assert counter[0] == 144
 
-    def test_accuracy_failure_no_receipt(self, tmp_path: Path, ws_factory: Any) -> None:
+    def test_accuracy_failure_no_receipt(
+        self, tmp_path: Path, ws_factory: Any, capsys: pytest.CaptureFixture[str],
+    ) -> None:
         responses = _scripted_responses(_load_fixture(), mislabel_count=3)
+        # Distinct nonmatch pairs12/13 yield false positives beside three false negatives.
+        responses[36:42] = [{"match": True, "confidence": 0.95, "reasoning": "false positive"}] * 6
         assert len(responses) == 72
         fake, counter = _scripted_http(responses)
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
         assert code == 1
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
         assert counter[0] == 72
+        errors = capsys.readouterr().err.splitlines()
+        assert len(errors) == 2 and errors[0] == "calibrate-judge: FAIL (majority): [0, 1, 2, 12, 13]"
+        prefix, value = errors[1].rsplit(": ", 1)
+        assert prefix == "calibrate-judge: FAIL (balanced_accuracy)"
+        assert float(value) == pytest.approx(19 / 24)
 
     def test_confirmation_refuses_before_any_call(self, tmp_path: Path, ws_factory: Any) -> None:
         fake, counter = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
@@ -327,6 +257,12 @@ class TestCalibrateAcceptance:
                 responses += [{"match": True, "confidence": 0.9, "reasoning": "x"},
                               {"match": True, "confidence": 0.5, "reasoning": "x"},
                               {"match": True, "confidence": 0.9, "reasoning": "x"}]
+            elif idx == 1:  # T,T,F majority is True and a single retained-edge flip is stable.
+                responses += [{"match": True, "confidence": 0.9, "reasoning": "x"}] * 2
+                responses += [{"match": False, "confidence": 0.9, "reasoning": "x"}]
+            elif idx == 12:  # F,F,T majority stays False for the first nonmatch pair.
+                responses += [{"match": False, "confidence": 0.9, "reasoning": "x"}] * 2
+                responses += [{"match": True, "confidence": 0.9, "reasoning": "x"}]
             else:
                 m = p["label"] == "match"
                 responses += [{"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"} for _ in range(3)]
@@ -334,12 +270,8 @@ class TestCalibrateAcceptance:
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
         assert code == 1
         err = capsys.readouterr().err
-        assert "instability" in err and "0" in err
+        assert err.splitlines() == ["calibrate-judge: FAIL (instability): [0]"]
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
-
-def test_calibrate_judge_subparser_and_flags() -> None:
-    args = _build_benchmark_parser().parse_args(["calibrate-judge", "/ws", "--yes"])
-    assert args.subcommand == "calibrate-judge" and str(args.dir) == "/ws" and args.yes is True
 
 def test_calibrate_judge_refuses_without_tty_or_yes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -348,19 +280,6 @@ def test_calibrate_judge_refuses_without_tty_or_yes(
     code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path)])
     assert code == 1
     assert "requires TTY confirmation or --yes" in capsys.readouterr().err
-
-def test_calibrate_judge_handler_forwards_yes_and_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    seen: dict[str, Any] = {}
-    def fake_run(workspace: Any, *, yes: Any, env: Any, http: Any) -> int:
-        seen.update(ws=str(workspace), yes=yes)
-        return 0
-    monkeypatch.setattr(cal, "run_calibration", fake_run)
-    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
-    code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path), "--yes"])
-    capsys.readouterr()
-    assert code == 0 and seen == {"ws": str(tmp_path), "yes": True}
 
 def test_calibrate_judge_handler_threads_claude_oauth_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

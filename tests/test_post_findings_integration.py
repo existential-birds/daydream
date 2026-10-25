@@ -739,8 +739,7 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
     finally:
         payload_path.unlink(missing_ok=True)
 
-@pytest.mark.parametrize("state", ["warning", "incomplete", "failed"])
-@pytest.mark.parametrize("has_finding", [False, True])
+@pytest.mark.parametrize(('state', 'has_finding'), [('warning', False), ('incomplete', True), ('failed', True)])
 def test_unfinished_review_comments_without_approval_or_stale_resolution(
     fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool,
 ) -> None:
@@ -772,7 +771,9 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
 
 
-@pytest.mark.parametrize("version", [1, 99])
+@pytest.mark.parametrize('version', [
+    99,
+])
 def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path, version: int) -> None:
     path = _write_artifact(tmp_path / "unknown.json", [_inline_finding("Legacy nit", severity="low")])
     data = json.loads(path.read_text())

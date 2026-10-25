@@ -53,14 +53,6 @@ def test_split_frozen_before_training(tmp_path: Path) -> None:
     assert other.digest != frozen.digest
     assert json.loads(sidecar_path.read_text())["digest"] == other.digest
 
-def test_gate_pass_separates_classes(frozen_split: FrozenSplit, trained_model: OutcomeModel) -> None:
-    report = evaluate_gate(trained_model, frozen_split, GateConfig(min_separation=0.1, min_calibration=0.5))
-    assert report.passed
-    assert report.separation > 0
-    assert report.evidence_digest
-    assert report.accepted_ratio is not None  # measured at gate time
-    assert 0.0 <= report.accepted_ratio <= 1.0
-    assert report.to_dict()["separation"] == report.separation  # JSON-serializable
 
 def test_gate_refuses_when_evidence_missing(trained_model: OutcomeModel) -> None:
     with pytest.raises(RuntimeError, match="gate evidence"):

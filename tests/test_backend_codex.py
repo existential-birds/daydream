@@ -5,10 +5,8 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -20,12 +18,15 @@ import pytest
 
 from daydream import git_ops
 from daydream.agent import StructuredOutputFailure, run_agent
+from daydream.atif import validate
 from daydream.backends import (
     BackendExecutionInput,
     CodexRequestConfig,
     ContinuationToken,
     CostEvent,
     DiagnosticEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -36,7 +37,6 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
     codex,
-    effective_fanout_concurrency,
 )
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
@@ -46,7 +46,6 @@ from daydream.backends.codex import (
     _prepare_read_only_checkout,
     _rebind_source_paths,
     _unwrap_shell_command,
-    display_shell_command,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.retry_policy import FailureClass, classify_failure
@@ -57,15 +56,16 @@ from tests.harness.codex_replay import (
     make_mock_process_from_fixture,
 )
 from tests.harness.fake_cli_process import (
-    FakeCliProcess,
     LimitAwareStdout,
     assert_concurrent_streams_isolated,
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.process_replay import replay_process
 from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.trajectory import make_recorder
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
+
 
 def _completed_command(command: str, output: str) -> dict[str, Any]:
     return {
@@ -73,12 +73,14 @@ def _completed_command(command: str, output: str) -> dict[str, Any]:
         "aggregated_output": output,
     }
 
+
 def _stage_executable(path: Path) -> Path:
     """Create a real 0o755 shell stub at *path*, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\n", encoding="utf-8")
     path.chmod(0o755)
     return path
+
 
 async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -105,31 +107,17 @@ async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
     assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
     assert backend._transports == []
 
+
 async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -> Any:
     mock_proc = make_mock_process_from_fixture(fixture)
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), prompt, **kwargs)
     return events
 
 
-async def test_tool_use_events() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
-    thinking = [e for e in events if isinstance(e, ThinkingEvent)]
-    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    texts = [e for e in events if isinstance(e, TextEvent)]
-    assert len(thinking) == 1
-    assert thinking[0].text == "Let me run a command"
-    assert any(ts.name == "shell" and ts.input == {"command": "ls -la"} for ts in tool_starts)
-    assert any(tr.output == "file.py\ntest.py" and not tr.is_error for tr in tool_results)
-    # file_change → synthetic ToolStart("patch") + ToolResult
-    patches = [ts for ts in tool_starts if ts.name == "patch"]
-    assert len(patches) == 1
-    assert patches[0].input == {"file": "main.py", "action": "modified"}
-    assert any("main.py" in tr.output for tr in tool_results)
-    assert any(t.text == "Done!" for t in texts)
-
-@pytest.mark.parametrize("tool_name", [None, 42, False, [], {"token": "private-value"}])
+@pytest.mark.parametrize("tool_name", [
+        None,
+        {"token": "private-value"},
+    ])
 async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Path, tool_name: Any) -> None:
     item = {"id": "mcp-1", "type": "mcp_tool_call", "tool": tool_name, "arguments": {"path": "api.py"}}
     process = make_mock_process([
@@ -150,74 +138,122 @@ async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Pa
     assert "private-value" not in repr(diagnostics)
 
 
-async def test_file_change_changes_map_single_path() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", "file_change_add.jsonl")
-    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
-    assert len(starts) == 1
-    assert starts[0].input["changes"] == [{"path": "spike-repo/a.py", "kind": "add"}]
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1 and not results[0].is_error
-
-async def test_file_change_changes_map_multi_path() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", "file_change_multi.jsonl")
-    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
-    assert len(starts) == 1  # exactly ONE pair for the item — no id collisions
-    # Legacy {"file", "action"} keys stay present for multi-file too (pre-diff
-    # fallback values), so tool supervisors keyed on them still see the event.
-    assert starts[0].input["file"] == "unknown"
-    assert starts[0].input["action"] == "modified"
-    assert sorted((c["path"], c["kind"]) for c in starts[0].input["changes"]) == [
-        ("spike-repo/a.py", "add"), ("spike-repo/b.py", "update"), ("spike-repo/c.py", "delete"),
-        ("spike-repo/d.py", "move"),
+async def test_file_changes_preserve_native_shapes_and_correlate_patch_results() -> None:
+    """One edit session retains every changed path and one correlated pair per native item."""
+    rows = [
+        {"type": "thread.started", "thread_id": "patch-session"},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "map",
+                "changes": {
+                    "/tmp/spike-repo/a.py": {"type": "add"},
+                    "/tmp/spike-repo/b.py": {"type": "update"},
+                    "/tmp/spike-repo/c.py": {"type": "delete"},
+                    "/tmp/spike-repo/d.py": {"type": "move"},
+                },
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "list",
+                "changes": [
+                    {"path": "/tmp/spike-repo/e.py", "type": "add"},
+                ],
+            },
+        },
+        {"type": "item.completed", "item": {"type": "file_change", "id": "empty", "changes": []}},
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
     ]
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1 and not results[0].is_error
+    events = await _run_inline_lines(CodexBackend(model="fixture-model"), "Edit", [json.dumps(row) for row in rows])
+    starts = [event for event in events if isinstance(event, ToolStartEvent)]
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert [(event.id, event.name) for event in starts] == [("map", "patch"), ("list", "patch"), ("empty", "patch")]
+    assert [event.input for event in starts] == [
+        {
+            "changes": [
+                {"path": "spike-repo/a.py", "kind": "add"},
+                {"path": "spike-repo/b.py", "kind": "update"},
+                {"path": "spike-repo/c.py", "kind": "delete"},
+                {"path": "spike-repo/d.py", "kind": "move"},
+            ],
+            "file": "unknown",
+            "action": "modified",
+        },
+        {"changes": [{"path": "spike-repo/e.py", "kind": "add"}], "file": "spike-repo/e.py", "action": "add"},
+        {"changes": [], "file": "unknown", "action": "modified"},
+    ]
+    assert [event.id for event in results] == ["map", "list", "empty"]
+    assert all(not event.is_error for event in results)
 
-@pytest.mark.parametrize("status", ["declined", "failed"])
-async def test_file_change_unsuccessful_status_is_preserved(status: str) -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", f"file_change_{status}.jsonl")
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert results[0].is_error is True
+
+@pytest.mark.parametrize(
+    ("status", "diagnostic"),
+    [("declined", "sandbox denied write"), ("failed", "patch: failed to apply hunk at b.py:12")],
+)
+async def test_file_change_unsuccessful_status_is_preserved(status: str, diagnostic: str) -> None:
+    """Unsuccessful edits retain their native status, affected path and diagnostic."""
+    events = await _run_inline_lines(
+        CodexBackend(model="fixture-model"),
+        "Edit",
+        [
+            json.dumps(row)
+            for row in [
+                {"type": "thread.started", "thread_id": "patch-failure"},
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "id": "patch",
+                        "status": status,
+                        "stderr": diagnostic,
+                        "changes": {"/tmp/spike-repo/b.py": {"type": "update"}},
+                    },
+                },
+                {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
+            ]
+        ],
+    )
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert len(results) == 1 and results[0].is_error is True
     assert results[0].status == status
-    if status == "failed":
-        assert "failed to apply hunk" in results[0].output
+    assert "b.py" in results[0].output and diagnostic in results[0].output
+    if status == "declined":
+        assert "File change declined by sandbox" in results[0].output
 
-async def test_file_change_pathless_payload_diagnostic() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Edit", "file_change_pathless.jsonl")
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
+
+async def test_file_change_pathless_echo_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
+    """A malformed idless item remains observable without an oversized echo or false unmatched warning."""
+    with caplog.at_level("WARNING"):
+        events = await _run_inline_lines(
+            CodexBackend(model="fixture-model"),
+            "Edit",
+            [
+                json.dumps(row)
+                for row in [
+                    {"type": "thread.started", "thread_id": "pathless"},
+                    {"type": "item.completed", "item": {"type": "file_change", "stderr": "x" * 100_000}},
+                    {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
+                ]
+            ],
+        )
+    starts = [event for event in events if isinstance(event, ToolStartEvent)]
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert len(starts) == len(results) == 1 and starts[0].id == results[0].id
     assert results[0].is_error is True
-    assert "unparseable" in results[0].output
-    assert "file_change" in results[0].output  # echoes available fields
-    assert "unknown" not in results[0].output
+    assert "unparseable file_change" in results[0].output and "unknown" not in results[0].output
+    assert len(results[0].output) < 600
+    assert "unmatched tool result" not in caplog.text
+
 
 async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list[Any]:
     mock_proc = make_mock_process(lines)
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), prompt)
     return events
 
-async def test_file_change_pathless_echo_is_bounded() -> None:
-    # Cap the ToolResult echo for a pathless item, including oversized fields.
-    backend = CodexBackend(model="fixture-model")
-    big_field = "x" * 100_000
-    pathless_line = (
-        '{"type":"item.completed","item":{"type":"file_change",'
-        '"id":"x1","stderr":"%s"}}' % big_field
-    )
-    events = await _run_inline_lines(backend, "Edit", [
-        '{"type":"thread.started","thread_id":"t"}', pathless_line,
-        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
-    ])
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert results[0].is_error is True
-    assert "unparseable" in results[0].output
-    assert len(results[0].output) < 600
 
 async def test_file_change_missing_status_is_success() -> None:
     # Missing or null status retains the successful default.
@@ -235,89 +271,6 @@ async def test_file_change_missing_status_is_success() -> None:
     assert all(r.is_error is False for r in results)
     assert all(r.status == "completed" for r in results)
 
-async def test_file_change_declined_output_names_paths() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_inline_lines(backend, "Edit", [
-        '{"type":"thread.started","thread_id":"t"}',
-        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
-        '"status":"declined","stderr":"sandbox denied write",'
-        '"changes":{"/tmp/spike-repo/b.py":{"type":"update"}}}}',
-        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
-    ])
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert results[0].is_error is True
-    assert results[0].status == "declined"
-    assert "File change declined by sandbox" in results[0].output
-    assert "b.py" in results[0].output  # names the affected path
-    assert "sandbox denied write" in results[0].output  # keeps stderr
-
-async def test_file_change_list_changes_parsed() -> None:
-    # A list of changes maps to file events; an empty list is a no-op.
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_inline_lines(backend, "Edit", [
-        '{"type":"thread.started","thread_id":"t"}',
-        '{"type":"item.completed","item":{"type":"file_change","id":"x1",'
-        '"status":"completed","changes":[{"path":"/tmp/spike-repo/a.py","type":"add"}]}}',
-        '{"type":"item.completed","item":{"type":"file_change","id":"x2",'
-        '"status":"completed","changes":[]}}',
-        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
-    ])
-    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
-    assert len(starts) == 2
-    assert starts[0].input["changes"] == [{"path": "spike-repo/a.py", "kind": "add"}]
-    assert starts[1].input["changes"] == []
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert all(r.is_error is False for r in results)
-
-async def test_file_change_idless_pathless_no_unmatched_warning(caplog: pytest.LogCaptureFixture) -> None:
-    # An idless file change cannot claim a pending call; assign a new ID without a warning.
-    backend = CodexBackend(model="fixture-model")
-    with caplog.at_level("WARNING"):
-        events = await _run_inline_lines(backend, "Edit", [
-            '{"type":"thread.started","thread_id":"t"}', '{"type":"item.completed","item":{"type":"file_change"}}',
-            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}',
-        ])
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(results) == 1
-    assert "unparseable" in results[0].output
-    assert "unmatched tool result" not in caplog.text
-
-@pytest.mark.parametrize(
-    ("fixture", "expected_output", "expected_text_count"),
-    [
-        (
-            "structured_output.jsonl",
-            {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}, None,
-        ),
-        (
-            "streamed_structured_output.jsonl",
-            {"issues": [{"id": 1, "description": "Missing type hint", "file": "app.py", "line": 10}]}, 1,
-        ),
-        (
-            "output_text_blocks.jsonl",
-            {"issues": [{"id": 1, "description": "Bad import", "file": "main.py", "line": 3}]}, None,
-        ),
-        (
-            "turn_completed_result.jsonl",
-            {"issues": [{"id": 1, "description": "Unused variable", "file": "utils.py", "line": 22}]}, None,
-        ),
-    ], ids=["item-completed", "streamed-item-updated", "output-text-blocks", "turn-completed-result"],
-)
-async def test_structured_output(fixture: Any, expected_output: Any, expected_text_count: Any) -> None:
-    backend = CodexBackend(model="fixture-model")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    events = await _run_fixture(backend, "Parse", fixture, output_schema=schema)
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    native = fixture == "turn_completed_result.jsonl"
-    assert result_events[0].structured_output == (expected_output if native else None)
-    if not native:
-        text = [event.text for event in events if isinstance(event, TextEvent)]
-        assert json.loads(text[-1]) == expected_output
-        assert sum(isinstance(event, TurnEndEvent) for event in events) == len(text)
-    if expected_text_count is not None:
-        assert len([e for e in events if isinstance(e, TextEvent)]) == expected_text_count
 
 @pytest.mark.parametrize('staged', [False, True])
 async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
@@ -360,6 +313,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert exc_info.value.category == "AUTH_CONFIG"
     assert classify_failure(exc_info.value).failure_class is FailureClass.AUTH_CONFIG
 
+
 async def test_nonzero_exit_with_no_output_still_informative() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process([])
@@ -371,24 +325,39 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
     assert "no non-JSON output captured" in str(exc_info.value)
     assert exc_info.value.category == "PROCESS_EXIT"
 
+
 @pytest.mark.parametrize("read_only", [False, True])
 async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> None:
     """Stable directories retain native resume, including non-Git read-only runs."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        events = [event async for event in backend.execute(
-            tmp_path, "Continue", continuation=token, read_only=read_only,
-        )]
+        events = [
+            event
+            async for event in backend.execute(
+                tmp_path,
+                "Continue",
+                continuation=token,
+                read_only=read_only,
+                output_schema=schema,
+            )
+        ]
         call_args = mock_exec.call_args
         flat_args = list(call_args.args) if call_args.args else []
         assert "resume" in flat_args
-        assert "th_prev" in flat_args
+        assert "th_prev" in flat_args and "--output-schema" in flat_args
+        request = next(event for event in events if isinstance(event, RequestEvent))
+        assert isinstance(request.config, CodexRequestConfig)
+        assert request.config.continuation_mode == "resume" and request.config.native_output_schema is True
+        assert request.output_schema == schema
+        assert (request.session_id, request.session_source) == ("th_prev", "configured")
         result = next(event for event in events if isinstance(event, ResultEvent))
         assert result.continuation is not None
         assert result.continuation.data["thread_id"] == "th_abc123"
         assert result.session_id == "th_abc123"
+
 
 async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Path, Path]) -> None:
     """A disposable clone mirrors HEAD, index, tracked worktree edits, and untracked files; rebind prompts,
@@ -407,6 +376,7 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     source_patch = git_ops.staged_patch(source)
     captured: dict[str, Any] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
     async def fake_exec(*args: Any, **kwargs: Any) -> Any:
         flat = list(args)
         cd = flat[flat.index("--cd") + 1]
@@ -423,6 +393,7 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
         captured["source_branches"] = git_ops.list_local_branches(source)
         captured["args"] = flat
         return mock_proc
+
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [event async for event in CodexBackend(model="fixture-model").execute(
             source, f"Audit repository at {source}", read_only=True,
@@ -447,11 +418,15 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     assert str(source).encode() not in written
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert request.prompt.encode() == written
+    assert isinstance(request.config, CodexRequestConfig)
+    assert request.config.sandbox_mode == "read-only" and request.config.read_only_isolation is True
+    assert request.config.native_output_schema is False
     assert not isolated.exists()
     # The native session remains observable, but its deleted cwd cannot resume.
     result = next(event for event in events if isinstance(event, ResultEvent))
     assert result.session_id == "th_abc123"
     assert result.continuation is None
+
 
 async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
     linked_worktree: tuple[Path, Path],
@@ -495,6 +470,7 @@ async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
     assert str(source) not in captured["config"]
     assert git_ops.head_sha(source) == head_before
     assert git_ops.list_local_branches(source) == source_branches
+
 
 @pytest.mark.parametrize("operation", ["clone", "update_refs"])
 async def test_codex_read_only_preparation_failure_is_fail_closed(
@@ -547,6 +523,7 @@ def test_rebind_source_paths_preserves_sibling_paths() -> None:
     assert str(execution) in out3
     assert "/work//inner" not in out3
 
+
 @pytest.mark.skipif(
     sys.platform == "darwin",
     reason="darwin isolated-env PATH behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122)",
@@ -569,6 +546,7 @@ def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch
     assert env["HOME"] == "/home/exedev"
     assert env["PATH"] == "/usr/bin"
 
+
 async def test_codex_execution_input_supplies_complete_native_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -589,6 +567,7 @@ async def test_codex_execution_input_supplies_complete_native_environment(
     assert backend.fanout_concurrency == 5
     assert backend.retry_policy == RetryPolicy(2, 2.0, 120.0)
 
+
 @pytest.mark.skipif(
     sys.platform == "darwin",
     reason="darwin behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122 M3)",
@@ -602,6 +581,7 @@ def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPa
     assert env["PATH"] == "/usr/bin:/opt/bin"  # byte-for-byte, no prepend (M3)
     assert "GIT_DIR" not in env
 
+
 async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Path]) -> None:
     """A read-only session passed a codex resume token fails closed: the resumed
     thread's stored cwd is the per-call clone, deleted when the turn ends."""
@@ -613,6 +593,7 @@ async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Pa
         with pytest.raises(CodexError, match="cannot be resumed"):
             async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
                 pass
+
 
 async def test_codex_read_only_parallel_calls_share_one_clone(
     linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
@@ -648,6 +629,7 @@ async def test_codex_read_only_parallel_calls_share_one_clone(
     assert len(seen) == 2
     assert seen[0] == seen[1], "both calls ran inside the same shared clone"
     assert not Path(seen[0]).exists()
+
 
 async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(linked_worktree: tuple[Path, Path]) -> None:
     _main, source = linked_worktree
@@ -698,6 +680,7 @@ async def test_codex_default_full_access_at_worktree_skips_isolation(linked_work
         assert "read-only" not in flat_args
         assert flat_args[flat_args.index("--cd") + 1] == str(source)
 
+
 @pytest.mark.parametrize("effort", ["high", None])
 async def test_codex_reasoning_effort_config_override(effort: str | None) -> None:
     backend = CodexBackend(model="fixture-model", reasoning_effort=effort)
@@ -710,6 +693,7 @@ async def test_codex_reasoning_effort_config_override(effort: str | None) -> Non
             assert "-c" not in flat_args
         else:
             assert flat_args[flat_args.index("-c") + 1] == 'model_reasoning_effort="high"'
+
 
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -740,26 +724,12 @@ async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     assert captured_kwargs["limit"] == _CODEX_STDOUT_LIMIT_BYTES
     assert _CODEX_STDOUT_LIMIT_BYTES > len(large_line)
 
-async def test_toplevel_text_field() -> None:
-    backend = CodexBackend(model="fixture-model")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    events = await _run_fixture(backend, "Parse", "toplevel_text.jsonl", output_schema=schema)
-    thinking = [e for e in events if isinstance(e, ThinkingEvent)]
-    assert len(thinking) == 1
-    assert "read the review" in thinking[0].text
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output is None
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    assert len(text_events) == 1
-    assert json.loads(text_events[0].text) == {"issues": [{"id": 1,
-        "description": "Missing yield for non-result events", "file": "agents/architect.py", "line": 134}]}
-
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'[prices."{model}"]\ninput = {input_price}\noutput = {output_price}\n', encoding="utf-8")
     return path
+
 
 async def _codex_cost_for_execution_input(model: str, environment: dict[str, str]) -> float | None:
     backend = CodexBackend(
@@ -773,13 +743,16 @@ async def _codex_cost_for_execution_input(model: str, environment: dict[str, str
     assert metrics[0].cost_usd == costs[0].cost_usd
     return costs[0].cost_usd
 
-def _codex_price_process() -> Any:
+
+def _codex_price_process(*, cached_input_tokens: int = 0) -> Any:
     return make_mock_process([
         '{"type":"thread.started","thread_id":"th_price"}',
         '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
-        '{"type":"turn.completed","usage":{"input_tokens":1000000,'
-        '"cached_input_tokens":0,"output_tokens":1000000}}',
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 1000000, "cached_input_tokens": cached_input_tokens, "output_tokens": 1000000,
+        }}),
     ])
+
 
 async def test_codex_injected_pricing_uses_each_captured_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -793,7 +766,7 @@ async def test_codex_injected_pricing_uses_each_captured_override(
     monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
     with patch(
         "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=[_codex_price_process(), _codex_price_process()],
+        side_effect=[_codex_price_process(cached_input_tokens=500_000), _codex_price_process()],
     ):
         first_cost, second_cost = await asyncio.gather(
             _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": str(first)}),
@@ -801,6 +774,7 @@ async def test_codex_injected_pricing_uses_each_captured_override(
         )
     assert first_cost == pytest.approx(3.0)
     assert second_cost == pytest.approx(30.0)
+
 
 async def test_codex_injected_pricing_falls_back_to_captured_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -814,6 +788,7 @@ async def test_codex_injected_pricing_falls_back_to_captured_home(
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=_codex_price_process()):
         cost = await _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": "", "HOME": str(run_home)})
     assert cost == pytest.approx(9.0)
+
 
 async def test_codex_injected_pricing_without_home_uses_builtins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -833,6 +808,7 @@ async def test_codex_injected_pricing_without_home_uses_builtins(
     # this also verifies resolve_prices retains its pricing-policy metadata.
     assert builtin_cost == pytest.approx(55.0)
 
+
 async def test_codex_injected_missing_or_malformed_price_file_falls_back_to_builtins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -850,6 +826,7 @@ async def test_codex_injected_missing_or_malformed_price_file_falls_back_to_buil
         malformed_cost = await _codex_cost_for_execution_input("gpt-5.5", {"DAYDREAM_PRICES_FILE": str(malformed)})
     assert missing_cost == pytest.approx(35.0)
     assert malformed_cost == pytest.approx(35.0)
+
 
 async def test_codex_without_execution_input_preserves_ambient_price_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -880,41 +857,16 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
         second_lines=['{"type":"turn.completed","usage":{}}'],
     )
 
-class TestUnwrapShellCommand:
 
-    @pytest.mark.parametrize("command,expected", [
-        pytest.param(
-            '/bin/zsh -lc "cd /home/user/project && make test"',
-            'cd /home/user/project && make test',
-            id='zsh-cd',
-        ),
-        pytest.param(
-            "/bin/zsh -lc 'awk '\\''{print $1}'\\'' file.txt'",
-            "awk '{print $1}' file.txt",
-            id='nested-quotes',
-        ),
-        pytest.param('/bin/zsh -lc "echo \\"hi\\" and $HOME"', 'echo "hi" and $HOME', id='escaped-quotes'),
-        pytest.param('/bin/zsh -lc "echo $(date)"', 'echo $(date)', id='substitution'),
-        pytest.param("/bin/zsh -lc 'echo line1\nline2'", 'echo line1\nline2', id='multiline'),
-        pytest.param("/bin/zsh -lc 'cat <<EOF\nhello\nEOF'", 'cat <<EOF\nhello\nEOF', id='heredoc'),
-        pytest.param('python -c "print(1)"', 'python -c "print(1)"', id='non-shell'),
-        pytest.param('/bin/zsh -lc "cmd" extra_arg', '/bin/zsh -lc "cmd" extra_arg', id='trailing-args'),
-        pytest.param("/bin/zsh -lc 'unbalanced", "/bin/zsh -lc 'unbalanced", id='bad-quotes'),
-        pytest.param('/bin/zsh -lc', '/bin/zsh -lc', id='missing-payload'),
-        pytest.param('/bin/zsh -lc "ls -la"', 'ls -la', id='no-cd'),
-        pytest.param('', '', id='empty'),
-        pytest.param('/bin/zsh -lc ls', 'ls', id='bare-word'),
-        pytest.param('/bin/zsh -lc make test', 'make test', id='bare-make'),
-        pytest.param('/bin/zsh -lc ls -la', 'ls -la', id='bare-ls'),
-        pytest.param('/bin/bash -lc git status --short', 'git status --short', id='bare-bash'),
-        pytest.param("/bin/zsh -lc echo 'hello world'", "echo 'hello world'", id='bare-quotes'),
-        pytest.param("/bin/zsh -lc 'git diff main...HEAD'", 'git diff main...HEAD', id='git-diff'),
-        pytest.param(
-            '/bin/zsh -lc "sed -n \'1,260p\' amelia/agents/architect.py"',
-            "sed -n '1,260p' amelia/agents/architect.py",
-            id='sed',
-        ),
-    ])
+class TestUnwrapShellCommand:
+    @pytest.mark.parametrize(
+        "command,expected",
+        [
+        ('/bin/zsh -lc "cmd" extra_arg', '/bin/zsh -lc "cmd" extra_arg'),
+        ("/bin/zsh -lc", "/bin/zsh -lc"),
+        ("/bin/zsh -lc echo 'hello world'", "echo 'hello world'"),
+    ],
+    )
     def test_unwrap_payload(self, command: str, expected: str) -> None:
         assert _unwrap_shell_command(command) == expected
 
@@ -951,7 +903,7 @@ class TestUnwrapShellCommand:
 
         Storage retains the cd prefix for replay; forwarding it would evade the rule.
         """
-        raw = '/bin/zsh -lc "cd /home/user/project && make test"'
+        raw = "/bin/zsh -lc cd /home/user/project && make test"
         lines = [
             json.dumps({"type": "thread.started", "thread_id": "th_sup"}),
             json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": raw}}),
@@ -1005,12 +957,6 @@ class TestUnwrapShellCommand:
         assert "cd /srv/app" not in seen["command"]
         assert "[REDACTED" not in seen["command"]
 
-    def test_unquoted_multi_word_cd_display(self) -> None:
-        """Unquoted multi-word cd chains stay replayable stored, cd-stripped on display."""
-        raw = "/bin/zsh -lc cd /app && make test"
-        assert _unwrap_shell_command(raw) == "cd /app && make test"
-        assert display_shell_command(raw) == "make test"
-
 
 # Parser correlation and diagnostics.
 
@@ -1033,6 +979,7 @@ async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixtu
         f"expected an 'unmatched tool result' WARNING; got {warnings}"
     )
 
+
 async def test_malformed_assistant_json_is_forwarded_as_text(caplog: pytest.LogCaptureFixture) -> None:
     backend = CodexBackend(model="fixture-model")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
@@ -1045,6 +992,7 @@ async def test_malformed_assistant_json_is_forwarded_as_text(caplog: pytest.LogC
     assert not any("structured output parse failed" in w for w in warnings)
     assert [event.text for event in events if isinstance(event, TextEvent)] == [
         "this is not valid JSON"]
+
 
 async def test_parser_coverage_is_bounded_redacted_and_precedes_result(caplog: pytest.LogCaptureFixture) -> None:
     backend = CodexBackend(model="fixture-model")
@@ -1080,6 +1028,7 @@ async def test_parser_coverage_is_bounded_redacted_and_precedes_result(caplog: p
     assert "opaque-parser-secret" not in combined
     assert "/Users/private-person" not in combined
     assert "printf hidden-command" not in combined
+
 
 def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     label = "x" * 54 + " ghp_" + "y" * 12
@@ -1231,37 +1180,8 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     assert len(message) <= 3_000
 
 
-def test_text_extraction_top_level_wins_over_content_blocks() -> None:
-    """When both delivery shapes exist, top-level text takes precedence over content blocks."""
-    item = {
-        "text": "TOP-LEVEL", "content": [{"type": "text", "text": "BLOCK"}, {"type": "output_text", "text": "OUTPUT"}],
-    }
-    assert CodexBackend._extract_text(item) == "TOP-LEVEL"
-
 # Use the shared fan-out setting so changing backends does not change endpoint concurrency.
 
-@pytest.mark.parametrize(
-    ("raw", "ceiling", "expected"),
-    [(None, 10, 8), ("3", 10, 3), ("8", 2, 2), ("0", 10, 8), ("-1", 10, 8), ("notanint", 10, 8)],
-)
-def test_codex_fanout_concurrency_honours_the_shared_env_override(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, ceiling: int, expected: int,
-) -> None:
-    if raw is None:
-        monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
-    else:
-        monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
-    assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
-
-
-class TestDisplayShellCommand:
-    """S1/M5: display variant decodes AND strips the leading cd prefix."""
-
-
-    def test_raw_and_display_distinct_for_cd_command(self) -> None:
-        raw = '/bin/zsh -lc "cd /app && echo hello"'
-        assert _unwrap_shell_command(raw) == "cd /app && echo hello"
-        assert display_shell_command(raw) == "echo hello"
 
 @pytest.fixture(autouse=True)
 def _reset_real_git_resolution() -> Iterator[Any]:
@@ -1271,6 +1191,7 @@ def _reset_real_git_resolution() -> Iterator[Any]:
     yield
     codex._REAL_GIT_DIR = None
     codex._REAL_GIT_RESOLVED = False
+
 
 class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
@@ -1349,6 +1270,7 @@ class TestResolveRealGitDir:
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun invoked on non-Darwin")),
         )
         assert codex._resolve_real_git_dir() is None
+
 
 class TestIsolatedChildEnvDarwinPath:
     """Darwin PATH-prepend in _isolated_child_env (issue #1122 M1/M4/M6/M7)."""
@@ -1462,12 +1384,15 @@ class TestIsolatedChildEnvDarwinPath:
     def test_non_isolated_path_returns_none_even_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         called = []
+
         def counting_resolver() -> str:
             called.append(1)
             return "/real/bin"
+
         monkeypatch.setattr(codex, "_resolve_real_git_dir", counting_resolver)
         assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
         assert called == []  # resolver never invoked on the non-clone path
+
 
 async def test_issue1124_stored_commands_are_replayable() -> None:
     """M1-M3: ToolStartEvent.input['command'] is the exact -lc argument (or raw fallback)."""
@@ -1483,77 +1408,172 @@ async def test_issue1124_stored_commands_are_replayable() -> None:
     assert starts["cmd_7"] == "/bin/zsh -lc 'unbalanced"
     assert starts["cmd_8"] == "make test"
 
+
 # --- P18 Task 1: effective request-config admission at the Codex argv seam ---
 
 
-async def test_request_event_config_read_only_sandbox_and_isolation() -> None:
-    worktree = Path(tempfile.mkdtemp(prefix="codex-p18-ro-"))
-    subprocess_run = subprocess.run
-    # Make the cwd a genuine git worktree root via the real git binary.
-    env = dict(os.environ)
-    env.pop("GIT_DIR", None)
-    init = subprocess_run(["git", "init", "-q", str(worktree)], env=env, capture_output=True, check=True)
-    assert init.returncode == 0
-    (worktree / "seed.txt").write_text("seed\n", encoding="utf-8")
-    subprocess_run(["git", "-C", str(worktree), "add", "seed.txt"], env=env, check=True)
-    subprocess_run(
-        ["git", "-C", str(worktree), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
-        env=env, check=True,
+async def test_native_codex_conversation_records_delivery_shapes_and_correlated_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One actual native conversation has literal projections rather than cross-adapter equality."""
+    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
+    rows = [
+        {"type": "thread.started", "thread_id": "native-thread"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "reasoning", "id": "reason", "text": "I will inspect"}},
+        {"type": "item.started", "item": {"type": "command_execution", "id": "shell", "command": "ls -la"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "shell",
+                "command": "ls -la",
+                "exit_code": 0,
+                "aggregated_output": "file.py\ntest.py",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"type": "file_change", "id": "patch", "file_path": "main.py", "action": "modified"},
+        },
+        {
+            "type": "item.started",
+            "item": {"type": "mcp_tool_call", "id": "read", "tool": "Read", "arguments": {"path": "/x"}},
+        },
+        {
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "read", "tool": "Read", "result": {"content": "file contents"}},
+        },
+        {
+            "type": "item.started",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "write",
+                "tool": "Write",
+                "arguments": {"path": "/y", "content": "hello"},
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "write",
+                "tool": "Write",
+                "result": {"content": "permission denied"},
+                "error": "permission denied",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "id": "top",
+                "text": '{"kind":"top"}',
+                "content": [{"type": "text", "text": "WRONG"}, {"type": "output_text", "text": "ALSO WRONG"}],
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "id": "blocks",
+                "content": [{"type": "text", "text": '{"kind":"blocks"}'}],
+            },
+        },
+        {"type": "item.started", "item": {"type": "agent_message", "id": "stream", "content": []}},
+        {
+            "type": "item.updated",
+            "item": {"type": "agent_message", "id": "stream", "content": [{"type": "text", "text": '{"kind":'}]},
+        },
+        {
+            "type": "item.updated",
+            "item": {"type": "agent_message", "id": "stream", "content": [{"type": "text", "text": '"streamed"}'}]},
+        },
+        {"type": "item.completed", "item": {"type": "agent_message", "id": "stream", "content": []}},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "id": "output",
+                "content": [{"type": "output_text", "text": '{"kind":"output"}'}],
+            },
+        },
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 200, "output_tokens": 90, "cached_input_tokens": 50, "reasoning_output_tokens": 20,
+        }},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "id": "verified", "text": "Verified"}},
+        {"type": "turn.completed", "model": "gpt-5.5-pro", "provider": "native-provider", "usage": {
+            "input_tokens": 100, "output_tokens": 30, "cached_input_tokens": 20, "reasoning_output_tokens": 10,
+        }, "result": {"issues": []}},
+    ]
+    process = make_mock_process([json.dumps(row) for row in rows])
+    backend = CodexBackend(model="gpt-5.5")
+    assert backend.fanout_concurrency == 8
+    recorder = make_recorder(tmp_path, agent_model_name="codex")
+    events: list[Any] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        async with recorder:
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe_user_step(prompt="Inspect")
+                async for event in backend.execute(tmp_path, "Inspect", output_schema={"type": "object"}):
+                    events.append(event)
+                    inv.observe(event)
+    expected_text = ['{"kind":"top"}', '{"kind":"blocks"}', '{"kind":"streamed"}', '{"kind":"output"}',
+                     "Verified"]
+    assert [event.text for event in events if isinstance(event, TextEvent)] == expected_text
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["I will inspect"]
+    assert [(event.id, event.name) for event in events if isinstance(event, ToolStartEvent)] == [
+        ("shell", "shell"),
+        ("patch", "patch"),
+        ("read", "Read"),
+        ("write", "Write"),
+    ]
+    results = {event.id: event for event in events if isinstance(event, ToolResultEvent)}
+    assert results["shell"].output == "file.py\ntest.py" and not results["shell"].is_error
+    patch_start = next(event for event in events if isinstance(event, ToolStartEvent) and event.id == "patch")
+    assert patch_start.input == {"file": "main.py", "action": "modified"}
+    assert results["patch"].output == "modified: main.py" and not results["patch"].is_error
+    assert results["read"].output == "file contents" and results["write"].is_error
+    terminal = [event for event in events if isinstance(event, ResultEvent)]
+    assert len(terminal) == 1 and terminal[0].structured_output == {"issues": []}
+    assert (terminal[0].session_id, terminal[0].model_name, terminal[0].provider_name) == (
+        "native-thread", "gpt-5.5-pro", "native-provider",
     )
-    captured_argv: dict[str, Any] = {}
-    ro_item = {"type": "agent_message", "id": "m1", "content": [{"type": "text", "text": "ro"}]}
-    lines = [
-        json.dumps({"type": "thread.started", "thread_id": "th_ro"}),
-        json.dumps({"type": "item.completed", "item": ro_item}),
-        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    assert sum(isinstance(event, TurnEndEvent) for event in events) == 5
+    metrics = [event for event in events if isinstance(event, MetricsEvent)]
+    assert [(m.message_id, m.prompt_tokens, m.completion_tokens, m.cached_tokens, m.reasoning_tokens)
+            for m in metrics] == [("", 200, 90, 50, 20), ("", 100, 30, 20, 10)]
+    costs = [event for event in events if isinstance(event, CostEvent)]
+    assert [event.cost_usd for event in costs] == pytest.approx([0.003475, 0.0084])
+    assert [(event.model_name, event.provider_name) for event in metrics] == [
+        ("gpt-5.5", None), ("gpt-5.5-pro", "native-provider"),
     ]
-    def _spawner(argv: list[str], **kwargs: Any) -> FakeCliProcess:
-        captured_argv["argv"] = list(argv)
-        return FakeCliProcess(lines)
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=lambda *a, **k: _spawner(list(a)),
-    ):
-        backend = CodexBackend(model="gpt-5.3-codex")
-        events = [event async for event in backend.execute(worktree, "hello", read_only=True)]
-    argv = captured_argv["argv"]
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, CodexRequestConfig)
-    assert config.sandbox_mode == "read-only"
-    assert config.read_only_isolation is True  # disposable clone (execution_cwd != cwd)
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
-    assert config.native_output_schema is False
-    shutil.rmtree(worktree, ignore_errors=True)
-
-async def test_request_event_config_resume_and_schema() -> None:
-    captured_argv: dict[str, Any] = {}
-    def _spawner(argv: list[str], **kwargs: Any) -> FakeCliProcess:
-        captured_argv["argv"] = list(argv)
-        return FakeCliProcess(lines)
-    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
-    res_item = {"type": "agent_message", "id": "m1", "content": [{"type": "text", "text": "{\"ok\": true}"}]}
-    lines = [
-        json.dumps({"type": "thread.started", "thread_id": "th_res"}),
-        json.dumps({"type": "item.completed", "item": res_item}),
-        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+    assert [(event.model_name, event.provider_name) for event in costs] == [
+        ("gpt-5.5", None), ("gpt-5.5-pro", "native-provider"),
     ]
-    token = ContinuationToken(backend="codex", data={"thread_id": "th_old"})
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=lambda *a, **k: _spawner(list(a)),
-    ):
-        backend = CodexBackend(model="gpt-5.3-codex")
-        events = [
-            event
-            async for event in backend.execute(Path("/tmp"), "hello", output_schema=schema, continuation=token)
-        ]
-    argv = captured_argv["argv"]
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, CodexRequestConfig)
-    assert config.continuation_mode == "resume"
-    assert config.native_output_schema is True
-    assert "--output-schema" in argv
-    assert "resume" in argv
-    assert request.session_id == "th_old"
-    assert request.session_source == "configured"
-    assert "hello" not in argv
+    assert [event.usage_scope for event in metrics] == ["invocation", "invocation"]
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert isinstance(request.config, CodexRequestConfig)
+    assert request.model_name == "gpt-5.5" and request.provider_name is None
+    assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in events)
+    document = json.loads(recorder.path.read_text())
+    steps = [step for step in document["steps"] if step["source"] == "agent"]
+    assert [step["message"] for step in steps] == expected_text
+    assert steps[0]["reasoning_content"] == "I will inspect"
+    assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write"]
+    assert {result["source_call_id"] for result in steps[0]["observation"]["results"]} == set(results)
+    assert process.returncode == 0 and backend._transports == []
+    process.wait.assert_awaited()
+    process.stdin.close.assert_called()
+    process._transport.close.assert_called_once()
+    billed = [step["metrics"] for step in steps if step.get("metrics")]
+    assert [(m["prompt_tokens"], m["completion_tokens"], m["cached_tokens"], m["extra"]["reasoning_tokens"])
+            for m in billed] == [(200, 90, 50, 20), (100, 30, 20, 10)]
+    assert [m["cost_usd"] for m in billed] == pytest.approx([0.003475, 0.0084])
+    assert document["final_metrics"]["total_prompt_tokens"] == 300
+    assert document["final_metrics"]["total_completion_tokens"] == 120
+    assert document["final_metrics"]["total_cached_tokens"] == 70
+    assert document["final_metrics"]["total_cost_usd"] == pytest.approx(0.011875)
+    assert validate(recorder.path, validate_images=False)

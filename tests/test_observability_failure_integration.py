@@ -680,9 +680,8 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
     assert attributes(root)["daydream.exit_code"] == 1
 
 @pytest.mark.parametrize("terminal_result", [False, True])
-@pytest.mark.parametrize("last_duration_source", ["tool", "message"])
 async def test_runner_attempt_duration_requires_terminal_result(
-    terminal_result: bool, last_duration_source: str, ext_dir: ExtDir, feature_branch_repo: Path,
+    terminal_result: bool, ext_dir: ExtDir, feature_branch_repo: Path,
     make_config: Callable[..., RunConfig], install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(ext_dir)
@@ -691,8 +690,6 @@ async def test_runner_attempt_duration_requires_terminal_result(
         MetricsEvent("message-one", 5, 1, None, None, duration_ms=123),
         ToolResultEvent("timed-tool", "source content", False, duration_ms=42),
     ]
-    if last_duration_source == "message":
-        timings.reverse()
 
     class TimedBackend(_NoCancelBackend):
         model = "timed-model"
@@ -836,6 +833,8 @@ async def test_runner_default_non_loop_generation_omits_optional_scope_attribute
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {"output": "final answer", "aborted": None}
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert [draft["generation_id"] for draft in lifecycle["drafts"]] == ["gen-default"]
+    assert lifecycle["billing_owner"] == "none"
+    assert lifecycle["drafts"][0]["billed"] is False and "usage" not in lifecycle["drafts"][0]
     spans = collector.spans
     by_kind = {kind: _kind(spans, kind) for kind in ("run", "agent", "attempt", "generation")}
     assert all(len(values) == 1 for values in by_kind.values())
@@ -925,6 +924,12 @@ class _LateMissingMetricsBackend(_NoCancelBackend):
         yield RequestEvent(prompt)
         yield _gen_start("gen-late")
         yield _gen_end("gen-late", "choice arrived, usage never did")
+        yield _gen_start("gen-bool")
+        yield _gen_end("gen-bool", "bool start", native_started_at_unix_ms=True)
+        yield _gen_start("gen-missing")
+        yield _gen_end("gen-missing", "missing start", native_started_at_unix_ms=None)
+        yield _gen_start("gen-reversed")
+        yield _gen_end("gen-reversed", "reversed start", native_started_at_unix_ms=1_778_000_001_000)
         yield CostEvent(0.02, 200, 40, measurement_source="terminal")
         yield TextEvent("answer")
         yield ResultEvent(None, None)
@@ -938,9 +943,17 @@ async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "structural_attempt"
-    assert lifecycle["drafts"][0]["billed"] is False
+    assert {draft["generation_id"]: (draft["native_started_at_unix_ns"], draft["duration_ns"], draft["start_fallback"])
+            for draft in lifecycle["drafts"]} == {
+        "gen-late": (1_778_000_000_000_000_000, 500_000_000, None),
+        "gen-bool": (None, None, "invalid"), "gen-missing": (None, None, "missing"),
+        "gen-reversed": (None, None, "reversed"),
+    }
+    assert all(draft["billed"] is False and "usage" not in draft for draft in lifecycle["drafts"])
     spans = collector.spans
-    generation = _kind(spans, "generation")[0]
+    generations = {attributes(span)["daydream.generation.id"]: span for span in _kind(spans, "generation")}
+    assert set(generations) == {"gen-late", "gen-bool", "gen-missing", "gen-reversed"}
+    generation = generations["gen-late"]
     meta = attributes(generation)
     assert meta["daydream.generation.billed"] is False
     assert "gen_ai.response.id" not in meta  # standard alias withheld unbilled
@@ -1055,8 +1068,9 @@ class _ToolErrorAfterSealBackend(_NoCancelBackend):
         yield _gen_start("gen-tool-err")
         yield _gen_end("gen-tool-err", "sealed before the tool failed", response_id="resp-tool-err")
         yield MetricsEvent("gen-tool-err", 30, 6, None, 0.0005, generation_id="gen-tool-err")
-        yield ToolStartEvent("failing-tool", "Bash", {"command": "exit 3"})
-        yield ToolResultEvent("failing-tool", "boom", True)
+        yield ToolStartEvent("failing-tool", "Bash", {"command": "exit 3"}, timestamp="2026-09-05T10:00:00Z")
+        yield ToolResultEvent("failing-tool", "read failed opaque-secret", True,
+                              timestamp="2026-09-05T10:00:02Z", duration_ms=2000)
         yield CostEvent(0.0005, 30, 6, measurement_source="terminal")
         yield TextEvent("recovered answer")
         yield ResultEvent(None, None)
@@ -1066,6 +1080,7 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later tool ERROR keeps sealed generation billing and historical timing intact."""
+    monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _ToolErrorAfterSealBackend(),
     )
@@ -1074,6 +1089,12 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
     assert tool["status"]["code"] == "STATUS_CODE_ERROR"
     assert attributes(tool)["daydream.outcome"] == "error"
     assert attributes(tool)["daydream.tool.error"] is True
+    assert tool["status"]["message"] == "error" and tool["events"][-1]["name"] == "exception"
+    error = attributes(tool["events"][-1])
+    assert error["exception.type"] == "ToolError" and "read failed" in error["exception.message"]
+    assert "opaque-secret" not in json.dumps(tool)
+    assert attributes(tool)["daydream.tool.started_at"] == "2026-09-05T10:00:00Z"
+    assert attributes(tool)["daydream.tool.completed_at"] == "2026-09-05T10:00:02Z"
     generation = _kind(spans, "generation")[0]
     meta = attributes(generation)
     assert meta["daydream.generation.billed"] is True
@@ -1093,7 +1114,8 @@ class _PendingCapBackend(_NoCancelBackend):
             generation_id = f"gen-{index:04d}"
             yield _gen_start(generation_id)
             yield _gen_end(generation_id, f"choice {index}", native_started_at_unix_ms=None)
-        yield CostEvent(0.01, 100, 10, measurement_source="terminal")
+            yield MetricsEvent(generation_id, 1, 1, None, None, generation_id=generation_id)
+        yield CostEvent(0.01, 513, 513, measurement_source="terminal")
         yield TextEvent("done")
         yield ResultEvent(None, None)
 
@@ -1111,12 +1133,15 @@ async def test_runner_pending_count_cap_drains_children_stay_unbilled(
     assert len(lifecycle["drafts"]) == 513
     assert all(draft["ended"] for draft in lifecycle["drafts"])
     assert all(draft["billed"] is False for draft in lifecycle["drafts"])
+    assert all(draft["usage"] == {"input_tokens": 1, "output_tokens": 1} for draft in lifecycle["drafts"])
+    assert lifecycle["authoritative_total"] == {"input_tokens": 513, "output_tokens": 513, "cost_usd": 0.01}
     cap = [d for d in lifecycle["diagnostics"] if "cap" in d]
     assert len(cap) == 1 and "512" in cap[0]
     generations = _kind(collector.spans, "generation")
     assert len(generations) == 513
     assert all("gen_ai.usage.input_tokens" not in attributes(span) for span in generations)
     assert attributes(_kind(collector.spans, "attempt")[0])["daydream.billing.owner"] == "structural_attempt"
+    assert attributes(_kind(collector.spans, "attempt")[0])["gen_ai.usage.input_tokens"] == 513
     payload = json.dumps([request["body"] for request in collector.requests])
     assert "generation_pending_cap" not in payload  # diagnostics never on the wire
 

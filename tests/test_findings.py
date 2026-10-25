@@ -24,6 +24,7 @@ from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import test_execution_identity as execution_identity
+from tests.harness.git_helpers import commit, git
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
 
 
@@ -217,15 +218,28 @@ async def test_real_review_export_preserves_findings_or_backend_failure(
     """Only provider and GitHub boundaries are doubled; Git/placement/writes run unchanged."""
     record = {"id": 1, "description": "Greeting changed without regression coverage", "severity": "medium",
               "confidence": "HIGH", "file": "main.py", "line": 1, "rationale": "", "evidence": "main.py:1"}
+    records = [record]
+    if not errored:
+        (feature_branch_repo / "db.py").write_text("def query():\n    return 1\n")
+        git(feature_branch_repo, "add", "db.py")
+        commit(feature_branch_repo, "add second reviewed source")
+        record = {**record, "description": "Missing check on `token_env`", "rationale": "NPE"}
+        records = [record, {**record, "id": 2, "line": 2},
+                   {**record, "id": 3, "severity": "low", "confidence": "MEDIUM"},
+                   {**record, "id": 4, "file": "db.py", "evidence": "db.py:1"},
+                   {**record, "id": 5, "rationale": "second rationale"},
+                   {**record, "id": 6, "description": "`alpha` and `bravo`"},
+                   {**record, "id": 7, "description": "`bravo` and `alpha`"}]
     backend: Any = ScriptedBackend(events=[TextEvent(text="Invalid API key · Fix external API key"),
         ClaudeAgentError("Claude agent run failed: Invalid API key · Fix external API key")],
         model=None) if errored else (
         EmptyReviewBackend(feature_branch_repo, forbid_merge=False, forbid_supervise=False,
-                           review_by_stack={"python": [record]}))
+                           review_by_stack={"python": records}))
     if not errored:
         backend.merge_echo_records, backend.merge_items = True, None
     head = git_ops.head_sha(feature_branch_repo)
-    pr = PRInfo(7, head, head, "main", "feature", "o", "r", "https://example.invalid/pr/7")
+    pr = PRInfo(7, head, git(feature_branch_repo, "rev-parse", "main"),
+                "main", "feature", "o", "r", "https://example.invalid/pr/7")
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
@@ -247,3 +261,18 @@ async def test_real_review_export_preserves_findings_or_backend_failure(
         assert not loaded.analysis_complete
     else:
         assert loaded.findings and all(re.fullmatch(r"[0-9a-f]{64}", f.fingerprint) for f in loaded.findings)
+        by_record = {(f.path, f.line, f.title, f.severity, f.confidence, f.body.rsplit("\n\n", 1)[-1]): f.fingerprint
+                     for f in loaded.findings}
+        assert len(by_record) == len(loaded.findings) == 7
+        base = by_record[("main.py", 1, "Missing check on `token_env`", "medium", "HIGH", "NPE")]
+        assert base == "d7aeacf21bddb6765801dde1c9b488cbf12a7bfabd9ee818c09861e0198484c7"
+        assert by_record[("main.py", 2, "Missing check on `token_env`", "medium", "HIGH", "NPE")] == base
+        assert by_record[("main.py", 1, "Missing check on `token_env`", "low", "MEDIUM", "NPE")] == base
+        other_file = by_record[("db.py", 1, "Missing check on `token_env`", "medium", "HIGH", "NPE")]
+        other_rationale = by_record[
+            ("main.py", 1, "Missing check on `token_env`", "medium", "HIGH", "second rationale")]
+        alpha_first = by_record[("main.py", 1, "`alpha` and `bravo`", "medium", "HIGH", "NPE")]
+        bravo_first = by_record[("main.py", 1, "`bravo` and `alpha`", "medium", "HIGH", "NPE")]
+        assert other_file != base and other_rationale != base
+        assert alpha_first != bravo_first
+        assert len({base, other_file, other_rationale, alpha_first, bravo_first}) == 5

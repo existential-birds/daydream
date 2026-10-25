@@ -6,6 +6,7 @@ and the default Rich path.
 from __future__ import annotations
 
 import io
+import json
 import sys
 from collections.abc import Callable
 from contextlib import redirect_stdout
@@ -68,48 +69,9 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.parametrize(("events", "config_overrides", "required", "forbidden"),
     [
-        # Sentinel-absence is asserted at the agent boundary in
-        # test_log_mode_emission_redacts_sentinels_on_agent_path; marker presence
-        # here proves the agent's `_print_log` redaction runs on the real path.
-        # The forbidden tuples keep the log-mode markup-free invariant guarded:
-        # captured stdout on this path is plain text (no Rich escape sequences).
-        pytest.param([TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
-            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("hello", "[REDACTED_API_KEY]"),
-            ("\x1b[", "[bold]", "[dim]"),
-            id="plain-text",
-        ), pytest.param([ThinkingEvent(f"thinking about {REDACTION_SENTINEL}")],
-            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[thinking]", "[REDACTED_API_KEY]"), (),
-            id="thinking-sentinel",
-        ), pytest.param([ToolStartEvent(id="test-id", name="bash", input={"command": f"echo {REDACTION_SENTINEL}"},),
-                ToolResultEvent(id="test-id", output=f"token={REDACTION_SENTINEL}", is_error=False),
-            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[tool:bash]", "[REDACTED_API_KEY]"), (),
-            id="tool-events",
-        ), pytest.param([CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
-            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[cost] $0.0042",), (), id="cost",
-        ),
-        pytest.param([MetricsEvent(
-                    message_id="test-msg", prompt_tokens=100, completion_tokens=50, cached_tokens=None, cost_usd=None,
-                )
-            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[metrics] prompt=100 completion=50",), (),
-            id="metrics",
-        ),
-        pytest.param(
-            [ThinkingEvent("I need to analyze this code")], {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[thinking] I need to analyze this code",), (), id="thinking",
-        ),
-        pytest.param([
-                ResultEvent(structured_output={"status": "complete", "token": REDACTION_SENTINEL}, continuation=None,)
-            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, (), ("[result]", REDACTION_SENTINEL),
-            id="rejected-result-event",
-        ),
-        pytest.param([ToolStartEvent(
-                    id="test-id", name="bash", input={"command": "false", "description": "failing command"},
-                ), ToolResultEvent(id="test-id", output="command failed with exit code 1", is_error=True,),
-            ], {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[tool:bash ERROR] command failed with exit code 1",), (), id="tool-error",
-        ), pytest.param([TextEvent("hello world"), CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
+        pytest.param([TextEvent("hello world"), CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
             {"log_mode": False, "quiet": False, "output_mode": "review"}, (), ("[cost] $0.0042",), id="default-off",
-        ),
+        )
     ],
 )
 def test_log_mode_rendering(
@@ -285,37 +247,41 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
         assert sentinel not in out   # raw token never reaches stdout
         assert "REDACTED" in out     # redaction marker present
 
-def test_log_mode_trajectory_still_written(
-    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Test that --log mode still writes trajectory file (recorder unaffected)."""
-    install_backend(ScriptedBackend(events=[TextEvent("generating trajectory")], retryable=False))
-
-    trajectory_path = tmp_path / "trajectory.json"
-
-    config = make_config(
-        tiny_diff_target, log_mode=True, quiet=True, output_mode="review", trajectory_path=trajectory_path,
-    )
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify trajectory file was created
-    assert trajectory_path.exists(), "Trajectory file should be written even in log mode"
-
-    # Verify log output still works
-    assert "generating trajectory" in output
 
 def test_verbose_flag_invocation_reaches_log_mode_pipeline(
-    tiny_diff_target: Path, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The real --verbose flag (not a config dict) drives log_mode end-to-end."""
-    install_backend(ScriptedBackend(events=[TextEvent(f"token=hello {REDACTION_SENTINEL} world")], retryable=False,))
+    """One real verbose invocation presents all event kinds and retains its trajectory."""
+    rejected_secret = "ghp_" + "z" * 16
+    install_backend(ScriptedBackend(events=[
+        TextEvent(f"token=hello {REDACTION_SENTINEL} world"),
+        ThinkingEvent(f"thinking about {REDACTION_SENTINEL}"),
+        ToolStartEvent(id="read", name="bash", input={"command": f"echo {REDACTION_SENTINEL}"}),
+        ToolResultEvent(id="read", output=f"token={REDACTION_SENTINEL}", is_error=False),
+        ToolStartEvent(id="error", name="bash", input={"command": "false", "description": "failing command"}),
+        ToolResultEvent(id="error", output="command failed with exit code 1", is_error=True),
+        MetricsEvent(message_id="test-msg", prompt_tokens=100, completion_tokens=50, cached_tokens=None, cost_usd=None),
+        CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50),
+        ResultEvent(structured_output={"status": "complete", "token": rejected_secret}, continuation=None),
+        TextEvent("Update the changed code."),
+    ], retryable=False))
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda repo, **_kwargs: ("test", "repo"))
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None)
-    config = _parse_args(["--verbose", str(tiny_diff_target)])
-    assert config.log_mode is True
+    config = _parse_args(["--verbose", "--review", str(tiny_diff_target)])
+    assert config.log_mode is True and config.output_mode == "review"
+    trajectory = tmp_path / "trajectory.json"
+    config.trajectory_path = trajectory
     output = _capture_stdout_and_run(config, monkeypatch)
-    assert "hello" in output
-    assert "[REDACTED_API_KEY]" in output     # redaction markers unchanged
-    assert "\x1b[" not in output              # plain text, no Rich escapes
+    assert all(value in output for value in (
+        "hello", "[thinking] thinking about", "[tool:bash]", "[tool:bash result]", "[tool:bash ERROR] command failed",
+        "[metrics] prompt=100 completion=50", "[cost] $0.0042", "[REDACTED_API_KEY]",
+    ))
+    agent_lines = [line for line in output.splitlines() if line.startswith(("token=hello ", "[thinking] ", "[tool:"))]
+    assert all(line in agent_lines for line in (
+        "token=hello [REDACTED_API_KEY] world", "[thinking] thinking about [REDACTED_API_KEY]",
+        "[tool:bash] echo [REDACTED_API_KEY]", "[tool:bash result] token=[REDACTED_API_KEY]",
+    ))
+    assert REDACTION_SENTINEL not in "\n".join(agent_lines)
+    assert all(value not in output for value in (rejected_secret, "[result]", "\x1b[", "[bold]", "[dim]"))
+    document = json.loads(trajectory.read_text())
+    assert document["steps"] and any(step["source"] == "agent" for step in document["steps"])

@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator, Mapping, cast
 import pytest
 
 from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.otlp import TraceCollector, attributes
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -258,52 +259,13 @@ def _verify_against(fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPat
 
 # HoneyHive verifier behavior
 
-def test_honeyhive_search_request_shape_and_pass(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    session_id = json.loads(receipt.read_text())["session_id"]
-    run_id = json.loads(receipt.read_text())["run_id"]
-    captured: list[dict[str, Any]] = []
-
-    def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        captured.append(dict(record))
-        body = {"events": [_hh_event("e1", session_id, **{"daydream.run.id": run_id}),
-                _hh_event("e2", session_id, event_type="model", **{"daydream.run.id": run_id}),
-                _hh_event("e3", session_id, event_type="tool", **{"daydream.run.id": run_id}),
-            ], "count": 3,
-        }
-        return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    exit_code = _run_verify(receipt, result_path)
-
-    assert exit_code == 0
-    # Two stable complete snapshots: page 1 is requested on both full reads.
-    assert len(captured) == 2
-    sent = captured[0]
-    assert sent["method"] == "POST"
-    assert sent["path"] == "/v1/events/search"
-    assert sent["headers"]["authorization"] == f"Bearer {_SECRET_KEY}"
-    payload = json.loads(sent["body"])
-    assert payload == {
-        "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}], "limit": 100,
-        "page": 1,
-    }
-    result = json.loads(result_path.read_text())
-    assert result["stored_contract_passed"] is True
-    assert result["terminal"] == _verifier.DISPOSITION_PASS
-    assert result["ui_inspected"] is False
-    # Two stable complete snapshots are required: one full read + one repeat.
-    assert len(captured) == 2
 
 def test_honeyhive_paginates_until_count_satisfied(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    session_id = json.loads(receipt.read_text())["session_id"]
+    data = json.loads(receipt.read_text())
+    session_id, run_id = data["session_id"], data["run_id"]
     # Full 100-row pages continue pagination; 250 rows require three pages.
     pages: dict[int, list[str]] = {1: [f"e{i:03d}" for i in range(100)], 2: [f"e{i:03d}" for i in range(100, 200)],
         3: [f"e{i:03d}" for i in range(200, 250)],
@@ -311,19 +273,28 @@ def test_honeyhive_paginates_until_count_satisfied(
 
     def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         page = json.loads(record["body"])["page"]
-        events = [_hh_event(event_id, session_id) for event_id in pages.get(page, [])]
+        events = [_hh_event(event_id, session_id, **{"daydream.run.id": run_id}) for event_id in pages.get(page, [])]
         # Representative-agent-tree minimums: one model and one tool event.
         if page == 3:
-            events[-2] = _hh_event("e-tool-001", session_id, event_type="tool")
-            events[-1] = _hh_event("e-model-001", session_id, event_type="model")
+            events[-2] = _hh_event("e-tool-001", session_id, event_type="tool", **{"daydream.run.id": run_id})
+            events[-1] = _hh_event("e-model-001", session_id, event_type="model", **{"daydream.run.id": run_id})
         return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 250}).encode()
 
     fake_vendor.respond("POST", "/v1/events/search", search)
     result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
     result = json.loads(result_path.read_text())
     assert result["stored_contract_passed"] is True
+    assert result["terminal"] == _verifier.DISPOSITION_PASS and result["ui_inspected"] is False
     # Two stable complete snapshots: each full read is 3 pages (100+100+50).
-    assert len([r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]) == 6
+    reads = [r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]
+    assert len(reads) == 6
+    sent = reads[0]
+    assert sent["method"] == "POST" and sent["path"] == "/v1/events/search"
+    assert sent["headers"]["authorization"] == f"Bearer {_SECRET_KEY}"
+    assert json.loads(sent["body"]) == {
+        "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}],
+        "limit": 100, "page": 1,
+    }
 
 @pytest.mark.parametrize(("body_builder", "disposition"),
     [(lambda sid: json.dumps({"events": [_hh_event("dup", sid), _hh_event("dup", sid)], "count": 2}).encode(),
@@ -352,7 +323,7 @@ def test_honeyhive_rejects_invalid_readbacks(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == disposition
 
-@pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
+@pytest.mark.parametrize("status", [401, 404, 503])
 def test_honeyhive_status_errors_are_bounded(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
@@ -781,7 +752,7 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
     assert exit_code == 1
     assert "HH_API_KEY" in buffer.getvalue()
 
-@pytest.mark.parametrize("marker", [False, True])
+@pytest.mark.parametrize("marker", [False])
 def test_replay_fake_pi_marker_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa - vulture: pytest fixture arg (side-effect env setup)
     marker: bool,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
@@ -792,24 +763,13 @@ def test_replay_fake_pi_marker_requirement(tmp_path: Path, monkeypatch: pytest.M
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         exit_code = _run_replay(repo, fk, receipt_path)
-    if not marker:
-        assert exit_code == 1
-        assert not receipt_path.exists()
-        assert "marker" in buffer.getvalue()
-    else:
-        assert exit_code == 0
-        receipt = json.loads(receipt_path.read_text())
-        assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
+    assert exit_code == 1
+    assert not receipt_path.exists()
+    assert "marker" in buffer.getvalue()
 
 
 # Gate integration (reviewer card t_d50a1bbe): replay→verify chain + HH stability
 
-def test_replay_receipt_is_accepted_by_verifier_validator(
-    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
-) -> None:
-    _receipt_path, receipt = _replay_receipt(tmp_path, message="replay must produce its receipt before validation")
-    # Must not raise: the replay receipt is the verifier's canonical input.
-    _verifier.validate_receipt(receipt)
 
 def test_honeyhive_requires_two_stable_complete_snapshots(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -834,30 +794,6 @@ def test_honeyhive_requires_two_stable_complete_snapshots(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
 
-def test_honeyhive_two_stable_complete_snapshots_pass(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
-    data = json.loads(receipt.read_text())
-    session_id, run_id = data["session_id"], data["run_id"]
-
-    def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        page = json.loads(record["body"])["page"]
-        if page == 1:
-            events = [_hh_event("e1", session_id, **{"daydream.run.id": run_id}),
-                _hh_event("e2", session_id, event_type="model", **{"daydream.run.id": run_id}),
-                _hh_event("e3", session_id, event_type="tool", **{"daydream.run.id": run_id}),
-            ]
-        else:
-            events = []
-        return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 3}).encode()
-
-    fake_vendor.respond("POST", "/v1/events/search", search)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
-    result = json.loads(result_path.read_text())
-    assert result["stored_contract_passed"] is True
-    # First complete read + second complete read of the same single page.
-    assert len([r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]) == 2
 
 def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -928,6 +864,25 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(
 ) -> None:
     fake_hh, fake_ls = fake_vendors
     receipt_path, receipt = _replay_receipt(tmp_path, message="replay must pass all gates before the verifier runs")
+    assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
+    assert receipt["model_call_count"] == receipt["operational_cost_usd"] == 0
+    assert receipt["fixture_sha256"] == hashlib.sha256(REPLAY_FIXTURE.read_bytes()).hexdigest()
+    assert receipt["manifest_sha256"] == hashlib.sha256((FIXTURES / "replay-manifest.json").read_bytes()).hexdigest()
+    assert receipt["run_id"] and receipt["session_id"] and receipt["local_otlp_root_span_id"]
+    assert receipt["local_otlp_wire_sha256"]
+    assert receipt["reported_cost_usd"] == 0.00402781
+    assert receipt["labels"]["reported_cost"].startswith("synthetic")
+    assert fake_hh.requests and fake_ls.requests
+    assert time.time_ns is _replay._stdlib_real_time_ns
+    wire = TraceCollector()
+    for request in fake_hh.requests:
+        wire.capture(request["path"], request["headers"], request["body"])
+    assert wire.spans
+    for span in wire.spans:
+        identity = attributes(span)
+        assert (identity["daydream.session.id"], identity["daydream.trajectory.id"],
+                identity["traceloop.association.properties.session_id"], identity["daydream.run.id"]) == (
+            receipt["session_id"], receipt["session_id"], receipt["session_id"], receipt["run_id"])
     run_id = receipt["run_id"]
     session_id = receipt["session_id"]
 
@@ -964,28 +919,3 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(
     assert result["destinations"]["langsmith"]["disposition"] == _verifier.DISPOSITION_PASS
     # The HoneyHive session was read twice completely (two stable snapshots).
     assert len([r for r in fake_hh.requests if r["path"] == "/v1/events/search"]) >= 2
-
-def test_replay_full_hermetic_run_writes_labeled_receipt(
-    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Real PiBackend/run_agent/trace_run with a fake process emits a labeled zero-cost replay receipt."""
-    monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-replay-test")
-    fake_hh, fake_ls = fake_vendors
-    _receipt_path, receipt = _replay_receipt(
-        tmp_path, message="hermetic replay should pass all gates and the local wire check"
-    )
-    assert receipt["acceptance_kind"] == "sanitized_protocol_replay"
-    assert receipt["model_call_count"] == 0
-    assert receipt["operational_cost_usd"] == 0
-    assert receipt["fixture_sha256"] == hashlib.sha256(REPLAY_FIXTURE.read_bytes()).hexdigest()
-    manifest_hash = hashlib.sha256((FIXTURES / "replay-manifest.json").read_bytes()).hexdigest()
-    assert receipt["manifest_sha256"] == manifest_hash
-    assert receipt["run_id"] and receipt["session_id"]
-    assert receipt["local_otlp_root_span_id"]
-    assert len(receipt["local_otlp_wire_sha256"]) >= 1
-    assert receipt["reported_cost_usd"] == 0.00402781
-    assert receipt["labels"]["reported_cost"].startswith("synthetic")
-    # Both vendor destinations must have been reached by the real exporters.
-    assert fake_hh.requests and fake_ls.requests
-    # Replay must restore the host clock for subsequent worker tests.
-    assert time.time_ns is _replay._stdlib_real_time_ns

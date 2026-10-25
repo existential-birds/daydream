@@ -30,8 +30,10 @@ from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
 from daydream.review_budget import ReviewLimits
+from tests.conftest import _feature_repo
 from tests.harness.backend import Responder, ScriptedBackend
 from tests.harness.fake_clock import FakeClock
+from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import default_strategy as _default_strategy, exploration_strategies
 from tests.harness.trajectory import (
     dispatch_descriptors as _ref_descriptors,
@@ -173,12 +175,6 @@ async def test_pre_scan_retains_slow_dependency_mapping_with_bounded_finalizatio
     assert bool(context.dependencies) is has_dependencies
     assert backend.call_count == calls
 
-def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    backend = _specialist_backend(results=_VALID_ENVELOPE)
-    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
-    by_path = {f.path: f for f in ctx.affected_files}
-    assert by_path["daydream/extra.py"].provenance == "llm"
 
 @pytest.mark.parametrize("oversized", [False, True])
 def test_pre_scan_supplies_small_diff_without_requiring_bash(tmp_path: Path, oversized: bool) -> None:
@@ -259,6 +255,7 @@ def test_modest_default_prescan_is_static_and_captures_guidance(tmp_path: Path, 
     context.write_to_dir(tmp_path / "exploration")
     summary = (tmp_path / "exploration/summary.md").read_text()
     assert "Guideline evidence: keep shared helpers canonical." in summary
+    assert "Additional Notes" in summary
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in summary
     assert "not correctness review or coverage evidence" in summary
 
@@ -285,23 +282,18 @@ def test_static_guidance_is_bounded_and_confined_to_repo(tmp_path: Path) -> None
     (repo / ".editorconfig").write_bytes(b"root=true\n\xff")
     (repo / "src").mkdir()
     (repo / "src/AGENTS.md").write_text("nested guideline evidence")
+    (repo / ".github/workflows").mkdir(parents=True)
+    (repo / ".github/AGENTS.md").write_text("Workflow-specific convention evidence")
     backend = _specialist_backend()
-    context = anyio.run(lambda: pre_scan(cast(Backend, backend), repo, _multifile_diff(["src/a.py", "src/b.py"])))
+    context = anyio.run(lambda: pre_scan(cast(Backend, backend), repo,
+        _multifile_diff(["src/a.py", "src/b.py", ".github/workflows/check.yml"])))
     assert backend.calls == []
     assert "outside guidance" not in context.raw_notes
     assert "nested guideline evidence" in context.raw_notes
+    assert "Workflow-specific convention evidence" in context.raw_notes
     assert "truncated" in context.raw_notes
     assert len(context.raw_notes.encode("utf-8")) <= 8192
 
-def test_static_guidance_includes_ancestors_of_non_source_changes(tmp_path: Path) -> None:
-    (tmp_path / ".github/workflows").mkdir(parents=True)
-    (tmp_path / ".github/AGENTS.md").write_text("Workflow-specific convention evidence")
-    backend = _specialist_backend()
-    context = anyio.run(lambda: pre_scan(
-        cast(Backend, backend), tmp_path, _multifile_diff([".github/workflows/check.yml", "config.json"]),
-    ))
-    assert backend.calls == []
-    assert "Workflow-specific convention evidence" in context.raw_notes
 
 def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
@@ -409,11 +401,75 @@ def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pyt
     assert str(tmp_path / "services/taste/new_name.py") in targets
     assert "old_name.py" not in targets
 
-def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: Path) -> None:
-    diff_text = _py_ts_diff()
-    backend = _specialist_backend(results=_VALID_ENVELOPE)
-    ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
-    exploration_dir = tmp_path / "exploration"
-    ctx.write_to_dir(exploration_dir)
-    data = json.loads((exploration_dir / "test-map.json").read_text())
-    assert {"test_file": "tests/test_a.py", "source_file": "daydream/a.py"} in data["test_mapping"]
+
+def test_native_repository_exploration_persists_static_and_specialist_facts(tmp_path: Path) -> None:
+    targets = {
+        "package/__init__.py": "", "package/feature/__init__.py": "",
+        "package/feature/nested/__init__.py": "", "package/feature/nested/deep/__init__.py": "",
+        "package/parentonly.py": "class User: pass\n", "package/grandparent.py": "class User: pass\n",
+        "package/ancestor.py": "thing = 1\n", "package/absolute.py": "VALUE = 1\n",
+        "package/feature/local.py": "class User: pass\n", "package/feature/something.py": "thing = 2\n",
+        "package/services/__init__.py": "", "package/extra.py": "EXTRA = 1\n",
+        "tests/test_relative_api.py": "def test_api(): pass\n",
+    }
+    sources = {
+        "package/direct.py": "import package.absolute\n",
+        "package/feature/simple.py": "from .local import User\n",
+        "package/feature/api.py": "from ..parentonly import User\n",
+        "package/feature/nested/api.py": "from ...grandparent import User\n",
+        "package/feature/nested/deep/api.py": "from ....ancestor import thing\n",
+        "package/feature/siblings.py": "from . import something\n",
+        "package/feature/parent.py": "from .. import services\n",
+        "package/parentonly.py": "class User: pass\n",
+        "web/api.ts": 'import { User } from "./models"; export function getUser(): User { return new User(); }\n',
+        "web/models.ts": "export class User {}\n",
+        "src/api.rs": "use crate::models::User; pub fn get_user() -> User { User }\n",
+        "src/models.rs": "pub struct User;\n",
+    }
+    repo = _feature_repo(
+        tmp_path, "exploration-population", {**targets, **dict.fromkeys(sources, "before = 0\n")}, sources,
+    )
+    backend = _specialist_backend(results={
+        "pattern_scanner": _VALID_ENVELOPE["pattern_scanner"],
+        "dependency_tracer": {
+            "affected_files": [
+                {"path": "web/models.ts", "role": "imports", "summary": "longer model detail"},
+                {"path": "package/extra.py", "role": "imports", "summary": "indirect helper"},
+            ],
+            "dependencies": [{"source": "web/api.ts", "target": "web/models.ts", "relationship": "imports"}],
+        },
+        "test_mapper": {"affected_files": [{"path": "tests/test_relative_api.py", "role": "test",
+            "summary": "covers relative api", "source_file": "package/feature/api.py"}]},
+    })
+    context = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), repo, _git(repo, "diff", "main")))
+    rows = {(row.path, row.role): row for row in context.affected_files}
+    assert {row.path for row in context.affected_files if row.role == "modified"} == set(sources)
+    assert {row.path for row in context.affected_files if row.role == "imports"} == {
+        "package/__init__.py", "package/feature/__init__.py", "package/absolute.py",
+        "package/feature/local.py", "package/parentonly.py", "package/grandparent.py",
+        "package/ancestor.py", "package/feature/something.py", "package/services/__init__.py",
+        "web/models.ts", "src/models.rs", "package/extra.py",
+    }
+    assert rows[("web/models.ts", "imports")].summary == "longer model detail"
+    assert rows[("web/models.ts", "imports")].provenance == "static"
+    assert rows[("package/extra.py", "imports")].provenance == "llm"
+    assert rows[("tests/test_relative_api.py", "test")].provenance == "llm"
+    assert all(row.provenance == "static" for row in context.affected_files
+        if (row.path, row.role) not in {("package/extra.py", "imports"), ("tests/test_relative_api.py", "test")})
+    assert context.completed is True
+    assert backend.call_count == 3
+    assert all(call["read_only"] is True for call in backend.calls)
+    exploration = context.write_to_dir(tmp_path / "exploration")
+    assert json.loads((exploration / "test-map.json").read_text()) == {"test_mapping": [
+        {"test_file": "tests/test_relative_api.py", "source_file": "package/feature/api.py"}]}
+    artifact_names = ("summary.md", "affected_files.md", "conventions.md", "dependencies.md")
+    artifacts = {name: (exploration / name).read_text() for name in artifact_names}
+    assert "affected_files.md" in artifacts["summary.md"]
+    assert "| `web/models.ts` | imports | static | longer model detail |" in artifacts["affected_files.md"]
+    assert "| modified | static |" in artifacts["affected_files.md"]
+    assert "snake_case" in artifacts["conventions.md"] and "use type hints" in artifacts["conventions.md"]
+    assert "web/api.ts" in artifacts["dependencies.md"] and "web/models.ts" in artifacts["dependencies.md"]
+    assert "imports" in artifacts["dependencies.md"]
+    assert all(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in content for content in artifacts.values())
+    assert (artifacts["affected_files.md"].index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
+        < artifacts["affected_files.md"].index("web/models.ts"))

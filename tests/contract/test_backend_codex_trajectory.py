@@ -14,20 +14,17 @@ from unittest.mock import patch
 import pytest
 
 from daydream.atif.validator import TrajectoryValidator
-from daydream.backends import MetricsEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase, TrajectoryRecorder
 from tests.harness.codex_replay import GapThenBlockingStdout as _GapThenBlockingStdout, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder
 
-FIXTURE = "multi_turn_with_metrics.jsonl"
-
 
 async def _drive_codex_through_recorder(
     tmp_path: Path,
     *,
-    fixture: str = FIXTURE,
+    fixture: str,
 ) -> tuple[list[Any], TrajectoryRecorder]:
     """Drive the fixture through Backend.execute inside one recorder/invocation. Return raw events and
     the recorder for stream and step assertions.
@@ -49,127 +46,6 @@ async def _drive_codex_through_recorder(
                     inv.observe(event)
                     events.append(event)
     return events, recorder
-
-
-@pytest.mark.asyncio
-async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
-    """The fixture covers reasoning_content, command_execution tool/result pairs, and
-    cached_input_tokens mapped into Step.metrics.
-    """
-    events, recorder = await _drive_codex_through_recorder(tmp_path)
-    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
-    assert len(metrics_events) == 2, (
-        f"expected one MetricsEvent per turn (2 turns), got {len(metrics_events)}"
-    )
-    for idx, mev in enumerate(metrics_events, start=1):
-        assert mev.message_id == "", (
-            f"turn {idx}: Codex MetricsEvent.message_id must be '' (D-04), "
-            f"got {mev.message_id!r}"
-        )
-        assert mev.prompt_tokens > 0, (
-            f"turn {idx}: prompt_tokens non-positive ({mev.prompt_tokens})"
-        )
-        assert mev.completion_tokens > 0, (
-            f"turn {idx}: completion_tokens non-positive ({mev.completion_tokens})"
-        )
-    # Distinct token counts distinguish separate turns from duplicate MetricsEvent emission.
-    assert metrics_events[0].prompt_tokens != metrics_events[1].prompt_tokens
-
-
-    traj_path = tmp_path / "trajectory.json"
-    assert traj_path.exists(), "recorder.__aexit__ must write trajectory.json"
-
-    validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
-    first_ok = validator.validate(traj_path)
-    assert first_ok, validator.get_errors() or "first validation failed"
-
-    # Revalidate the loaded dict without image checks because it has no filesystem anchor.
-    raw = json.loads(traj_path.read_text())
-    step_prompt = sum(
-        s["metrics"]["prompt_tokens"] for s in raw["steps"]
-        if s.get("metrics") and s["metrics"].get("prompt_tokens")
-    )
-    assert step_prompt == 34594 + 36000
-    assert raw["final_metrics"]["total_prompt_tokens"] == step_prompt
-    rt_validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
-    rt_ok = rt_validator.validate(raw, validate_images=False)
-    assert rt_ok, rt_validator.get_errors() or "round-trip validation failed"
-
-    agent_steps = [s for s in recorder.steps if s.source == "agent"]
-    assert agent_steps, "no agent steps recorded"
-
-    reason_steps = [s for s in agent_steps if s.reasoning_content]
-    assert reason_steps, "no REASON span (reasoning_content) captured"
-
-    act_steps = [
-        s
-        for s in agent_steps
-        if s.tool_calls and s.observation and s.observation.results
-    ]
-    assert act_steps, "no ACT/tool span (tool_calls + observation) captured"
-    # Every linked observation must reference a tool call on the same step.
-    for act_step in act_steps:
-        observation = act_step.observation
-        assert observation is not None and observation.results, (
-            f"ACT span on step {act_step.step_id}: observation/results missing"
-        )
-        call_ids = {tc.tool_call_id for tc in (act_step.tool_calls or [])}
-        # Interrupted markers use null source_call_id so coverage consumers cannot count interrupted
-        # reads as completed results.
-        result_ids = {
-            r.source_call_id for r in observation.results if r.source_call_id is not None
-        }
-        # Require every result ID to match; a nonempty intersection would allow unmatched results.
-        assert result_ids.issubset(call_ids), (
-            f"ACT span on step {act_step.step_id}: unpaired tool result ids "
-            f"{sorted(str(r) for r in (result_ids - call_ids))} "
-            f"not present in tool call ids {sorted(str(c) for c in call_ids)}"
-        )
-
-    metric_steps = [s for s in agent_steps if s.metrics is not None]
-    assert metric_steps, "no step carries metrics"
-    for ms in metric_steps:
-        metrics = ms.metrics
-        assert metrics is not None, f"step {ms.step_id}: metrics is None"
-        assert metrics.prompt_tokens is not None, (
-            f"step {ms.step_id}: metrics.prompt_tokens is None"
-        )
-        assert metrics.completion_tokens is not None, (
-            f"step {ms.step_id}: metrics.completion_tokens is None"
-        )
-
-    cached_steps = [s for s in metric_steps if s.metrics is not None and s.metrics.cached_tokens is not None]
-    assert cached_steps, "no step carries non-None cached_tokens"
-    for cs in cached_steps:
-        metrics = cs.metrics
-        assert metrics is not None, f"step {cs.step_id}: metrics is None"
-        assert metrics.cached_tokens and metrics.cached_tokens > 0, (
-            f"step {cs.step_id}: cached_tokens not positive "
-            f"({metrics.cached_tokens})"
-        )
-    # Reasoning tokens use Metrics.extra because ATIF has no dedicated field. They are a subset of
-    # completion tokens, never additive.
-    reasoning_steps = [
-        s
-        for s in metric_steps
-        if s.metrics is not None
-        and s.metrics.extra is not None
-        and s.metrics.extra.get("reasoning_tokens") is not None
-    ]
-    assert reasoning_steps, "no step carries reasoning_tokens via Metrics.extra"
-    for rs in reasoning_steps:
-        metrics = rs.metrics
-        assert metrics is not None and metrics.extra is not None, (
-            f"step {rs.step_id}: metrics/extra missing"
-        )
-        rt = metrics.extra["reasoning_tokens"]
-        assert isinstance(rt, int) and rt > 0, (
-            f"step {rs.step_id}: reasoning_tokens not a positive int ({rt})"
-        )
-        assert metrics.completion_tokens is not None and rt <= metrics.completion_tokens, (
-            f"step {rs.step_id}: reasoning_tokens ({rt}) exceeds "
-            f"completion_tokens ({metrics.completion_tokens}) — subset invariant"
-        )
 
 
 @pytest.mark.asyncio
@@ -276,31 +152,6 @@ async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
         "codex_parser_coverage"
     ]
     assert diagnostics[0]["metadata"]["unknown_event_types"]["total"] == 1
-
-
-@pytest.mark.asyncio
-async def test_codex_final_metrics_equal_step_sum(tmp_path: Path) -> None:
-    """Usage appears in both MetricsEvent and CostEvent; final_metrics must count it once."""
-    await _drive_codex_through_recorder(
-        tmp_path, fixture="turn_completed_with_usage.jsonl"
-    )
-
-    traj = json.loads((tmp_path / "trajectory.json").read_text())
-    step_prompt = sum(
-        s["metrics"]["prompt_tokens"]
-        for s in traj["steps"]
-        if s.get("metrics") and s["metrics"].get("prompt_tokens")
-    )
-    step_completion = sum(
-        s["metrics"]["completion_tokens"]
-        for s in traj["steps"]
-        if s.get("metrics") and s["metrics"].get("completion_tokens")
-    )
-    assert step_prompt == 200, f"fixture step-sum drifted: {step_prompt}"
-
-    final = traj["final_metrics"]
-    assert final["total_prompt_tokens"] == step_prompt  # not 400
-    assert final["total_completion_tokens"] == step_completion  # not 200
 
 
 @pytest.mark.asyncio

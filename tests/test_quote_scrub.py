@@ -5,9 +5,7 @@ from typing import Any
 import pytest
 
 from daydream.git_ops import GitError
-from daydream.hunk_index import added_line_numbers, parse_hunks
 from daydream.quote_scrub import (
-    normalize_smart_quotes,
     scrub_smart_quotes_changed_files,
 )
 from tests.harness.git_helpers import git, init_repo
@@ -29,67 +27,38 @@ def _baseline_repo(tmp_path: Path, files: dict[str, str | bytes], *, symlinks: d
     git(repo, "commit", "-m", "baseline")
     return repo
 
-def test_normalize_smart_quotes_maps_all_four_code_points_to_ascii() -> None:
-    assert normalize_smart_quotes("\u201cleft\u201d \u2018single\u2019") == "\"left\" 'single'"
-    assert normalize_smart_quotes("not \u201d") == 'not "'
-
-def test_normalize_smart_quotes_identity_on_ascii() -> None:
-    # Legitimate ASCII code/strings are byte-identical.
-    assert normalize_smart_quotes('fmt.Println("x")') == 'fmt.Println("x")'
-    # The empty-string literal in a Go comment is already ASCII — untouched.
-    assert normalize_smart_quotes("// not ''") == "// not ''"
-
-def test_scrub_driver_rewrites_and_reports_changed_files(tmp_path: Path) -> None:
-    (tmp_path / "main.go").write_text("package main\n\n// not \u201d\n")
-    (tmp_path / "keep.py").write_text("x = 1\n")
-    scrubbed = scrub_smart_quotes_changed_files(tmp_path, ["main.go", "keep.py"])
-    assert scrubbed == ["main.go"]
-    assert (tmp_path / "main.go").read_text() == 'package main\n\n// not "\n'
-    assert (tmp_path / "keep.py").read_text() == "x = 1\n"
-
-def test_scrub_driver_skips_generated_binary_and_out_of_scope(tmp_path: Path) -> None:
-    gen = tmp_path / "models_generated.go"
-    gen.write_text("// generated \u201d\n")
-    binary = tmp_path / "blob.bin"
-    binary.write_bytes(b"\x00\xff\xfe smart \x80")  # invalid UTF-8
-    outside = tmp_path / "outside.txt"
-    outside.write_text("\u201doutside\u201d")
-    assert scrub_smart_quotes_changed_files(tmp_path, ["models_generated.go", "blob.bin"]) == []
-    assert gen.read_text() == "// generated \u201d\n"
-    assert binary.read_bytes() == b"\x00\xff\xfe smart \x80"
-    assert outside.read_text() == "\u201doutside\u201d"  # not in changed set → untouched
-
-def test_scrub_driver_skips_missing_file(tmp_path: Path) -> None:
-    assert scrub_smart_quotes_changed_files(tmp_path, ["gone.go"]) == []
-
-def test_scrub_driver_normalizes_only_added_lines(tmp_path: Path) -> None:
-    repo = _baseline_repo(tmp_path, {"main.go": "package main\n\n// baseline \u201d quote\n"})
-    src = repo / "main.go"
-    # The fix pass adds a smart quote on a new line only.
-    src.write_text("package main\n\n// baseline \u201d quote\n// added \u201cquote\u201d\n", encoding="utf-8",)
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["main.go"], pre_fix_ref="HEAD")
-    assert scrubbed == ["main.go"]
-    assert src.read_text(encoding="utf-8") == ('package main\n\n// baseline \u201d quote\n// added "quote"\n')
 
 def test_scrub_driver_never_rewrites_baseline_smart_quotes_in_literals(tmp_path: Path) -> None:
-    """Normalizing the baseline U+2019 inside a single-quoted literal would
-    introduce a syntax error; only the added line may change."""
-    repo = _baseline_repo(tmp_path, {"main.go": "package main\n\nconst s = 'it\u2019s'\n\n"})
-    src = repo / "main.go"
-    src.write_text("package main\n\nconst s = 'it\u2019s'\n\n// \u201cadded\u201d\n", encoding="utf-8",)
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["main.go"], pre_fix_ref="HEAD")
-    assert scrubbed == ["main.go"]
-    assert src.read_text(encoding="utf-8") == ("package main\n\nconst s = 'it\u2019s'\n\n// \"added\"\n")
+    """A real mixed fix batch attributes both hunks and preserves every unowned byte."""
+    name = "naïve ve.go"
+    padding = "// stable padding\n" * 20
+    baseline = "package main\nconst s = 'it’s'\n" + padding + "// end\n"
+    repo = _baseline_repo(tmp_path, {name: baseline, "keep.py": "x = 1\n",
+        "models_generated.go": "// generated ”\n", "blob.bin": b"\x00\x01"})
+    git(repo, "config", "core.quotepath", "true")
+    git(repo, "config", "diff.noprefix", "true")
+    source = repo / name
+    source.write_text("package main\nconst s = 'it’s'\n// “added” ‘single’\n" + padding
+                      + "+ b/not-a-header\n// “tail”\n// end\n", encoding="utf-8")
+    (repo / "new.go").write_text("// “new” ‘single’\n", encoding="utf-8")
+    (repo / "keep.py").write_text("x = 1\nprint('ascii')\n", encoding="utf-8")
+    (repo / "outside.go").write_text("// “operator”\n", encoding="utf-8")
+    (repo / "blob.bin").write_bytes(b"\x00\x02")
+    scrubbed = scrub_smart_quotes_changed_files(
+        repo, [name, "new.go", "keep.py", "models_generated.go", "blob.bin", "gone.go"], pre_fix_ref="HEAD",
+    )
+    assert scrubbed == [name, "new.go"]
+    assert source.read_text(encoding="utf-8") == (
+        "package main\nconst s = 'it’s'\n// \"added\" 'single'\n" + padding
+        + "+ b/not-a-header\n// \"tail\"\n// end\n"
+    )
+    assert (repo / "new.go").read_text() == "// \"new\" 'single'\n"
+    assert (repo / "keep.py").read_text() == "x = 1\nprint('ascii')\n"
+    assert (repo / "models_generated.go").read_text() == "// generated ”\n"
+    assert (repo / "blob.bin").read_bytes() == b"\x00\x02"
+    assert (repo / "outside.go").read_text() == "// “operator”\n"
+    assert not (repo / "gone.go").exists()
 
-def test_scrub_driver_guards_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Write errors must stay inside the caller's GitError-only failure boundary."""
-    src = tmp_path / "main.go"
-    src.write_text("// not \u201d\n", encoding="utf-8")
-    def _fail_write(path: Any, data: Any) -> None:
-        raise OSError("read-only filesystem")
-    monkeypatch.setattr("daydream.quote_scrub._atomic_write_bytes", _fail_write)
-    assert scrub_smart_quotes_changed_files(tmp_path, ["main.go"]) == []
-    assert src.read_text(encoding="utf-8") == "// not \u201d\n"
 
 def test_scrub_driver_atomic_write_leaves_original_intact_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -123,86 +92,6 @@ def test_scrub_driver_with_non_utf8_diff_content_raises_git_error(tmp_path: Path
     with pytest.raises(GitError):
         scrub_smart_quotes_changed_files(repo, ["latin.go"], pre_fix_ref="HEAD")
 
-def test_scrub_driver_with_quotepath_non_ascii_path_preserves_attribution(tmp_path: Path) -> None:
-    """Unquote Git's default octal path escapes to retain line attribution and
-    protect baseline quotes from whole-file normalization."""
-    repo = _baseline_repo(tmp_path, {"caf\u00e9.go": "package main\n\n// baseline \u201d quote\n"})
-    src = repo / "caf\u00e9.go"
-    src.write_text("package main\n\n// baseline \u201d quote\n// added \u201cquote\u201d\n", encoding="utf-8",)
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["caf\u00e9.go"], pre_fix_ref="HEAD")
-    assert scrubbed == ["caf\u00e9.go"]
-    assert src.read_text(encoding="utf-8") == ('package main\n\n// baseline \u201d quote\n// added "quote"\n')
-
-def test_scrub_driver_normalizes_untracked_new_file_in_full(tmp_path: Path) -> None:
-    """Untracked files have no attribution diff; every line is agent-authored."""
-    repo = _baseline_repo(tmp_path, {"base.go": "x\n"})
-    new_file = repo / "new.go"
-    new_file.write_text("// \u201cnew file\u201d\n", encoding="utf-8")
-    scrubbed = scrub_smart_quotes_changed_files(repo, ["new.go"], pre_fix_ref="HEAD")
-    assert scrubbed == ["new.go"]
-    assert new_file.read_text(encoding="utf-8") == '// "new file"\n'
-
-def test_added_line_numbers_parses_unified_diff() -> None:
-    diff = (
-        "diff --git a/main.go b/main.go\n"
-        "index 422c2b7..63da0a2 100644\n"
-        "--- a/main.go\n"
-        "+++ b/main.go\n"
-        "@@ -1,2 +1,3 @@\n"
-        " package main\n"
-        " \n"
-        "+// \u201cquote\u201d\n"
-        "@@ -10,0 +12,2 @@\n"
-        "+\n"
-        "+b\n"
-        "--- a/other.py\n"
-        "+++ b/other.py\n"
-        "@@ -5 +5 @@\n"
-        "-old\n"
-        "+new\n"
-    )
-    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {3, 12, 13}, "other.py": {5}}
-
-def test_added_line_numbers_added_line_looking_like_header_is_content(tmp_path: Path) -> None:
-    """Added text starting with ++ b/ resembles a diff header; keep attributing
-    it and subsequent additions to the actual file."""
-    diff = (
-        "--- a/main.go\n"
-        "+++ b/main.go\n"
-        "@@ -1,2 +1,4 @@\n"
-        " package main\n"
-        " \n"
-        "++ b/not-a-header\n"
-        "+// \u201cquote\u201d\n"
-        "--- a/other.go\n"
-        "+++ b/other.go\n"
-        "@@ -1 +1 @@\n"
-        "-old\n"
-        "+new\n"
-    )
-    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {3, 4}, "other.go": {1}}
-
-def test_added_line_numbers_noprefix_and_space_paths() -> None:
-    """Handle missing a/b prefixes and the trailing tab Git puts after spaced paths."""
-    diff = (
-        "diff --git main.go main.go\n"
-        "--- main.go\n"
-        "+++ main.go\n"
-        "@@ -1 +1,2 @@\n"
-        " package main\n"
-        "+// \u201cquote\u201d\n"
-        "diff --git a/has space.py b/has space.py\n"
-        "--- a/has space.py\t\n"
-        "+++ b/has space.py\t\n"
-        "@@ -0,0 +1 @@\n"
-        "+x = 1\n"
-    )
-    assert added_line_numbers(parse_hunks(diff)) == {"main.go": {2}, "has space.py": {1}}
-
-def test_added_line_numbers_quoted_path_with_space() -> None:
-    """A quoted path may have a trailing tab after the closing quote."""
-    diff = ("--- \"a/na\\303\\257ve ve.py\"\n" "+++ \"b/na\\303\\257ve ve.py\"\t\n" "@@ -0,0 +1 @@\n" "+x = 1\n")
-    assert added_line_numbers(parse_hunks(diff)) == {"na\u00efve ve.py": {1}}
 
 def test_scrub_driver_raises_git_error_on_external_driver_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Reject unattributable external diff output with GitError so the caller

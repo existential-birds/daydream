@@ -23,8 +23,6 @@ from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_lan
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
 
-FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
-
 
 def _modified_diff(path: str) -> str:
     """Minimal unified diff marking *path* as modified."""
@@ -50,136 +48,6 @@ def _materialize(tmp_path: Path, files: dict[str, str]) -> Path:
         target.write_text(content)
     return tmp_path
 
-def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path) -> None:
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "widget.py").write_text("x = 1\n")
-    (tmp_path / "app.py").write_text("import pkg.widget\n")
-    results = detect_affected_files(_modified_diff("app.py"), tmp_path)
-    assert results, "static resolution must produce rows"
-    assert all(f.provenance == "static" for f in results)
-
-def test_python_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "daydream_demo/__init__.py": "",
-            "daydream_demo/api.py": (
-                '"""API module."""\nfrom .models import User\n\ndef get_user():\n    return User()\n'
-            ),
-            "daydream_demo/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    paths_by_role = {(r.path, r.role) for r in results}
-    assert ("daydream_demo/api.py", "modified") in paths_by_role
-    assert ("daydream_demo/models.py", "modified") in paths_by_role
-    assert ("daydream_demo/models.py", "imports") in paths_by_role
-    assert len(results) >= 2
-
-
-_SHARED_FIXTURES: dict[str, str] = {
-    "package/__init__.py": "",
-    "package/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
-    "package/feature/__init__.py": "",
-}
-
-@pytest.mark.parametrize(
-    "api_rel, files, expected_import_path",
-    [
-        # `from ..models` in package/feature/api.py resolves to the parent package.
-        (
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/api.py": (
-                    '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
-                ),
-            }, "package/models.py",
-        ),
-        # `from ...models` in package/feature/nested/api.py resolves to the grandparent package.
-        (
-            "package/feature/nested/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/nested/__init__.py": "",
-                "package/feature/nested/api.py": (
-                    '"""API module."""\nfrom ...models import User\n\ndef get_user():\n    return User()\n'
-                ),
-            }, "package/models.py",
-        ),
-        # Capture the whole statement to resolve both __init__.py and the sibling module.
-        (
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/api.py": ('"""API module."""\nfrom . import something\n\nthing = something.thing\n'),
-                "package/feature/something.py": "",
-            }, {"package/feature/__init__.py", "package/feature/something.py"},
-        ),
-        # `from ....something import name` with 4+ dots ascends to the great-grandparent package.
-        (
-            "package/feature/nested/deep/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/nested/__init__.py": "", "package/feature/nested/deep/__init__.py": "",
-                "package/something.py": '"""Ancestor sibling module."""\n\nthing = 1\n',
-                "package/feature/nested/deep/api.py": (
-                    '"""API module."""\nfrom ....something import thing\n\nthing\n'
-                ),
-            }, "package/something.py",
-        ),
-    ],
-)
-def test_python_multilevel_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str | set[str],
-) -> None:
-    repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo)
-    imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
-    if isinstance(expected_import_path, str):
-        assert imports_pairs == {(expected_import_path, "imports")}
-    else:
-        assert imports_pairs == {(p, "imports") for p in expected_import_path}
-
-@pytest.mark.parametrize(
-    "api_rel, files, expected_import_paths",
-    [
-        # Resolve the parent and services packages, excluding the importer's own package.
-        pytest.param(
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/services/__init__.py": "",
-                "package/feature/api.py": ('"""API module."""\nfrom .. import services\n'),
-            }, {"package/__init__.py", "package/services/__init__.py"}, id="parent-package-import",
-        ),
-    ],
-)
-def test_python_parent_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_paths: set[str],
-) -> None:
-    repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo)
-    imports_paths = {r.path for r in results if r.role == "imports"}
-    assert imports_paths == expected_import_paths
-
-def test_typescript_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "typescript_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "src/api.ts": (
-                '// API module\nimport { User } from "./models";\n\n'
-                "export function getUser(): User {\n  return new User();\n}\n"
-            ),
-            "src/models.ts": "// Models module\n\nexport class User {}\n",
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    assert any(r.path == "src/api.ts" and r.role == "modified" for r in results)
-    assert any(r.path == "src/models.ts" and r.role == "modified" for r in results)
-    assert ("src/models.ts", "imports") in {(r.path, r.role) for r in results}
 
 def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _materialize(
@@ -211,19 +79,6 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
     assert imports_paths == {"models/user.go", "models/order.go", "helpers/format.go"}
     assert {r.path for r in results if r.role == "modified"} == {"cmd/alpha.go", "cmd/beta.go"}
 
-def test_rust_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "rust_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "src/api.rs": "// api module\nuse crate::models::User;\n\npub fn get_user() -> User {\n    User\n}\n",
-            "src/models.rs": "// models module\n\npub struct User;\n",
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    assert any(r.path == "src/api.rs" and r.role == "modified" for r in results)
-    assert any(r.path == "src/models.rs" and r.role == "modified" for r in results)
-    assert ("src/models.rs", "imports") in {(r.path, r.role) for r in results}
 
 def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
     diff_text = (

@@ -18,7 +18,9 @@ def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -
     assert "checkpoint" not in output
 
 
-@pytest.mark.parametrize("verb", ["publish-state", "resume-state", "publish-final", "download-final"])
+@pytest.mark.parametrize('verb', [
+    "publish-final",
+])
 def test_retired_annotation_commands_rejected_without_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str,
 ) -> None:

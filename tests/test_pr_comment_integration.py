@@ -2,10 +2,10 @@
 
 Rendered comments must preserve SDK model identity and per-phase usage/cost.
 Per-step metrics matter: correct final totals alone cannot verify the renderer."""
+
 from __future__ import annotations
 
 import json
-import re
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -68,148 +68,44 @@ def _stream(text: str, cost: float, *, input_tokens: int, output_tokens: int, ca
         ),
     ]
 
-async def test_render_uses_real_sdk_model_id_not_backend_alias(tmp_path: Path, patch_sdk: Any) -> None:
-    """Carry AssistantMessage.model through to the rendered model label."""
-    patch_sdk(_stream("reviewing the code", 0.42, input_tokens=1000, output_tokens=200, cache_read_input_tokens=800))
 
+async def test_sdk_review_parse_and_fix_render_exact_phase_and_run_usage(tmp_path: Path, patch_sdk: Any) -> None:
+    """One real multi-phase recording exposes model attribution and per-phase billing independently."""
     recorder = _make_recorder(tmp_path)
-    target_path = recorder.path
+    backend = ClaudeBackend(model="opus")
     async with recorder:
-        backend = ClaudeBackend(model="opus")
-        await run_agent(backend, tmp_path, "review please", phase=DaydreamPhase.REVIEW)
-
-    assert target_path.exists(), "Trajectory file should have been written"
-    markdown = render_run_info_block([target_path])
-
-    model_line = _line(markdown, "- **Model:**")
-    assert FIXTURE_MODEL_ID in model_line, (f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
-        f"got: {model_line!r}\n\nFull markdown:\n{markdown}"
-    )
-    # Exact-line check: real id begins with "claude-", so a substring match on
-    # "claude" alone would be unsafe.
-    assert model_line.strip() != "- **Model:** claude", (
-        f"Bug A: Model line is the backend alias instead of the SDK model id: {model_line!r}"
-    )
-
-async def test_render_shows_real_cost_and_tokens_from_sdk_usage(tmp_path: Path, patch_sdk: Any) -> None:
-    """Per-step metrics must reach the renderer when usage arrives on ResultMessage."""
-    review_messages = _stream("reviewing", 0.30, input_tokens=5000, output_tokens=600, cache_read_input_tokens=2000)
-    fix_messages = _stream("fixing", 0.15, input_tokens=2500, output_tokens=400, cache_read_input_tokens=1000)
-
-    recorder = _make_recorder(tmp_path)
-    target_path = recorder.path
-    async with recorder:
-        # Reapplying patch_sdk between phases re-routes ClaudeSDKClient so the
-        # second run_agent() picks up the new stream.
-        patch_sdk(review_messages)
-        backend = ClaudeBackend(model="opus")
+        patch_sdk(_stream("Reviewing", 0.30, input_tokens=5000, output_tokens=600, cache_read_input_tokens=2000))
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
-
-        patch_sdk(fix_messages)
-        backend = ClaudeBackend(model="opus")
-        await run_agent(backend, tmp_path, "fix", phase=DaydreamPhase.FIX)
-
-    assert target_path.exists()
-    traj_data = json.loads(target_path.read_text())
-    # Surface per-step metrics for failure diagnostics.
-    agent_steps = [s for s in traj_data["steps"] if s["source"] == "agent"]
-    per_step_metrics = [s.get("metrics") for s in agent_steps]
-
-    markdown = render_run_info_block([target_path])
-
-    cost_line = _line(markdown, "- **Cost:**")
-    tokens_line = _line(markdown, "- **Tokens:**")
-
-    assert "$0.00" not in cost_line, (
-        f"Bug B/C: rollup cost is $0.00 — per-step metrics never landed.\n"
-        f"  per-step metrics: {per_step_metrics}\n"
-        f"  cost line: {cost_line!r}\n"
-        f"  full markdown:\n{markdown}"
-    )
-    # Tokens must be non-zero in/out. With Bug B/C totals collapse to "0 in → 0 out";
-    # word-boundary regex avoids matching e.g. "500 in".
-    assert not re.search(r"(?<!\d)0 in\b", tokens_line), (
-        f"Bug B/C: rollup input tokens are zero — per-step metrics never landed.\n"
-        f"  per-step metrics: {per_step_metrics}\n"
-        f"  tokens line: {tokens_line!r}\n"
-        f"  full markdown:\n{markdown}"
-    )
-    assert not re.search(r"(?<!\d)0 out\b", tokens_line), (
-        f"Bug B/C: rollup output tokens are zero — per-step metrics never landed.\n"
-        f"  per-step metrics: {per_step_metrics}\n"
-        f"  tokens line: {tokens_line!r}\n"
-        f"  full markdown:\n{markdown}"
-    )
-
-    # Per-phase rows must carry non-zero cost + tokens for both Review and Fix.
-    review_row = _phase_row(markdown, "Review")
-    fix_row = _phase_row(markdown, "Fix")
-    assert "$0.00" not in review_row, (
-        f"Bug B/C: Review row shows $0.00 cost.\n  row: {review_row!r}\n"
-        f"  per-step metrics: {per_step_metrics}"
-    )
-    assert "$0.00" not in fix_row, (
-        f"Bug B/C: Fix row shows $0.00 cost.\n  row: {fix_row!r}\n"
-        f"  per-step metrics: {per_step_metrics}"
-    )
-    # 6-column layout: Phase | Model | Tools | Input (cached) | Output | Cost.
-    # Spot-check Output != 0 as a canary (fixture counts are >= 100).
-    for label, row in (("Review", review_row), ("Fix", fix_row)):
-        cells = [c.strip() for c in row.strip("|").split("|")]
-        assert cells[4] != "0", (
-            f"Bug B/C: {label} row has Output=0.\n  row: {row!r}\n"
-            f"  per-step metrics: {per_step_metrics}"
-        )
-        # Cache-percentage parenthetical (e.g. "5,000 (40%)") appears when cached > 0.
-        assert re.search(r"\(\d+%\)", cells[3]), (
-            f"Bug B/C: {label} row missing cache-percentage parenthetical.\n"
-            f"  input cell: {cells[3]!r}\n  row: {row!r}\n"
-            f"  per-step metrics: {per_step_metrics}"
-        )
-
-async def test_per_phase_rollup_distinguishes_phases(tmp_path: Path, patch_sdk: Any) -> None:
-    """Separate calls must render distinct phase rows with their own usage and cost."""
-    review_messages = _stream("reviewing", 0.20, input_tokens=4000, output_tokens=500, cache_read_input_tokens=1500)
-    parse_messages = _stream("parsed", 0.05, input_tokens=1000, output_tokens=100, cache_read_input_tokens=500)
-
-    recorder = _make_recorder(tmp_path)
-    target_path = recorder.path
-    async with recorder:
-        patch_sdk(review_messages)
-        backend = ClaudeBackend(model="opus")
-        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
-
-        patch_sdk(parse_messages)
-        backend = ClaudeBackend(model="opus")
+        patch_sdk(_stream("Parsed", 0.05, input_tokens=1000, output_tokens=100, cache_read_input_tokens=500))
         await run_agent(backend, tmp_path, "parse", phase=DaydreamPhase.PARSE)
-
-    assert target_path.exists()
-    traj_data = json.loads(target_path.read_text())
-    agent_steps = [s for s in traj_data["steps"] if s["source"] == "agent"]
-    per_step_metrics = [s.get("metrics") for s in agent_steps]
-
-    markdown = render_run_info_block([target_path])
-
-    review_row = _phase_row(markdown, "Review")
-    parse_row = _phase_row(markdown, "Parse Feedback")
-
-    # prompt_tokens is the total input (uncached remainder + cache read folded in).
-    # Review: 4,000 + 1,500 read = 5,500 → row should display "5,500".
-    # Parse Feedback: 1,000 + 500 read = 1,500 → row should display "1,500".
-    assert "5,500" in review_row, (
-        f"Bug B/C: Review row missing real input tokens (expected 5,500 total).\n"
-        f"  row: {review_row!r}\n  per-step metrics: {per_step_metrics}"
-    )
-    assert "1,500" in parse_row, (
-        f"Bug B/C: Parse Feedback row missing real input tokens (expected 1,500 total).\n"
-        f"  row: {parse_row!r}\n  per-step metrics: {per_step_metrics}"
-    )
-    # And costs should differ — Review $0.20 vs Parse $0.05.
-    assert "$0.20" in review_row, (
-        f"Bug B/C: Review row missing real cost ($0.20).\n"
-        f"  row: {review_row!r}\n  per-step metrics: {per_step_metrics}"
-    )
-    assert "$0.05" in parse_row, (
-        f"Bug B/C: Parse Feedback row missing real cost ($0.05).\n"
-        f"  row: {parse_row!r}\n  per-step metrics: {per_step_metrics}"
-    )
+        patch_sdk(_stream("Fixed", 0.15, input_tokens=2500, output_tokens=400, cache_read_input_tokens=1000))
+        await run_agent(backend, tmp_path, "fix", phase=DaydreamPhase.FIX)
+    document = json.loads(recorder.path.read_text())
+    steps = [step for step in document["steps"] if step["source"] == "agent" and step["message"]]
+    assert [step["message"] for step in steps] == ["Reviewing", "Parsed", "Fixed"]
+    # Content without message usage has no native model witness until terminal billing arrives.
+    assert [step["model_name"] for step in steps] == ["claude", FIXTURE_MODEL_ID, FIXTURE_MODEL_ID]
+    assert all(step.get("metrics") is None for step in steps)
+    billed = [step for step in document["steps"] if step["source"] == "agent" and step.get("metrics")]
+    assert [(step["extra"]["daydream_phase"], step["model_name"], step["message"],
+             step["metrics"]["prompt_tokens"], step["metrics"]["cached_tokens"],
+             step["metrics"]["completion_tokens"], step["metrics"]["cost_usd"]) for step in billed] == [
+        ("review", FIXTURE_MODEL_ID, "", 7000, 2000, 600, 0.30),
+        ("parse", FIXTURE_MODEL_ID, "", 1500, 500, 100, 0.05),
+        ("fix", FIXTURE_MODEL_ID, "", 3500, 1000, 400, 0.15),
+    ]
+    report = render_run_info_block([recorder.path])
+    assert _line(report, "- **Model:**") == f"- **Model:** {FIXTURE_MODEL_ID}"
+    assert _line(report, "- **Cost:**") == "- **Cost:** $0.50"
+    assert _line(report, "- **Tokens:**") == "- **Tokens:** 12,000 in (3,500 cached, 29% hit) → 1,100 out"
+    assert [line.split("|")[1].strip() for line in report.splitlines()
+            if line.startswith("| ") and not line.startswith("| Phase |")] == ["Review", "Parse Feedback", "Fix"]
+    rows = {
+        phase: [cell.strip() for cell in _phase_row(report, phase).strip("|").split("|")][1:6]
+        for phase in ("Review", "Parse Feedback", "Fix")
+    }
+    assert rows == {
+        "Review": [FIXTURE_MODEL_ID, "0", "7,000 (29%)", "600", "$0.30"],
+        "Parse Feedback": [FIXTURE_MODEL_ID, "0", "1,500 (33%)", "100", "$0.05"],
+        "Fix": [FIXTURE_MODEL_ID, "0", "3,500 (29%)", "400", "$0.15"],
+    }

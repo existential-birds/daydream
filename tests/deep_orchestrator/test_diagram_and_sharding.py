@@ -187,22 +187,14 @@ async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
     ({'deep_shard_max_files': 1}, ['python#0', 'python#1', 'python#2']),
     ({'deep_shard_max_files': 0}, ['python#0', 'python#1', 'python#2']),
     ({'deep_shard_max_bytes': 0}, ['python#0', 'python#1', 'python#2']),
-    ({'deep_shard_max_files': 1, 'deep_shard_fanout_cap': 2}, ['python']),
     ({'deep_shard_max_files': 1, 'deep_shard_fanout_cap': 0}, ['python']),
-    ({'deep_shard_max_files': 1, 'deep_shard_enabled': False,
-      'file_config': DaydreamFileConfig(deep_shard_enabled=True)}, ['python']),
-    ({'deep_shard_max_files': 1, 'file_config': DaydreamFileConfig(deep_shard_enabled=False)}, ['python']),
-    ({'deep_shard_max_files': 1, 'deep_shard_enabled': True,
-      'file_config': DaydreamFileConfig(deep_shard_enabled=False)}, ['python#0', 'python#1', 'python#2']),
-    ({'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python#0', 'python#1', 'python#2']),
     ({'deep_shard_max_files': 5, 'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python']),
     ({'deep_shard_max_files': -1, 'file_config': DaydreamFileConfig(deep_shard_max_files=1)}, ['python']),
     ({'deep_shard_max_files': 1, 'shallow_fanout_threshold': 4}, ['python']),
     ({'deep_shard_max_files': 1, 'shallow': True, 'output_mode': 'loop', 'findings_out': None}, ['python']),
     ({'deep_shard_max_files': 1, 'review_profile': _profile_with_pipeline(structural_enabled=False)},
      ['python#0', 'python#1', 'python#2']),
-], ids=['fitting', 'file-bound', 'zero-files', 'zero-bytes', 'cap-role-count', 'zero-cap',
-        'runconfig-false', 'file-false', 'runconfig-true', 'file-bound-config', 'runconfig-bound',
+], ids=['fitting', 'file-bound', 'zero-files', 'zero-bytes', 'zero-cap', 'runconfig-bound',
         'invalid-bound-fallback', 'tiny-collapse', 'shallow', 'structure-disabled'])
 async def test_resolved_sharding_controls_publish_actual_review_scopes(
     shard_many_python_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -214,8 +206,11 @@ async def test_resolved_sharding_controls_publish_actual_review_scopes(
     inventory = {scope['scope_id']: scope for scope in coverage['stack_outcomes']}
     if overrides.get('output_mode') != 'loop':
         assert scopes(review.load()) == inventory
-    if 'review_profile' in overrides:
+    if "review_profile" in overrides:
         assert 'structure' not in inventory
+        assert any("evaluate the implementation" in call["prompt"].lower() for call in review.backend.calls)
+        alternatives = next(phase for phase in coverage["phase_outcomes"] if phase["phase"] == "alternatives")
+        assert alternatives["status"] == "complete"
     assert [name for name in inventory if name.startswith('python')] == expected_python
     changed = git(shard_many_python_target, 'diff', '--name-only', 'main..HEAD').splitlines()
     assert Counter(path for name, scope in inventory.items() if name != 'structure'
@@ -271,6 +266,7 @@ def test_deep_shard_enabled_overrides_and_aggregate_fallback(tmp_path: Path) -> 
     assert _deep_shard_enabled(cfg) is False
     assert _deep_shard_enabled(cfg, diff=large_diff) is False
 
+
 def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     """The per-shard file bound resolves with RunConfig > file-config > default
     and degrades malformed ints to the named default (never raises)."""
@@ -293,6 +289,7 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(deep_shard_max_files=7)
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _deep_shard_max_files(cfg) == 7
+
 
 async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

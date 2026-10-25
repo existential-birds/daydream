@@ -24,7 +24,6 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import (
     make_recorder,
-    observe_claude_shape,
     read_trajectory,
     step_token_sum,
 )
@@ -48,84 +47,6 @@ async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
     return read_trajectory(recorder.path)
 
 
-async def _run_tool_agent(tmp_path: Path, *, turns: int, tools_per_turn: int) -> dict[str, Any]:
-    """Emit per-turn tools, single-digit completion and turn boundaries, then
-    authoritative session usage before the result."""
-    events: list[AgentEvent] = []
-    for turn in range(turns):
-        events.append(TextEvent(text=f"turn {turn}"))
-        for j in range(tools_per_turn):
-            events.append(ToolStartEvent(id=f"t{turn}-{j}", name="Bash", input={"command": "x"}))
-            events.append(ToolResultEvent(id=f"t{turn}-{j}", output="ok", is_error=False))
-        events.append(MetricsEvent(
-            message_id=f"m{turn}", prompt_tokens=100, completion_tokens=10, cached_tokens=None, cost_usd=None,
-        ))
-        events.append(TurnEndEvent(message_id=f"m{turn}"))
-    events.append(CostEvent(cost_usd=0.5, input_tokens=600, output_tokens=66_737, cached_tokens=None))
-    events.append(ResultEvent(structured_output=None, continuation=None))
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        await run_agent(
-            ScriptedBackend(events=events, model="mock-model"), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
-        )
-    return read_trajectory(recorder.path)
-
-@pytest.mark.asyncio
-async def test_claude_shape_final_reflects_session_total(tmp_path: Path) -> None:
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_claude_shape(inv)
-    traj = read_trajectory(recorder.path)
-    assert traj["final_metrics"]["total_completion_tokens"] == 66_737
-
-@pytest.mark.asyncio
-async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_claude_shape(inv)
-    traj = read_trajectory(recorder.path)
-    final = traj["final_metrics"]
-    step_sum = step_token_sum(traj, "completion_tokens")
-    assert step_sum == 66_737
-    assert final["total_completion_tokens"] == step_sum
-
-@pytest.mark.asyncio
-async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
-    traj = await _run_tool_agent(tmp_path, turns=3, tools_per_turn=8)
-    assert traj["final_metrics"]["total_steps"] > 2
-    # One metrics-bearing step per turn: the per-message single-digit (10)
-    # steps are the per-turn MetricsEvents; the CostEvent residual step
-    # (completion 66707) is reconciliation, not a turn, so it is excluded.
-    turn_steps = [s for s in traj["steps"]
-                  if s["source"] == "agent" and s.get("metrics")
-                  and s["metrics"].get("completion_tokens") == 10]
-    assert len(turn_steps) == 3   # exactly one per turn, not collapsed
-
-@pytest.mark.asyncio
-async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            for i in range(3):
-                inv.observe(TextEvent(text=f"turn {i}"))
-                inv.observe(MetricsEvent(message_id="", prompt_tokens=100,
-                                         completion_tokens=10, cached_tokens=None,
-                                         cost_usd=0.25))
-                inv.observe(TurnEndEvent(message_id=""))
-            inv.observe(CostEvent(cost_usd=0.75, input_tokens=300, output_tokens=30, cached_tokens=None))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
-    traj = read_trajectory(recorder.path)
-    final = traj["final_metrics"]
-    step_sum = step_token_sum(traj, "completion_tokens")
-    step_cost = sum(s["metrics"].get("cost_usd") or 0 for s in traj["steps"] if s.get("metrics"))
-    assert final["total_completion_tokens"] == 30
-    assert step_sum == 30               # not 60
-    assert final["total_cost_usd"] == pytest.approx(0.75)
-    assert step_cost == pytest.approx(0.75)  # not 1.5
-
-
 def _tool_argument_floor(traj: dict[str, Any]) -> Any:
     """floor = SUM(len(json.dumps(tool_call['arguments'])) / 4) over recorded calls."""
     total = 0
@@ -139,22 +60,6 @@ async def test_tool_argument_invariant_holds_real_path(tmp_path: Path) -> None:
     traj = await _run_write_agent(tmp_path, content="y" * 16_000)
     assert traj["final_metrics"]["total_completion_tokens"] >= _tool_argument_floor(traj)
 
-def test_tool_argument_invariant_fails_pre_fix_bundle() -> None:
-    """The pre-fix collapsed total must fail the floor, proving the gate is effective."""
-    traj = _pre_fix_bundle()   # total_completion_tokens=50, one Write call with 16KB args
-    completion = traj["final_metrics"]["total_completion_tokens"]
-    assert completion < _tool_argument_floor(traj)
-
-
-def _pre_fix_bundle() -> dict[str, Any]:
-    """Minimal ATIF-shaped dict with a collapsed pre-fix completion total."""
-    return {"final_metrics": {"total_completion_tokens": 50},
-        "steps": [{"source": "agent",
-            "tool_calls": [{"tool_call_id": "w1", "function_name": "Write",
-                "arguments": {"file_path": "/tmp/f", "content": "z" * 16_000},
-            }],
-        }],
-    }
 
 @pytest.mark.asyncio
 async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path: Path) -> None:

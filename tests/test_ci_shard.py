@@ -281,11 +281,10 @@ def test_shards_cover_collection_and_combine_real_branch_data(
     "wrong-selection", "missing-test", "missing-teardown", "missing-call", "failed-test", "failed-process",
     "worker-crash", "line-only", "low-coverage",
 ])
-@pytest.mark.parametrize("diagnostic", [False, True])
 def test_combine_rejects_incomplete_or_wrong_run_artifacts(
-    shard_artifacts: ShardProject, tmp_path: Path, fault: str, diagnostic: bool,
+    shard_artifacts: ShardProject, tmp_path: Path, fault: str,
 ) -> None:
-    """Every fault starts from successfully executed artifacts, avoiding earlier false guards."""
+    """CI's diagnostic mode must reject each corrupt receipt from a real execution."""
     from coverage import CoverageData
 
     repo, env = shard_artifacts.repo, shard_artifacts.env
@@ -344,8 +343,7 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
         data.write()
         manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
     path.write_text(json.dumps(manifest))
-    result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts),
-                  *(["--diagnostic"] if diagnostic else []), env=env)
+    result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts), "--diagnostic", env=env)
     assert result.returncode != 0, result.stdout + result.stderr
     assert "ci-shard:" in result.stderr or "coverage.exceptions.DataError" in result.stderr
     if fault not in {"failed-test", "failed-process", "worker-crash", "low-coverage"}:
@@ -361,7 +359,6 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
     ("full", "success", "cancelled", "skipped", False),
     ("full", "success", "skipped", "skipped", False),
     ("full", "success", "success", "failure", False),
-    ("full", "success", "success", "cancelled", False),
     ("basic", "cancelled", "skipped", "skipped", False),
     ("reuse", "success", "failure", "skipped", False),
     ("basic", "success", "success", "success", False),
@@ -381,10 +378,8 @@ def test_final_gate_propagates_dependency_outcomes(
     ("baseline", "success", "skipped", True),
     ("baseline", "skipped", "skipped", False),
     ("baseline", "cancelled", "skipped", False),
-    ("baseline", "failure", "skipped", False),
     ("baseline", "success", "success", False),
     ("basic", "success", "success", False),
-    ("reuse", "cancelled", "success", False),
 ])
 def test_final_gate_requires_the_selected_baseline_job(
     mode: str, baseline: str, static: str, success: bool,

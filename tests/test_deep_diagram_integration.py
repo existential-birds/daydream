@@ -258,25 +258,60 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
 async def test_both_signals_render_sequence_first(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
-    """A diff carrying both signals renders both blocks, sequence first."""
+    """Coercion admits independent valid entries; only an unknown edge needs grounded repair."""
     target = dr.build_both_signals_repo(tmp_path)
+    expected_sequence = dr.sequence_spec()
+    expected_sequence["blocks"] = [{"kind": "opt", "branches": [{
+        "condition": "payload is None", "evidence": {"file": "pkg_b/client.py", "line": 12}, "messages": [0, 2],
+    }]}]
+    sequence = dr.sequence_spec()
+    sequence["participants"][0].pop("service")
+    sequence["participants"][0]["files"] += ["pkg_b/client.py", "a$b.py"]
+    sequence["participants"] += ["not a participant", {"name": "", "kind": "internal", "files": []},
+        {"name": "Ghost", "kind": "daemon", "files": []}, {"name": "Client", "kind": "external", "files": []}]
+    first = sequence["messages"][0]
+    sequence["messages"] = ["not a message", {**first, "evidence": {**first["evidence"], "line": "6"}},
+        *sequence["messages"][1:], {**first, "kind": "broadcast"},
+        {**first, "evidence": {"file": "pkg_b/client.py", "line": 6}},
+        {**first, "evidence": {**first["evidence"], "line": True}},
+        {**first, "evidence": {**first["evidence"], "line": 0}},
+        {**first, "evidence": {**first["evidence"], "file": "a$b.py"}}]
+    sequence["blocks"] = [{"kind": "par", "branches": []}, {"kind": "loop", "branches": []},
+        {"kind": "opt", "branches": [
+        {"condition": "payload is None", "evidence": {"file": "pkg_b/client.py", "line": 12},
+         "messages": [1, 3, 3, 99]},
+        {"condition": "", "evidence": {"file": "pkg_b/client.py", "line": 12}, "messages": [2]}]}]
+    expected_flow = dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)
+    flow = copy.deepcopy(expected_flow)
+    flow["nodes"][5]["evidence"].pop("symbol")
+    flow["nodes"] += [dict(flow["nodes"][0], label="duplicate id"),
+        dict(flow["nodes"][0], id="bad-kind", kind="gateway"),
+        dict(flow["nodes"][0], id="empty-label", label=""), "not a node"]
+    flow["edges"][1]["label"] = "  yes  "
+    flow["edges"] += [{"from": "start"}, "not an edge", {"from": "start", "to": "missing"}]
+    repaired_flow = copy.deepcopy(flow)
+    repaired_flow["edges"].pop()
 
-    exit_code, stub = await review_run(target,
-        specs={
-            "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
-        },
-    )
+    exit_code, stub = await review_run(target, session_id="coercion-session", specs={
+        "sequence": [sequence], "flowchart": [flow, repaired_flow],
+    })
 
     assert exit_code == 0
-    artifact = _artifact(target)
-    assert artifact["results"]["sequence"]["status"] == "rendered"
-    assert artifact["results"]["flowchart"]["status"] == "rendered"
-    # One author session per kind, run as siblings.
+    results = _artifact(target)["results"]
+    assert results["sequence"]["status"] == results["flowchart"]["status"] == "rendered"
+    assert results["sequence"]["spec_final"] == expected_sequence
+    assert results["flowchart"]["spec_final"] == expected_flow
+    # A real continuation is available: any malformed sequence entry leaking past
+    # coercion would cause an unwanted repair, rather than quietly vanish downstream.
     assert len(_diagram_calls(stub, "sequence")) == 1
-    assert len(_diagram_calls(stub, "flowchart")) == 1
-
+    flow_calls = _diagram_calls(stub, "flowchart")
+    assert len(flow_calls) == 2 and flow_calls[1]["continuation"].data == {"session_id": "coercion-session"}
+    failures = flow_calls[1]["prompt"].split("Rejected elements (element, reference, reason code):\n", 1)[1]
+    assert failures.split("\n\nFor EACH", 1)[0] == "- edge `start->missing`: EDGE_ENDPOINT_UNGROUNDED"
     body = captured_post.body()
     assert body.index(SEQUENCE_HEADING) < body.index(FLOWCHART_HEADING)
+    assert "opt payload is None" in results["sequence"]["mermaid"]
+    assert results["sequence"]["mermaid"] in body and FLOWCHART_GOLDEN in body
 
 # --- Spec test 4: repair then prune -----------------------------------------
 

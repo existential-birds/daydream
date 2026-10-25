@@ -135,20 +135,17 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
     return surface
 
 
-@pytest.mark.parametrize("unit", [
-    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
-    "rationale-directory", "rationale-permission",
-    "author-present", "author-absent", "split-inputs",
-])
+@pytest.mark.parametrize(
+    "unit", ["arbiter", "rationale-directory", "rationale-permission", "author-present", "author-absent"]
+)
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    unit: str,
+    fake_gh: FakeGh,
 ) -> None:
     """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
-    if unit == 'split-inputs':
-        from tests.harness.git_helpers import git
-        (multi_stack_target / 'api.py').write_text("def hello():\n    return '" + '界' * 11000 + "'\n")
-        git(multi_stack_target, 'add', 'api.py')
-        git(multi_stack_target, 'commit', '-m', 'retain split Unicode source through reuse and resume')
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     options: dict[str, Any] = {}
     author_case = unit.startswith('author-')
@@ -156,7 +153,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
         options['pr_number'] = 7
         fake_gh.serve_pr_view({'state': 'OPEN', 'headRefOid': git_ops.head_sha(multi_stack_target),
                              'body': 'Current author grounding' if unit == 'author-present' else None})
-    if unit in {"independent", "arbiter"}:
+    if unit == "arbiter":
         options["review_profile"] = independent_alternatives_profile()
     if unit == "arbiter":
         options["latency_profile"] = "balanced"
@@ -171,10 +168,6 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     first = json.loads((deep / "review-coverage.json").read_text())
     attribution = {scope['scope_id']: scope['target_decisions'] for scope in first['stack_outcomes']}
     assert all(attribution.values()), 'completed scopes must retain source-attributed target assertions'
-    if unit == 'split-inputs':
-        assert len(attribution['python']) > 1, 'the fixture must require multiple independently bound parts'
-        assert all(ref['source_range'] is None and ref['fragment']['bytes'] > 0
-                   for decision in attribution['python'] for ref in decision['evidence_refs'])
     for scope_id, decisions in attribution.items():
         records = json.loads((deep / f'stack-{scope_id}-records.json').read_text())
         assert 'target_decisions' not in records, 'retained attribution must not inflate later model inputs'
@@ -200,21 +193,9 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
         monkeypatch.setattr(json_utils, '_stage_bytes', fail_author_stage)
     obstructed: list[Path] = []
     prior_rationale = (deep / 'stack-python-report-context.json').read_bytes()
-    if unit in {'rationale-missing', 'rationale-corrupt', 'rationale-nested'}:
-        entries = deep.parent / 'review-cache/entries'
-        sidecars = list(entries.glob('*/stack-*-report-context.json'))
-        assert sidecars
-        for sidecar in sidecars:
-            manifest = json.loads((sidecar.parent / 'manifest.json').read_text())
-            assert sidecar.name not in manifest['payload'], 'optional reporting cannot gate valid review reuse'
-            if unit == 'rationale-missing':
-                sidecar.unlink()
-            elif unit == 'rationale-nested':
-                sidecar.write_text('[' * 30000 + '0' + ']' * 30000)
-            else:
-                sidecar.write_text('{corrupt optional rationale')
-    elif unit in {'rationale-directory', 'rationale-permission'}:
+    if unit in {"rationale-directory", "rationale-permission"}:
         unlink = Path.unlink
+
         def obstruct_optional_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
             if (path.name == 'stack-python-report-context.json'
                     and tuple(parent.name for parent in path.parents[:3]) == ('deep', '.daydream', 'live')
@@ -228,18 +209,11 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
                     path.write_bytes(prior_rationale)
                     raise PermissionError('optional report cleanup denied')
             unlink(path, *args, **kwargs)
+
         monkeypatch.setattr(Path, 'unlink', obstruct_optional_cleanup)
-    if unit == "all-units":
-        store = deep.parent / "review-cache"
-        assert store.is_dir(), "store must be published beside the deep artifacts"
-        first_units = cast(dict[str, Any], _latest_provenance(deep)["units"])
-        assert first_units["exploration"]["outcome"] in {"reused", "regenerated"}
-        unknown_entry = store / "entries" / ("a" * 64)
-        unknown_entry.mkdir()
-    if unit == "independent":
+    if unit == "arbiter":
         assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
         assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 1
-    elif unit == "arbiter":
         assert _count_arbiter_prompts(stub.calls) >= 1
     stub.calls.clear()
     assert await run(config) == 0
@@ -272,12 +246,10 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             assert all(entry['review_context'] is None for entry in context['scopes'])
         assert all(entry['originating_run_id'] == first['run_id'] for entry in context['scopes'])
     units = cast(dict[str, Any], _latest_provenance(deep)["units"])
-    if unit == "all-units":
-        assert unknown_entry.is_dir(), "a fresh run must preserve unknown cache entries"
-    if unit == "independent":
+    if unit == "arbiter":
         for name, grounding in (("intent", {"exploration"}), ("alternatives", {"intent", "exploration"})):
             assert units[name]["outcome"] == "hit" and set(units[name]["grounding_status"]) == grounding
-    elif unit == "arbiter":
+    if unit == "arbiter":
         assert units["arbiter"]["outcome"] == "hit"
         assert set(units["arbiter"]["grounding_status"]) == {"intent", "alternatives", "exploration"}
         assert sorted(path.name for path in deep.glob("arbiter-*-complete.marker"))
@@ -293,12 +265,6 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
-    if unit in {'all-units', 'split-inputs'}:
-        stub.calls.clear()
-        assert await run(make_config(multi_stack_target, start_at='merge')) == 0
-        resumed = saved_coverage(deep)
-        assert {name: outcome['target_decisions'] for name, outcome in resumed.scopes.items()} == attribution
-        assert _count_review_prompts(stub.calls) == 0, 'resume must use the retained source attribution'
 
 
 async def test_obsolete_completed_synthesis_is_replaced_and_current_output_reused(
@@ -433,6 +399,7 @@ async def test_precision_overlap_publishes_only_joined_whole_unit_and_restores_b
     coverage = saved_coverage(deep)
     assert all(coverage.phases[phase]["status"] == "complete" for phase in ("arbiter", "suppression"))
 
+
 async def test_configured_reviewer_policy_invalidates_reuse_and_records_resolved_identity(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -474,12 +441,12 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_boun
     run_config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
                              deep_shard_max_bytes=10**9)
     assert await run(run_config) == 0
-    assert _count_review_prompts(stub.calls) >= 2          # a sharded first run reviews several shards
-    first_records = _records_bytes(shard_many_python_target)   # {artifact name: bytes}
+    assert _count_review_prompts(stub.calls) >= 2  # a sharded first run reviews several shards
+    first_records = _records_bytes(shard_many_python_target)  # {artifact name: bytes}
     stub.calls.clear()
     assert await run(run_config) == 0
-    assert _count_review_prompts(stub.calls) == 0          # exact hit: no per-stack review calls
-    assert _records_bytes(shard_many_python_target) == first_records   # restored byte-for-byte
+    assert _count_review_prompts(stub.calls) == 0  # exact hit: no per-stack review calls
+    assert _records_bytes(shard_many_python_target) == first_records  # restored byte-for-byte
     target = shard_many_python_target / "mod0.py"
     target.write_text("def f0():\n    return 'edited'\n")
     stub.calls.clear()
@@ -570,6 +537,7 @@ def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
 
 async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A real Daydream fix commit moves HEAD and requires positive coverage of the new snapshot."""
     stub = install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
@@ -589,7 +557,10 @@ async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
                                         "file": "mod0.py", "line": 1,
                                         "description": "regression after fix"}}
     stub.calls.clear()
-    assert await run(config) == 0
+    with caplog.at_level(logging.INFO):
+        assert await run(config) == 0
+    summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Review reuse:")]
+    assert summary and "0 hit" in summary[-1] and "shard:" in summary[-1]
     deep = shard_many_python_target / ".daydream" / "deep"
     assert len(_reviewed_stacks(stub.calls)) >= 2
     assert _count_arbiter_prompts(stub.calls) >= 1             # records changed -> arbiter recomputes
@@ -600,22 +571,6 @@ async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     assert not reused, "previous-head completion claims cannot establish current coverage"
     assert all(value["outcome"] == "miss" for name, value in provenance["units"].items() if name.startswith("shard:"))
 
-async def test_run_reports_snapshot_bound_reuse_misses_after_head_moves(
-    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
-    config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
-                         deep_shard_max_bytes=10**9)
-    assert await run(config) == 0
-    (shard_many_python_target / "mod0.py").write_text("def f0():\n    return 'fixed'\n")
-    git_ops.commit_paths(shard_many_python_target, [Path("mod0.py")],
-                         build_commit_message(items=[], run_id="fix-loop-2", version=daydream.__version__))
-    with caplog.at_level(logging.INFO):
-        assert await run(config) == 0
-    summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Review reuse:")]
-    assert summary, "the run must report its reuse outcome"
-    assert "0 hit" in summary[-1] and "shard:" in summary[-1]
 
 
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
@@ -671,140 +626,213 @@ def _damage_source_attribution(decisions: list[dict[str, Any]], damage: str) -> 
     return True
 
 
-@pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
-                                     "partial_payload", "malformed_payload", "unstaged", "prior-staged",
-                                     "contract-3", "contract-4", "contract-5", "contract-6", "contract-8",
-                                     "contract-9", "contract-10", "contract-11",
-                                     "missing-attribution", "invalid-attribution", "aggregate-attribution",
-                                     *_ATTRIBUTION_DAMAGE])
-async def test_legacy_cache_without_coverage_proof_recomputes_review(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    damage: str,
+async def test_cache_population_restores_warm_bytes_then_recomputes_only_independently_damaged_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-v2 completed bytes cannot establish complete current review coverage."""
-    if damage == "attribution-missing-target":
-        from tests.harness.git_helpers import git
-        (multi_stack_target / 'extra.py').write_text('EXTRA = True\n')
-        git(multi_stack_target, 'add', 'extra.py')
-        git(multi_stack_target, 'commit', '-m', 'add another required Python target')
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target)
-    assert await run(config) == 0
-    original_decisions = {name: outcome['target_decisions'] for name, outcome in
-                          saved_coverage(multi_stack_target / '.daydream/deep').scopes.items()}
-    entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
-    staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6",
-                               "contract-8", "contract-9", "contract-10", "contract-11"}
-    downgraded = 0
-    for manifest_path in entries.glob("*/manifest.json"):
+    """Entry-local proof failures cannot invalidate an untouched sibling or establish false cache coverage."""
+    from tests.deep_orchestrator.test_review_investigation import InvestigationRun
+    from tests.harness.git_helpers import seed_feature_branch
+    from tests.harness.stub_backend import review_stage_state
+
+    damages = [
+        "legacy",
+        "corrupt",
+        "incomplete",
+        "head",
+        "diff",
+        "scope",
+        "origin",
+        "partial_payload",
+        "malformed_payload",
+        "unstaged",
+        "prior-staged",
+        "missing-attribution",
+        "invalid-attribution",
+        *_ATTRIBUTION_DAMAGE,
+    ]
+    repo = tmp_path / "cache_population"
+    before = {f"{name}/module_{index}.py": "VALUE = 0\n" for name in [*damages, "healthy"] for index in range(2)}
+    after = {path: "VALUE = 1\n" for path in before}
+    after["healthy/module_0.py"] = "VALUE = '" + "界" * 11000 + "'\n"
+    seed_feature_branch(repo, base=before, feature=after)
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    config = dict(
+        deep_shard_enabled=True,
+        deep_shard_max_files=2,
+        deep_shard_max_bytes=10**9,
+        deep_shard_fanout_cap=32,
+        review_cache_enabled=True,
+    )
+    assert await review.run(**config) == 0
+    deep = repo / ".daydream/deep"
+    first = saved_coverage(deep)
+    by_name = {
+        scope.files[0].split("/")[0]: scope.scope_id for scope in first.planned_scopes if scope.scope_id != "structure"
+    }
+    assert set(by_name) == {*damages, "healthy"}
+    original = {scope: outcome["target_decisions"] for scope, outcome in first.scopes.items()}
+    fragments = [
+        decision
+        for decision in original[by_name["healthy"]]
+        if any(ref["fragment"] is not None for ref in decision["evidence_refs"])
+    ]
+    assert len(fragments) > 1
+    assert all(
+        ref["source_range"] is None and ref["fragment"]["bytes"] > 0
+        for decision in fragments
+        for ref in decision["evidence_refs"]
+    )
+    canonical = _records_bytes(repo)
+    entries = deep.parent / "review-cache/entries"
+    manifests = {json.loads(path.read_text())["unit"]: path for path in entries.glob("*/manifest.json")}
+    unknown = entries / ("a" * 64)
+    unknown.mkdir()
+    optional = {}
+    for name, fault in [("legacy", "missing"), ("corrupt", "corrupt"), ("incomplete", "nested")]:
+        scope = by_name[name]
+        manifest = manifests["shard:" + scope]
+        path = manifest.parent / f"stack-{scope}-report-context.json"
+        assert path.name not in json.loads(manifest.read_text())["payload"]
+        optional[scope] = fault
+        if fault == "missing":
+            path.unlink()
+        else:
+            path.write_text("{corrupt" if fault == "corrupt" else "[" * 30000 + "0" + "]" * 30000)
+    review.backend.calls.clear()
+    assert await review.run(**config) == 0
+    assert _review_surface_prompts(review.backend.calls) == []
+    assert _records_bytes(repo) == canonical and unknown.is_dir()
+    second = saved_coverage(deep)
+    assert first.run_id != second.run_id and first.revision == second.revision
+    assert second.scopes == first.scopes
+    context = json.loads((deep / "review-report-context.json").read_text())
+    contexts = {scope["scope_id"]: scope for scope in context["scopes"]}
+    assert all(contexts[scope]["review_context"] is None for scope in optional)
+    assert all(scope["originating_run_id"] == first.run_id for scope in contexts.values())
+
+    for damage in damages:
+        manifest_path = manifests["shard:" + by_name[damage]]
         manifest = json.loads(manifest_path.read_text())
-        if staged_damage:
-            if not manifest["unit"].startswith("shard:"):
-                continue
+        if damage in {"unstaged", "prior-staged"}:
             if damage == "unstaged":
                 manifest["components"].pop("staged_review_contract")
             else:
-                manifest["components"]["staged_review_contract"] = (
-                    2 if damage == "prior-staged" else int(damage.rsplit('-', 1)[-1]))
-                assert manifest['coverage']['status'] == 'complete'
-            legacy_key = hashlib.sha256(json.dumps({
-                "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
-            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-            manifest["key"] = legacy_key
-            manifest_path.write_text(json.dumps(manifest))
-            manifest_path.parent.rename(entries / legacy_key)
-            downgraded += 1
-            continue
-        if damage == "legacy":
-            manifest.pop("coverage", None)
+                manifest["components"]["staged_review_contract"] = 11
+            key = hashlib.sha256(
+                json.dumps(
+                    {"format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"]},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            manifest["key"] = key
+        elif damage == "legacy":
+            manifest.pop("coverage")
         elif damage == "corrupt":
             manifest["coverage"] = "invalid proof"
         elif damage == "incomplete":
             manifest["coverage"]["status"] = "incomplete"
         elif damage == "origin":
             manifest["origin"] = "malformed lineage"
-        elif damage in {"missing-attribution", "invalid-attribution", "aggregate-attribution", *_ATTRIBUTION_DAMAGE}:
-            for name in list(manifest['payload']):
-                if not name.endswith('-records-attribution.json'):
-                    continue
-                payload_path = manifest_path.parent / name
-                if damage == 'missing-attribution':
-                    # Leave the bytes present: an unlisted, unverified sidecar
-                    # must never stand in for required cache evidence.
-                    manifest['payload'].pop(name)
-                else:
-                    payload = json.loads(payload_path.read_text())
-                    if damage == 'invalid-attribution':
-                        payload['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
-                    elif damage == 'aggregate-attribution':
-                        if manifest['unit'] != 'shard:structure':
-                            payload['target_decisions'][0]['reason'] = 'r' * 90000
-                    else:
-                        _damage_source_attribution(payload['target_decisions'], damage)
-                    payload_path.write_text(json.dumps(payload))
-                    manifest['payload'][name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
-        elif damage in {"partial_payload", "malformed_payload"}:
-            for name in manifest["payload"]:
-                if not name.startswith("stack-") or not name.endswith("-records.json"):
-                    continue
-                payload_path = manifest_path.parent / name
-                payload = json.loads(payload_path.read_text())
-                if damage == "partial_payload":
+        elif damage in {"head", "diff"}:
+            manifest["coverage"]["analyzed_revision"]["head_sha" if damage == "head" else "diff_key"] = "f" * (
+                40 if damage == "head" else 64
+            )
+        elif damage == "scope":
+            manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
+        else:
+            attribution = damage not in {"partial_payload", "malformed_payload"}
+            suffix = "-records-attribution.json" if attribution else "-records.json"
+            payload_path = next(manifest_path.parent / name for name in manifest["payload"] if name.endswith(suffix))
+            payload = json.loads(payload_path.read_text())
+            if damage == "missing-attribution":
+                manifest["payload"].pop(payload_path.name)
+            else:
+                if damage == "invalid-attribution":
+                    payload["target_decisions"][0]["evidence_refs"][0]["revision"] = "0" * 40
+                elif damage in _ATTRIBUTION_DAMAGE:
+                    assert _damage_source_attribution(payload["target_decisions"], damage)
+                elif damage == "partial_payload":
                     payload["incomplete"] = True
                 else:
                     payload["issues"] = ["invalid authored finding"]
                 payload_path.write_text(json.dumps(payload))
-                manifest["payload"][name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
-        elif damage in {"head", "diff"}:
-            field = "head_sha" if damage == "head" else "diff_key"
-            manifest["coverage"]["analyzed_revision"][field] = "f" * (40 if damage == "head" else 64)
-        else:
-            manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
+                manifest["payload"][payload_path.name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
-    assert not staged_damage or downgraded > 0
-    stub.calls.clear()
+        if damage in {"unstaged", "prior-staged"}:
+            manifest_path.parent.rename(entries / manifest["key"])
+    review.backend.calls.clear()
+    assert await review.run(**config) == 0
+    actual = {
+        stage["scope_id"] for call in review.backend.calls if (stage := review_stage_state(call["prompt"])) is not None
+    }
+    assert actual == {by_name[name] for name in damages}
+    assert _reused_stacks(deep) == {by_name["healthy"], "structure"}
+    current = saved_coverage(deep)
+    assert all(scope["status"] == "complete" for scope in current.scopes.values())
+    assert {scope: outcome["target_decisions"] for scope, outcome in current.scopes.items()} == original
+    assert unknown.is_dir()
+    review.backend.calls.clear()
+    assert await review.run(start_at="merge", **config) == 0
+    assert _count_review_prompts(review.backend.calls) == 0
+    assert {scope: outcome["target_decisions"] for scope, outcome in saved_coverage(deep).scopes.items()} == original
+
+
+async def test_aggregate_cached_attribution_regains_all_frozen_references_within_the_published_bound(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """The shared publication budget remains independent of entry-local corruption."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
     assert await run(config) == 0
-    assert _count_review_prompts(stub.calls) > 0
-    if not staged_damage and damage not in {
-            "partial_payload", "malformed_payload", "missing-attribution", "invalid-attribution",
-            "aggregate-attribution", *_ATTRIBUTION_DAMAGE}:
-        assert _count_merge_prompts(stub.calls) > 0
-    if staged_damage:
-        assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
-    coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
-    assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])
-    if damage in _ATTRIBUTION_DAMAGE:
-        assert {outcome['scope_id']: outcome['target_decisions'] for outcome in coverage['stack_outcomes']} == (
-            original_decisions), 'every corrupted scope, including Structure, must regain its frozen identities'
-    if damage == 'aggregate-attribution':
-        for outcome in coverage['stack_outcomes']:
-            decisions = [{key: value for key, value in decision.items() if key != 'reason'}
-                         for decision in outcome['target_decisions']]
-            original = [{key: value for key, value in decision.items() if key != 'reason'}
-                        for decision in original_decisions[outcome['scope_id']]]
-            assert decisions == original, 'every scope must preserve admitted target identities and references'
-        without_decisions = copy.deepcopy(coverage)
-        for outcome in without_decisions['stack_outcomes']:
-            outcome.pop('target_decisions', None)
-        full = json.dumps({'terminal_result': coverage}, indent=2, ensure_ascii=False).encode('utf-8')
-        core = json.dumps({'terminal_result': without_decisions}, indent=2, ensure_ascii=False).encode('utf-8')
-        assert len(full) - len(core) <= 256 * 1024
+    deep = multi_stack_target / ".daydream/deep"
+    original = {scope: outcome["target_decisions"] for scope, outcome in saved_coverage(deep).scopes.items()}
+    for manifest_path in (deep.parent / "review-cache/entries").glob("*/manifest.json"):
+        manifest = json.loads(manifest_path.read_text())
+        for name in manifest["payload"]:
+            if not name.endswith("-records-attribution.json") or manifest["unit"] == "shard:structure":
+                continue
+            path = manifest_path.parent / name
+            payload = json.loads(path.read_text())
+            payload["target_decisions"][0]["reason"] = "r" * 90000
+            path.write_text(json.dumps(payload))
+            manifest["payload"][name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+    stub.calls.clear()
+    assert await run(config) == 0 and _count_review_prompts(stub.calls) > 0
+    coverage = saved_coverage(deep).to_dict()
+    for outcome in coverage["stack_outcomes"]:
+        decisions = [
+            {key: value for key, value in decision.items() if key != "reason"}
+            for decision in outcome["target_decisions"]
+        ]
+        expected = [
+            {key: value for key, value in decision.items() if key != "reason"}
+            for decision in original[outcome["scope_id"]]
+        ]
+        assert decisions == expected
+    core = copy.deepcopy(coverage)
+    for outcome in core["stack_outcomes"]:
+        outcome.pop("target_decisions", None)
+
+    def size(value: dict[str, Any]) -> int:
+        return len(json.dumps({"terminal_result": value}, indent=2, ensure_ascii=False).encode())
+
+    assert size(coverage) - size(core) <= 256 * 1024
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",
                                     "missing-attribution", "invalid-attribution", "aggregate-attribution",
-                                     *_ATTRIBUTION_DAMAGE])
+                                    "attribution-path"])
 async def test_resume_rejects_missing_or_mismatched_coverage(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
 ) -> None:
     """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
 
-    if damage == "attribution-missing-target":
-        from tests.harness.git_helpers import git
-        (multi_stack_target / 'extra.py').write_text('EXTRA = True\n')
-        git(multi_stack_target, 'add', 'extra.py')
-        git(multi_stack_target, 'commit', '-m', 'add another required Python target')
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     initial = tmp_path / "initial-review.json"

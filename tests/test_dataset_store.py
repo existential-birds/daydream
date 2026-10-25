@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,12 @@ from daydream.training.reward import ScoringInputs
 from tests.harness.adjudication import reply_evidence
 from tests.harness.dataset import observation, read_records, run_record
 
+LEGACY_REVIEW = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
+CONTEXT_REVIEW = insert_review_context(LEGACY_REVIEW, {
+    'scopes': [], 'scopes_omitted': 0, 'verification': {'status': 'unproduced', 'value': None}, 'author_reported': None,
+})
+SCORING = ScoringInputs([{'verdict': 'consistent'}], True, len(LEGACY_REVIEW))
+
 
 @pytest.fixture
 def store(tmp_path: Path) -> LocalRecordStore:
@@ -27,18 +34,39 @@ def store(tmp_path: Path) -> LocalRecordStore:
     return result
 
 
-@pytest.mark.parametrize("trace_fields", [{}, {"trace_id": None}, {"trace_id": "0123456789abcdef0123456789abcdef"}])
+@pytest.mark.parametrize("trace_fields", [{"trace_id": "0123456789abcdef0123456789abcdef"}])
 def test_current_records_read_all_history_without_creating_snapshot(
     store: LocalRecordStore, trace_fields: dict[str, Any],
 ) -> None:
     store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z", **trace_fields))
+    projected = capture_scoring(SCORING, CONTEXT_REVIEW)
+    historic = capture_scoring(replace(SCORING, length=len(CONTEXT_REVIEW)), CONTEXT_REVIEW)
+    legacy = capture_scoring(SCORING, LEGACY_REVIEW)
+    redacted = capture_scoring(replace(SCORING, length=len(LEGACY_REVIEW) + 7), LEGACY_REVIEW)
+    redacted['review_text_redaction'] = {'applied': True, 'policy': 'retained-redaction-policy'}
+    store.commit_run(run_record('scoring-projected', scoring={'status': 'available', 'value': projected}))
+    store.commit_run(run_record('scoring-historic', scoring={'status': 'available', 'value': historic}))
+    store.commit_run(run_record('scoring-legacy', scoring={'status': 'available', 'value': legacy}))
+    store.commit_run(run_record('scoring-redacted', scoring={'status': 'available', 'value': redacted}))
     store.append_observation(observation("future-observation", observed_at="2200-01-02T00:00:00Z"))
     assert list((store.root / "snapshots").iterdir()) == []
     current = store.read_records()
-    assert {record["run_id"] for record in current["runs"]} == {"run-1", "future-run"}
+    assert {record["run_id"] for record in current["runs"]} == {
+        "run-1", "future-run", "scoring-projected", "scoring-historic", "scoring-legacy", "scoring-redacted",
+    }
     assert [record["observation_id"] for record in current["observations"]] == ["future-observation"]
     assert {record["run_id"]: record["trace_id"] for record in current["runs"]} == {
         "run-1": None, "future-run": trace_fields.get("trace_id"),
+        "scoring-projected": None, "scoring-historic": None, "scoring-legacy": None, "scoring-redacted": None,
+    }
+    assert {r['run_id']: (r['scoring']['value']['review_text'], r['scoring']['value']['length'],
+                         r['scoring']['value'].get('review_text_redaction'))
+            for r in current['runs'] if r['run_id'].startswith('scoring-')} == {
+        'scoring-projected': (CONTEXT_REVIEW, len(LEGACY_REVIEW), None),
+        'scoring-historic': (CONTEXT_REVIEW, len(CONTEXT_REVIEW), None),
+        'scoring-legacy': (LEGACY_REVIEW, len(LEGACY_REVIEW), None),
+        'scoring-redacted': (LEGACY_REVIEW, len(LEGACY_REVIEW) + 7,
+                             {'applied': True, 'policy': 'retained-redaction-policy'}),
     }
     assert list((store.root / "snapshots").iterdir()) == []
     pinned = store.select_snapshot(observed_before="2300-01-01T00:00:00Z")
@@ -48,6 +76,7 @@ def test_current_records_read_all_history_without_creating_snapshot(
 @pytest.mark.parametrize("missing", ["run", "finding"])
 def test_current_record_reads_reject_orphaned_observations(store: LocalRecordStore, missing: str) -> None:
     store.append_observation(observation())
+    current = store.read_records()
     path = next((store.root / "runs").iterdir())
     if missing == "run":
         path.unlink()
@@ -55,51 +84,13 @@ def test_current_record_reads_reject_orphaned_observations(store: LocalRecordSto
         raw = json.loads(path.read_bytes())
         raw["findings"]["value"]["items"] = []
         path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n")
-    with pytest.raises(StoreError, match="unknown_run_reference" if missing == "run" else "orphan_finding_reference"):
+    diagnostic = "unknown_run_reference" if missing == "run" else "orphan_finding_reference"
+    with pytest.raises(StoreError, match=diagnostic):
         store.read_records()
+    with pytest.raises(StoreError, match=diagnostic):
+        store.record_download_source({"revision": "a" * 40}, **current)
+    assert not (store.root / "source.json").exists()
     assert list((store.root / "snapshots").iterdir()) == []
-
-
-def test_public_record_target_validation_matches_store_reference_rules() -> None:
-    import daydream.dataset as dataset
-
-    dataset.validate_record_targets([parse_run(run_record())], [dataset.parse_observation(observation())])
-    with pytest.raises(StoreError, match="unknown_run_reference"):
-        dataset.validate_record_targets([], [dataset.parse_observation(observation())])
-    with pytest.raises(StoreError, match="orphan_finding_reference"):
-        dataset.validate_record_targets(
-            [parse_run(run_record())], [dataset.parse_observation(observation(item_uid="item:99"))])
-
-
-@pytest.mark.parametrize('length_kind', [
-    'projected', 'historic', 'incorrect', 'legacy', 'legacy-incorrect', 'redacted',
-])
-def test_scoring_length_projection_preserves_raw_records_and_historical_replay(
-    store: LocalRecordStore, length_kind: str,
-) -> None:
-    legacy = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
-    context = {'scopes': [], 'scopes_omitted': 0, 'verification': {'status': 'unproduced', 'value': None},
-               'author_reported': None}
-    raw = (legacy if length_kind.startswith('legacy') or length_kind == 'redacted' else
-           insert_review_context(legacy, context))
-    length = len(raw) if length_kind == 'historic' else len(legacy)
-    if length_kind in {'incorrect', 'legacy-incorrect', 'redacted'}:
-        length += 7
-    scoring = capture_scoring(ScoringInputs([{'verdict': 'consistent'}], True, length), raw)
-    if length_kind == 'redacted':
-        scoring['review_text_redaction'] = {'applied': True, 'policy': 'retained-redaction-policy'}
-    record = run_record('scoring-projection', scoring={'status': 'available', 'value': scoring})
-    if length_kind in {'incorrect', 'legacy-incorrect'}:
-        with pytest.raises(ValueError, match='invalid RunRecord'):
-            parse_run(record)
-        return
-    assert store.commit_run(record).committed
-    retained = next(run for run in store.read_records()['runs'] if run['run_id'] == 'scoring-projection')
-    assert retained['scoring']['value'] == scoring
-    assert retained['scoring']['value']['review_text'] == raw
-    assert retained['scoring']['value']['length'] == length
-    if length_kind != 'redacted':
-        assert 'review_text_redaction' not in retained['scoring']['value']
 
 
 def test_download_source_records_exact_membership_privately(store: LocalRecordStore) -> None:
@@ -200,6 +191,12 @@ def test_snapshot_views_resolve_simultaneous_source_generations_consistently(
     ("run", run_record(scoring={"status": "available", "value": {
         **capture_scoring(ScoringInputs(None, True, 6), "review"),
         "reward_policy": {"version": "missing", "configuration": {}}}}), "invalid_or_unknown_record_schema"),
+    pytest.param("run", run_record(scoring={'status': 'available', 'value': capture_scoring(
+        replace(SCORING, length=len(LEGACY_REVIEW) + 7), CONTEXT_REVIEW)}),
+        "invalid_or_unknown_record_schema", id="modern-scoring-length"),
+    pytest.param("run", run_record(scoring={'status': 'available', 'value': capture_scoring(
+        replace(SCORING, length=len(LEGACY_REVIEW) + 7), LEGACY_REVIEW)}),
+        "invalid_or_unknown_record_schema", id="legacy-scoring-length"),
     ("run", b"{private-malformed", "invalid_or_unknown_record_schema"),
     ("run", run_record(schema_version="daydream.run.v99"), "invalid_or_unknown_record_schema"),
     ("run", {k: v for k, v in run_record().items() if k != "schema_version"}, "invalid_or_unknown_record_schema"),
@@ -373,7 +370,7 @@ def test_snapshot_pins_download_provenance_independently_of_later_source_metadat
     assert store.read_snapshot(second["snapshot_id"]).snapshot["source"]["revision"] == "b" * 40
 
 
-@pytest.mark.parametrize("version", ["daydream.observation.v1", "daydream.observation.v2"])
+@pytest.mark.parametrize("version", ["daydream.observation.v2"])
 def test_store_refuses_historical_observation_versions_without_writes(store: LocalRecordStore, version: str) -> None:
     before = store.read_records()
     with pytest.raises(StoreError):

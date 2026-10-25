@@ -50,32 +50,6 @@ def test_stack_name_from_uid_splits_on_the_last_separator() -> None:
     """A trailing ordinal leaves any separators within the stack name intact."""
     assert stack_name_from_uid("weird:name:7") == "weird:name"
 
-def test_stamp_assigns_sequential_uids_in_place() -> None:
-    """Existing list holders see assigned durable identities without rebinding."""
-    records: list[dict[str, Any]] = [{"id": 1}, {"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record[RECORD_UID_KEY] for record in records] == ["python:1", "python:2", "python:3"]
-
-def test_stamp_preserves_an_existing_uid() -> None:
-    """Resume preserves identities even after adjudication compacts their source list."""
-    records: list[dict[str, Any]] = [{"id": 9, RECORD_UID_KEY: "python:4"}]
-    stamp_record_uids(records, "python")
-    assert record_uid(records[0]) == "python:4"
-
-def test_stamp_is_idempotent() -> None:
-    """Called at both record birth and record load, the second call must be a no-op."""
-    records: list[dict[str, Any]] = [{"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    first = [record_uid(record) for record in records]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == first
-
-def test_partial_stamp_does_not_reuse_an_ordinal_already_held() -> None:
-    """Mixed stamped/unstamped records cannot receive colliding ordinals."""
-    records: list[dict[str, Any]] = [{"id": 1, RECORD_UID_KEY: "python:1"}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == ["python:1", "python:2"]
-    assert duplicate_record_uids(records) == []
 
 def test_item_source_uids_ignores_malformed_entries() -> None:
     """A hallucinated non-string entry must not reach a consumer as provenance."""

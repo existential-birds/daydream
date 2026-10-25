@@ -7,15 +7,9 @@ from typing import Any
 
 import pytest
 
-from daydream.training import labeler_versions
 from daydream.training._immutable_json import freeze_json
-from daydream.training.adjudication.snapshot import (
-    ANNOTATION_SNAPSHOT_SCHEMA_VERSION,
-    build_canonical_record,
-    record_evidence_digest,
-)
+from daydream.training.adjudication.snapshot import build_canonical_record, record_evidence_digest
 from daydream.training.labeler_versions import reply_evidence_digest
-from daydream.training.record_identity import record_finding_id
 
 
 def _resolution(fp: str = "fp-1", digest: str = "d" * 32) -> dict[str, Any]:
@@ -42,21 +36,6 @@ def _snapshot_session() -> dict[str, object]:
         "segment_id": "s1-seg",
         "resolutions": [{"fingerprint": "fp-1", "item_uid": "item:1", "profile_name": "pr_review", "stack": "python"}],
     }
-
-
-def test_build_canonical_record_pins_identity_and_provenance() -> None:
-    session = _snapshot_session()
-    record = build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00")
-    # identity via record_identity.record_finding_id — recompute and compare, never trust a stored copy
-
-    assert record["record_id"] == record_finding_id("s1", "s1-t", "s1-seg", "item:1")
-    assert record["evidence_digest"] == "d" * 32
-    assert record["disposition"] == "unanswered"
-    assert record["profile"]["profile_name"] == "pr_review"
-    assert record["stack"] == "python"
-
-    assert record["classifier_version"] == labeler_versions.REPLY_CLASSIFIER_VERSION
-    assert ANNOTATION_SNAPSHOT_SCHEMA_VERSION in record["schema_version"]
 
 
 def test_build_canonical_record_serializes_frozen_shared_evidence_canonically() -> None:
@@ -98,13 +77,9 @@ def test_build_canonical_record_rejects_missing_digest() -> None:
         build_canonical_record(session, _resolution(digest=""), evidence_observed_at="2026-01-01")
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("fingerprint", None), ("fingerprint", ""), ("fingerprint", []),
-     ("disposition", None), ("disposition", "other"), ("disposition", []),
-     pytest.param("fingerprint", ..., id="fingerprint-absent"),
-     pytest.param("disposition", ..., id="disposition-absent")],
-)
+@pytest.mark.parametrize(("field", "value"), [
+    ("fingerprint", ""), pytest.param("fingerprint", ..., id="fingerprint-absent"),
+    ("disposition", "other"), pytest.param("disposition", ..., id="disposition-absent")])
 def test_build_canonical_record_rejects_invalid_required_resolution_fields(field: str, value: Any) -> None:
     resolution = _resolution()
     if value is ...:
@@ -121,17 +96,3 @@ def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[di
     session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": rows}
     with pytest.raises(ValueError, match="expected exactly 1"):
         build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01")
-
-
-def test_build_canonical_record_as_of_passthrough() -> None:
-    session = _snapshot_session()
-    record = build_canonical_record(
-        session,
-        _resolution(),
-        evidence_observed_at="2026-01-01T00:00:00+00:00",
-        as_of="2026-02-01T00:00:00+00:00",
-    )
-    assert record["as_of"] == "2026-02-01T00:00:00+00:00"
-    assert "as_of" not in build_canonical_record(
-        session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00"
-    )

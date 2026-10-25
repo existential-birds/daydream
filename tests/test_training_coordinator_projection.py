@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ import pytest
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.gate import _split_digest
+from daydream.training.reward_model import OutcomeModel, score_comment
 from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks import load_v2_projection
 from tests.fixtures.training.build_projection_50 import build_projection_50
@@ -168,17 +170,20 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
         assert row["format_valid"] is True
         assert row["verifier_verdicts"]
 
+
 def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, omit_finding_text=True)
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="finding_text"):
         run_pipeline(cfg, dry_run=False)
 
+
 def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, base_sha="abc123")
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="base_sha"):
         run_pipeline(cfg, dry_run=False)
+
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     proj_dir = _build_projection(tmp_path)
@@ -187,6 +192,7 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     assert res.exit_code == 0, res
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
+
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
@@ -197,6 +203,17 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     proj_dir = build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)
     assert len(projection.records) == 50
+    assert projection.by_split == {
+        split: [json.loads(line) for line in (proj_dir / f"{split}.jsonl").read_text().splitlines() if line]
+        for split in ("train", "validation", "holdout")
+    }
+    assert sum(len(records) for records in projection.by_split.values()) == 50
+    assert projection.lineage["salt"] == "issue-1081-fixture-salt"
+    copied = tmp_path / "copied-projection"
+    shutil.copytree(proj_dir, copied)
+    assert load_v2_projection(copied).digest == projection.digest
+    (copied / "train.jsonl").write_bytes((copied / "train.jsonl").read_bytes() + b"\n")
+    assert load_v2_projection(copied).digest != projection.digest
     gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
     record_types = {cast(str, r["record_type"]) for r in projection.records}
@@ -236,6 +253,40 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     assert first == projection.digest
     manifest2 = run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out2"), dry_run=False)
     assert manifest2["run_identity"]["corpus_digest"] == first
+    stage0 = tmp_path / "out/stage0"
+    model = OutcomeModel(**json.loads((stage0 / "model-state.json").read_text()))
+    assert model.label_ratio_reported == 0.5 and model.train_rows + model.held_out_rows == 46
+    assert model.split_digest == manifest["stages"]["stage0"]["split"]["digest"]
+    assert score_comment(model, "accepted finding body") > score_comment(model, "rejected finding body")
+    gate = json.loads((stage0 / "gate-report.json").read_text())
+    assert gate == manifest["stages"]["stage0"]["gate"] and gate["passed"] is True
+    assert gate["separation"] > 0 and gate["evidence_digest"]
+    assert 0 <= gate["accepted_ratio"] <= 1
+    assert {name: (stage0 / name).read_bytes()
+            for name in ("labels.jsonl", "split.json", "model-state.json", "gate-report.json")} == {
+        name: (tmp_path / "out2/stage0" / name).read_bytes()
+        for name in ("labels.jsonl", "split.json", "model-state.json", "gate-report.json")}
+
+    # Resume consumes the persisted identity before any stage can overwrite evidence.
+    from dataclasses import replace
+
+    from daydream.training.lineage import ResumeAborted
+
+    cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
+    prior = {str(path.relative_to(cfg.out_dir)): path.read_bytes() for path in cfg.out_dir.rglob("*") if path.is_file()}
+    resumed = run_pipeline(cfg, dry_run=False)
+    assert resumed["run_identity"] == manifest["run_identity"]
+    assert {
+        str(path.relative_to(cfg.out_dir)): path.read_bytes() for path in cfg.out_dir.rglob("*") if path.is_file()
+    } == prior
+    with pytest.raises(ValueError) as failure:
+        run_pipeline(replace(cfg, learning_rate=2e-5, max_seq_len=16384), dry_run=False)
+    assert isinstance(failure.value, ResumeAborted)
+    assert "learning_rate" in str(failure.value) and "max_seq_len" in str(failure.value)
+    assert {
+        str(path.relative_to(cfg.out_dir)): path.read_bytes() for path in cfg.out_dir.rglob("*") if path.is_file()
+    } == prior
+
 
 def test_projection_is_the_only_input(tmp_path: Path) -> None:
     legacy_ctor = cast(Any, PipelineConfig)

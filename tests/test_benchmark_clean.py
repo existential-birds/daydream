@@ -107,109 +107,14 @@ def test_clean_report_summary_includes_populated_counters() -> None:
         "deletion is unrecoverable",
     ]
 
-def test_clean_no_flags_deletes_nothing_and_preserves_gold(ws: Path) -> None:
-    report = clean_mod.clean_workspace(ws)  # no selection flags
-    assert report.exit_code == 0
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists(), f"{name} must be preserved on a no-flag clean"
-    assert report.cache_deleted == 0 and report.job_dirs_deleted == 0
-    assert report.trajectory_deleted == 0 and report.images_removed == 0
 
-def test_clean_cache_deletes_only_cache_targets(ws: Path) -> None:
-    (ws / "cache" / "repository.git").mkdir(parents=True)
-    (ws / "cache" / "harbor-build-stage").mkdir(parents=True)
-    report = clean_mod.clean_workspace(ws, cache=True)
-    assert report.exit_code == 0
-    assert report.cache_deleted == 2
-    assert not (ws / "cache" / "repository.git").exists()
-    assert not (ws / "cache" / "harbor-build-stage").exists()
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists(), f"curated {name} must survive --cache"
-    # the empty cache/ dir itself remains (clean removes targets, not the scaffold)
-    assert (ws / "cache").is_dir()
 
-def test_clean_cache_absent_target_is_already_clean(ws: Path) -> None:
-    report = clean_mod.clean_workspace(ws, cache=True)
-    assert report.exit_code == 0 and report.cache_absent == 2
-    assert report.cache_deleted == 0
-    # container job dirs / trajectories untouched when only --cache is given
-    assert report.job_dirs_deleted == 0 and report.trajectory_deleted == 0
 
-def test_clean_trajectories_deletes_job_trajectories_only(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000a1"
-    job = ws / "harbor" / "jobs" / run_id
-    traj = job / "case-abc" / "agent" / "trajectory.json"
-    traj.parent.mkdir(parents=True)
-    traj.write_text("{}")
-    (job / "case-abc" / "verifier").mkdir(parents=True)
-    (job / "case-abc" / "verifier" / "reward.json").write_text("{}")
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("case-abc__1", removed=False)])
-    report = clean_mod.clean_workspace(ws, trajectories=True)
-    assert report.exit_code == 0 and report.trajectory_deleted == 1
-    assert not traj.exists()
-    assert (job / "case-abc" / "verifier" / "reward.json").exists()  # dir remains
-    assert job.is_dir()  # --trajectories does not remove the job dir itself
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists()
 
-def test_clean_trajectories_absent_dir_is_already_clean(ws: Path) -> None:
-    _append_ledger_run(ws, "00000000-0000-0000-0000-0000000000a2", state="complete", environments=[])
-    report = clean_mod.clean_workspace(ws, trajectories=True)
-    assert report.exit_code == 0 and report.trajectory_absent == 1
-    assert report.job_dirs_deleted == 0
 
-def test_clean_jobs_deletes_ledgered_job_dir_and_marks_cleaned(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000b1"
-    job = ws / "harbor" / "jobs" / run_id
-    (job / "case-abc" / "verifier").mkdir(parents=True)
-    (job / "case-abc" / "verifier" / "reward.json").write_text("{}")
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("case-abc__1", removed=False)])
-    report = clean_mod.clean_workspace(ws, jobs=True)
-    assert report.exit_code == 0 and report.job_dirs_deleted == 1
-    assert not job.exists()
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    assert ledger["runs"][0]["state"] == "cleaned"
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists()
 
-def test_clean_jobs_already_cleaned_run_is_noop(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000b2"
-    _append_ledger_run(ws, run_id, state="cleaned", environments=[])
-    report = clean_mod.clean_workspace(ws, jobs=True)
-    assert report.exit_code == 0 and report.runs_already_clean == 1
-    assert report.job_dirs_deleted == 0
 
-def test_clean_jobs_removes_recorded_images_and_marks_removed(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000c1"
-    (ws / "harbor" / "jobs" / run_id / "t").mkdir(parents=True)
-    env = _docker_env("case-abc__1", removed=False, image_id="hb__deadbeef")
-    _append_ledger_run(ws, run_id, state="complete", environments=[env])
-    removed_refs = []
 
-    def fake_docker_rm(refs: Any) -> dict[str, Any]:
-        removed_refs.extend(refs)
-        return {"returncode": 0}
-
-    clean_mod.clean_workspace(ws, jobs=True, docker_rm=fake_docker_rm)
-    assert removed_refs == ["hb__deadbeef"]            # exact recorded ref, never guessed
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    assert ledger["runs"][0]["environments"][0]["removed"] is True
-    assert ledger["runs"][0]["state"] == "cleaned"
-
-def test_clean_jobs_removed_true_env_skipped(ws: Path) -> None:
-    run_id = "00000000-0000-0000-0000-0000000000c2"
-    (ws / "harbor" / "jobs" / run_id / "t").mkdir(parents=True)
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("c", removed=True)])
-    called: list[list[str]] = []
-
-    def _docker_rm(refs: list[str]) -> dict[str, Any]:
-        called.append(refs)
-        return {"returncode": 0}
-
-    clean_mod.clean_workspace(ws, jobs=True, docker_rm=_docker_rm)
-    assert called == []                                 # already-removed image not re-attempted
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    assert ledger["runs"][0]["state"] == "cleaned"
 
 def test_job_dir_kept_when_image_removal_fails(ws: Path) -> None:
     run_id = "00000000-0000-0000-0000-0000000000d1"
@@ -309,20 +214,6 @@ def test_clean_jobs_keeps_dir_when_environments_empty(ws: Path) -> None:
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
     assert ledger["runs"][0]["state"] == "complete"  # never marked cleaned
 
-def test_clean_jobs_cleans_run_whose_job_dir_never_materialized(ws: Path) -> None:
-    """A failed run recorded with empty environments and no job dir (Harbor
-    never wrote one) has no images either, so ``clean --jobs`` transitions it
-    to ``cleaned`` instead of blocking the workspace on an unrecoverable row.
-    """
-    run_id = "00000000-0000-0000-0000-0000000000d4"
-    _append_ledger_run(ws, run_id, state="cleanup_pending", environments=[])
-    report = clean_mod.clean_workspace(ws, jobs=True)
-    assert report.exit_code == 0
-    assert report.job_dirs_absent == 1 and report.runs_cleaned == 1
-    assert report.images_failed == 0
-    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
-    assert ledger["runs"][0]["state"] == "cleaned"
-    assert not (ws / "harbor" / "jobs" / run_id).exists()
 
 def test_symlink_escape_target_rejected(tmp_path: Path, ws: Any) -> None:
     victim = tmp_path / "outside-secret"
@@ -347,13 +238,6 @@ def test_clean_all_refuses_without_yes_and_no_tty(ws: Path) -> None:
     for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
         assert (ws / name).exists()   # nothing deleted on refusal
 
-def test_clean_all_yes_deletes_curated_and_derived(ws: Path) -> None:
-    report = clean_mod.clean_workspace(ws, all_=True, yes=True)
-    assert report.exit_code == 0 and report.gold_deleted == 4   # imports cases snapshots + manifest
-    assert not (ws / "benchmark.yaml").exists()
-    assert not (ws / "imports").exists() and not (ws / "cases").exists()
-    assert not (ws / "snapshots").exists()
-    assert report.recoverable is False        # curated deletion is unrecoverable
 
 def test_clean_all_preserves_curated_when_derived_stage_raises(ws: Path) -> None:
     """Curated source/gold is unrecoverable, so it must be deleted last: a
@@ -418,25 +302,58 @@ def test_workspace_lock_held_during_mutation(ws: Path, monkeypatch: pytest.Monke
     assert report.exit_code == 0 and report.job_dirs_deleted == 1
     assert lock_held_at_write == [True]
 
-def test_clean_idempotent_repeat_noop(ws: Path) -> None:
-    (ws / "cache" / "repository.git").mkdir(parents=True)
-    r1 = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
-    r2 = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
-    assert r1.exit_code == 0 and r2.exit_code == 0
-    assert r2.cache_deleted == 0 and r2.job_dirs_deleted == 0 and r2.trajectory_deleted == 0
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists()
 
 def test_clean_derived_union_deletes_all_derived(ws: Path) -> None:
+    """One ledger-owned workspace exercises selected cleanup, resume and confirmed curated deletion."""
     (ws / "cache" / "repository.git").mkdir(parents=True)
-    (ws / "cache" / "harbor-build-stage").mkdir(parents=True)
-    run_id = "00000000-0000-0000-0000-0000000000e1"
-    job = ws / "harbor" / "jobs" / run_id
-    (job / "case" / "agent").mkdir(parents=True)
-    (job / "case" / "agent" / "trajectory.json").write_text("{}")
-    _append_ledger_run(ws, run_id, state="complete", environments=[_docker_env("c", removed=False)])
-    r = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
-    assert r.cache_deleted == 2 and r.job_dirs_deleted == 1
-    assert r.trajectory_deleted == 1 and r.images_removed == 1
-    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
-        assert (ws / name).exists()        # derived union preserves source/gold
+    (ws / "cache" / "harbor-build-stage").mkdir()
+    primary, missing, already = ("00000000-0000-0000-0000-0000000000e1",
+        "00000000-0000-0000-0000-0000000000e2", "00000000-0000-0000-0000-0000000000e3")
+    job = ws / "harbor" / "jobs" / primary
+    trajectory = job / "case" / "agent" / "trajectory.json"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text("{}")
+    verifier = job / "case" / "verifier" / "reward.json"
+    verifier.parent.mkdir()
+    verifier.write_text('{"reward": 1}')
+    _append_ledger_run(ws, primary, state="complete", environments=[
+        _docker_env("active", image_id="hb__owned"), _docker_env("retired", removed=True, image_id="hb__already")])
+    _append_ledger_run(ws, missing, state="cleanup_pending", environments=[])
+    _append_ledger_run(ws, already, state="cleaned", environments=[])
+    curated = [ws / name for name in ("benchmark.yaml", "imports", "cases", "snapshots")]
+    original_manifest = curated[0].read_bytes()
+    before = (ws / "runtime" / "harbor.json").read_bytes()
+    assert clean_mod.clean_workspace(ws) == clean_mod.CleanReport()
+    assert trajectory.exists() and verifier.exists() and (ws / "runtime" / "harbor.json").read_bytes() == before
+    trajectories = clean_mod.clean_workspace(ws, trajectories=True)
+    assert (trajectories.exit_code, trajectories.trajectory_deleted, trajectories.trajectory_absent) == (0, 1, 2)
+    assert trajectories.job_dirs_deleted == 0 and trajectories.images_removed == 0
+    assert not trajectory.exists() and verifier.read_text() == '{"reward": 1}' and job.is_dir()
+    cache = clean_mod.clean_workspace(ws, cache=True)
+    assert (cache.exit_code, cache.cache_deleted, cache.cache_absent) == (0, 2, 0)
+    assert cache.job_dirs_deleted == cache.trajectory_deleted == 0 and (ws / "cache").is_dir()
+    assert not (ws / "cache" / "repository.git").exists() and not (ws / "cache" / "harbor-build-stage").exists()
+    removed: list[list[str]] = []
+    def docker_rm(refs: list[str]) -> dict[str, Any]:
+        removed.append(refs)
+        return {"returncode": 0}
+    report = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True, docker_rm=docker_rm)
+    assert (report.exit_code, report.cache_absent, report.trajectory_absent, report.job_dirs_deleted,
+            report.job_dirs_absent, report.runs_cleaned, report.runs_already_clean,
+            report.images_removed) == (0, 2, 2, 1, 1, 2, 1, 1)
+    assert removed == [["hb__owned"]] and not job.exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert {row["run_id"]: row["state"] for row in ledger["runs"]} == {
+        primary: "cleaned", missing: "cleaned", already: "cleaned"
+    }
+    assert [env["removed"] for env in ledger["runs"][0]["environments"]] == [True, True]
+    assert all(path.exists() for path in curated) and curated[0].read_bytes() == original_manifest
+    frozen_ledger = (ws / "runtime" / "harbor.json").read_bytes()
+    repeat = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True, docker_rm=docker_rm)
+    assert (repeat.exit_code, repeat.cache_absent, repeat.trajectory_absent, repeat.runs_already_clean) == (0, 2, 3, 3)
+    assert repeat.cache_deleted == repeat.trajectory_deleted == repeat.job_dirs_deleted == repeat.images_removed == 0
+    assert removed == [["hb__owned"]] and (ws / "runtime" / "harbor.json").read_bytes() == frozen_ledger
+    assert all(path.exists() for path in curated)
+    final = clean_mod.clean_workspace(ws, all_=True, yes=True, docker_rm=docker_rm)
+    assert final.exit_code == 0 and final.gold_deleted == 4 and final.recoverable is False
+    assert not any(path.exists() for path in curated) and removed == [["hb__owned"]]

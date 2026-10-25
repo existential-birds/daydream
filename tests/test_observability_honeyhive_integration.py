@@ -31,16 +31,17 @@ from tests.test_observability_integration import _FLOW, _PROMPT, _REPLY, _SECRET
 
 
 @pytest.mark.parametrize("capture_content", [True, False])
-@pytest.mark.parametrize("tool_failed", [False, True])
 async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
-    capture_content: bool, tool_failed: bool, ext_dir: ExtDir, feature_branch_repo: Path,
+    capture_content: bool, ext_dir: ExtDir, feature_branch_repo: Path,
     make_config: Callable[..., RunConfig], install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(ScriptedBackend(events=[
                 RequestEvent(_PROMPT, model_name="effective-model", provider_name="observed-provider"),
                 ToolStartEvent("call-one", "read_file", {"path": "sample.py", "api_key": _SECRET}),
-                ToolResultEvent("call-one", f"Tool output includes credential {_SECRET}", tool_failed),
+                ToolResultEvent("call-one", f"Tool output includes credential {_SECRET}", False),
+                ToolStartEvent("call-error", "read_file", {"path": "missing.py", "api_key": _SECRET}),
+                ToolResultEvent("call-error", f"Tool failure includes credential {_SECRET}", True),
                 TextEvent(_REPLY),
                 MetricsEvent(message_id="message-one", prompt_tokens=100, completion_tokens=12, cached_tokens=20,
                     cache_creation_tokens=5, reasoning_tokens=6, cost_usd=0.004,
@@ -98,12 +99,15 @@ async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
         else:
             assert not any(key.startswith("honeyhive_metadata.") for key in native)
             assert "gen_ai.usage.cost" not in native
-        if kind == "tool":
-            assert (mapped["status"]["code"] == "STATUS_CODE_ERROR") == tool_failed
+    assert {attributes(span)["gen_ai.tool.call.id"]: span["status"]["code"]
+            for span in honeyhive.spans if attributes(span)["daydream.span.kind"] == "tool"} == {
+        "call-one": "STATUS_CODE_OK", "call-error": "STATUS_CODE_ERROR",
+    }
     assert sum(attributes(span).get("honeyhive_metadata.cost", 0) for span in honeyhive.spans) == 0.004
     payload = json.dumps([request["body"] for request in honeyhive.requests])
     assert _SECRET not in payload
-    for text in (_PROMPT, _REPLY, "sample.py", "Tool output includes credential"):
+    for text in (_PROMPT, _REPLY, "sample.py", "missing.py", "Tool output includes credential",
+                 "Tool failure includes credential"):
         assert (text in payload) == capture_content
     assert all(request["path"] == "/opentelemetry/v1/traces" for request in honeyhive.requests)
     assert all(request["headers"]["authorization"] == f"Bearer {_SECRET}" for request in honeyhive.requests)

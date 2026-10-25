@@ -49,6 +49,7 @@ def _strict_backend(audit_root: Path) -> ScriptedBackend:
     """A backend whose strict PreToolUse isolation forces the inline transport."""
     return ScriptedBackend(audit_root_isolation="claude-pretooluse", audit_root=audit_root)
 
+
 def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
     """Count the bytes ``prompt_budget`` actually streams off disk."""
     total = 0
@@ -61,6 +62,7 @@ def _count_prompt_budget_reads(monkeypatch: pytest.MonkeyPatch) -> Callable[[], 
     monkeypatch.setattr("daydream.prompt_budget.os.read", counted_read)
     return lambda: total
 
+
 def _captured_artifact(
     tmp_path: Path, *, backend: ScriptedBackend | None = None
 ) -> tuple[Path, ScriptedBackend, PreparedSanctionedInputs]:
@@ -70,6 +72,7 @@ def _captured_artifact(
     backend = backend or ScriptedBackend()
     prepared = prepare_sanctioned_inputs(backend, tmp_path, {"artifact": artifact}, read_only=False)
     return artifact, backend, prepared
+
 
 def _count_capture_calls(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
     """Count how often ``prompt_budget`` captures (re-reads/hashes) an input."""
@@ -82,9 +85,11 @@ def _count_capture_calls(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
     monkeypatch.setattr(prompt_budget, "_capture_input", counted_capture)
     return lambda: total
 
+
 async def _run_with_inputs(backend: Any, root: Path, prepared: Any) -> Any:
     """Enter ``run_agent`` with *prepared* sanctioned inputs attached."""
     return await run_agent(backend, root, "inspect", phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared)
+
 
 @pytest.mark.anyio
 async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry(tmp_path: Path) -> None:
@@ -108,6 +113,7 @@ async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry
     assert active_backends() == ()
     assert current_run_context() is None
 
+
 @pytest.mark.anyio
 async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> None:
     context = RunContext(InteractionPolicy(quiet=True))
@@ -116,6 +122,7 @@ async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> 
         await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW, run_context=context)
     assert context.active_backends() == ()
     assert active_backends() == ()
+
 
 async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
     class InjectedInterrupt(BaseException):
@@ -143,6 +150,7 @@ async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) 
     assert active_backends() == ()
     assert current_run_context() is None
 
+
 def _sized_inputs(tmp_path: Path, count: int, size: int) -> dict[str, Path]:
     """*count* real files of exactly *size* bytes, labelled ``input-<n>``."""
     inputs: dict[str, Path] = {}
@@ -151,6 +159,7 @@ def _sized_inputs(tmp_path: Path, count: int, size: int) -> dict[str, Path]:
         path.write_bytes(b"x" * size)
         inputs[f"input-{index}"] = path
     return inputs
+
 
 def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_bytes(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
@@ -163,6 +172,9 @@ def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_byte
     assert [item.label for item in prepared.inputs] == ["alpha", "zeta"]
     assert all(item.text is None for item in prepared.inputs)
     assert str(first.resolve()) in prepared.render()
+    prompt = prepared.render_prompt("Review src/app.py")
+    assert prompt.startswith("Review src/app.py") and prompt.endswith(f"- zeta: {second.resolve()}")
+    assert prepared.render_prompt(prompt) == prompt
     assert "x" * 100 not in prepared.render()
     strict = _strict_backend(tmp_path.resolve())
     inline = prepare_sanctioned_inputs(strict, tmp_path, {"alpha": first, "zeta": second}, read_only=True)
@@ -178,6 +190,7 @@ def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_byte
     with pytest.raises(SanctionedInputUnavailable, match="byte budget"):
         prepare_sanctioned_inputs(strict, tmp_path, {"alpha": first, "zeta": second}, read_only=True)
 
+
 def test_prepare_sanctioned_inputs_rejects_mismatched_strict_audit_root(tmp_path: Path) -> None:
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("captured", encoding="utf-8")
@@ -185,6 +198,7 @@ def test_prepare_sanctioned_inputs_rejects_mismatched_strict_audit_root(tmp_path
     other.mkdir()
     with pytest.raises(SanctionedInputUnavailable, match="audit root"):
         prepare_sanctioned_inputs(_strict_backend(other), tmp_path, {"artifact": artifact}, read_only=True)
+
 
 def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) -> None:
     backend = ScriptedBackend()
@@ -213,6 +227,7 @@ def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) 
     with pytest.raises(SanctionedInputUnavailable, match="file count"):
         prepare_sanctioned_inputs(backend, tmp_path, too_many, read_only=False)
 
+
 def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,6 +240,7 @@ def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
         prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
     assert delegated_bytes() <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
     assert backend.call_count == 0
+
 
 def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -239,6 +255,7 @@ def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
         prepared.revalidate(backend, tmp_path, read_only=False)
     assert delegated_bytes() <= SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES + 1
     assert backend.call_count == 0
+
 
 def test_revalidate_skips_rehash_when_identity_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Matching (dev, ino, size, mtime_ns) reuses already captured bytes without rereading or hashing."""
@@ -259,6 +276,7 @@ def test_revalidate_skips_rehash_when_identity_unchanged(tmp_path: Path, monkeyp
         prepared.revalidate(backend, tmp_path, read_only=False)
     assert capture_calls() == baseline + 1
 
+
 def test_revalidate_fails_closed_when_captured_file_vanishes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing captured input is re-captured and surfaces the real error."""
     artifact, backend, prepared = _captured_artifact(tmp_path)
@@ -267,6 +285,7 @@ def test_revalidate_fails_closed_when_captured_file_vanishes(tmp_path: Path, mon
     with pytest.raises(SanctionedInputUnavailable, match="unavailable"):
         prepared.revalidate(backend, tmp_path, read_only=False)
     assert capture_calls() == 1
+
 
 def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +304,7 @@ def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
     with pytest.raises(SanctionedInputUnavailable, match="aggregate input budget"):
         exhausted.revalidate(backend, tmp_path, read_only=False)
 
+
 def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: Path) -> None:
     invalid = tmp_path / "invalid.txt"
     invalid.write_bytes(b"\xff")
@@ -298,6 +318,7 @@ def test_prepare_sanctioned_inputs_rejects_invalid_utf8_and_symlinks(tmp_path: P
         with pytest.raises(SanctionedInputUnavailable, match=reason):
             prepare_sanctioned_inputs(ScriptedBackend(), tmp_path, {"input": path}, read_only=False)
 
+
 @pytest.mark.anyio
 async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(tmp_path: Path) -> None:
     artifact, backend, prepared = _captured_artifact(tmp_path)
@@ -305,6 +326,7 @@ async def test_run_agent_revalidates_sanctioned_inputs_before_backend_entry(tmp_
     with pytest.raises(SanctionedInputUnavailable, match="changed"):
         await _run_with_inputs(backend, tmp_path, prepared)
     assert backend.call_count == 0
+
 
 @pytest.mark.anyio
 async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Path) -> None:
@@ -324,6 +346,7 @@ async def test_run_agent_revalidates_sanctioned_input_before_retry(tmp_path: Pat
         await _run_with_inputs(backend, tmp_path, prepared)
     assert backend.call_count == 1
 
+
 @pytest.mark.anyio
 async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes(tmp_path: Path) -> None:
     artifact, backend, prepared = _captured_artifact(tmp_path, backend=ScriptedBackend(sandbox=False))
@@ -331,6 +354,7 @@ async def test_run_agent_rejects_same_backend_object_when_transport_mode_changes
     with pytest.raises(SanctionedInputUnavailable, match="transport mode changed"):
         await _run_with_inputs(backend, tmp_path, prepared)
     assert backend.call_count == 0
+
 
 def test_is_environmental_failure_both_directions() -> None:
     environmental = [
@@ -342,6 +366,7 @@ def test_is_environmental_failure_both_directions() -> None:
     ordinary = ["AssertionError: assert 1 == 2", "1 failed, 3 passed", "ValueError: bad input"]
     for output in ordinary:
         assert is_environmental_failure(output) is False, output
+
 
 def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
     """Scrub OSError fields and custom str/repr surfaces while preserving retryability."""
@@ -374,11 +399,13 @@ def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
     assert credential not in str(rebuilt_retryable)
     assert getattr(rebuilt_retryable, "retryable", False) is True
 
+
 class ExplodingStrError(RuntimeError):
     """A hostile supervisor exception: its ``__str__`` itself raises."""
 
     def __str__(self) -> str:
         raise RuntimeError("boom in str")
+
 
 def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
     """A hostile __str__ must not escape during either wrapper construction or scrubbing."""
@@ -393,6 +420,7 @@ def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
     failure = _ToolSupervisorFailure(original)
     assert failure.original is original
     assert str(failure) == ""
+
 
 @pytest.mark.anyio
 async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
@@ -427,6 +455,7 @@ async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     assert "Extension Failure" in rendered
     assert "secret-shaped-payload" not in rendered
     assert "boom in str" not in rendered
+
 
 @pytest.mark.anyio
 async def test_diagnostic_event_is_recorder_only_and_has_no_agent_side_effects(

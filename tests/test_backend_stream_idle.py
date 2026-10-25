@@ -96,26 +96,16 @@ async def drain(backend: Any, cwd: Path) -> list[Any]:
 
 # A silent stream trips the idle timeout; the subprocess is torn down.
 
-@pytest.mark.parametrize(
-    ("cli", "backend_cls", "lines", "expected_timeout"),
-    [
-        pytest.param("pi", PiBackend, PI_LINES[:2], float(TINY_WINDOW), id="pi"),
-        pytest.param("codex", CodexBackend, CODEX_LINES[:2], None, id="codex"),
-    ],
-)
 async def test_silent_stream_trips_idle_timeout_and_reaps_subprocess(
-    cli: str, backend_cls: Any, lines: list[str], expected_timeout: float | None, tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A CLI that emits two lines then goes silent forever ends the turn. The pi case also proves the env override
-    reaches the armed window: the raised error carries the exact configured value."""
-    spawner = install_fake_cli_process(monkeypatch, cli, lines=lines, hang=True)
+    """Pi silence ends its turn at the exact configured idle window and reaps the child."""
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
     with pytest.raises(StreamStalledError) as excinfo:
-        await drain(backend_cls(model="test-model"), tmp_path)
-    assert excinfo.value.cli == cli
-    if expected_timeout is not None:
-        assert excinfo.value.timeout_s == expected_timeout
+        await drain(PiBackend(model="test-model"), tmp_path)
+    assert excinfo.value.cli == "pi"
+    assert excinfo.value.timeout_s == float(TINY_WINDOW)
     assert excinfo.value.retryable is True
     assert_stalled_and_reaped(spawner)
 

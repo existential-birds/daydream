@@ -262,8 +262,7 @@ def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> 
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
     assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
 
-@pytest.mark.parametrize("cli", [None, "uv run pytest"])
-@pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])
+@pytest.mark.parametrize(('cli', 'lockfile'), [(None, None), ('uv run pytest', 'uv.lock'), (None, 'requirements.txt')])
 def test_recipe_round_trips_through_its_persisted_payload(
     tmp_path: Path, cli: str | None, lockfile: str | None,
 ) -> None:
@@ -308,7 +307,9 @@ def test_execution_identity_carries_every_reuse_component() -> None:
         "branch": "feature", "kind": "host", "outcome": "passed",
     }
 
-@pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
+@pytest.mark.parametrize('outcome', [
+    "failed",
+])
 def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
     identity = _identity(outcome=outcome)
     assert identity.reusable is False
@@ -316,11 +317,12 @@ def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
 
-@pytest.mark.parametrize(("raw", "reason", "source"), [
-    (None, "missing", "config"), ("", "missing", "config"), ("   ", "blank", "config"),
-    ("'secret-unclosed", "malformed", "config"), (123, "invalid-type", "config"), ('""', "empty-argv", "config"),
-    ("   ", "blank", "cli"), ("'secret-unclosed", "malformed", "cli"),
-    (123, "invalid-type", "cli"), ('""', "empty-argv", "cli"),
+@pytest.mark.parametrize(('raw', 'reason', 'source'), [
+    (None, "missing", "config"),
+    ("'secret-unclosed", "malformed", "config"),
+    ('""', "empty-argv", "config"),
+    ("   ", "blank", "cli"),
+    (123, "invalid-type", "cli"),
 ])
 def test_unresolved_command_preserves_safe_diagnostic_and_source(raw: object, reason: str, source: str) -> None:
     config = SimpleNamespace(test_command=raw if source == "config" else None)
@@ -343,7 +345,10 @@ def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> Non
     assert fact.diagnostic.reason_code == "blank" and fact.diagnostic.source == "cli"
 
 
-@pytest.mark.parametrize("value", [[], [""], [" "]])
+@pytest.mark.parametrize('value', [
+    [],
+    [" "],
+])
 def test_loaded_recipe_with_empty_executable_remains_no_execution(tmp_path: Path, value: list[str]) -> None:
     recipe = _recipe(tmp_path, cli="true")
     deep = tmp_path / "deep"

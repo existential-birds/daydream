@@ -13,7 +13,6 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -181,19 +180,6 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
 
 _MAKE_INVOCATION_RE = re.compile(r"^make\s+([A-Za-z0-9_.-]+)\s*$")
 _ACTIONLINT_DIGEST_RE = re.compile(r"rhysd/actionlint:[\w.]+@sha256:[0-9a-f]{64}")
-_WHITESPACE_RE = re.compile(r"\s+")
-
-
-def _recipe_commands(recipe: str) -> list[str]:
-    """The individual shell commands a dry-run recipe printed."""
-    lines = [line for line in recipe.splitlines() if line.strip() and not line.lstrip().startswith("#")]
-    joined = "\n".join(lines).replace("\\\n", " ")
-    commands: list[str] = []
-    for chunk in re.split(r"&&|;|\n", joined):
-        command = chunk.strip().lstrip("@").strip()
-        if command and command not in {"then", "else", "fi"}:
-            commands.append(_WHITESPACE_RE.sub(" ", command))
-    return commands
 
 
 def _dry_run_recipe(target: str) -> str:
@@ -207,87 +193,25 @@ def _dry_run_recipe(target: str) -> str:
     return proc.stdout
 
 
-def _observed_gate_commands() -> dict[str, str]:
-    """Map each gate step's dry-run command text to the target that owns it."""
-    owners: dict[str, str] = {}
-    for target in _gate_steps():
-        for command in _recipe_commands(_dry_run_recipe(target)):
-            owners.setdefault(command, target)
-    return owners
-
-
-def _gate_violations(
-    steps: list[dict[str, Any]], gate_steps: set[str], owners: dict[str, str], exemptions: dict[str, str],
-) -> list[str]:
-    """Every reason a check job's steps are not represented by the local gate."""
-    violations: list[str] = []
-    for step in steps:
-        run = step.get("run")
-        if not isinstance(run, str):
-            continue  # setup / artifact steps carry no command
-        name = str(step.get("name", "<unnamed step>"))
-        invocation = _MAKE_INVOCATION_RE.match(run.strip())
-        if invocation:
-            target = invocation.group(1)
-            if target not in gate_steps:
-                violations.append(f"{name}: runs `make {target}`, which is not a declared gate step")
-            continue
-        if name in exemptions:
-            if not exemptions[name].strip():
-                violations.append(f"{name}: declared CI-only step carries no reason")
-            continue
-        owner = owners.get(_WHITESPACE_RE.sub(" ", run.strip()))
-        if owner is not None:
-            violations.append(f"{name}: restates `{run.strip()}`, the command owned by the `{owner}` gate step; "
-                f"run `make {owner}` instead"
-            )
-        else:
-            violations.append(f"{name}: neither an invocation of a declared gate step nor a declared CI-only step")
-    return violations
-
-@pytest.mark.parametrize("makeflags", ["", "-w"], ids=["plain", "directory-logging"])
-def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch, makeflags: str) -> None:
+def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real check job invokes declared gate steps, plus stated CI-only ones."""
-    monkeypatch.setenv("MAKEFLAGS", makeflags)
-    monkeypatch.setenv("MFLAGS", makeflags)
+    monkeypatch.setenv("MAKEFLAGS", "-w")
+    monkeypatch.setenv("MFLAGS", "-w")
     workflow = load_workflow(_CI_WORKFLOW)
     steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
     # Script tests are a component of make test, shared with the static CI job.
     script_recipe = _dry_run_recipe("test-scripts").strip()
     assert script_recipe in _dry_run_recipe("test")
-    violations = _gate_violations(steps, {*_gate_steps(), "test-scripts"}, _observed_gate_commands(), _CI_ONLY_STEPS)
-
-    assert violations == [], "\n".join(violations)
-
-def test_guard_rejects_a_restated_gate_command() -> None:
-    """An inlined gate command is caught, and names the step that owns it."""
-    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests scripts/ci_*.py"}]
-    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
-
-    assert violations and "lint" in violations[0], violations
-
-def test_guard_rejects_an_unrepresented_step() -> None:
-    """A check-job command that matches no gate step and no exemption fails."""
-    steps = [{"name": "Inline gate", "run": "bash scripts/inline-gate.sh"}]
-    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
-
-    assert violations and "neither an invocation" in violations[0], violations
-
-def test_guard_rejects_a_ci_only_step_without_a_reason() -> None:
-    """Declaring a step CI-only is not enough; it must state why."""
-    steps = [{"name": "Run vulture", "run": "uv run vulture --config pyproject.toml daydream tests"}]
-    owners = _observed_gate_commands()
-    allowed = _gate_violations(steps, set(_gate_steps()), owners, {"Run vulture": "root only"})
-    rejected = _gate_violations(steps, set(_gate_steps()), owners, {"Run vulture": "  "})
-
-    assert allowed == []
-    assert rejected and "no reason" in rejected[0], rejected
-
-def test_guard_accepts_a_new_gate_step() -> None:
-    """The guard reads the declared gate, so adding or reordering a step stays green."""
-    steps = [{"name": "New gate step", "run": "make newcheck"}]
-
-    assert _gate_violations(steps, {"lint", "newcheck"}, {}, {}) == []
+    assert all(reason.strip() for reason in _CI_ONLY_STEPS.values())
+    targets = {*_gate_steps(), "test-scripts"}
+    for step in steps:
+        command = step.get("run")
+        if not isinstance(command, str) or step.get("name") in _CI_ONLY_STEPS:
+            continue
+        invocation = _MAKE_INVOCATION_RE.fullmatch(command.strip())
+        assert invocation and invocation.group(1) in targets, (
+            f"{step.get('name')}: invoke a declared make gate target or explain the CI-only exception"
+        )
 
 def test_pinned_actionlint_image_has_one_owner() -> None:
     """Only the gate's actionlint step declares the workflow-lint image digest."""

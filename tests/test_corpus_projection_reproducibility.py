@@ -1,4 +1,5 @@
 """Offline pinned membership, deterministic bytes, and chronological evidence eligibility."""
+
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +8,6 @@ import pytest
 
 from daydream.dataset import semantic_evidence_digest
 from daydream.training.corpus_projection.projector import build_frozen_corpus
-from daydream.training.corpus_projection.splits import assign_split
 from tests.harness.dataset import observation
 from tests.harness.record_projection import (
     add_projection_run,
@@ -22,19 +22,18 @@ def _memberships(out_dir: Path) -> dict[str, set[str]]:
             for name in ("train", "validation", "holdout")}
 
 
-def test_assign_split_is_deterministic_and_salted() -> None:
-    rid = "ab" * 32
-    assert assign_split(rid, holdout_rate=0.1, val_rate=0.1, salt="s") == assign_split(
-        rid, holdout_rate=0.1, val_rate=0.1, salt="s")
-    assert assign_split(rid, holdout_rate=0, val_rate=0, salt="s") == "train"
-    assert assign_split(rid, holdout_rate=1, val_rate=0, salt="s") == "holdout"
-
-
 @pytest.mark.parametrize("capped", [False, True])
 def test_reprojection_is_byte_identical_with_frozen_disjoint_membership(tmp_path: Path, capped: bool) -> None:
+    """Configured split boundaries must reach persisted membership, beyond the pure helper."""
     store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"), siblings=4)
-    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "rejected"), stack="rust",
-                       profile="quick-review", repo_slug="owner/repo-b")
+    add_projection_run(
+        store,
+        run_id="sess-b",
+        dispositions=("accepted", "rejected"),
+        stack="rust",
+        profile="quick-review",
+        repo_slug="owner/repo-b",
+    )
     caps = {"max_stack_share": 0.5, "max_repo_share": 0.5, "max_profile_share": 0.5} if capped else {}
     config = projection_config(store, tmp_path, **caps)
     build_frozen_corpus(config)
@@ -53,6 +52,13 @@ def test_reprojection_is_byte_identical_with_frozen_disjoint_membership(tmp_path
         row["record_id"] for row in _read_jsonl(config.out_dir / "corpus.jsonl")}
     for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
         assert row["record_id"] in memberships[row["lineage"]["split"]]
+    identities = set.union(*memberships.values())
+    train_only = replace(config, out_dir=tmp_path / "all-train", holdout_rate=0, val_rate=0)
+    build_frozen_corpus(train_only)
+    assert _memberships(train_only.out_dir) == {"train": identities, "validation": set(), "holdout": set()}
+    holdout_only = replace(config, out_dir=tmp_path / "all-holdout", holdout_rate=1, val_rate=0)
+    build_frozen_corpus(holdout_only)
+    assert _memberships(holdout_only.out_dir) == {"train": set(), "validation": set(), "holdout": identities}
 
 
 def test_observation_temporal_eligibility_and_embedded_posterior_leak_are_distinct(tmp_path: Path) -> None:

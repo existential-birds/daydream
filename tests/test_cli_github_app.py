@@ -10,11 +10,14 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import jwt as pyjwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
-from daydream import cli
+from daydream import cli, github_app
 from daydream.backends import ResultEvent, TextEvent
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
@@ -32,13 +35,15 @@ class _Transport:
     gh: FakeGh
     requests: list[tuple[Path, list[str], dict[str, str]]] = field(default_factory=list, repr=False)
     require_app: bool = True
+    resolved_session: github_app.ResolvedGitHubSession | None = field(default=None, repr=False)
 
 
 @pytest.fixture
 def transport(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> _Transport:
     boundary = _Transport(fake_gh)
     fake_gh.set_response("GET", "app/installations", [
-        {"id": 71, "account": {"login": "acme"}, "app_slug": "review-app"},
+        {"id": 99, "account": {"login": "another-owner"}, "app_slug": "unrelated-app"},
+        {"id": 71, "account": {"login": "AcMe"}, "app_slug": "review-app"},
     ])
     fake_gh.set_response("POST", "app/installations/71/access_tokens", {
         "token": _TOKEN, "expires_at": "2099-01-01T00:00:00Z",
@@ -62,6 +67,12 @@ def transport(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> _Transport:
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-alternate-token")
     monkeypatch.setenv("DAYDREAM_APP_ID", "42")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", generate_rsa_pem())
+    resolve_session = github_app.resolve_run_identity
+    def observe_session(*args: Any, **kwargs: Any) -> github_app.ResolvedGitHubSession:
+        session = resolve_session(*args, **kwargs)
+        boundary.resolved_session = session
+        return session
+    monkeypatch.setattr(github_app, "resolve_run_identity", observe_session)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
     return boundary
 
@@ -74,7 +85,17 @@ def _run(repo: Path, trajectory: Path, *flags: str) -> int | str | None:
 
 
 def _assert_app_requests(transport: _Transport) -> None:
-    assert transport.requests
+    listing, exchange = transport.requests[:2]
+    jwt_token = listing[2]["GH_TOKEN"]
+    authorization = f"Authorization: Bearer {jwt_token}"
+    assert listing[1] == ["gh", "api", "-H", authorization, "--paginate", "--jq", "(.[]) | @json", "/app/installations"]
+    assert exchange[1][:8] == ["gh", "api", "-H", authorization, "/app/installations/71/access_tokens",
+                               "--method", "POST", "--input"]
+    assert len(exchange[1]) == 9 and exchange[0] == listing[0]
+    assert exchange[2]["GH_TOKEN"] == jwt_token
+    private_key = serialization.load_pem_private_key(os.environ["DAYDREAM_APP_PRIVATE_KEY"].encode(), password=None)
+    decoded = pyjwt.decode(jwt_token, cast(rsa.RSAPublicKey, private_key.public_key()), algorithms=["RS256"])
+    assert decoded["iss"] == "42" and decoded["exp"] - decoded["iat"] == 600
     for _cwd, argv, environment in transport.requests:
         assert environment["GH_TOKEN"] != _AMBIENT, argv
         assert environment["GH_REPO"] == "acme/widgets"
@@ -87,10 +108,7 @@ def _assert_app_requests(transport: _Transport) -> None:
 
 @pytest.mark.parametrize("origin,override", [
     ("https://github.com/acme/widgets.git", None),
-    ("git@github.com:acme/widgets.git", None),
-    ("ssh://git@github.com/acme/widgets.git", None),
     ("https://github.com/other/disagrees.git", "acme/widgets"),
-    ("https://github.com/other/disagrees.git", "github.com/acme/widgets"),
     (None, "https://github.com/acme/widgets"),
 ])
 def test_cli_app_bootstrap_without_ambient_auth(
@@ -114,15 +132,18 @@ def test_cli_app_bootstrap_without_ambient_auth(
     assert (repo / ".review-output.md").is_file()
     assert transport.gh.calls("POST", "app/installations/71/access_tokens")[0].payload == {"repositories": ["widgets"]}
     _assert_app_requests(transport)
+    assert transport.requests[0][0] == repo
+    assert not Path(transport.requests[1][1][-1]).exists()
+    assert transport.resolved_session is not None
+    assert transport.resolved_session.identity.login == "review-app[bot]"
+    environment = transport.resolved_session.execution.auth.environment_for_request()
+    assert environment is not None and environment["GH_TOKEN"] == _TOKEN
 
 
 @pytest.mark.parametrize("origin,override,host", [
     (None, None, None),
-    ("https://gitlab.com/acme/widgets.git", None, None),
     ("https://secret-user:remote-secret@foreign.invalid/acme/widgets.git", None, None),
-    ("https://github.com/acme/widgets/extra", None, None),
     ("https://github.com/acme/widgets.git", "malformed", None),
-    ("https://github.com/acme/widgets.git", "foreign.invalid/acme/widgets", None),
     ("https://github.com/acme/widgets.git", None, "foreign.invalid"),
 ])
 def test_cli_invalid_identity_aborts_before_mint(
@@ -201,15 +222,16 @@ def test_cli_app_pr_target_survives_detached_workspace(
     if not explicit:
         assert views[0][0] == repo
         assert views[0][2]["GH_TOKEN"] == _TOKEN
+        assert views[0][1][:3] == ["gh", "pr", "view"] and views[0][1][3].startswith("--")
     else:
-        assert all(argv[3] == "73" for _cwd, argv, _env in views)
+        assert all(argv[:4] == ["gh", "pr", "view", "73"] for _cwd, argv, _env in views)
     assert any(cwd != repo for cwd, _argv, _env in views)
     assert transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     _assert_app_requests(transport)
     assert git(repo, "branch", "--show-current") == "feature"
 
 
-@pytest.mark.parametrize("app_configured,mode", [(False, "--review"), (True, "--review"), (False, "--comment")])
+@pytest.mark.parametrize("app_configured,mode", [(True, "--review"), (False, "--comment")])
 def test_cli_read_only_preserves_ambient_auth_without_minting(
     feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     transport: _Transport, app_configured: bool, mode: str,

@@ -1,4 +1,5 @@
 """Pure reductions and real CLI projection over pinned record-store evidence."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -9,7 +10,6 @@ import pytest
 
 from daydream.dataset import LocalRecordStore, StoreError, semantic_evidence_digest
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
-from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
@@ -40,11 +40,6 @@ def test_record_identity_is_stable_and_discriminating() -> None:
     assert record_finding_id("s1", "s1:fix-0", "seg-0", "item:2") != identity
 
 
-def test_record_identity_has_explicit_versioned_host_uid_hash() -> None:
-    payload = b'["record-snapshot-v1","s1","s1:fix-0","seg-0","item:1"]'
-    assert record_finding_id("s1", "s1:fix-0", "seg-0", "item:1") == hashlib.sha256(payload).hexdigest()
-
-
 def _resolution(disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
     evidence_after_as_of: bool = False,
 ) -> dict[str, object]:
@@ -69,6 +64,7 @@ def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
     with pytest.raises(GoldGateError):
         classify_tier({"fingerprint": "ab" * 32, "disposition": "accepted", "evidence": []})
 
+
 def test_evidence_after_as_of_rows_are_never_gold() -> None:
     # C5/M9 recorded-and-flagged edge: evidence observed after the pin's
     # as_of keeps its evidence but is never gold-eligible — a decisive
@@ -77,6 +73,7 @@ def test_evidence_after_as_of_rows_are_never_gold() -> None:
     assert classify_tier(_resolution("rejected", evidence_after_as_of=True)) == "silver"
     assert classify_tier(_resolution("accepted", evidence_after_as_of=False)) == "gold"
     assert classify_tier(_resolution("accepted")) == "gold"
+
 
 def _traj(siblings: list[tuple[str, str]]) -> dict[str, Any]:
     return {"trajectory_id": "s1:root", "session_id": "s1",
@@ -91,39 +88,14 @@ def test_segment_order_is_fork_registration_then_descriptor() -> None:
     assert [s.segment_id for s in segs] == ["seg-0", "seg-1"]
     assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
 
+
 def test_duplicate_sibling_keys_raise() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl"), ("s1:fix-0", "a.jsonl")])
     with pytest.raises(ValueError, match="s1:fix-0"):
         segment(traj)
 
+
 # Task 6: profile + stack provenance
-
-
-def test_absent_explicit_stack_stays_unknown() -> None:
-    prov = extract_provenance({"profile_name": "deep-review"})
-    assert prov["stack"] is None
-
-def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> None:
-    store = LocalRecordStore(tmp_path / "records")
-    run = projection_run(dispositions=("ambiguous",))
-    store.commit_run(run)
-    append_projection_evidence(store, run, dispositions=())
-    semantic, capture = reply_evidence("9", "Needs investigation.\n")
-    assert semantic["classifier_label"] == "ambiguous"
-    store.append_observation(observation(
-        "reply", run_id="sess-a", item_uid="item:0", role="automatic",
-        semantic_evidence=[semantic], evidence_digest=reply_evidence_digest([semantic]),
-        evidence_digest_scheme="reply-evidence-v1", reply_captures=[capture],
-        payload={"type": "finding-judgment", "disposition": "ambiguous", "rationale": "nondirectional reply"},
-    ))
-    config = projection_config(store, tmp_path)
-    assert cli_main(_cli_args(config)) == 0
-    assert _read_jsonl(config.out_dir / "corpus.jsonl") == []
-    report = json.loads((config.out_dir / "adjudication-report.json").read_text())
-    assert len(report) == 1
-    assert report[0]["disposition"] == "ambiguous"
-    assert report[0]["evidence"] == [semantic]
-    assert report[0]["reply_captures"] == [capture]
 
 
 def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:
@@ -132,48 +104,95 @@ def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:
 
 
 def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_path: Path) -> None:
+    """One frozen mixed-source population owns emission, complete adjudication and provenance.
+
+    Per-row helper tests miss interactions between canonical source identities, nonvoting captured
+    replies and findings without judgments when the projector joins the complete store.
+    """
     store = seed_projection_store(tmp_path, siblings=3)
+    add_projection_run(store, run_id="mixed-case", dispositions=("accepted",), repo_slug="OWNER/Repo")
+    add_projection_run(
+        store, run_id="https-source", dispositions=("accepted",), repo_slug=" https://github.com/OWNER/Repo.git "
+    )
+    add_projection_run(
+        store, run_id="ssh-source", dispositions=("accepted",), repo_slug="git@github.com:OWNER/Repo.git"
+    )
+    add_projection_run(store, run_id="git-suffix", dispositions=("accepted",), repo_slug="OWNER/Repo.git")
+    unclaimed = projection_run("unknown-stack", dispositions=("accepted",))
+    unclaimed["provenance"].pop("stack")
+    store.commit_run(unclaimed)
+    append_projection_evidence(store, unclaimed, dispositions=("accepted",))
+    store.commit_run(projection_run("missing-judgments"))
+    semantic, capture = reply_evidence("9", "Needs investigation.\n")
+    store.append_observation(
+        observation(
+            "reply",
+            run_id="sess-a",
+            item_uid="item:2",
+            role="automatic",
+            semantic_evidence=[semantic],
+            evidence_digest=reply_evidence_digest([semantic]),
+            evidence_digest_scheme="reply-evidence-v1",
+            reply_captures=[capture],
+            payload={"type": "finding-judgment", "disposition": "ambiguous", "rationale": "nondirectional reply"},
+        )
+    )
     config = projection_config(store, tmp_path)
     assert cli_main(_cli_args(config)) == 0
     rows = _read_jsonl(config.out_dir / "corpus.jsonl")
-    assert len(rows) == 2
-    assert {row["outcome_label"] for row in rows} == {"accepted", "rejected"}
-    assert len({row["record_id"] for row in rows}) == 2
-    assert {row["trajectory_id"] for row in rows} == {"sess-a:fix-0"}
-    assert {row["task_segment"] for row in rows} == {"seg-0"}
-    run = store.read_snapshot(config.snapshot_id).runs[0]
+    assert len(rows) == 7 and len({row["record_id"] for row in rows}) == 7
+    assert {row["session_id"]: row["lineage"]["repo_slug"] for row in rows} == {
+        "sess-a": "owner/repo-a",
+        "mixed-case": "OWNER/Repo",
+        "https-source": "OWNER/Repo",
+        "ssh-source": "OWNER/Repo",
+        "git-suffix": "OWNER/Repo",
+        "unknown-stack": "owner/repo-a",
+    }
+    assert all(row["task_identity"]["repo_slug"] == row["lineage"]["repo_slug"] for row in rows)
+    base_rows = [row for row in rows if row["session_id"] == "sess-a"]
+    assert {row["outcome_label"] for row in base_rows} == {"accepted", "rejected"}
+    assert {row["trajectory_id"] for row in base_rows} == {"sess-a:fix-0"}
+    assert {row["task_segment"] for row in base_rows} == {"seg-0"}
+    frozen = store.read_snapshot(config.snapshot_id)
+    runs = {run["run_id"]: run for run in frozen.runs}
+    schema = json.loads((config.out_dir / "schema.json").read_text())
     for row in rows:
-        jsonschema.validate(row, json.loads((config.out_dir / "schema.json").read_text()))
+        run = runs[row["session_id"]]
+        jsonschema.validate(row, schema)
         assert row["finding_text"] == f"{row['disposition']} finding body"
         assert row["finding_text_sha256"] == hashlib.sha256(row["finding_text"].encode()).hexdigest()
         assert row["diff"] == run["original_task"]["value"]["diff"]
         assert row["task_identity"]["base_sha"] == "1" * 40
         assert row["task_identity"]["head_sha"] == "2" * 40
-        assert row["task_identity"]["diff_ref"]["run_id"] == "sess-a"
+        assert row["task_identity"]["diff_ref"]["run_id"] == row["session_id"]
         assert row["lineage"]["snapshot_id"] == config.snapshot_id
         assert row["lineage"]["source_identity_version"] == "record-snapshot-v2"
         assert row["profile"]["profile_name"] == "deep-review"
-        assert row["stack"] == "python"
+        assert row["stack"] == (None if row["session_id"] == "unknown-stack" else "python")
         assert row["intrinsic_reward"] == run["scoring"]["value"]["persisted_breakdown"]
     report = json.loads((config.out_dir / "adjudication-report.json").read_text())
-    assert len(report) == 1 and report[0]["disposition"] == "ambiguous"
+    assert {(entry["session_id"], entry["item_uid"]): entry["disposition"] for entry in report} == {
+        ("sess-a", "item:2"): "ambiguous",
+        ("missing-judgments", "item:0"): "unanswered",
+        ("missing-judgments", "item:1"): "unanswered",
+        ("missing-judgments", "item:2"): "unanswered",
+    }
+    undecided = next(entry for entry in report if entry["session_id"] == "sess-a")
+    assert undecided["evidence"] == [semantic] and undecided["reply_captures"] == [capture]
     lineage = json.loads((config.out_dir / "lineage.json").read_text())
-    assert lineage["adjudication_count"] == 1
-    assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
+    assert lineage["adjudication_count"] == 4
+    assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 4}
     assert lineage["exclusion_list_digest"] == hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
     assert lineage["snapshot"]["snapshot_id"] == config.snapshot_id
-    assert len(lineage["content_digests"]) == 4
-    assert (config.out_dir / "SHA256SUMS").is_file()
-    assert (config.out_dir / "_SUCCESS").is_file()
-    assert len(load_dataset_v2(config.out_dir)) == 2
+    assert len(lineage["content_digests"]) == 16  # seven captured runs and nine observations
+    assert (config.out_dir / "SHA256SUMS").is_file() and (config.out_dir / "_SUCCESS").is_file()
+    assert len(load_dataset_v2(config.out_dir)) == 7
 
 
 @pytest.mark.parametrize(("slug", "reason"), [
-    *((slug, "c5_excluded_repo") for slug in (
-        "getsentry/sentry", "GETSENTRY/SENTRY", "https://github.com/getsentry/sentry.git",
-        "git@github.com:getsentry/sentry.git", "git@host:getsentry/sentry", "getsentry/sentry.git",
-        "  getsentry/sentry  ")),
-    *((slug, "repo_identity_missing") for slug in (None, "", "  ", "owner/repo/extra")),
+    ("GETSENTRY/SENTRY", "c5_excluded_repo"), (None, "repo_identity_missing"),
+    ("owner/repo/extra", "repo_identity_missing"),
 ])
 def test_cli_identity_and_benchmark_refusal_writes_no_projection(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], slug: Any, reason: str,
@@ -184,16 +203,6 @@ def test_cli_identity_and_benchmark_refusal_writes_no_projection(
     captured = capsys.readouterr()
     assert reason in captured.out + captured.err
     assert not config.out_dir.exists()
-
-
-@pytest.mark.parametrize("slug", ["OWNER/Repo", " https://github.com/OWNER/Repo.git ",
-                                  "git@github.com:OWNER/Repo.git", "OWNER/Repo.git"])
-def test_cli_canonical_source_identity_is_preserved(tmp_path: Path, slug: str) -> None:
-    store = seed_projection_store(tmp_path, repo_slug=slug)
-    config = projection_config(store, tmp_path)
-    assert cli_main(_cli_args(config)) == 0
-    for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
-        assert row["lineage"]["repo_slug"] == row["task_identity"]["repo_slug"] == "OWNER/Repo"
 
 
 def test_mixed_repositories_build_without_permission_evidence(tmp_path: Path) -> None:
@@ -212,18 +221,6 @@ def test_mixed_repositories_build_without_permission_evidence(tmp_path: Path) ->
     assert not {
         "license_policy", "copyleft_opt_ins", "license_decisions", "license_decision_distribution",
     } & lineage.keys()
-
-
-def test_missing_judgments_remain_in_complete_adjudication_population(tmp_path: Path) -> None:
-    store = LocalRecordStore(tmp_path / "records")
-    run = projection_run()
-    store.commit_run(run)
-    append_projection_evidence(store, run, dispositions=())
-    result = build_frozen_corpus(projection_config(store, tmp_path))
-    assert result["total"] == 0
-    assert result["adjudication"] == 3
-    report = json.loads((tmp_path / "out" / "adjudication-report.json").read_text())
-    assert {entry["disposition"] for entry in report} == {"unanswered"}
 
 
 @pytest.mark.parametrize("failure", ["snapshot", "trajectory"])
@@ -399,7 +396,7 @@ def test_cli_output_refuses_record_store_overlap_without_mutating_input(
     assert set(tmp_path.rglob("*")) == before_paths
 
 
-@pytest.mark.parametrize("slug", [17, ["owner/repo"], {"repo": "owner/repo"}])
+@pytest.mark.parametrize("slug", [17])
 def test_capture_refuses_nonstring_identity_before_run_write(tmp_path: Path, slug: Any) -> None:
     store = LocalRecordStore(tmp_path / "records")
     record = projection_run()

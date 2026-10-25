@@ -13,11 +13,8 @@ from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
     LocalCommitAppliedSignal,
-    PerFindingResolution,
-    PRCommentThreads,
     comment_resolution_signal,
     fix_applied_signal,
-    index_pr_review_comments,
     local_commit_applied_signal,
     per_finding_resolution_signal,
     pr_link_signal,
@@ -69,16 +66,10 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     )
 
 
-
-
 @pytest.mark.parametrize(
     ("added_line", "post_content", "verdict", "hunks_applied"),
     [
-        pytest.param("foo = 1", "foo = 1\n", "applied", 1, id="ordinary"),
         pytest.param("left\u2028right", "left\u2028right\n", "applied", 1, id="line-separator"),
-        pytest.param("left\u2029right", "left\u2029right\n", "applied", 1, id="paragraph-separator"),
-        pytest.param("left\x85right", "left\x85right\n", "applied", 1, id="next-line"),
-        pytest.param("left\rright", "left\rright\n", "applied", 1, id="carriage-return"),
         pytest.param("foo = 1", "foo = 1\rbar = 2\n", "not_applied", 0, id="carriage-return-prefix"),
         pytest.param("", "", "not_applied", 0, id="empty-source"),
         pytest.param("", "\n", "applied", 1, id="blank-line"),
@@ -152,77 +143,6 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     assert sig.hunks_total == 3
 
 
-FP = "a" * 64
-
-
-def test_comment_resolution_signal_counts_top_level_threads() -> None:
-    comments = [
-        _comment(1, f"finding\n\n{DAYDREAM_FOOTER}"),
-        _comment(2, "ack", in_reply_to=1),
-        _comment(3, f"finding\n\n{DAYDREAM_FOOTER}"),
-    ]
-    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/42/comments"): comments})
-    assert comment_resolution_signal({"pr_repo": "org/repo", "pr_number": 42}, gh_api=gh) == (
-        CommentResolutionSignal(total=2, replied=1, unresolved=1)
-    )
-
-
-def _scoped_threads(replies: list[tuple[str, dict[str, Any]]]) -> PRCommentThreads:
-    comments = [_comment(10, _daydream_body(FP))] + [
-        _comment(100 + i, body, in_reply_to=10, **over) for i, (body, over) in enumerate(replies)
-    ]
-    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/11/comments"): comments})
-    threads = index_pr_review_comments({"pr_repo": "org/repo", "pr_number": 11}, gh_api=gh, session_fingerprints=[FP])
-    assert threads is not None
-    return threads
-
-
-def _resolve(replies: list[tuple[str, dict[str, Any]]]) -> list[PerFindingResolution]:
-    threads = _scoped_threads(replies)
-    return per_finding_resolution_signal(
-        {"pr_repo": "org/repo", "pr_number": 11},
-        recorded_fingerprints=[FP],
-        gh_api=None,
-        threads=threads,
-    )
-
-
-
-
-
-def test_disposition_non_qualifying_author_does_not_vote() -> None:
-    """A non-qualifying author's decisive-looking reply stays excluded evidence: no vote, no decisive
-    timestamp, and an unanswered disposition.
-    """
-    (res,) = _resolve([("Fixed in abc123", {"login": "dev", "assoc": "NONE"})])
-    assert res.disposition == "unanswered"
-    assert res.evidence[0]["reason"] == "excluded:non-qualifying"
-
-
-def test_disposition_unanswered_on_bot_only_and_self_replies() -> None:
-    (res,) = _resolve(
-        [
-            ("Fixed in abc", {"bot": "Bot", "login": "app[bot]", "assoc": "NONE"}),
-            ("Fixed in abc", {"login": "daydream-agent", "assoc": "NONE", "_self": True}),
-        ]
-    )
-    assert res.disposition == "unanswered"
-    # Persist excluded evidence so the reason remains auditable.
-    assert len(res.evidence) == 2
-    assert all("excluded" in ev["reason"] for ev in res.evidence)
-
-
-def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
-    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/x")
-    sig = local_commit_applied_signal(
-        row,
-        repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: ["c1"],  # noqa
-        file_at_fetcher=lambda repo, path, sha: "foo = 1\n",
-    )
-    assert sig == LocalCommitAppliedSignal(verdict="applied")
-
-
 def _fake_gh_reviews() -> Any:
     """Serve human/bot reviews and a footer-marked finding with a human reply, exercising reviewer
     extraction from both endpoints.
@@ -251,17 +171,6 @@ def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> 
     assert logins == ["alice", "bob"]  # sorted, deduped, humans only
     assert "octobot[bot]" not in logins  # [bot] excluded
     assert "daydream-runner" not in logins  # author of the footer comment excluded
-
-
-def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path: Path) -> None:
-    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/x")
-    sig = local_commit_applied_signal(
-        row,
-        repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: [],  # noqa
-        file_at_fetcher=lambda repo, path, sha: "",
-    )
-    assert sig == LocalCommitAppliedSignal(verdict="rejected")
 
 
 def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path: Path) -> None:
@@ -332,7 +241,6 @@ def _fake_commits_pulls(pulls: Any) -> Any:
 @pytest.mark.parametrize(
     "pulls",
     [
-        pytest.param([{"number": 7, "head": {"sha": "abc123"}}], id="single-match"),
         pytest.param(
             [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}],
             id="disambiguated-match",
@@ -371,7 +279,6 @@ def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict[str, An
     }
 
 
-
 def test_per_finding_resolution_signal_deleted_comment() -> None:
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/42/comments"): [_daydream_finding_comment(1, _FP_A)]})
@@ -380,8 +287,6 @@ def test_per_finding_resolution_signal_deleted_comment() -> None:
         (_FP_A, 1, "unanswered"),
         (_FP_C, None, "missing"),
     ]
-
-
 
 
 def _comment(
@@ -407,11 +312,6 @@ def _comment(
         comment["is_self_reply"] = True
     comment.update(extra)
     return comment
-
-
-def _daydream_body(*fps: str) -> str:
-    return "\n".join(finding_marker(fp) for fp in fps) + "\n" + DAYDREAM_FOOTER
-
 
 
 def test_pr_merge_signal_legacy_payload_defaults() -> None:

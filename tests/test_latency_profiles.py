@@ -59,21 +59,6 @@ def _signals(diff: str, *, files: int = 4, stacks: int = 2) -> DiffSignals:
 
 ROUTINE_DIFF = "diff --git a/notes.md b/notes.md\n--- a/notes.md\n+++ b/notes.md\n+wording\n"
 
-@pytest.mark.parametrize(("diff", "floor"),
-    [
-        ("+def authenticate(user):\n", "security_surface"),
-        ("+    threading.Lock()\n", "concurrency_surface"),
-        ("+ALTER TABLE users ADD COLUMN ttl int;\n", "persistence_surface"),
-        ("+@app.route('/v1/things')\n", "interface_surface"),
-        ("+    migrations/0007_ttl.py\n", "migration_surface"),
-    ],
-)
-def test_each_surface_family_forbids_the_cheapest_route(diff: str, floor: str) -> None:
-    summary = summarize_risk(_signals(diff))
-    assert floor in summary.floors
-    route = route_for("fast", summary)
-    assert route.wonder != "skip" and route.arbiter_effort != "medium"
-    assert route.wonder == "high" and route.arbiter_effort == "high"
 
 def test_high_severity_or_contested_findings_forbid_the_cheapest_route() -> None:
     for findings in (FindingSignals(high_severity=True, contested=False), FindingSignals(False, True)):

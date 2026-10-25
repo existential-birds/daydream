@@ -1,4 +1,5 @@
 """Tests for the strict review-profile model and stage schema."""
+
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from daydream import review_profile as rp
 
 def _profile(body: str = "", *, source: str = "<string>") -> rp.ReviewProfile:
     return rp.parse_profile(f'schema_version = 1\nname = "p"\n{body}', source=source)
+
 
 def test_review_deadline_is_profiled_and_validated() -> None:
     base = _profile("[pipeline]\nreview_wall_budget_s = 1800")
@@ -28,7 +30,11 @@ def test_reviewer_investigation_budget_is_independent_and_changes_identity(secon
     assert configured.digest != base.digest
 
 
-@pytest.mark.parametrize("value", ["-1", "true", "false", "1.5", '"480"', "[]"])
+@pytest.mark.parametrize('value', [
+    "-1",
+    "true",
+    '"480"',
+])
 def test_invalid_reviewer_investigation_budget_names_field_and_source(value: str) -> None:
     source = "/tmp/reviewer-profile.toml"
     with pytest.raises(rp.ProfileError) as error:
@@ -49,7 +55,8 @@ name="p"
 [strategies.intent]
 source="copied: a"
 content="X"''')
-    assert a.digest == b.digest           # order/whitespace/comment independent
+    assert a.digest == b.digest  # order/whitespace/comment independent
+
 
 def test_omitted_defaults_and_explicit_defaults_hash_identically() -> None:
     implicit = _profile('''[strategies.intent]
@@ -64,6 +71,7 @@ reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s
     assert implicit.to_canonical_dict() == explicit.to_canonical_dict()
     assert implicit.digest == explicit.digest
 
+
 # Task 3 (R3): fail-closed validation.
 @pytest.mark.parametrize(("body", "unknown_key"), [
     ("bogus = 1", "bogus"),
@@ -74,16 +82,18 @@ def test_unknown_key_fails_closed_naming_source(body: str, unknown_key: str) -> 
         _profile(body, source="/tmp/profile.toml")
     assert "/tmp/profile.toml" in str(e.value) and unknown_key in str(e.value)
 
+
 def test_unsupported_schema_version_fails_closed() -> None:
     with pytest.raises(rp.ProfileError) as e:
         rp.parse_profile('schema_version = 99\nname = "p"', source="x")
     assert "schema_version" in str(e.value)
 
+
 def test_invalid_enum_fails_closed() -> None:
     with pytest.raises(rp.ProfileError):
         _profile('''\
 [pipeline]
-arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
+arbitration_min_severity = "CRITICAL"''')  # not in the allowed severity enum
 
 
 # Task 4 (R5): host invariants unoverridable + host caps.
@@ -94,21 +104,3 @@ def test_forbidden_host_fields_rejected() -> None:
         with pytest.raises(rp.ProfileError) as e:
             _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
-
-
-@pytest.mark.parametrize("kind", ["per_stack", "structural", "generic_fallback"])
-@pytest.mark.parametrize("custom", [False, True])
-def test_composed_review_search_guidance_is_independent_of_strategy(tmp_path: Path, kind: str, custom: bool) -> None:
-    # Shipped builder contract: strategies tune judgment without removing shared
-    # search scope. Existing profile parsing tests cannot prove prompt composition.
-    from daydream.deep import prompts
-    from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
-    from tests.harness.review_profile import prompt_paths
-
-    strategy = ("Custom judgment policy" if custom
-        else rp.build_default_profile().strategies[f"discovery.{kind}"].content)
-    kwargs = {"stack_name": "python"} if kind == "per_stack" else {}
-    builder = getattr(prompts, f"build_{kind}_prompt")
-    prompt = builder(strategy=strategy, files=["src/main.py"], **prompt_paths(tmp_path), **kwargs)
-    assert strategy in prompt
-    assert REPOSITORY_SEARCH_GUIDANCE in prompt

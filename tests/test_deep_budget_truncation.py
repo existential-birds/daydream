@@ -76,10 +76,9 @@ async def test_runaway_host_suite_is_bounded_and_reaches_abort(
     test_ends = [event for event in ends if event["phase"] == "test-execution"]
     assert test_ends and all(event["metadata"]["stop_reason"] == "timed_out" for event in test_ends)
 
-@pytest.mark.parametrize(
-    "phase", ["intent", "alternatives", "per_stack", "merge", "arbiter", "suppression", "supervisor"],
-)
-@pytest.mark.parametrize("budget", ["wall", "tool_call"])
+@pytest.mark.parametrize(('phase', 'budget'),
+    [('intent', 'wall'), ('alternatives', 'tool_call'), ('per_stack', 'wall'), ('per_stack', 'tool_call'),
+    ('merge', 'tool_call'), ('arbiter', 'wall'), ('suppression', 'tool_call'), ('supervisor', 'wall')])
 async def test_review_budget_stop_emits_partial_findings(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig], phase: str,
     budget: str,

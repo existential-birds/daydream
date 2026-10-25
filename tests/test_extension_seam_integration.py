@@ -253,51 +253,7 @@ async def test_fork_filter_controls_findings_artifact(
     assert KEEP_ME in artifact and KEEP_ME in canonical
     assert DROP_ME not in artifact and DROP_ME not in canonical
 
-async def test_fork_filter_controls_pr_post_payload(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
-    tmp_path: Path,
-) -> None:
-    """A load-items fork controls the canonical PR review payload."""
-    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    fake_gh.serve_open_pr(multi_stack_target)
 
-    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
-    # A finding reaches the PR either in the review payload or as its own
-    # file-level comment; the fork's filter must govern both surfaces.
-    posted = json.dumps(
-        [
-            call.payload
-            for call in (
-                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
-                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
-            )
-        ]
-    )
-
-    assert rc == 0
-    assert fake_gh.pr_view_calls()
-    assert KEEP_ME in posted
-    assert DROP_ME not in posted
-
-async def test_fork_filter_controls_fix_prompts(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
-    tmp_path: Path,
-) -> None:
-    """A load-items fork controls the findings that reach the fix phase."""
-
-    backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    fake_gh.serve_open_pr(multi_stack_target)
-
-    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
-    fix_prompts = "\n".join(_fix_prompts(backend))
-
-    assert rc == 0
-    assert KEEP_ME in fix_prompts
-    assert DROP_ME not in fix_prompts
 
 async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
@@ -342,6 +298,12 @@ async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     }
     assert KEEP_ME in fix_prompts
     assert DROP_ME not in fix_prompts
+
+    posted = json.dumps([call.payload for call in (
+        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
+        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
+    )])
+    assert fake_gh.pr_view_calls() and KEEP_ME in posted and DROP_ME not in posted
 
 
 def _deferred_write_responder(target: Path) -> Callable[..., Any]:

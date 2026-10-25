@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,13 @@ import pytest
 
 from daydream.deep.diff import DeepDiffBoundInfo, bound_deep_diff
 from daydream.deep.routing_record import read_routing_record
+from daydream.hunk_index import (
+    added_line_numbers,
+    head_side_ranges,
+    head_side_ranges_by_file,
+    load_hunk_index,
+    parse_hunks,
+)
 from daydream.runner import run
 from tests.harness.git_helpers import commit, git, init_repo, seed_feature_branch, write_and_stage
 from tests.harness.review_profile import independent_alternatives_profile
@@ -24,8 +32,10 @@ async def test_dropped_sensitive_block_routes_from_full_captured_change(
 ) -> None:
     repo = tmp_path / "full_change"
     seed_feature_branch(repo,
-        base={"aaa.py": "VALUE = 0\n", "zzz.py": "VALUE = 0\n"},
-        feature={"aaa.py": "VALUE = 1\n", "zzz.py": "password = 'test-only'\n" + "# ordinary filler é\n" * 3000},
+        base={"aaa.py": "VALUE = 0\n", "gone.py": "VALUE = 0\n", "zzz.py": "VALUE = 0\n"},
+        feature={"aaa.py": "VALUE = 1\n", "gone.py": "", "zzz.py": "password = 'test-only'\n"
+                 "# threading.Lock() ALTER TABLE users @app.route('/v1') migrations/0042_add_flag.py\n"
+                 + "# ordinary filler é\n" * 3000},
     )
     captured_patch = git(repo, "diff", "--no-ext-diff", "--no-textconv", "main", "HEAD") + "\n"
     stub = StubBackend(repo)
@@ -37,22 +47,36 @@ async def test_dropped_sensitive_block_routes_from_full_captured_change(
     record = read_routing_record(deep)
     assert record["wonder"]["effort"] == "high"
     assert record["wonder"]["outcome"] == "run"
-    assert record["risk"]["signals"]["security_surface"] is True
-    assert record["risk"]["signals"]["changed_files"] == 2
+    surfaces = ("security_surface", "concurrency_surface", "persistence_surface", "interface_surface",
+                "migration_surface")
+    assert all(record["risk"]["signals"][name] is True for name in surfaces)
+    assert record["risk"]["floors"] == sorted(surfaces)
+    assert record["risk"]["signals"]["changed_files"] == 3
     assert record["risk"]["signals"]["diff_bytes"] == len(captured_patch.encode("utf-8"))
     assert record["risk"]["signals"]["diff_lines"] == len(captured_patch.splitlines())
     assert record["diff_population"]["full_patch"] == {
-        "bytes": len(captured_patch.encode("utf-8")), "lines": len(captured_patch.splitlines()), "blocks": 2,
+        "bytes": len(captured_patch.encode("utf-8")), "lines": len(captured_patch.splitlines()), "blocks": 3,
     }
     population = record["diff_population"]
     assert population["truncated"] is True and population["dropped_blocks"] == 1
-    assert population["retained_patch"]["blocks"] == 1
+    assert population["retained_patch"]["blocks"] == 2
     assert population["retained_patch"]["bytes"] < population["bounded_prompt_diff"]["bytes"] < 24 * 1024
     assert (repo / ".daydream" / "diff.patch").read_text(encoding="utf-8") == captured_patch
     snapshot_key = hashlib.sha256(captured_patch.encode("utf-8")).hexdigest()
     assert population["diff_key"] == (deep / "diff-key").read_text() == snapshot_key
     coverage = json.loads((deep / "review-coverage.json").read_text())
     assert coverage["analyzed_revision"]["diff_key"] == snapshot_key
+    # The source index is captured from the complete Git patch before prompt bounding.
+    index = load_hunk_index(repo / ".daydream")
+    ranges = {"aaa.py": [(1, 1)], "gone.py": [], "zzz.py": [(1, 3002)]}
+    assert head_side_ranges_by_file(index) == ranges
+    parsed = parse_hunks(captured_patch)
+    assert head_side_ranges_by_file(parsed) == ranges and head_side_ranges(parsed) == [(1, 1), (1, 3002)]
+    assert added_line_numbers(parsed) == {"aaa.py": {1}, "gone.py": set(), "zzz.py": set(range(1, 3003))}
+    assert {name: (value["added_total"], value["removed_total"]) for name, value in index.items()} == {
+        "aaa.py": (1, 1), "gone.py": (0, 1), "zzz.py": (3002, 1),
+    }
+    assert all(set(value) == {"hunks", "added_total", "removed_total"} for value in index.values())
 
     ttt_prompts = [call["prompt"] for call in stub.calls
                    if "understand the intent" in call["prompt"].lower()
@@ -62,7 +86,7 @@ async def test_dropped_sensitive_block_routes_from_full_captured_change(
     assert all("diff.patch" in prompt for prompt in ttt_prompts)
     stages = [stage for call in stub.calls if (stage := review_stage_state(call["prompt"])) is not None]
     assert stages
-    assert {name for stage in stages for name in stage["assigned_files"]} == {"aaa.py", "zzz.py"}
+    assert {name for stage in stages for name in stage["assigned_files"]} == {"aaa.py", "gone.py", "zzz.py"}
     for stage in stages:
         bundle = Path(stage["supporting_bundle"]["path"])
         artifact_root = next(parent for parent in bundle.parents if parent.name == ".daydream")
@@ -73,6 +97,7 @@ async def test_dropped_sensitive_block_routes_from_full_captured_change(
 @pytest.mark.parametrize("shape", ["untruncated-utf8", "oversized-first", "empty"])
 async def test_population_metrics_preserve_complete_snapshot_at_patch_edges(
     tmp_path: Path, make_config: MakeConfig, install_backend: Callable[[object], object], shape: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo = tmp_path / "patch_edges"
     if shape == "empty":
@@ -84,7 +109,7 @@ async def test_population_metrics_preserve_complete_snapshot_at_patch_edges(
     else:
         seed_feature_branch(repo,
             base={"aaa.py": "VALUE = 0\n", "zzz.py": "VALUE = 0\n"},
-            feature={"aaa.py": "VALUE = 'é雪'\n" + ("# ordinary filler é\n" * 1000
+            feature={"aaa.py": "VALUE = 'é雪'\n# diff --git é\n" + ("# ordinary filler é\n" * 1000
                                                      if shape == "oversized-first" else ""),
                      "zzz.py": "VALUE = 1\n"},
         )
@@ -112,6 +137,8 @@ async def test_population_metrics_preserve_complete_snapshot_at_patch_edges(
         retained_bytes = len(first_block.encode("utf-8"))
         assert population["retained_patch"] == {"bytes": retained_bytes, "blocks": 1}
         assert retained_bytes > 12_288
+        warning = re.sub(r"[\s│╭╮╰╯─]", "", capsys.readouterr().out)
+        assert "oversizedblockkeptwhole:aaa.py" in warning and "droppedblocks:zzz.py" in warning
         assert population["bounded_prompt_diff"]["bytes"] > retained_bytes
         assert population["truncated"] is True and population["dropped_blocks"] == 1
         ttt = [call["prompt"] for call in stub.calls if "understand the intent" in call["prompt"].lower()
@@ -128,7 +155,7 @@ async def test_population_metrics_preserve_complete_snapshot_at_patch_edges(
         else:
             assert patch_bytes > len(expected_patch)
             intent = next(call["prompt"] for call in stub.calls if "understand the intent" in call["prompt"].lower())
-            assert "VALUE = 'é雪'" in intent
+            assert "VALUE = 'é雪'" in intent and "# diff --git é" in intent
 
 
 @pytest.mark.parametrize("evidence", ["stale-fields", "missing", "corrupt"])

@@ -9,7 +9,11 @@ import pytest
 from tests.conftest import ExtDir
 from tests.harness.console import collapse_panel_text
 from tests.harness.scripts import cli_main as _run_main
-from tests.test_integration import strip_ansi
+
+
+def strip_ansi(text: str) -> str:
+    """Normalize terminal styling for the CLI assertions below."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def test_ext_validate_ok(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:

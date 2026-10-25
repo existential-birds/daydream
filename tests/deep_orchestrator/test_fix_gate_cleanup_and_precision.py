@@ -272,6 +272,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     assert not verdicts_file.exists(), (f"recommendation-verdicts.json exists despite declined gate -- verify must "
         f"not run when fixes are not applied; found {verdicts_file}"
     )
+    assert not (run_root / "deep/test-verdict.json").exists()
 
 async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -337,12 +338,9 @@ async def test_apply_fixes_gate_interactive_yes_applies_fixes(
         "a typed 'y' at the apply-fixes gate did not reach phase_fix -- the gate declined despite an affirmative answer"
     )
 
-@pytest.mark.parametrize(("shallow", "cleanup", "report_exists"),
-    [pytest.param(True, True, False, id="shallow-cleanup"), pytest.param(True, False, True, id="shallow-keep"),
-        pytest.param(False, True, False, id="deep-cleanup"),
-    ],
-)
-@pytest.mark.parametrize('presentation_fault', ['none', 'initial', 'final'])
+@pytest.mark.parametrize(('shallow', 'cleanup', 'report_exists', 'presentation_fault'),
+    [(True, True, False, 'none'), (True, False, True, 'none'), (False, True, False, 'none'),
+    (True, False, True, 'initial'), (False, True, False, 'final')])
 async def test_cleanup_flag_controls_review_report_on_success(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     shallow: bool, cleanup: bool, report_exists: bool, presentation_fault: str,

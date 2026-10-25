@@ -1,4 +1,5 @@
 """Real capture, CLI annotation, canonical HF publication, and offline projection."""
+
 import hashlib
 import json
 from dataclasses import replace
@@ -40,10 +41,18 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root),
                      "--trajectory-hub-repo", repo]) == 0
     first_revision = hub.revision
+    status = dataset_hub.DatasetUploader(store, repo, backend=hub).status()
+    assert (status.queued, status.published, status.failed, status.revision) == (0, 1, 0, first_revision)
+    assert not (store.root / "index.db").exists() and store.download_source() is None
     downloaded_path = tmp_path / "downloaded"
     assert cli_main(["corpus", "dataset", "download", "--trajectory-hub-repo", repo,
                      "--revision", first_revision, "--output", str(downloaded_path)]) == 0
     downloaded = LocalRecordStore(downloaded_path)
+    assert downloaded.read_records() == store.read_records()
+    source = downloaded.download_source()
+    assert source is not None and source["revision"] == first_revision
+    assert downloaded.root.stat().st_mode & 0o777 == 0o700
+    assert not (downloaded.root / "index.db").exists()
     initial = downloaded.select_snapshot(observed_before="2100-01-01T00:00:00Z")
 
     comments = []
@@ -59,9 +68,16 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
                       "html_url": f"https://github.com/owner/repo/pull/7#discussion_r{index * 2 + 1}"}]
     excluded_id = len(items) * 2 + 2
     excluded_body = "Disagree.\nUnqualified reply preserved."
-    comments.append({"id": excluded_id, "in_reply_to_id": 2, "user": {"login": "drive-by[bot]"},
-                     "author_association": "NONE", "body": excluded_body,
-                     "created_at": "2026-10-06T10:10:00Z"})
+    comments.append(
+        {
+            "id": excluded_id,
+            "in_reply_to_id": 2,
+            "user": {"login": "drive-by[bot]"},
+            "author_association": "NONE",
+            "body": excluded_body,
+            "created_at": "2026-10-06T10:10:00Z",
+        }
+    )
     expected_text[str(excluded_id)] = excluded_body
 
     def github(repo_path: Path, endpoint: str, **kwargs: Any) -> Any:
@@ -112,6 +128,7 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert cli_main(["corpus", "dataset", "publish", "--store", str(downloaded.root),
                      "--trajectory-hub-repo", repo]) == 0
     final_revision = hub.revision
+    published_records = downloaded.read_records()
     assert final_revision != first_revision
     final_path = tmp_path / "final-records"
     assert cli_main(["corpus", "dataset", "download", "--trajectory-hub-repo", repo,
@@ -120,6 +137,9 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     frozen = final.select_snapshot(observed_before="2100-01-01T00:00:00Z",
                                    valid_before="2100-01-01T00:00:00Z")
     records = final.read_snapshot(frozen["snapshot_id"])
+    assert records.runs == published_records["runs"]
+    assert records.observations == published_records["observations"]
+    assert not (final.root / "index.db").exists()
     assert json.dumps(next(r for r in records.runs if r["run_id"] == captured["run_id"]), sort_keys=True) == original
     assert any(o["payload"]["type"] == "harvest-annotation" for o in records.observations)
     assert any(o["role"] == "rater" and o["source"] == "adjudication" for o in records.observations)
@@ -170,9 +190,11 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     gold = tmp_path / "gold.json"
     gold.write_text(json.dumps({row["record_id"]: {"accepted": row["outcome_label"] == "accepted"} for row in rows}))
     breakdowns = tmp_path / "breakdowns.json"
-    breakdowns.write_text(json.dumps({
-        row["record_id"]: {"correctness": 0.8 if row["outcome_label"] == "accepted" else 0.2} for row in rows
-    }))
+    breakdowns.write_text(
+        json.dumps(
+            {row["record_id"]: {"correctness": 0.8 if row["outcome_label"] == "accepted" else 0.2} for row in rows}
+        )
+    )
     result = run_calibration(CalibrationConfig(corpus_dir=first, gold_labels=gold, breakdowns=breakdowns,
                                               out_dir=tmp_path / "calibrated", run_id="record-hf-journey", seed=7,
                                               candidates={"correctness": [0.3, 0.6]}))

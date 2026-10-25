@@ -42,36 +42,41 @@ def _item(item_uid: str, **over: object) -> dict[str, object]:
 def _provenance(uid: str, *, verdict_bound: bool = True, revised_fields: tuple[str, ...] = ()) -> RecordProvenance:
     return RecordProvenance(uid, ("arbiter",), verdict_bound, True, revised_fields)
 
-@pytest.mark.parametrize(("item_over", "prov", "expected_reason"),
-    [({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
-        ({"description": "auth token check missing"}, _provenance("item:1"), "risk_category:security"),
-        ({"confidence": "MEDIUM"}, _provenance("item:1"), "weak_evidence:confidence"),
-        ({"evidence": "n/a"}, _provenance("item:1"), "weak_evidence:placeholder_evidence"),
-        ({"location_distrust": True}, _provenance("item:1"), "weak_evidence:located_beyond_tolerance"),
-        ({}, None, "unadjudicated:no_provenance"),
-        ({}, _provenance("item:1", verdict_bound=False), "unadjudicated:verdict_unbound"),
-        ({}, _provenance("item:1", revised_fields=("severity",)), "materially_revised"),
-    ],
-)
-def test_every_mandatory_select_branch_is_reachable(
-    item_over: dict[str, object], prov: RecordProvenance | None, expected_reason: str
-) -> None:
-    decisions = select_items([_item("item:1", **item_over)], provenance={} if prov is None else {"item:1": prov},
-        diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
-    )
-    assert decisions[0].selected is True
-    assert decisions[0].reason_code == expected_reason
+def test_absent_global_provenance_cannot_certify_a_routine_item() -> None:
+    decisions = select_items([_item("item:1")], provenance={}, diff_text=_DIFF,
+        config=SelectionConfig(verify_all=False, extra_categories=()))
+    assert [(d.item_uid, d.selected, d.reason_code) for d in decisions] == [
+        ("item:1", True, "unadjudicated:no_provenance")]
 
 def test_only_a_strong_adjudicated_routine_item_skips() -> None:
-    # The diff is present and readable but never covers the cited file (a.py), so
-    # the changed-line signal is absent while the input itself is not: the skip
-    # branch may certify routine strength. An *absent* diff is an absent input
-    # and selects instead (see the invariant test below).
-    decisions = select_items([_item("item:1")], provenance={"item:1": _provenance("item:1")},
-        diff_text=_DIFF, config=SelectionConfig(verify_all=False, extra_categories=()),
-    )
-    assert decisions[0].selected is False
-    assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
+    """One selection batch retains each sibling's identity, distinct reason and input order."""
+    items = [
+        _item("item:1"), _item("item:2", lens="cross-stack"),
+        _item("item:3", description="the handler must authenticate the caller's token"),
+        _item("item:4", description="this path can deadlock while holding the mutex"),
+        _item("item:5", description="the change runs `alter table users`"),
+        _item("item:6", description="the grpc endpoint gains a field"),
+        _item("item:7", description="see migrations/0042_add_flag.py"),
+        _item("item:8", confidence="MEDIUM"), _item("item:9", evidence="n/a"),
+        _item("item:10", location_distrust=True), _item("item:11"), _item("item:12"),
+    ]
+    for index, item in enumerate(items, 1):
+        item["id"] = index
+    provenance = {str(item["item_uid"]): _provenance(str(item["item_uid"])) for item in items}
+    provenance["item:11"] = _provenance("item:11", verdict_bound=False)
+    provenance["item:12"] = _provenance("item:12", revised_fields=("severity",))
+    config = resolve_selection_config(verify_all=False, extra_categories=["security", "migration", "security"])
+    decisions = select_items(items, provenance=provenance, diff_text=_DIFF, config=config)
+    assert [(d.item_uid, d.item_id, d.selected, d.reason_code) for d in decisions] == [
+        ("item:1", 1, False, "strongly_evidenced_adjudicated_routine"), ("item:2", 2, True, "cross_stack"),
+        ("item:3", 3, True, "risk_category:security"), ("item:4", 4, True, "risk_category:concurrency"),
+        ("item:5", 5, True, "risk_category:persistence"),
+        ("item:6", 6, True, "risk_category:public-interface"),
+        ("item:7", 7, True, "risk_category:migration"), ("item:8", 8, True, "weak_evidence:confidence"),
+        ("item:9", 9, True, "weak_evidence:placeholder_evidence"),
+        ("item:10", 10, True, "weak_evidence:located_beyond_tolerance"),
+        ("item:11", 11, True, "unadjudicated:verdict_unbound"), ("item:12", 12, True, "materially_revised"),
+    ]
 
 def test_absent_diff_selects_even_a_strong_routine_item() -> None:
     # Uniform failure direction: an unreadable or absent diff.patch is an absent
@@ -123,8 +128,8 @@ def test_unresolved_prior_verdicts_are_reverified_and_absent_prior_is_a_miss() -
     assert plan_reuse(cast(Any, []), [_decision("item:1", digest="d1")])[0] == {}
 
 def test_unknown_extra_category_fails_loudly_and_digest_is_content_only() -> None:
-    with pytest.raises(UnknownRiskCategoryError):
-        resolve_selection_config(verify_all=False, extra_categories=["nope"])
+    with pytest.raises(UnknownRiskCategoryError, match="public_interface"):
+        resolve_selection_config(verify_all=False, extra_categories=["public_interface"])
     a = _item("item:1")
     assert item_content_digest(a) == item_content_digest({**a, "id": 7, "verifier_verdict": "consistent"})
     assert item_content_digest(a) != item_content_digest({**a, "evidence": "a.py:1 rewritten"})

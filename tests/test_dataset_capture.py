@@ -1,4 +1,5 @@
 """Real run -> raw record -> typed history, including producer failures."""
+
 import asyncio
 import hashlib
 import json
@@ -15,6 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 from daydream import git_ops, json_utils, runner
+from daydream.atif import validate as atif_validate
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore, StoreError, parse_observation
 from daydream.extensions import Registry, build_registry
@@ -225,6 +227,7 @@ class _RetryBackend(StubBackend):
 async def test_failed_attempt_and_child_registration_without_tracing(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A real retry/fanout must persist valid, independently numbered children and exact links."""
     backend = _RetryBackend(Path(config.target or ""))
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
@@ -242,11 +245,26 @@ async def test_failed_attempt_and_child_registration_without_tracing(
     assert any(tool["tool_call_id"] == "attempt-one-tool" for step in first for tool in step.get("tool_calls", []))
     forks = [item for item in root["extra"]["subtrajectories"] if "fork_id" in item]
     assert forks and all(item["trajectory_id"] in {doc["trajectory_id"] for doc in documents} for item in forks)
+    for document in documents:
+        assert document["session_id"] == raw["run_id"]
+        assert atif_validate(document, validate_images=False)
+        assert [step["step_id"] for step in document["steps"]] == list(range(1, len(document["steps"]) + 1))
+        assert all(
+            step["extra"]["daydream_run_flow"] == "ttt" for step in document["steps"] if step["source"] == "agent"
+        )
     dispatch = next(step for step in root["steps"] if "dispatch_id" in step.get("extra", {}))["observation"]["results"]
     assert [item["content"] for item in dispatch] == [f"Dispatched to deep-{s}" for s in
         ("python", "react", "generic", "structure")]
     assert [item["subagent_trajectory_ref"][0]["trajectory_id"] for item in dispatch] == [
         f"{raw['run_id']}:dispatch:1:fork:{i}" for i in range(1, 5)]
+    assert all(len(item["subagent_trajectory_ref"]) == 1 for item in dispatch)
+    assert all(item["subagent_trajectory_ref"][0]["session_id"] == raw["run_id"] for item in dispatch)
+    assert all(
+        str(item["subagent_trajectory_ref"][0]["trajectory_path"]).startswith(
+            f"runs/{raw['run_id']}/trajectories/deep-"
+        )
+        for item in dispatch
+    )
 
 
 @pytest.mark.parametrize("tracing", [False, True])

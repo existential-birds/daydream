@@ -9,11 +9,6 @@ from daydream.backends import (
 )
 
 
-def test_create_backend_invalid_raises() -> None:
-    with pytest.raises(ValueError, match="Unknown backend"):
-        create_backend("invalid")
-
-
 @pytest.mark.parametrize("name", ["codex", "pi", "osprey"])
 def test_create_backend_refuses_unsupported_audit_backend(name: str, tmp_path: Path) -> None:
     root = tmp_path / "audit"

@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -73,24 +72,6 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path: Path, f
     assert "gh auth git-credential" in joined and "password=" not in joined
     assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
 
-def test_fetch_persists_complete_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["body"] = "fixes the cache\n\nand tests"
-    header["html_url"] = "https://github.com/o/r/pull/101"
-    header["merged_at"] = "2026-01-02T00:00:00Z"
-    header["closed_at"] = "2026-01-02T00:00:00Z"
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    pr = doc.pull_request
-    assert pr.body == "fixes the cache\n\nand tests"
-    assert pr.html_url == "https://github.com/o/r/pull/101"
-    assert pr.title_sha256 == hashlib.sha256(b"Fix cache").hexdigest()
-    assert pr.body_sha256 == hashlib.sha256("fixes the cache\n\nand tests".encode()).hexdigest()
-    assert pr.head.ref == "feature/cache"          # head.ref parity with base.ref
-    assert pr.merged_at is not None and pr.closed_at is not None
-    assert pr.number == 101 and pr.author.login == "alice"
 
 def test_fetch_changed_files_persists_complete_rename_union(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
@@ -128,122 +109,6 @@ def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
     with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
         gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
 
-def test_final_only_fetch_does_not_request_changed_files(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    assert doc.pull_request.changed_files is None
-    assert fake_gh.calls("GET", "repos/o/r/pulls/101/files") == []
-
-def test_materialized_case_carries_full_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)                  # REST + canned PR for pr 101
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    pr = case["pull_request"]
-    assert pr["head"]["ref"] == "feature/cache"    # head.ref persisted in the case YAML
-    assert pr["body"] == ""                         # _PR_HEADER has no body -> empty
-    assert pr["title_sha256"] and pr["body_sha256"]
-    assert "merged_at" in pr and "closed_at" in pr and "html_url" in pr
-
-def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Both base SHAs retain the PR base tip until freezing computes the merge base."""
-
-    ws = _preflight_workspace(tmp_path, fake_gh)                 # REST + canned PR for pr 101
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
-    snapshot = case["snapshot"]
-    assert snapshot["status"] == "imported"
-    assert snapshot["requested_base_sha"] == snapshot["original_base_sha"]
-    assert snapshot["original_base_sha"] == "b" * 40
-    assert snapshot["requested_base_sha"] == "b" * 40
-
-@pytest.mark.parametrize("body_field,expected", [
-    (None, ""),                      # null body -> empty
-    ("", ""),                        # empty body
-    ("héllo wörld \u00e9", "héllo wörld \u00e9"),          # Unicode preserved
-    ("line1\nline2\nline3", "line1\nline2\nline3"),        # newlines preserved
-    ("x" * 50000, "x" * 50000),      # over context-limit body (never bounded here; persisted whole)
-])
-def test_import_body_shape_preserved(tmp_path: Path, fake_gh: FakeGh, body_field: Any, expected: str) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["body"] = body_field
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    assert doc.pull_request.body == expected
-    assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
-
-@pytest.mark.parametrize("state,merged_at,closed_at,expect_merged", [("open", None, None, False),
-    ("closed", None, "2026-01-02T00:00:00Z", False),     # closed-unmerged
-    ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
-])
-def test_import_merged_state_distinction(
-    tmp_path: Path, fake_gh: FakeGh, state: Any, merged_at: Any, closed_at: Any, expect_merged: Any,
-) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["state"] = state
-    header["merged_at"] = merged_at
-    header["closed_at"] = closed_at
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    pr = doc.pull_request
-    assert pr.state == state
-    assert (pr.merged_at is not None) == expect_merged
-    assert (pr.closed_at is not None) == (closed_at is not None)
-
-def test_import_no_comments_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    header = dict(_PR_HEADER)
-    header["body"] = "no comments here"
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-    _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    assert doc.evidence == [] and doc.pull_request.body == "no comments here"
-
-def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    def fetch_with(title: Any) -> Any:
-        ws = tmp_path / "ws"
-        (ws / "imports").mkdir(parents=True, exist_ok=True)
-        header = dict(_PR_HEADER)
-        header["title"] = title
-        header["body"] = "b"
-        fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
-        _seed_empty_rest(fake_gh)
-        return gi.fetch_and_normalize(ws, "o/r", 101)
-    a = fetch_with("Fix cache")
-    b = fetch_with("Fix cache EDITED")            # header-only change, same evidence
-    assert a.fetch.payload_sha256 != b.fetch.payload_sha256
-    assert gi._evidence_signature_from_doc(a) == gi._evidence_signature_from_doc(b)
-
-def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [_review(1, 'approved')])
-    fake_gh.set_response(
-        "GET", "repos/o/r/pulls/101/comments", [_rest_comment(7, original_line=3, original_position=3)],
-    )
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments",
-        [{"id": 9, "user": {"login": "carol", "type": "User"}, "body": "question",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#issuecomment-9"},
-        ],
-    )
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    kinds = {e.kind for e in doc.evidence}
-    assert kinds == {"review", "inline_comment", "issue_comment"}
-    assert doc.evidence[0].source_id == "github:review:1"
-    assert doc.evidence[0].is_bot is False
-    assert doc.evidence[1].is_bot is True      # bot classification retained, not dropped
-    assert doc.evidence[1].subject_type == "line" and doc.evidence[1].side == "RIGHT"
-    get_calls = fake_gh.calls("GET")
-    header_args = [c.argv for c in get_calls if c.endpoint == "repos/o/r/pulls/101"]
-    collection_args = [c.argv for c in get_calls if c.endpoint != "repos/o/r/pulls/101"]
-    assert header_args and "@json" in (header_args[0] or []) and "--paginate" not in (header_args[0] or [])
-    assert all("--paginate" in (a or []) for a in collection_args)
 
 def test_review_thread_queries_request_only_schema_fields() -> None:
     """Validate GraphQL's actual field names, accepting aliases such as ``side: diffSide``."""
@@ -279,43 +144,6 @@ def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh)
     assert reply.reply_to_id == "10"          # REST in_reply_to_id (parent db id)
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
-def test_rest_inline_normalization_retains_original_range(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
-    # Original range belongs to the authoring commit; observed fields describe the re-anchor.
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [_rest_comment(1, 'fix this', login='alice', user_type='User', commit_id='b' * 40, line=5, original_line=5,
-                original_start_line=4, start_line=4
-            ),
-        ],
-    )
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-    fake_gh._write_threads([])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
-    rec = {e.database_id: e for e in doc_gi.evidence}[1]
-    assert rec.original_start_line == 4
-    assert rec.original_commit_id == "a" * 40
-    assert rec.original_line == 5
-
-def test_graphql_thread_maps_original_start_line(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _fetch_workspace(tmp_path)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
-    # thread-only comment (no REST counterpart) canonicalized from thread fields
-    fake_gh._write_threads([{"id": "thread_1", "isResolved": False, "isOutdated": False,
-         "subjectType": "LINE", "path": "a.py", "line": 5, "originalLine": 5, "originalStartLine": 4,
-         "side": "RIGHT", "startSide": None, "comments": {"nodes": [{"id": "c1", "databaseId": 1, "body": "fix this",
-              "author": {"login": "alice", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
-              "url": "https://github.com/o/r/pull/101#discussion_r1"},
-         ]}},
-    ])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
-    rec = {e.database_id: e for e in doc_gi.evidence}[1]
-    assert rec.kind == "inline_comment"
-    assert rec.original_start_line == 4
 
 head_sha = "a" * 40  # matches _PR_HEADER's head sha; the projection head in these tests
 
@@ -385,7 +213,6 @@ def _project_from_anchor(*, anchor_commit: str | None = None,
     return gi._project_one(rec, head_sha=head_sha)
 
 
-@pytest.mark.parametrize("outdated", [False, True])
 @pytest.mark.parametrize(("raw_template", "expected_title", "expected_body"),
     [
         ("\n{marker}\r\n## Cache race\r\nDetails.\r\n", "Cache race", "\n\n## Cache race\nDetails."),
@@ -395,14 +222,14 @@ def _project_from_anchor(*, anchor_commit: str | None = None,
     ],
 )
 def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
-    raw_template: str, expected_title: str, expected_body: str, outdated: bool,
+    raw_template: str, expected_title: str, expected_body: str,
 ) -> None:
     raw_body = raw_template.format(marker=finding_marker("f" * 64))
     rec = _evidence_record(
         body=raw_body, commit_id="a" * 40, original_commit_id="a" * 40, path="feature.py", line=2, original_line=2,
         subject_type="line", side="RIGHT", authoring_anchor=schema.AuthoringAnchor(
             version=1, status="derived", commit_id="a" * 40, path="feature.py", start_line=2, end_line=2,
-        ), outdated=outdated,
+        ), outdated=False,
     )
     before = rec.model_dump()
 
@@ -413,8 +240,8 @@ def test_finding_marker_projection_preserves_raw_evidence_and_eligibility(
     assert not FINDING_MARKER_RE.search(candidate.title + "\n" + candidate.body)
     assert candidate.source_id == rec.source_id
     assert candidate.location == schema.Location(path="feature.py", start_line=2, end_line=2)
-    assert candidate.exact_acceptable is (bool(expected_title) and not outdated)
-    assert candidate.not_exact_reason == ("outdated" if outdated else "title" if not expected_title else None)
+    assert candidate.exact_acceptable is bool(expected_title)
+    assert candidate.not_exact_reason == ("title" if not expected_title else None)
     assert rec.model_dump() == before
 
 def test_exact_acceptance_from_authoring_anchor_matches_head() -> None:
@@ -693,7 +520,6 @@ def _preflight_workspace(
     return ws
 
 
-
 def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh) -> tuple[str, str, str]:
     """Seed real PR refs through ``seed_pr_origin`` and synchronize the fake header SHAs.
 
@@ -795,6 +621,9 @@ def test_materialization_derives_anchors_per_comment(tmp_path: Path, fake_gh: Fa
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
     imp = load_json_strict(ws / "imports" / "pr-000101.json")
+    observed = {e["database_id"]: e for e in imp["evidence"]}
+    assert observed[1]["original_commit_id"] == head_sha
+    assert (observed[1]["original_start_line"], observed[1]["original_line"]) == (4, 5)
     anchors = {e["database_id"]: e["authoring_anchor"] for e in imp["evidence"]}
     at_head = anchors[1]
     assert at_head is not None and at_head["status"] == "derived"
@@ -1079,13 +908,6 @@ def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path: Path, fak
     assert pr["import_file"] is None and pr["import_sha256"] is None
     assert not (ws / "imports" / "pr-000101.json").exists()
 
-def test_status_reflects_fetched_import_and_resolved_identity(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
-    assert rc == 0
-    st = workspace_status(ws)
-    assert st.workspace_state != "empty"
-    assert st.repository_identity_resolved is True
 
 def test_cli_import_prs_drives_command(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     ws = _preflight_workspace(tmp_path, fake_gh)
@@ -1130,6 +952,7 @@ def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path
     ws = _import_ready_case(tmp_path, fake_gh)
     before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     before_import_sha = before["source"]["import_sha256"]
+    before_import = load_json_strict(ws / "imports/pr-000101.json")
     hdr = dict(_PR_HEADER)
     hdr["updated_at"] = "2026-01-02T00:00:00Z"
     hdr["html_url"] = "https://github.com/o/r/pull/101"
@@ -1142,6 +965,11 @@ def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path
     # import_sha256 changes with fetched_at; only these assertions prove metadata propagation.
     assert case["pull_request"]["updated_at"] == "2026-01-02T00:00:00Z"
     assert case["pull_request"]["html_url"] == "https://github.com/o/r/pull/101"
+    after_import = load_json_strict(ws / "imports/pr-000101.json")
+    assert after_import["fetch"]["payload_sha256"] != before_import["fetch"]["payload_sha256"]
+    assert gi._evidence_signature_from_doc(schema.ImportDocument.model_validate(after_import)) == (
+        gi._evidence_signature_from_doc(schema.ImportDocument.model_validate(before_import))
+    )
 
 def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Legacy imports lack reconstructable task inputs; only evidence changes can stale them."""
@@ -1269,6 +1097,63 @@ def _seed_rest(gh: Any, number: int, *, reviews: Any, comments: Any, issue_comme
     gh.set_response("GET", f"repos/o/r/issues/{number}/comments", issue_comments)
 
 
+def test_import_population_persists_complete_headers_and_imported_snapshots(tmp_path: Path, fake_gh: FakeGh) -> None:
+    """One real import keeps PR-local normalization, checksums and case identity independent."""
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    _seed_identity(fake_gh)
+    long_body = "héllo wörld\n\n" + "é" * 50000 + "\nlast line"
+    headers = {
+        101: {**_pr_header(101), "body": long_body, "state": "closed",
+              "merged_at": "2026-01-02T00:00:00Z", "closed_at": "2026-01-02T00:00:00Z"},
+        102: {**_pr_header(102), "body": None, "state": "closed", "closed_at": "2026-01-02T00:00:00Z"},
+        103: {**_pr_header(103), "body": "", "state": "open"},
+    }
+    for number, header in headers.items():
+        _seed_rest(fake_gh, number, reviews=[], comments=[], issue_comments=[])
+        header["html_url"] = header["url"]
+        fake_gh.set_response("GET", f"repos/o/r/pulls/{number}", header)
+
+    assert gi.run_import_prs(ws, pr_numbers=[101, 102, 103], heads=["final"], origin_url=None) == 0
+
+    ledger = load_yaml_strict(ws / "benchmark.yaml")
+    assert [(row["number"], row["import_state"], row["case_ids"]) for row in ledger["pull_requests"]] == [
+        (101, "fetched", ["pr-000101-aaaaaaaaaaaa"]),
+        (102, "fetched", ["pr-000102-aaaaaaaaaaaa"]),
+        (103, "fetched", ["pr-000103-aaaaaaaaaaaa"]),
+    ]
+    imports = {number: load_json_strict(ws / f"imports/pr-{number:06d}.json") for number in headers}
+    assert {number: doc["pull_request"]["body"] for number, doc in imports.items()} == {
+        101: long_body, 102: "", 103: "",
+    }
+    assert {number: (doc["pull_request"]["state"], doc["pull_request"]["merged_at"],
+                    doc["pull_request"]["closed_at"]) for number, doc in imports.items()} == {
+        101: ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z"),
+        102: ("closed", None, "2026-01-02T00:00:00Z"),
+        103: ("open", None, None),
+    }
+    for entry in ledger["pull_requests"]:
+        number = entry["number"]
+        imported = imports[number]
+        pr = imported["pull_request"]
+        assert (pr["number"], pr["title"], pr["head"]["ref"], pr["author"]["login"]) == (
+            number, "Fix cache", "feature/cache", "alice",
+        )
+        assert pr["html_url"] == pr["url"] == f"https://github.com/o/r/pull/{number}"
+        assert pr["title_sha256"] == hashlib.sha256(b"Fix cache").hexdigest()
+        assert pr["body_sha256"] == hashlib.sha256(pr["body"].encode()).hexdigest()
+        assert pr["changed_files"] is None and imported["evidence"] == []
+        assert entry["import_file"] == f"imports/pr-{number:06d}.json"
+        assert entry["import_sha256"] == sha256_file(ws / entry["import_file"])
+        case = load_yaml_strict(ws / "cases" / f"{entry['case_ids'][0]}.yaml")
+        assert case["pull_request"] == pr
+        assert case["snapshot"]["status"] == "imported"
+        assert case["snapshot"]["requested_base_sha"] == case["snapshot"]["original_base_sha"] == "b" * 40
+    assert not any(call.endpoint.endswith("/files") for call in fake_gh.calls("GET"))
+    status = workspace_status(ws)
+    assert status.repository_identity_resolved and status.workspace_state == "curating"
+
+
 def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)
@@ -1286,7 +1171,8 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake
         ],
     )
     fake_gh._write_threads([{"id": "thread_1", "isResolved": False, "isOutdated": False,
-             "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
+             "subjectType": "LINE", "path": "a.py", "line": 5, "originalLine": 5,
+             "originalStartLine": 4, "side": "RIGHT",
              "comments": {"nodes": [{"id": "c1", "databaseId": 10, "body": "root",
                   "author": {"login": "dave", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
                   "url": "https://github.com/o/r/pull/101#discussion_r10"},
@@ -1307,6 +1193,19 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake
     db10 = next(e for e in imp["evidence"] if e["database_id"] == 10)
     assert db10["kind"] == "inline_comment" and db10["source_id"] == "github:inline_comment:10"
     assert db10["thread_id"] == "thread_1"
+    assert (db10["original_start_line"], db10["original_line"]) == (4, 5)
+    by_id = {e["database_id"]: e for e in imp["evidence"]}
+    assert by_id[1]["source_id"] == "github:review:1" and by_id[1]["is_bot"] is True
+    assert by_id[2]["is_bot"] is False
+    assert (by_id[7]["subject_type"], by_id[7]["side"]) == ("line", "RIGHT")
+    header_calls = fake_gh.calls("GET", "repos/o/r/pulls/101")
+    assert header_calls
+    assert all("@json" in (call.argv or []) and "--paginate" not in (call.argv or []) for call in header_calls)
+    collections = [call for call in fake_gh.calls("GET") if call.endpoint in {
+        "repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments", "repos/o/r/issues/101/comments",
+    }]
+    assert len({call.endpoint for call in collections}) == 3
+    assert all("--paginate" in (call.argv or []) for call in collections)
     assert any(e["is_bot"] for e in imp["evidence"])      # bot author retained
     assert any(not e["is_bot"] for e in imp["evidence"])  # human author retained
     assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
@@ -1327,9 +1226,6 @@ def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path: Path, f
     assert (ws / "imports/pr-000101.json").exists()
     assert not (ws / "imports/pr-000102.json").exists()   # failed fetch: no import file
 
-def test_benchmark_help_lists_import_prs() -> None:
-    r = subprocess.run([sys.executable, "-m", "daydream", "benchmark", "--help"], capture_output=True, text=True)
-    assert r.returncode == 0 and "import-prs" in r.stdout
 def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -1522,16 +1418,17 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh:
 
 def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
+    marker = finding_marker("f" * 64)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(
-            40, 'outdated root', login='dave', user_type='User', line=5, original_line=5, original_start_line=4
+            40, marker, login='dave', user_type='User', line=5, original_line=5, original_start_line=4
         )])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([{"id": "thread_2", "isResolved": True,
         "isOutdated": True, "subjectType": "LINE", "path": "a.py", "line": 5, "originalLine": 4, "side": "RIGHT",
-        "startSide": None, "comments": {"nodes": [{"id": "c40", "databaseId": 40, "body": "outdated root",
+        "startSide": None, "comments": {"nodes": [{"id": "c40", "databaseId": 40, "body": marker,
              "author": {"login": "dave", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
              "url": "https://github.com/o/r/pull/101#discussion_r40"}]}}],
         number=101)
@@ -1540,6 +1437,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
     _set_anchor({e.database_id: e for e in doc.evidence}[40], commit_id="a" * 40, path="a.py", start_line=4, end_line=5)
     cands = {c.source_id: c for c in gi.project_candidates(doc, head_sha="a" * 40)}
     cand = cands["github:inline_comment:40"]
+    assert cand.title == cand.body == "" and doc.evidence[0].body == marker
     assert cand.exact_acceptable is False
     assert cand.not_exact_reason == "outdated"
 
@@ -1717,7 +1615,6 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fa
     assert case["curation"]["snapshot_attested"] is False
 
 
-
 def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _import_ready_case(tmp_path, fake_gh)
     hdr = dict(_PR_HEADER)
@@ -1730,7 +1627,6 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeG
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready
-
 
 
 def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, fake_gh: FakeGh) -> None:

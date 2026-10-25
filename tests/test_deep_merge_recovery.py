@@ -209,6 +209,9 @@ async def test_public_resume_retains_failure_until_same_revision_remerge(
             DeepArtifact.MERGED_ITEMS.at(multi_stack_target / ".daydream" / "deep").write_text("{corrupt projection")
         if index == 1:
             assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
+        if index == 2:
+            prompts = [call["prompt"] for call in stub.calls if "cross-stack merge agent" in call["prompt"].lower()]
+            assert prompts and "__merge__" not in "\n".join(prompts)
         stub.merge_emit_str = None
         stub.calls.clear()
     loaded = [load_findings_artifact(path, expected_repo="o/r", expected_pr_number=pr.number,
@@ -302,39 +305,14 @@ def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
         ]
     return ScriptedBackend(responder=respond, model="op-5")
 
-@pytest.mark.parametrize("envelope", [True, False], ids=["current-envelope", "bare-array-rejected"])
-async def test_merge_requires_current_result_envelope(
-    tmp_path: Path, make_work: Callable[..., WorkContext], envelope: bool,
-) -> None:
-    args = _merge_args(tmp_path)
-    records = [_merge_item(1, "api.py", "high", desc="unbounded cache write")]
-    call = phase_cross_stack_merge(
-        cast(Backend, _merge_text_backend("prose", {"items": records} if envelope else records)),
-        make_work(tmp_path), **args,
-    )
-    if not envelope:
-        with pytest.raises(CrossStackMergeError):
-            await call
-        return
-    await call
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep_dir(tmp_path, allow_standalone=True)).read_text())
-    assert [i["file"] for i in items["items"]] == ["api.py"]
-    assert items.get("partial") is not True
-
-@pytest.mark.parametrize("merge_text",
-    ["The review is done; no JSON items list here.",
-        # Reopen #361: the archived Pi str shape must raise a byte-identical CrossStackMergeError.
-        ARCHIVED_MERGE_STR,
-    ], ids=["generic", "archived"],
-)
 async def test_merge_raises_structured_error_on_str(
-    tmp_path: Path, make_work: Callable[..., WorkContext], merge_text: Any,
+    tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
     args = _merge_args(tmp_path)
     with pytest.raises(CrossStackMergeError) as excinfo:
-        await phase_cross_stack_merge(cast(Backend, _merge_text_backend(merge_text, None)), make_work(tmp_path), **args,
-        )
+        await phase_cross_stack_merge(
+            cast(Backend, _merge_text_backend(ARCHIVED_MERGE_STR, None)), make_work(tmp_path), **args)
     assert excinfo.value.response_shape == "StructuredOutputFailure"
     assert excinfo.value.stack_context == ["python"]
     assert str(excinfo.value) == CROSS_STACK_MERGE_ERR_MSG
@@ -356,19 +334,14 @@ async def test_merge_rejects_bare_list_and_salvages_bound_records(
     coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
     assert coverage.phases["merge"]["status"] == "failed"
 
-@pytest.mark.parametrize("merge_str,resume", [
-    ("All stacks reviewed. No JSON item list to emit.", "inspect"),
-    ("prose with no item list", "fix"), (ARCHIVED_MERGE_STR, "fix"),
-    ("prose with no item list", "merge"), ("prose with no item list", "fix-declined"),
-])
 async def test_merge_salvage_and_resume_preserve_findings_and_failure_context(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
-    capsys: pytest.CaptureFixture[str], merge_str: str, resume: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     silence(monkeypatch)
-    mute_side_effects()
+    mute_side_effects(heal=False, commit=False)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity, stub.merge_emit_str = "high", merge_str
+    stub.parse_severity, stub.merge_emit_str = "high", ARCHIVED_MERGE_STR
     assert await _run_deep(multi_stack_target) != 0
     dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())
@@ -378,35 +351,22 @@ async def test_merge_salvage_and_resume_preserve_findings_and_failure_context(
     assert coverage.phases['merge']['status'] == 'failed'
     assert coverage.phases['merge']['reason_codes'] == ['synthesis_failure']
     assert coverage.diagnostics['phases']['merge'] == CROSS_STACK_MERGE_ERR_MSG
-    if resume == "inspect":
-        return
     stub.calls.clear()
-    stub.merge_emit_str = None
-    if resume == "merge":
-        stub.merge_items = [_merge_item(1, "store/cache.py", "high", desc="unbounded cache write")]
-        assert await _run_deep(multi_stack_target, start_at="merge") == 0
-        prompts = [call["prompt"].lower() for call in stub.calls if "cross-stack merge agent" in call["prompt"].lower()]
-        assert prompts and "__merge__" not in "\n".join(prompts)
-    else:
-        if resume == "fix":
-            monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
-            monkeypatch.delenv("CI", raising=False)
-            monkeypatch.setattr("daydream.run_context._prompt_user",
-                lambda _console, message, _default: "y" if "Apply fixes" in message else "n")
-        assert await _run_deep(multi_stack_target, start_at="fix") == 0
-        assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
-        assert not any(
-            "cross-stack merge agent" in call["prompt"].lower() or "per-stack review" in call["prompt"].lower()
-            for call in stub.calls
-        )
-        if resume == "fix":
-            salvaged = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-            fixes = [
-                call["prompt"] for call in stub.calls
-                if call["prompt"].lower().startswith(("fix these", "fix this issue"))
-            ]
-            assert salvaged and any(item["description"] in prompt and item["file"] in prompt
-                                    for item in salvaged for prompt in fixes)
+    stub.merge_emit_str, stub.fix_edit_line = None, "\n# salvage fixed\n"
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr("daydream.run_context._prompt_user",
+        lambda _console, message, _default: "y" if "Apply fixes" in message else "n")
+    assert await _run_deep(multi_stack_target, start_at="fix") == 0
+    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
+    assert not any("cross-stack merge agent" in call["prompt"].lower() or "per-stack review" in call["prompt"].lower()
+                   for call in stub.calls)
+    salvaged = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
+    fixes = [call["prompt"] for call in stub.calls
+             if call["prompt"].lower().startswith(("fix these", "fix this issue"))]
+    assert salvaged and any(item["description"] in prompt and item["file"] in prompt
+                            for item in salvaged for prompt in fixes)
+    assert "# salvage fixed" in (multi_stack_target / "api.py").read_text()
 
 
 async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(

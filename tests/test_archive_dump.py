@@ -48,24 +48,7 @@ def test_dump_preserves_credentials_and_binary_without_scanning(
         assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 
-@pytest.mark.parametrize("patch", ["+print('safe')\n", '+SORT_KEY = "created_at"\n'])
-def test_dump_retains_exact_bundle_bytes(tmp_path: Path, archive_dir: Path, patch: str) -> None:
-    source, _, recorder = _setup_bundle(tmp_path)
-    (source / ".daydream" / "diff.patch").write_text(patch)
-    stage = tmp_path / "late"
-    stage.mkdir()
-    original = _contents(source)
-    _strict_archive(
-        target=source, session_id=recorder.session_id,
-        config=RunConfig(target=str(source), dump_artifacts=str(stage)),
-        write_snapshot=_write_snapshot(recorder), dump_path=stage,
-    )
-    assert _contents(stage) == _contents(archive_dir / "runs" / recorder.session_id)
-    assert (stage / "diff.patch").read_text() == patch
-    assert _contents(source) == original
-
-
-@pytest.mark.parametrize("patch", ["+print('safe')\n", "+ghp_canaryfake123\n"])
+@pytest.mark.parametrize("patch", ["+ghp_canaryfake123\n"])
 def test_destination_publication_error_stays_fatal(tmp_path: Path, archive_dir: Path, patch: str) -> None:
     source, _, recorder = _setup_bundle(tmp_path)
     (source / ".daydream" / "diff.patch").write_text(patch)

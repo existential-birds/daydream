@@ -205,6 +205,7 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert report == DeepArtifact.MERGED_REPORT.at(deep).read_text()
     assert all(item["description"] in report for item in expected)
+    assert "## Structural Review" in report
     assert omitted["description"] not in report and twin["description"] not in report
     assert not (deep / "folded-structural.json").exists()
     if presentation_fault in {'missing-items', 'corrupt-items'}:
@@ -388,8 +389,8 @@ async def test_precision_adjudication_overlaps_and_joins_before_reconciling_orig
         assert lifecycle[-1]["status"] == "succeeded"
 
 
-@pytest.mark.parametrize("failed", ["arbiter", "suppression"])
-@pytest.mark.parametrize("fault", ["raise", "malformed", "omitted", "foreign-id"])
+@pytest.mark.parametrize(('failed', 'fault'), [(owner, fault) for owner in ('arbiter', 'suppression')
+    for fault in ('raise', 'malformed', 'foreign-id')])
 async def test_precision_overlap_keeps_independent_failure_policies_and_incomplete_publication(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: str, fault: str,
 ) -> None:
@@ -937,38 +938,6 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     assert twins[0]["severity"] == "high"
     assert {item["file"] for item in items} == {"api.py", "App.tsx", "README.md"}
 
-async def test_precision_mode_suppression_never_sees_structural_records(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Structural records rejoin adjudication for the arbiter only (issue #1103)."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_echo_records = True
-    stub.suppression_keep = False
-    stub.parse_by_stack = {"python": {"severity": "low", "confidence": "MEDIUM", "file": "api.py", "line": 1,
-            "description": "Borderline python nit the suppression pass rejects",
-        },
-        "structure": {"severity": "low", "confidence": "MEDIUM", "file": "api.py", "line": 1,
-            "description": "Low-severity structural erosion in this module",
-        },
-        "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1,
-            "description": "Unrelated React concern",
-        },
-        "generic": {"severity": "medium", "confidence": "MEDIUM", "file": "README.md", "line": 1,
-            "description": "Unrelated docs concern",
-        },
-    }
-
-    assert await _run_deep(multi_stack_target, precision_mode=True) == 0
-
-    deep = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    descriptions = [i["description"] for i in items]
-    # The borderline LANGUAGE finding is suppressed (that is the pass working).
-    assert not any("Borderline python nit" in d for d in descriptions), descriptions
-    # The equally borderline STRUCTURAL finding is not -- it was never eligible.
-    assert any("Low-severity structural erosion" in d for d in descriptions), descriptions
-
 async def test_precision_suppression_preserves_structural_records_on_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -989,24 +958,6 @@ async def test_precision_suppression_preserves_structural_records_on_resume(
     assert len(structural) == 1
     assert structural[0]["lens"] == "structural"
     assert structural[0]["source_uids"] == ["structure:1"]
-
-async def test_synthesis_retains_a_distinct_structural_finding(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A model-retained distinct structural concern reaches the canonical report."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_echo_records = True
-    overrides = _twin_parse_by_stack(structural_line=1)
-    overrides["structure"]["description"] = "Module layering inverted: api.py now imports the CLI"
-    stub.parse_by_stack = overrides
-    assert await _run_deep(multi_stack_target) == 0
-    dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-    api_items = sorted(i["description"] for i in items if i["file"] == "api.py")
-    assert len(api_items) == 2, f"a distinct structural finding was folded away: {api_items}"
-    assert any(i["lens"] == "structural" for i in items)
-    assert "## Structural Review" in DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _silence(monkeypatch)

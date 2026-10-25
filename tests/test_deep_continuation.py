@@ -1,4 +1,5 @@
 """Deep arbiter-session continuation integration tests."""
+
 from __future__ import annotations
 
 import json
@@ -10,13 +11,16 @@ from typing import Any
 import pytest
 
 from daydream.backends import AgentEvent, ResultEvent, ToolStartEvent
+from daydream.trajectory import TrajectoryRecorder, get_current_recorder
 from tests.harness.review_result import merge_result, saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
+from tests.harness.trajectory import root_trajectory
 from tests.test_deep_orchestrator import _run_deep
 
 
 def _merge_call(stub: StubBackend) -> dict[str, Any]:
     return next(c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower())
+
 
 @pytest.mark.parametrize("finalize", [False, True])
 async def test_merge_resumes_arbiter_session(
@@ -30,6 +34,9 @@ async def test_merge_resumes_arbiter_session(
     execute = stub.execute
     supplied: list[dict[str, Any]] = []
     finalization_calls: list[dict[str, Any]] = []
+    recorders: dict[str, TrajectoryRecorder] = {}
+    siblings_before_merge: set[str] = set()
+    pre_merge_steps: list[tuple[int, str, Any]] = []
 
     async def capture_merge(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if kwargs.pop("finalization", False):
@@ -38,6 +45,15 @@ async def test_merge_resumes_arbiter_session(
             yield ResultEvent(structured_output=merge_result([]), continuation=None)
             return
         is_merge = "cross-stack merge agent" in prompt.lower()
+        if is_merge or "you are the arbiter" in prompt.lower():
+            recorder = get_current_recorder()
+            assert recorder is not None
+            recorders["merge" if is_merge else "arbiter"] = recorder
+            if is_merge:
+                pre_merge_steps.extend((step.step_id, step.source, step.message) for step in recorder.steps)
+                siblings_before_merge.update(
+                    path.name for path in (recorder.path.parent / "trajectories").glob("*.json")
+                )
         if is_merge:
             source = re.search(r"^- structural-records: (.+)$", prompt, flags=re.MULTILINE)
             if source is not None:
@@ -53,6 +69,21 @@ async def test_merge_resumes_arbiter_session(
     monkeypatch.setattr(stub, "execute", capture_merge)
     monkeypatch.setattr(stub, "supports_finalization", True, raising=False)
     assert await _run_deep(multi_stack_target) == 0
+    assert recorders["arbiter"] is recorders["merge"]
+    root = root_trajectory(multi_stack_target)
+    assert [step["step_id"] for step in root["steps"]] == list(range(1, len(root["steps"]) + 1))
+    assert [(step["step_id"], step["source"], step["message"])
+            for step in root["steps"][:len(pre_merge_steps)]] == pre_merge_steps
+    assert any(step["source"] == "agent" and step.get("extra", {}).get("daydream_phase") == "merge"
+               for step in root["steps"][len(pre_merge_steps):])
+    arbiter_user = next(step for step in root["steps"] if step["source"] == "user"
+                        and "you are the arbiter" in str(step["message"]).lower())
+    merge_user = next(step for step in root["steps"] if step["source"] == "user"
+                      and "cross-stack merge agent" in str(step["message"]).lower())
+    assert arbiter_user["extra"]["daydream_phase"] == "deep"
+    assert merge_user["extra"]["daydream_phase"] == "merge"
+    final_siblings = {path.name for path in (multi_stack_target / ".daydream/runs").glob("*/trajectories/*.json")}
+    assert final_siblings == siblings_before_merge
     merge_call = _merge_call(stub)
     assert merge_call["continuation"] is not None
     assert merge_call["continuation"].data["session_id"] == "arb-sess"
@@ -73,6 +104,7 @@ async def test_merge_resumes_arbiter_session(
     else:
         assert finalization_calls == []
 
+
 async def test_merge_cold_when_arbiter_mints_no_token(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No arbiter token means merge runs cold with today's prompt, no addendum."""
@@ -84,6 +116,7 @@ async def test_merge_cold_when_arbiter_mints_no_token(multi_stack_target: Path, 
     merge_call = _merge_call(stub)
     assert merge_call["continuation"] is None
     assert "re-read" not in merge_call["prompt"].lower()
+
 
 async def test_merge_cold_when_arbiter_skipped_on_resume(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

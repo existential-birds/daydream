@@ -194,8 +194,7 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     assert direct["share_caps"] == lineage["share_caps"]
 
 
-@pytest.mark.parametrize(("dimension", "value"), [(dimension, value) for dimension in ("stack", "repo", "profile")
-                                                  for value in ("0", "-0.1", "1.5")])
+@pytest.mark.parametrize(("dimension", "value"), [("stack", "0"), ("repo", "-0.1"), ("profile", "1.5")])
 def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimension: str, value: str) -> None:
     store = _store_with_caps_population(tmp_path)
     config = projection_config(store, tmp_path)

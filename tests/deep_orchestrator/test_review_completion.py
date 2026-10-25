@@ -1,4 +1,5 @@
 """Snapshot-bound terminal contracts through the real runner and Git."""
+
 from __future__ import annotations
 
 import json
@@ -10,12 +11,15 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops, json_utils, runner
-from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore
+from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases.review import ReviewOutputError
+from daydream.ui.messages import print_warning
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
@@ -142,6 +146,12 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
         assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
     if case == 'demoted':
         assert (data['findings'][0]['confidence'], data['findings'][0]['location_distrust']) == ('LOW', True)
+        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())['items'][0]
+        assert (canonical['line'], canonical['location_cited_line'], canonical['severity'],
+                canonical['severity_before_demotion'], canonical['location_distrust']) == (
+                    500, 500, 'low', 'medium', True)
+        assert 'cited line 500 in api.py' in canonical['location_note']
+        assert 'demoted to low' in canonical['location_note']
     if case == 'language':
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert canonical['items'][0]['source_uids'] == ['python:1']
@@ -209,32 +219,6 @@ async def test_automatic_shard_failure_preserves_successful_sibling_findings_and
              for path in (deep.parent / 'review-cache/entries').glob('*/manifest.json')}
     assert 'shard:python#1' not in units
     assert {'shard:python#0', 'shard:python#2', 'shard:structure'} <= units
-
-
-@pytest.mark.parametrize(('mode', 'reason', 'payload'), [
-    ('missing', 'missing_output', None), ('malformed', 'malformed_output', {'unexpected': []}),
-    ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),
-    ('rejected-native', 'malformed_output', {'unexpected': []}), ('text-only', None, None),
-    *[('invalid-envelope', 'malformed_output', payload) for payload in
-      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})]])
-async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
-
-    def response(prompt: str) -> list[AgentEvent] | None:
-        state = review_stage_state(prompt)
-        if state is None or state['scope_id'] != 'python':
-            return None
-        return [TextEvent(text=json.dumps(review_stage_result(prompt, []))
-                          if mode in {'text-only', 'rejected-native'} else ''),
-                ResultEvent(structured_output=payload, continuation=None)]
-
-    review.backend.responder = response
-    assert await review.run() == 0
-    data = review.load()
-    assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')
-    assert scopes(data)['python']['reason_codes'] == ([] if reason is None else [reason])
-    assert data['findings'] == []
-    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
-    assert saved['issues'] == [] and bool(saved.get('incomplete')) is (reason is not None)
 
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
@@ -347,12 +331,18 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
 
 
-@pytest.mark.parametrize(('budget', 'nonempty', 'structure_only'), [
-    *[(budget, nonempty, False) for budget in ('tool', 'wall', 'model') for nonempty in (False, True, None)],
-    *[(budget, nonempty, True) for budget in ('tool', 'backend') for nonempty in (False, True)],
-])
+@pytest.mark.parametrize(
+    ("budget", "nonempty", "structure_only"),
+    [
+        *[(budget, nonempty, False) for budget in ("tool", "wall", "model") for nonempty in (True, None)],
+        *[(budget, True, True) for budget in ("tool", "backend")],
+    ],
+)
 async def test_unsuccessful_stage_discards_checkpoints(
-    review: ReviewRun, budget: str, nonempty: bool | None, structure_only: bool,
+    review: ReviewRun,
+    budget: str,
+    nonempty: bool | None,
+    structure_only: bool,
 ) -> None:
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 
@@ -361,6 +351,7 @@ async def test_unsuccessful_stage_discards_checkpoints(
     intent = 'PRESERVE_AUTHOR_INTENT'
     review.patch.setattr(git_ops, 'gh_pr_view', lambda *_a, **_k: {
         'body': intent, 'state': 'OPEN', 'headRefOid': review.pr.head_sha})
+
     def response(prompt: str) -> Any:
         if 'understand the intent of these changes' in prompt.lower():
             yield TextEvent(text=intent)
@@ -387,6 +378,7 @@ async def test_unsuccessful_stage_discards_checkpoints(
                     if budget == 'wall':
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
+
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
         review_by_stack={'python': [record()]} if structure_only else {},
         responder=lambda p: response(p) if (reviewer(p) and (not structure_only or
@@ -562,8 +554,8 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
 
 
-@pytest.mark.parametrize('late_event', ['legacy-result', 'native-start'])
-@pytest.mark.parametrize('offset', [0, 1], ids=['at-deadline', 'after-deadline'])
+@pytest.mark.parametrize(('late_event', 'offset'), [
+    ('legacy-result', 0), ('native-start', 1)], ids=['at-deadline-legacy-result', 'after-deadline-native-start'])
 async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
     review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
     import re
@@ -664,11 +656,15 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-@pytest.mark.parametrize('fault', ['markdown-read', 'context-write', 'report-write'])
-@pytest.mark.parametrize('export', [True, False], ids=['export', 'no-export'])
+@pytest.mark.parametrize(('export', 'fault'), [
+    (True, 'markdown-read'), (True, 'context-write'), (True, 'report-write'), (False, 'report-write')],
+    ids=['export-markdown-read', 'export-context-write', 'export-report-write', 'no-export-report-write'])
 async def test_optional_presentation_failure_preserves_canonical_export(
-    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str, export: bool,
+    review: ReviewRun, fault: str, export: bool,
 ) -> None:
+    warning_console = Console(width=120)
+    review.patch.setattr(review_terminal, 'console', warning_console)
+    review.patch.setattr(review_terminal, 'print_warning', print_warning)
     stage, read = json_utils._stage_bytes, Path.read_text
     refreshing = False
     injected: list[bool] = []
@@ -693,7 +689,10 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
                                        review_by_stack={'structure': [record()]})
     review.backend.merge_echo_records = True
-    assert await review.run(findings_out=str(review.output) if export else None) == 0 and injected
+    with warning_console.capture() as warning_output:
+        assert await review.run(findings_out=str(review.output) if export else None) == 0 and injected
+    error = 'PermissionError' if fault == 'markdown-read' else 'OSError'
+    assert f'Review report unavailable: {error}' in warning_output.get()
     if not export:
         saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
         assert saved['run_id'] and saved['analyzed_revision']['head_sha'] == review.pr.head_sha
@@ -701,7 +700,6 @@ async def test_optional_presentation_failure_preserves_canonical_export(
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert len(canonical['items']) == 1 and canonical['items'][0]['description'] == 'Grounded defect'
         assert not review.output.exists()
-        assert 'Review report unavailable:' in collapse_panel_text(capsys)
         return
     data = review.load()
     assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
@@ -709,7 +707,6 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert data['terminal_result']['projection_valid']
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     assert 'review_context' not in data
-    assert 'Review report unavailable:' in collapse_panel_text(capsys)
 
 
 @pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])

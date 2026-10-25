@@ -1,5 +1,4 @@
 import fcntl
-import inspect
 import os
 import stat
 from pathlib import Path
@@ -30,45 +29,16 @@ def test_load_yaml_rejects_duplicate_keys(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceCorrupt):
         load_yaml_strict(p)
 
-def test_load_yaml_rejects_unknown_keys_at_schema_layer(tmp_path: Path) -> None:
-    p = tmp_path / "m.yaml"
-    p.write_text("schema_version: 1\nbogus: true\n")
-    assert "schema_version" in load_yaml_strict(p)  # raw load is permissive; schema is strict
-
 def test_load_yaml_safe_load_no_object_execution(tmp_path: Path) -> None:
     p = tmp_path / "unsafe.yaml"
     p.write_text("!!python/object/apply:os.system ['true']\n")
     with pytest.raises(WorkspaceCorrupt):
         load_yaml_strict(p)
 
-def test_atomic_write_json_0600_and_readback(tmp_path: Path) -> None:
-    dest = tmp_path / "out" / "nested" / "data.json"
-    atomic_write_json(dest, {"k": 1})
-    assert load_json_strict(dest) == {"k": 1}
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
-def test_atomic_write_yaml_0600_and_readback(tmp_path: Path) -> None:
-    dest = tmp_path / "benchmark.yaml"
-    atomic_write_yaml(dest, {"schema_version": 1})
-    assert load_yaml_strict(dest) == {"schema_version": 1}
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
-def test_ensure_private_dir_is_0700(tmp_path: Path) -> None:
-    d = tmp_path / "private" / "nested"
-    ensure_private_dir(d)
-    assert stat.S_IMODE(d.stat().st_mode) == 0o700
 
-def test_sha256_file(tmp_path: Path) -> None:
-    p = tmp_path / "f.bin"
-    p.write_bytes(b"hello")
-    assert sha256_file(p) == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
-def test_workspace_lock_acquire_release(tmp_path: Path) -> None:
-    with WorkspaceLock(tmp_path):
-        lock_file = tmp_path / ".benchmark.lock"
-        assert lock_file.exists()
-    with WorkspaceLock(tmp_path):
-        pass
 
 def test_workspace_lock_contention_is_explicit(tmp_path: Path) -> None:
     # Separate open file descriptions conflict even within one process.
@@ -97,39 +67,44 @@ def _stage(ctx: Any, path: Any, content: str) -> None:
     ctx.stage(path, content.encode())
 
 
-def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path) -> None:
-    data_a = tmp_path / "cases" / "a.yaml"
+def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real locked transaction replaces typed files privately, retires an attested blob and publishes last."""
+    data = tmp_path / "cases" / "nested" / "data.json"
     manifest = tmp_path / "benchmark.yaml"
-    (tmp_path / "cases").mkdir(parents=True, exist_ok=True)
-    with Transaction(tmp_path, op_id="op-1", kind="write") as tx:
-        _stage(tx, data_a, "case-a")
-        _stage(tx, manifest, "manifest-v2")
-        tx.commit()
-    assert data_a.read_text() == "case-a"
-    assert manifest.read_text() == "manifest-v2"
-    assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
-
-def test_transaction_has_no_fault_or_state_forging_surface(tmp_path: Path) -> None:
-    tx = Transaction(tmp_path, op_id="surface", kind="write")
-    assert not hasattr(tx, "inject_crash")
-    assert not hasattr(tx, "force_state")
-    assert "stop_after" not in inspect.signature(tx._apply_replacements).parameters
-    faults = TransactionFaultDriver(tmp_path, op_id="faults", kind="write")
-    assert isinstance(faults.transaction, Transaction)
-    assert not hasattr(faults, "stage")
-    assert not hasattr(faults, "force_state")
-
-def test_transaction_retires_digest_matched_file_atomically(tmp_path: Path) -> None:
+    atomic_write_json(data, {"k": 1})
+    atomic_write_yaml(manifest, {"schema_version": 1})
+    assert load_json_strict(data) == {"k": 1} and load_yaml_strict(manifest) == {"schema_version": 1}
+    assert stat.S_IMODE(data.stat().st_mode) == stat.S_IMODE(manifest.stat().st_mode) == 0o600
+    assert stat.S_IMODE(data.parent.stat().st_mode) == stat.S_IMODE(data.parent.parent.stat().st_mode) == 0o700
     bundle = tmp_path / "snapshots" / "old.bundle"
-    bundle.parent.mkdir(parents=True)
-    bundle.write_bytes(b"old bundle")
+    ensure_private_dir(bundle.parent)
+    bundle.write_bytes(b"hello")
     digest = sha256_file(bundle)
-    with Transaction(tmp_path, op_id="retire", kind="import") as tx:
-        tx.retire("snapshots/old.bundle", expected_sha256=digest)
-        tx.stage("benchmark.yaml", b"after")
-        tx.commit()
-    assert not bundle.exists()
-    assert (tmp_path / "benchmark.yaml").read_bytes() == b"after"
+    assert digest == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    replacements: list[Path] = []
+    real_replace = os.replace
+    def observe_replace(source: str | Path, destination: str | Path) -> None:
+        if Path(destination) in (data, manifest):
+            replacements.append(Path(destination))
+        real_replace(source, destination)
+    monkeypatch.setattr(os, "replace", observe_replace)
+    with WorkspaceLock(tmp_path):
+        assert (tmp_path / ".benchmark.lock").is_file()
+        with Transaction(tmp_path, op_id="op-1", kind="write") as tx:
+            tx.stage(data, b'{"k": 2}\n')  # the public API admits an absolute contained target
+            tx.retire("snapshots/old.bundle", expected_sha256=digest)
+            tx.stage("benchmark.yaml", b"schema_version: 2\n")
+            tx.commit()
+    assert replacements == [data, manifest]
+    assert load_json_strict(data) == {"k": 2} and load_yaml_strict(manifest) == {"schema_version": 2}
+    assert stat.S_IMODE(data.stat().st_mode) == stat.S_IMODE(manifest.stat().st_mode) == 0o600
+    assert stat.S_IMODE(bundle.parent.stat().st_mode) == 0o700 and not bundle.exists()
+    assert not list((tmp_path / "transactions").iterdir())
+    with WorkspaceLock(tmp_path):
+        recover_startup(tmp_path)
+    assert load_json_strict(data) == {"k": 2} and load_yaml_strict(manifest) == {"schema_version": 2}
+
+
 
 @pytest.mark.parametrize("boundary", [0, 1, 2, 3, "manifest"])
 def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, boundary: int | Literal["manifest"]
@@ -362,13 +337,6 @@ def test_stage_rejects_symlink_parent_escape(tmp_path: Path) -> None:
             tx.stage("cases/x.yaml", b"x")
     assert not (outside / "x.yaml").exists()
 
-def test_stage_accepts_absolute_inside_root(tmp_path: Path) -> None:
-    target = tmp_path / "cases" / "a.yaml"
-    target.parent.mkdir(parents=True)
-    with Transaction(tmp_path, op_id="op", kind="write") as tx:
-        _stage(tx, target, "ok")
-        tx.commit()
-    assert target.read_text() == "ok"
 
 
 def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
@@ -604,12 +572,6 @@ def test_resolve_authoring_path_rejects_symlink_escape(tmp_path: Path) -> None:
     (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
     with pytest.raises(WorkspaceCorrupt):
         resolve_authoring_path(tmp_path, "cases/x.yaml")
-
-def test_resolve_authoring_path_accepts_relative_inside(tmp_path: Path) -> None:
-    (tmp_path / "cases").mkdir(parents=True)
-    (tmp_path / "cases" / "x.yaml").write_text("x")
-    assert resolve_authoring_path(tmp_path, "cases/x.yaml").is_absolute()
-    assert resolve_authoring_path(tmp_path, "cases/x.yaml").resolve() == (tmp_path / "cases" / "x.yaml").resolve()
 
 def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path: Path) -> None:
     (tmp_path / "cases").mkdir(parents=True)

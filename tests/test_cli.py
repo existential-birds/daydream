@@ -1,4 +1,5 @@
 """Tests for CLI argument parsing."""
+
 import json
 import os
 import signal
@@ -59,68 +60,109 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
 
     assert events == ["flush", "panel-start", "snapshot", "backend-step"]
 
-@pytest.mark.parametrize(("argv", "expected"),
-    [
-        pytest.param(['--review', '--approved-head-sha', 'a' * 40, '/tmp/repo'], {'approved_head_sha': 'a' * 40},
-            id='approved_head_sha_flag_populates_config'),
-        pytest.param(['--review', '/tmp/repo'], {'approved_head_sha': None},
-            id='approved_head_sha_defaults_none'),
-        pytest.param(['/tmp/project', '-s', 'python'], {'stack': 'python'},
-            id='stack_short_flag'),
-        pytest.param(['/tmp/project'], {'ignore_paths': []},
-            id='ignore_paths_default_empty'),
-        pytest.param(['/tmp/project'], {'dataset_capture': False, 'dataset_store_path': None, 'archive': True},
-            id='dataset_capture_is_opt_in'),
-        pytest.param(['--dataset-store', '/tmp/records', '/tmp/project'],
-            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records')},
-            id='dataset_store_enables_capture'),
-        pytest.param(['--capture-data', '--dataset-store', '/tmp/records', '--no-archive', '/tmp/project'],
-            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records'), 'archive': False},
-            id='dataset_capture_without_archive'),
-        pytest.param(['/tmp/project', '--ignore-path', '.planning'], {'ignore_paths': ['.planning']},
-            id='ignore_paths_single'),
-        pytest.param(['/tmp/project', '--ignore-path', '.planning', '--ignore-path', 'vendor'],
-            {'ignore_paths': ['.planning', 'vendor']},
-            id='ignore_paths_repeatable'),
-        pytest.param(['--branch', 'feat/x', '--base', 'develop', '/tmp/repo'],
-            {'branch': 'feat/x', 'base': 'develop', 'output_mode': 'loop'},
-            id='parse_args_branch_and_base'),
-        pytest.param(['--comment', '/tmp/repo'], {'output_mode': 'comment'},
-            id='parse_args_comment_mode_sets_output_mode'),
-        pytest.param(['--review', '/tmp/repo'], {'output_mode': 'review'},
-            id='parse_args_review_mode_sets_output_mode'),
-        pytest.param(['/tmp/repo'], {'output_mode': 'loop'},
-            id='parse_args_default_is_loop'),
-        pytest.param(['--review', '--findings-out', 'findings/findings.json', '/tmp/repo'],
-            {'findings_out': 'findings/findings.json', 'output_mode': 'review'},
-            id='findings_out_with_review_populates_config'),
-        pytest.param(['--diagram-only', 'flowchart', '/tmp/repo'], {'output_mode': 'diagram', 'diagram': 'flowchart'},
-            id='diagram_only_sets_output_mode_and_diagram_value'),
-        pytest.param(['--diagram', 'off', '/tmp/repo'], {'output_mode': 'loop', 'diagram': 'off'},
-            id='diagram_flag_leaves_output_mode_alone'),
-        pytest.param(['/tmp/repo'], {'diagram': None},
-            id='diagram_defaults_to_unset'),
-        pytest.param(['--diagram-only', 'sequence', '--findings-out', 'f.json', '/tmp/repo'],
-            {'findings_out': 'f.json', 'output_mode': 'diagram'},
-            id='findings_out_with_diagram_only_populates_config'),
-        pytest.param(['--findings-out', 'findings/findings.json', '/tmp/repo'],
-            {'findings_out': 'findings/findings.json', 'output_mode': 'loop', 'shallow': False},
-            id='findings_out_with_deep_flow_populates_config'),
-        pytest.param(['--review', '/tmp/repo'], {'findings_out': None},
-            id='findings_out_defaults_none'),
-        pytest.param(['--review', '--pr-number', '42', '/tmp/repo'], {'pr_number': 42},
-            id='pr_number_flag_populates_config'),
-        pytest.param(['--copy', 'a.env', '--copy', 'b.env', '/tmp/repo'],
-            {'extra_copy': [Path('a.env'), Path('b.env')]},
-            id='parse_args_copy_repeatable'),
-        pytest.param(['/tmp/repo'], {'extra_copy': []},
-            id='parse_args_copy_default_empty'),
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["/tmp/project"],
+            {
+                "output_mode": "loop",
+                "approved_head_sha": None,
+                "findings_out": None,
+                "ignore_paths": [],
+                "dataset_capture": False,
+                "dataset_store_path": None,
+                "archive": True,
+                "diagram": None,
+                "extra_copy": [],
+                "non_interactive": False,
+            },
+        ),
+        (
+            [
+                "--review",
+                "--approved-head-sha",
+                "a" * 40,
+                "--pr-number",
+                "42",
+                "--findings-out",
+                "findings/out.json",
+                "--capture-data",
+                "--dataset-store",
+                "/tmp/records",
+                "--no-archive",
+                "--worktree",
+                "--non-interactive",
+                "--branch",
+                "feat/x",
+                "--base",
+                "develop",
+                "-s",
+                "python",
+                "--ignore-path",
+                ".planning",
+                "--ignore-path",
+                "vendor",
+                "--copy",
+                "a.env",
+                "--copy",
+                "b.env",
+                "/tmp/project",
+            ],
+            {
+                "output_mode": "review",
+                "approved_head_sha": "a" * 40,
+                "pr_number": 42,
+                "findings_out": "findings/out.json",
+                "dataset_capture": True,
+                "dataset_store_path": Path("/tmp/records"),
+                "archive": False,
+                "force_worktree": True,
+                "non_interactive": True,
+                "branch": "feat/x",
+                "base": "develop",
+                "stack": "python",
+                "ignore_paths": [".planning", "vendor"],
+                "extra_copy": [Path("a.env"), Path("b.env")],
+            },
+        ),
+        (
+            [
+                "--diagram-only",
+                "flowchart",
+                "--findings-out",
+                "diagram.json",
+                "--dataset-store",
+                "/tmp/records",
+                "/tmp/project",
+            ],
+            {
+                "output_mode": "diagram",
+                "diagram": "flowchart",
+                "findings_out": "diagram.json",
+                "dataset_capture": True,
+                "dataset_store_path": Path("/tmp/records"),
+            },
+        ),
+        (
+            ["--shallow", "--diagram", "off", "--stack", "rust", "/tmp/project"],
+            {"output_mode": "loop", "shallow": True, "diagram": "off", "stack": "rust"},
+        ),
+        (["--comment", "/tmp/project"], {"output_mode": "comment", "shallow": False}),
+        (
+            ["--findings-out", "findings/out.json", "/tmp/project"],
+            {"output_mode": "loop", "findings_out": "findings/out.json", "shallow": False},
+        ),
     ],
+    ids=["defaults", "configured-review", "diagram-export", "shallow", "comment", "default-deep-export"],
 )
-def test_review_arguments_populate_config(
-    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: dict[str, Any],
+def test_compatible_cli_vectors_resolve_coherent_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    expected: dict[str, Any],
 ) -> None:
+    """Compatible options compose in one real parse, including defaults and repeatable flags."""
     config = _cfg(monkeypatch, argv)
     for field, value in expected.items():
         actual = getattr(config, field)
@@ -130,16 +172,10 @@ def test_review_arguments_populate_config(
             assert actual == value, field
 
 
-
-
-
-
-
 def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "invalid"])
     with pytest.raises(SystemExit):
         _parse_args()
-
 
 
 def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
@@ -148,14 +184,12 @@ def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
     return _parse_args()
 
 
-
-
-
 @pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
 def test_flow_conflicts_rejected(monkeypatch: pytest.MonkeyPatch, conflict: Any) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
     with pytest.raises(SystemExit):
         _parse_args()
+
 
 def test_loop_flag_rejected(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "/tmp/project"])
@@ -171,17 +205,20 @@ def test_log_flag_rejected_review(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert exc_info.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
 
+
 def test_log_flag_rejected_improve(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         _parse_improve_args(["improve", "/tmp/x", "--log"])
     assert exc_info.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
 
+
 def test_verbose_joined_equals_rejected() -> None:
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--verbose=true"])
     with pytest.raises(SystemExit):
         _parse_improve_args(["improve", "/tmp/x", "--log=true"])
+
 
 @pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
 def test_yes_with_review_only_output_errors(
@@ -192,16 +229,6 @@ def test_yes_with_review_only_output_errors(
         _parse_args()
     assert "--yes" in capsys.readouterr().err
 
-@pytest.mark.parametrize("stack", ["go", "rust", "ios"])
-def test_stack_choice_routes_to_stack_field(monkeypatch: pytest.MonkeyPatch, stack: Any) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--stack", stack])
-    config = _parse_args()
-    assert config.stack == stack
-
-
-
-
-
 
 # Consolidated CLI surface (worktree-isolation refactor)
 
@@ -210,9 +237,6 @@ def test_parse_args_comment_mode_excludes_review(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "--review", "/tmp/repo"])
     with pytest.raises(SystemExit):
         _parse_args()
-
-
-
 
 
 @pytest.mark.parametrize("extra", [["--comment"], ["--shallow"]])
@@ -225,8 +249,6 @@ def test_findings_out_rejects_flows_without_pipeline_errors(
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
     assert "--findings-out" in err
-
-
 
 
 @pytest.mark.parametrize(("argv", "expected"),
@@ -249,23 +271,6 @@ def test_diagram_only_conflicts_are_rejected(
         _parse_args()
     assert exc_info.value.code == 2
     assert expected in capsys.readouterr().err
-
-
-
-
-
-@pytest.mark.parametrize(("flag", "field", "expected"),
-    [pytest.param("--worktree", "force_worktree", True, id="worktree"),
-        pytest.param("--shallow", "shallow", True, id="shallow"),
-        pytest.param("--non-interactive", "non_interactive", True, id="non-interactive"),
-        pytest.param(None, "non_interactive", False, id="non-interactive-default"),
-    ],
-)
-def test_parse_args_boolean_modifiers(monkeypatch: pytest.MonkeyPatch, flag: str | None, field: str, expected: bool
-) -> None:
-    argv = [flag] if flag is not None else []
-    assert getattr(_cfg(monkeypatch, [*argv, "/tmp/repo"]), field) is expected
-
 
 
 def test_feedback_subcommand_is_unknown(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],) -> None:
@@ -358,6 +363,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
         assert "Exact pushed-SHA remote CI passed" not in output
         assert (project / ".daydream" / "deep" / "remote-ci-handoff.json").is_file()
 
+
 def test_print_issues_table_renders() -> None:
 
 
@@ -374,18 +380,21 @@ def test_print_issues_table_renders() -> None:
     assert "Missing test" in output
 
 
-
-
-
-@pytest.mark.parametrize("flag,phase",
-    [("--review-backend", "review"), ("--fix-backend", "fix"), ("--test-backend", "test"),
-        ("--exploration-model", "exploration"), ("--review-model", "review"), ("--parse-model", "parse"),
-        ("--fix-model", "fix"), ("--test-model", "test"),
+@pytest.mark.parametrize(
+    ("flag", "phase", "sep"),
+    [
+        ("--review-backend", "review", " "),
+        ("--fix-backend", "fix", "="),
+        ("--exploration-model", "exploration", " "),
+        ("--parse-model", "parse", "="),
     ],
 )
-@pytest.mark.parametrize("sep", [" ", "="],)
 def test_per_phase_flag_rejected_with_config_pointer(
-    flag: Any, phase: Any, sep: str, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    flag: Any,
+    phase: Any,
+    sep: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     argv = [flag, "claude-opus-5", str(tmp_path)] if sep == " " else [f"{flag}=claude-opus-5", str(tmp_path)]
     with pytest.raises(SystemExit):
@@ -393,7 +402,6 @@ def test_per_phase_flag_rejected_with_config_pointer(
     err = capsys.readouterr().err
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
-
 
 
 def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
@@ -532,6 +540,7 @@ def _write_signal_fake_gh(tmp_path: Path) -> tuple[Path, Path]:
     _write_fake_gh(bin_dir, "DAYDREAM_SIGNAL_GH_LOG", "signal-fixture")
     return bin_dir, log_path
 
+
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext_dir: Any, signum: signal.Signals,
 ) -> None:
@@ -604,6 +613,7 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     calls = gh_log.read_text(encoding="utf-8").splitlines()
     assert calls == ["api /user", "repo view --json nameWithOwner -q .nameWithOwner"]
 
+
 def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     def interrupted(*args: Any, **kwargs: Any) -> Any:
@@ -612,6 +622,7 @@ def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyP
     with pytest.raises(SystemExit) as caught:
         cli.main([str(tmp_path), "--non-interactive"])
     assert caught.value.code == 130
+
 
 def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
@@ -629,10 +640,12 @@ def test_harvest_parser_accepts_repo_clone_root() -> None:
     args = parser.parse_args(["--snapshot-id", "a" * 64, "--repo-clone-root", "/tmp/clones"])
     assert args.repo_clone_root == Path("/tmp/clones")
 
+
 def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     parser = _build_harvest_parser()
     args = parser.parse_args(["--snapshot-id", "a" * 64])
     assert args.repo_clone_root is None
+
 
 def test_cli_defers_repository_discovery_until_session_resolution(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path,
@@ -645,7 +658,6 @@ def test_cli_defers_repository_discovery_until_session_resolution(
     assert config.target is None
     assert config.pr_repo is None
     assert config.discover_github_provenance is True
-
 
 
 @pytest.mark.parametrize("capture", [False, True], ids=["capture-off", "store-only"])

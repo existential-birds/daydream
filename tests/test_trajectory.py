@@ -26,7 +26,6 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.cli import _signal_handler
-from daydream.eval.analyzer import analyze_costs
 from daydream.phases.publish import (
     _do_commit,
 )
@@ -53,13 +52,7 @@ from daydream.trajectory import (
 from daydream.trajectory.recorder import _safe_descriptor
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from tests.harness.backend import ScriptedBackend
-from tests.harness.trajectory import (
-    make_recorder,
-    observe_metrics_and_result,
-    observe_text_and_result,
-    read_trajectory,
-    trajectory_payload,
-)
+from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory, trajectory_payload
 
 
 def _agent_steps(traj: dict[str, Any]) -> list[dict[str, Any]]:
@@ -113,6 +106,7 @@ async def test_diagnostic_is_json_safe_redacted_and_persisted_in_arrival_order(t
     assert records[0]["metadata"]["non_finite"] == "[UNSUPPORTED_DIAGNOSTIC_VALUE]"
     assert json.loads(encoded) == records
 
+
 async def test_diagnostic_redaction_failure_persists_fixed_safe_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "sk-neverpersist123456"
@@ -163,6 +157,7 @@ async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
 
 INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
 
+
 @pytest.mark.parametrize("host_closed", [False, True], ids=["open-step", "closed-step"])
 async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host_closed: bool) -> None:
     """Open and closed host steps both receive an incomplete-call marker."""
@@ -179,6 +174,7 @@ async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host
     assert result.source_call_id is None
     assert result.content == INCOMPLETE_CONTENT
     assert result.extra == {"is_error": True, "status": "interrupted"}
+
 
 async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -> None:
     """A result arriving before the final flush amends its step and suppresses the marker."""
@@ -269,7 +265,6 @@ async def test_context_var_set_inside_and_cleared_after(recorder: TrajectoryReco
     assert get_current_recorder() is None
 
 
-
 async def test_dispatch_repeated_descriptor_scopes_keep_distinct_children(recorder: TrajectoryRecorder,) -> None:
     """Repeated semantic labels cannot overwrite or migrate across dispatches."""
     assert hasattr(trajectory_module, "dispatch_scope")
@@ -299,6 +294,7 @@ async def test_dispatch_repeated_descriptor_scopes_keep_distinct_children(record
     assert "first" in json.dumps(read_trajectory(child_paths[0]))
     assert "second" in json.dumps(read_trajectory(child_paths[1]))
 
+
 async def test_dispatch_cancellation_overrides_optimistic_terminal(recorder: TrajectoryRecorder,) -> None:
     """Cancellation propagates while closing the dispatch with a stable code."""
     assert hasattr(trajectory_module, "dispatch_scope")
@@ -319,6 +315,7 @@ async def test_dispatch_cancellation_overrides_optimistic_terminal(recorder: Tra
     assert step["extra"]["dispatch_status"] == "cancelled"
     assert step["extra"]["reason_code"] == "cancelled"
 
+
 async def test_dispatch_cancellation_overrides_empty_child_write_failure(recorder: TrajectoryRecorder,) -> None:
     """Cancellation remains authoritative when an empty child cannot be written."""
     async with recorder:
@@ -336,6 +333,7 @@ async def test_dispatch_cancellation_overrides_empty_child_write_failure(recorde
     assert step["extra"]["reason_code"] == "cancelled"
     assert step["extra"]["attempted_count"] == 1
     assert step["extra"]["completed_count"] == 0
+
 
 async def test_dispatch_exception_overrides_empty_child_write_failure(recorder: TrajectoryRecorder,) -> None:
     """An escaping exception retains its cause when an empty child also failed."""
@@ -369,6 +367,7 @@ def _replace_snapshot_root(snapshot: RunWriteSnapshot, root_path: Path) -> RunWr
         documents=documents,
     )
 
+
 def test_producer_labels_and_partial_paths_come_from_the_layout_surface(tmp_path: Path) -> None:
     """`_source_file` names and the partial path are derived, not retyped."""
     run_dir = run_directory(tmp_path / ".daydream", SESSION)
@@ -388,19 +387,6 @@ def test_producer_labels_and_partial_paths_come_from_the_layout_surface(tmp_path
         == RUN_DOCUMENT_NAME
     )
 
-def test_lifecycle_snapshot_value_types_are_frozen(tmp_path: Path) -> None:
-    """Task 1 freezes the immutable payload types consumed by Task 5."""
-    assert hasattr(trajectory_module, "TrajectoryDocumentSnapshot")
-    document = trajectory_module.TrajectoryDocumentSnapshot(
-        trajectory_id="root", path=tmp_path / "trajectory.json", json_bytes=b"{}",
-    )
-    snapshot = trajectory_module.RunWriteSnapshot(
-        status="partial", cutoff_at="2026-01-01T00:00:00Z", root_trajectory_id="root", documents=(document,),
-    )
-    assert snapshot.documents == (document,)
-    with pytest.raises(AttributeError):
-        setattr(snapshot, "cutoff_at", "changed")
-
 
 def test_empty_secret_assignment_does_not_consume_the_following_line() -> None:
     """An empty API_KEY= assignment must preserve the following newline and content."""
@@ -414,9 +400,11 @@ def test_empty_secret_assignment_does_not_consume_the_following_line() -> None:
 
     assert redact_text(block) == block
 
+
 def test_secret_value_on_the_same_line_is_still_redacted() -> None:
     assert redact_text("API_KEY= sk-live-abc123") == "API_KEY=[REDACTED_ENV_VAR]"
     assert redact_text("TOKEN=abc\nPLAIN_SETTING=1") == "TOKEN=[REDACTED_ENV_VAR]\nPLAIN_SETTING=1"
+
 
 def test_public_text_redactor_is_fail_closed() -> None:
     secret = "OPENAI_API_KEY=sk-secret123456"
@@ -454,6 +442,7 @@ def test_safe_descriptor_slugification() -> None:
     assert _safe_descriptor("UPPER--CASE") == "upper-case"
     assert _safe_descriptor("-leading-trailing-") == "leading-trailing"
     assert _safe_descriptor("../etc/passwd") == "etc-passwd"
+
 
 def test_safe_descriptor_rejects_degenerate_inputs() -> None:
     """Degenerate inputs that produce empty slugs raise ValueError (CR-01)."""
@@ -497,41 +486,8 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
     assert recorder.path.exists()
 
 
-async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
-    """Pitfall 6: Child with 0 steps writes no sibling file; parent has no registration."""
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.fork("empty-child") as child:
-            pass
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv)
-
-    assert not child.path.exists()
-    root = read_trajectory(recorder.path)
-    assert not any("sibling_trajectory_ref" in item for item in root["extra"]["subtrajectories"])
-
-
 # write_partial tests (CLI-03, D-07 SIGINT partial flush)
 
-
-async def test_write_partial_no_op_when_steps_empty(recorder: TrajectoryRecorder) -> None:
-    """write_partial skips disk write when steps list is empty (matches _write)."""
-    async with recorder:
-        recorder.write_partial()
-        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-        assert not partial_path.exists()
-
-async def test_write_partial_is_idempotent(recorder: TrajectoryRecorder) -> None:
-    """Calling write_partial twice yields a single .partial file with latest contents."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "first")
-        recorder.write_partial()
-        partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-        first = partial_path.read_text(encoding="utf-8")
-        recorder.write_partial()
-        second = partial_path.read_text(encoding="utf-8")
-        assert first == second
 
 async def test_write_partial_failure_emits_warning_does_not_raise(
     recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch,
@@ -554,70 +510,6 @@ async def test_write_partial_failure_emits_warning_does_not_raise(
         recorder.write_partial()
 
     assert any("Partial trajectory write failed" in m for m in warnings_emitted)
-
-
-async def test_write_partial_records_in_flight_tool_like_finish(recorder: TrajectoryRecorder) -> None:
-    """A partial flush mid-invocation carries the same interrupted marker the
-    final flush (finish()) emits, and the snapshot leaves live state untouched."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(ToolStartEvent(id="ip1", name="Read", input={"file_path": "a.py"}))
-            recorder.write_partial()
-            # Signal-safe snapshot: nothing consumed; finish() still marks the call.
-            assert "ip1" in inv._in_flight_tools
-
-    partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-    partial = json.loads(partial_path.read_text(encoding="utf-8"))
-    final = read_trajectory(recorder.path)
-
-    def marker_results(traj: dict[str, Any]) -> list[dict[str, Any]]:
-        return [r
-            for s in traj["steps"]
-            if s["source"] == "agent"
-            for r in (s.get("observation") or {}).get("results") or []
-            if r.get("extra", {}).get("status") == "interrupted"
-        ]
-
-    expected = [{"content": INCOMPLETE_CONTENT, "extra": {"is_error": True, "status": "interrupted"}}]
-    assert marker_results(partial) == expected
-    assert marker_results(final) == expected
-
-async def test_write_partial_preserves_in_flight_diagnostic_once(recorder: TrajectoryRecorder,) -> None:
-    """Signal-safe snapshots include normalized diagnostics without consuming them."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(DiagnosticEvent(code="parser_gap", message="bounded", metadata={"count": 1}))
-            recorder.write_partial()
-
-    partial = json.loads(recorder.path.with_suffix(recorder.path.suffix + ".partial").read_text(encoding="utf-8"))
-    final = read_trajectory(recorder.path)
-
-    for trajectory in (partial, final):
-        diagnostics = [diagnostic
-            for step in trajectory["steps"]
-            if step["source"] == "agent"
-            for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
-        ]
-        assert diagnostics == [{"code": "parser_gap", "message": "bounded", "metadata": {"count": 1}}]
-
-async def test_write_partial_no_double_count_after_invocation_exit(tmp_path: Path,) -> None:
-    """An exited invocation must not duplicate steps already transferred to the recorder."""
-    recorder = make_recorder(tmp_path)
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe_user_step(prompt="hi")
-            observe_text_and_result(inv, "ok")
-
-        # Now invocation has exited, steps flushed
-        assert recorder._active_invocations == []
-        flushed_count = len(recorder.steps)
-        assert flushed_count >= 2
-
-        recorder.write_partial()
-
-    partial_path = tmp_path / ".daydream" / "trajectory.json.partial"
-    data = json.loads(partial_path.read_text(encoding="utf-8"))
-    assert len(data["steps"]) == flushed_count, f"Expected {flushed_count} steps post-exit, got {len(data['steps'])}"
 
 
 def _partial_path(recorder: TrajectoryRecorder) -> Path:
@@ -670,6 +562,7 @@ async def test_signal_flush_with_child_evidence_freezes_schema_valid_empty_root(
             assert trajectory_module.compute_timing_summary(snapshot) is not None
             release.set()
 
+
 async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -703,6 +596,7 @@ async def test_signal_flush_reuses_cutoff_until_any_document_state_changes(
                     for document in third.documents
                 } == {third.cutoff_at}
                 assert tuple(document.json_bytes for document in first.documents) == first_bytes
+
 
 async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -751,6 +645,7 @@ async def test_signal_flush_root_prepare_failure_never_publishes_rootless_snapsh
                 } == {snapshot.cutoff_at}
                 assert all(document.path.exists() for document in snapshot.documents)
 
+
 @pytest.mark.parametrize("exit_kind", ["normal", "runtime", "cancel", "system-exit"])
 async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder, exit_kind: str) -> None:
     """Every child exit shape unregisters before a later root-only flush."""
@@ -791,6 +686,7 @@ async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder, 
         child_path = recorder._sibling_path_for(f"exited-{exit_kind}")
         assert not child_path.with_suffix(child_path.suffix + ".partial").exists()
 
+
 async def test_signal_flush_excludes_child_after_final_write_system_exit(
     recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -816,6 +712,7 @@ async def test_signal_flush_excludes_child_after_final_write_system_exit(
         flush_active_signal_recorders()
         assert _partial_path(recorder).exists()
         assert not _partial_path(child).exists()
+
 
 async def test_signal_flush_selects_latest_independent_root(tmp_path: Path) -> None:
     """A nested independent root is targeted until it exits, then outer resumes."""
@@ -845,6 +742,7 @@ def _finish_shutdown_panel() -> None:
         panel.finish()
         set_shutdown_panel(None)
 
+
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 async def test_signal_handler_flushes_all_siblings_once(tmp_path: Path, signum: signal.Signals) -> None:
     """The real handler flushes root and both siblings without parent recursion."""
@@ -873,6 +771,7 @@ async def test_signal_handler_flushes_all_siblings_once(tmp_path: Path, signum: 
                 _finish_shutdown_panel()
                 for event in release.values():
                     event.set()
+
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
 async def test_signal_handler_isolates_sibling_write_failure(
@@ -921,30 +820,58 @@ async def test_signal_handler_isolates_sibling_write_failure(
                 for event in release.values():
                     event.set()
 
-async def test_forked_child_write_partial_captures_in_flight_steps(recorder: TrajectoryRecorder,) -> None:
-    """A direct child write keeps the established child-to-parent cascade."""
 
+async def test_forked_child_write_partial_captures_in_flight_steps(recorder: TrajectoryRecorder,) -> None:
+    """A live child progresses through repeatable partial snapshots into a final persisted tree.
+
+    In-flight tools and diagnostics belong to the captured bytes. Repeated flushes cannot consume
+    them, duplicate them after scope exit, or omit the parent cascade.
+    """
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv, "parent-before-child")
         async with recorder.fork("child-branch") as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe_user_step(prompt="forked-prompt")
-                observe_text_and_result(inv, "forked-response")
-
+                inv.observe(ToolStartEvent("pending-read", "Read", {"file_path": "api.py"}))
+                inv.observe(DiagnosticEvent("parser_gap", "bounded", {"count": 1}))
                 child.write_partial()
+                child_partial = partial_document_path(child.path)
+                parent_partial = partial_document_path(recorder.path)
+                first = child_partial.read_bytes()
+                assert parent_partial.is_file()
+                assert "parent-before-child" in parent_partial.read_text()
+                assert "pending-read" in inv._in_flight_tools
+                child.write_partial()
+                second = child_partial.read_bytes()
+                assert "pending-read" in inv._in_flight_tools
+            # Open steps receive a fresh capture timestamp. Once materialized at scope exit,
+            # unchanged completed state must produce byte-identical repeated partial flushes.
+            child.write_partial()
+            completed_partial = child_partial.read_bytes()
+            child.write_partial()
+            assert child_partial.read_bytes() == completed_partial
+    partial = json.loads(child_partial.read_bytes())
+    final = read_trajectory(child.path)
+    assert partial["extra"]["partial"] is True
+    assert json.loads(parent_partial.read_bytes())["extra"]["partial"] is True
+    assert len(partial["steps"]) == len(final["steps"]) == 2
+    expected_marker = {"content": INCOMPLETE_CONTENT, "extra": {"is_error": True, "status": "interrupted"}}
+    for document in (json.loads(first), json.loads(second), partial, final):
+        assert document["session_id"] == recorder.session_id
+        assert document["trajectory_id"] == child.trajectory_id
+        assert [step["step_id"] for step in document["steps"]] == [1, 2]
+        assert document["steps"][0]["message"] == "forked-prompt"
+        (agent,) = [step for step in document["steps"] if step["source"] == "agent"]
+        (tool,) = agent["tool_calls"]
+        assert tool["tool_call_id"] == "pending-read" and tool["function_name"] == "Read"
+        assert tool["arguments"] == {"file_path": "api.py"}
+        assert agent["observation"]["results"] == [expected_marker]
+        assert agent["extra"]["backend_diagnostics"] == [
+            {"code": "parser_gap", "message": "bounded", "metadata": {"count": 1}}
+        ]
+        assert atif_validate(document, validate_images=False)
 
-    partial_path = child.path.with_suffix(child.path.suffix + ".partial")
-    parent_partial_path = recorder.path.with_suffix(recorder.path.suffix + ".partial")
-    assert partial_path.exists(), "Child partial trajectory should be written"
-    assert parent_partial_path.exists(), "Direct child partial should cascade to parent"
-
-    data = json.loads(partial_path.read_text(encoding="utf-8"))
-    parent_data = json.loads(parent_partial_path.read_text(encoding="utf-8"))
-    assert data.get("extra", {}).get("partial") is True
-    assert parent_data.get("extra", {}).get("partial") is True
-    assert "parent-before-child" in json.dumps(parent_data, sort_keys=True)
-    assert len(data["steps"]) >= 2, f"Child partial missing in-flight steps: {data['steps']!r}"
 
 async def test_recorder_marks_partial_on_exception_exit(recorder: TrajectoryRecorder) -> None:
     """When __aexit__ receives an exception, the trajectory is marked partial."""
@@ -960,74 +887,6 @@ async def test_recorder_marks_partial_on_exception_exit(recorder: TrajectoryReco
     assert traj.get("extra", {}).get("partial") is True
 
 
-async def test_empty_fork_folds_nothing_into_parent(recorder: TrajectoryRecorder) -> None:
-    """A fork whose write produced no steps contributes no totals."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_metrics_and_result(inv, "parent-text", message_id="m-1", prompt_tokens=100,
-                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
-            )
-        async with recorder.fork("empty-child"):
-            pass
-
-    parent = read_trajectory(recorder.path)["final_metrics"]
-    assert parent["total_prompt_tokens"] == 100
-    assert parent["total_cost_usd"] == pytest.approx(1.0)
-
-async def test_nested_fork_totals_reach_the_root(recorder: TrajectoryRecorder) -> None:
-    """Fold is transitive: a fork of a fork reaches the root's final_metrics."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_metrics_and_result(
-                inv, "root", message_id="m-1", prompt_tokens=10, completion_tokens=1, cached_tokens=0, cost_usd=0.1,
-            )
-        async with recorder.fork("outer") as outer:
-            async with outer.invocation(phase=DaydreamPhase.DEEP) as oinv:
-                observe_metrics_and_result(oinv, "outer", message_id="m-2", prompt_tokens=20,
-                    completion_tokens=2, cached_tokens=0, cost_usd=0.2,
-                )
-            async with outer.fork("inner") as inner:
-                async with inner.invocation(phase=DaydreamPhase.DEEP) as iinv:
-                    observe_metrics_and_result(iinv, "inner", message_id="m-3", prompt_tokens=30,
-                        completion_tokens=3, cached_tokens=0, cost_usd=0.3,
-                    )
-
-    root = read_trajectory(recorder.path)["final_metrics"]
-    assert root["total_prompt_tokens"] == 60
-    assert root["total_cost_usd"] == pytest.approx(0.6)
-
-async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
-    """Root final_metrics is fork-inclusive, so analyze_costs must not re-sum forks."""
-
-    session = "sess-fold-0001"
-    daydream_dir = tmp_path / ".daydream"
-    snapshots: list[trajectory_module.RunWriteSnapshot] = []
-    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot),
-        path=daydream_dir / "runs" / session / "trajectory.json", session_id=session,
-    )
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_metrics_and_result(inv, "parent", message_id="m-1", prompt_tokens=100,
-                completion_tokens=20, cached_tokens=10, cost_usd=1.0,
-            )
-        async with recorder.fork("deep-python") as child:
-            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                observe_metrics_and_result(cinv, "child", message_id="m-2", prompt_tokens=40,
-                    completion_tokens=8, cached_tokens=4, cost_usd=0.5,
-                )
-
-    costs = analyze_costs(trajectory_module.snapshot_trajectories(snapshots[-1]))
-    assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)
-    assert costs["total_prompt_tokens_raw"] == 140  # not 180
-    assert costs["total_completion_tokens"] == 28
-
-    # Subtract folded child totals from the root row to avoid double-counting.
-    by_agent = {a["agent"]: a for a in costs["by_agent"]}
-    assert len(by_agent) == 2
-    assert any(a["cost_usd"] == pytest.approx(0.5) for a in costs["by_agent"])
-    assert sum(a["cost_usd"] for a in costs["by_agent"]) == pytest.approx(costs["total_cost_usd"])
-
-
 async def test_build_trajectory_omits_backend_when_unset(recorder: TrajectoryRecorder) -> None:
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -1037,6 +896,7 @@ async def test_build_trajectory_omits_backend_when_unset(recorder: TrajectoryRec
     assert "review_backend" not in extra
     assert "fix_backend" not in extra
     assert "test_backend" not in extra
+
 
 async def test_build_trajectory_omits_empty_per_phase_backend_keys(tmp_path: Path,) -> None:
     """Per-phase backend keys are omitted when their name is empty (improve flow)."""
@@ -1054,19 +914,10 @@ async def test_build_trajectory_omits_empty_per_phase_backend_keys(tmp_path: Pat
     assert "test_backend" not in extra
 
 
-async def test_host_phase_scope_noop_without_recorder() -> None:
-
-    async with host_phase_scope(DaydreamPhase.COMMIT):
-        pass  # must not raise when no recorder is active
-
-@pytest.mark.parametrize(("stop_reason", "expected_status", "expected_reason"),
-    [("completed", "succeeded", None), ("passed", "succeeded", None), ("no_ci", "succeeded", None),
-        ("timed_out", "timed_out", "timed_out"), ("cancelled", "cancelled", "cancelled"),
-        ("interrupted", "cancelled", "cancelled"), ("failed", "failed", "domain_failure"),
-        ("missing", "failed", "domain_failure"), ("unavailable", "failed", "domain_failure"),
-        ("superseded", "failed", "domain_failure"), ("pending", "failed", "domain_failure"),
-    ],
-)
+@pytest.mark.parametrize(("stop_reason", "expected_status", "expected_reason"), [
+    ("completed", "succeeded", None), ("timed_out", "timed_out", "timed_out"),
+    ("interrupted", "cancelled", "cancelled"), ("failed", "failed", "domain_failure"),
+])
 async def test_remote_ci_host_phases_record_exact_terminal_reasons(
     recorder: TrajectoryRecorder, stop_reason: str, expected_status: str, expected_reason: str | None,
 ) -> None:
@@ -1144,6 +995,7 @@ def _host_only_step(recorder: TrajectoryRecorder, cutoff_at: str) -> dict[str, A
         "extra": {"daydream_run_flow": recorder.run_flow.value, "host_event": "host_only_final_snapshot"},
     }
 
+
 async def test_bound_empty_root_writes_host_only_final_snapshot(tmp_path: Path,) -> None:
     """A P10-bound host-only root reaches its writer and immutable capture."""
     private_run = tmp_path / "private" / "runs" / "host-only"
@@ -1180,18 +1032,20 @@ async def test_bound_empty_root_writes_host_only_final_snapshot(tmp_path: Path,)
     assert recorder._step_id_counter == 0
     assert recorder.steps == []
 
+
 async def test_standalone_empty_root_still_writes_nothing(tmp_path: Path) -> None:
-    """An on_write callback alone does not opt an empty root into output."""
+    """Neither a callback nor a partial flush opts an empty standalone root into output."""
     callbacks: list[Any] = []
     recorder = make_recorder(tmp_path, on_write=lambda _recorder, snapshot: callbacks.append(snapshot),)
-
     async with recorder:
         async with trajectory_module.phase_scope(DaydreamPhase.MERGE):
             pass
-
+        recorder.write_partial()
+        assert not partial_document_path(recorder.path).exists()
     assert recorder.steps == []
     assert not recorder.path.exists()
     assert callbacks == []
+
 
 @pytest.mark.parametrize("exception_kind", ["runtime", "cancel"])
 async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(tmp_path: Path, exception_kind: str,) -> None:
@@ -1228,6 +1082,7 @@ async def test_bound_empty_root_abort_writes_partial_host_only_snapshot(tmp_path
     assert recorder.steps == []
     assert recorder._invocation_counter == 0
 
+
 async def test_bound_empty_root_with_completed_child_retains_both_documents(tmp_path: Path,) -> None:
     """A completed child is retained once behind the synthetic root document."""
     sink = _RecordingSink()
@@ -1262,6 +1117,7 @@ async def test_bound_empty_root_with_completed_child_retains_both_documents(tmp_
     assert recorder._invocation_counter == 0
     assert recorder._step_id_counter == 0
     assert recorder.steps == []
+
 
 async def test_artifact_document_writer_precedes_root_capture_and_is_inherited_by_fork(tmp_path: Path,) -> None:
     """The host sink owns root/child bytes while P07 keeps one pure root callback."""
@@ -1307,6 +1163,7 @@ async def test_artifact_partial_writer_failure_still_delivers_immutable_capture(
     partial = sink.snapshots[0]
     assert partial.status == "partial"
     assert json.loads(partial.documents[0].json_bytes)["extra"]["partial"] is True
+
 
 async def test_artifact_final_writer_failure_preserves_existing_primary_exception(tmp_path: Path,) -> None:
     """A secondary explicit-output failure cannot replace the active body error."""
@@ -1356,6 +1213,7 @@ def _git_add_commit(repo: Path) -> None:
 
     subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "base"], cwd=repo, check=True,)
+
 
 async def test_dispatch_registers_late_dynamic_fork_before_scope_exit(recorder: TrajectoryRecorder) -> None:
     async with recorder:

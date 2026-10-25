@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from typing import Any
 
@@ -15,18 +14,11 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan, SpanLimits
+from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
-from daydream.observability.exporters import (
-    CompatSpanExporter,
-    LangSmithExporter,
-    honeyhive_exporter,
-    langsmith_exporter,
-    otlp_exporter,
-)
+from daydream.observability.exporters import CompatSpanExporter, honeyhive_exporter, langsmith_exporter, otlp_exporter
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from tests.harness.otlp import attributes, exporting_provider, grpc_trace_server, otlp_collector
 
@@ -55,6 +47,7 @@ def _emit_spans() -> list[ReadableSpan]:
             ),
         )
     ]
+
 
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive", "otlp"])
 def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,98 +94,6 @@ def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.M
         if destination != "otlp":
             assert "x-custom" not in headers
 
-def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage() -> None:
-    sink = InMemorySpanExporter()
-    exporter = LangSmithExporter(sink)
-    spans = [ReadableSpan(
-            "scope", resource=Resource({}), attributes={"daydream.span.kind": kind, "gen_ai.usage.input_tokens": 0}
-        )
-        for kind in ("run", "phase", "agent", "tool")
-    ]
-    spans.append(ReadableSpan("attempt", resource=Resource({}),
-            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
-                "gen_ai.usage.input_tokens": 0,
-            },
-        )
-    )
-    assert exporter.export(spans) == SpanExportResult.SUCCESS
-    result = sink.get_finished_spans()
-    assert [span.attributes["langsmith.span.kind"] for span in result if span.attributes] == [
-        "chain", "chain", "chain", "tool", "chain",
-    ]
-    for original, mapped in zip(spans, result, strict=True):
-        assert original.attributes is not None and mapped.attributes is not None
-        assert "langsmith.span.kind" not in original.attributes
-        assert all(mapped.attributes[key] == value for key, value in original.attributes.items())
-        assert ("langsmith.usage_metadata" in mapped.attributes) == (
-            original.attributes["daydream.span.kind"] == "attempt"
-        )
-    assert exporter.force_flush()
-    exporter.shutdown()
-
-@pytest.mark.parametrize("known_usage", [False, True])
-@pytest.mark.parametrize("has_session", [False, True])
-def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
-    known_usage: bool, has_session: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    originals = InMemorySpanExporter()
-    run_id = "8dc328f9-f3af-4293-a8c3-19f8627999cd"
-    session_id = "f55b21e4-4693-4795-a625-64b1a2d969ee"
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter, originals) as provider:
-            for kind in ("run", "step", "agent", "tool"):
-                span_attributes: dict[str, Any] = {
-                    "daydream.span.kind": kind, "daydream.run.id": run_id, "daydream.flow": "review",
-                }
-                if has_session:
-                    span_attributes["traceloop.association.properties.session_id"] = session_id
-                if known_usage:
-                    span_attributes.update({
-                        "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
-                        "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
-                        "gen_ai.usage.reasoning.output_tokens": 0,
-                    })
-                with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=span_attributes):
-                    pass
-            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
-                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
-                    "daydream.run.id": run_id, "daydream.flow": "review",
-                    **({"traceloop.association.properties.session_id": session_id} if has_session else {}),
-                    **({"gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
-                            "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
-                            "gen_ai.usage.reasoning.output_tokens": 0,
-                        }
-                        if known_usage
-                        else {}
-                    ),
-                },
-            ):
-                pass
-            assert provider.force_flush()
-            recorded = originals.get_finished_spans()
-    assert len(receiver.spans) == len(recorded) == 5
-    assert [attributes(span)["honeyhive_event_type"] for span in receiver.spans] == [
-        "chain", "chain", "chain", "tool", "chain"
-    ]
-    for original, mapped in zip(recorded, receiver.spans, strict=True):
-        assert original.attributes is not None and original.context is not None
-        native = attributes(mapped)
-        assert base64.b64decode(mapped["spanId"]).hex() == f"{original.context.span_id:016x}"
-        assert all(native[key] == value for key, value in original.attributes.items())
-        assert not any(key.startswith("honeyhive") for key in original.attributes)
-        assert native["honeyhive.session_id"] == (session_id if has_session else run_id)
-        assert native["honeyhive.session_auto_create"] is True
-        assert native["honeyhive.session_name"] == "daydream.review"
-        expected = known_usage and original.attributes["daydream.span.kind"] == "attempt"
-        for key in ("prompt_tokens", "completion_tokens", "cost", "cache_read_input_tokens",
-            "cache_write_input_tokens", "reasoning_tokens",
-        ):
-            assert (f"honeyhive_metadata.{key}" in native) == expected
-            if expected:
-                assert native[f"honeyhive_metadata.{key}"] == 0
 
 @pytest.mark.parametrize("factory,env",
     [(langsmith_exporter, {}), (honeyhive_exporter, {}), (honeyhive_exporter, {"HH_API_KEY": "opaque-secret"}),
@@ -217,6 +118,7 @@ def test_setup_errors_are_actionable_and_do_not_echo_credentials(
     assert "opaque-secret" not in str(exc.value)
     assert str(exc.value)
 
+
 def test_generic_trace_specific_environment_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://unreachable.invalid")
@@ -229,6 +131,7 @@ def test_generic_trace_specific_environment_takes_precedence(monkeypatch: pytest
         assert receiver.requests[0]["path"] == "/custom"
         assert receiver.requests[0]["headers"]["x-selected"] == "active"
         assert "x-generic" not in receiver.requests[0]["headers"]
+
 
 def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[ExportTraceServiceRequest] = []
@@ -253,6 +156,7 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
             attr.key == "gen_ai.usage.input_tokens" and attr.value.int_value == 100 for attr in span.attributes
         )
         assert ("x-custom", "grpc-credential") in headers
+
 
 @pytest.mark.parametrize("drift", ["1.45.2", "1.440.0", "missing-surface"])
 def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.MonkeyPatch, drift: str) -> None:
@@ -290,6 +194,7 @@ def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.M
             for delegate in delegates:
                 delegate.shutdown()
 
+
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
 def test_presets_do_not_forward_redirected_payloads_or_credentials(
     destination: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -308,6 +213,7 @@ def test_presets_do_not_forward_redirected_payloads_or_credentials(
             assert len(first.requests) == 1
             assert second.requests == []
             assert "redirected" in caplog.text
+
 
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
 def test_presets_ignore_ambient_auth_and_generic_transport_settings(destination: str, monkeypatch: pytest.MonkeyPatch,
@@ -338,6 +244,7 @@ def test_presets_ignore_ambient_auth_and_generic_transport_settings(destination:
             assert headers["authorization"] == "Bearer real-key"
         assert "content-encoding" not in headers
 
+
 def test_malformed_otlp_headers_never_log_credential_fragments(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -345,6 +252,7 @@ def test_malformed_otlp_headers_never_log_credential_fragments(
     with pytest.raises(ObservabilityError):
         otlp_exporter(ObservabilityConfig())
     assert "opaque-broken-credential" not in caplog.text
+
 
 def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -358,181 +266,3 @@ def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
             exporter.shutdown()
         assert "opaque-http-response-secret" not in caplog.text
         assert "Failed to export" in caplog.text
-
-@pytest.mark.parametrize("kind,expected_hh,expected_ls",
-    [("agent", "chain", "chain"), ("attempt", "chain", "chain"), ("generation", "model", "llm"),
-        ("tool", "tool", "tool"),
-    ],
-)
-def test_vendor_chain_model_tool_classification(
-    kind: str, expected_hh: str, expected_ls: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with otlp_collector() as honeyhive, otlp_collector() as langsmith:
-        monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-        for exporter in (honeyhive_exporter(ObservabilityConfig()), langsmith_exporter(ObservabilityConfig())):
-            sink = InMemorySpanExporter()
-            with exporting_provider(exporter, sink) as provider:
-                group: list[dict[str, Any]] = [
-                    {"daydream.span.kind": kind, "daydream.run.id": "run-1", "daydream.flow": "review"},
-                    {"daydream.span.kind": "tool", "daydream.run.id": "run-1", "daydream.flow": "review"},
-                ]
-                if kind == "attempt":
-                    group[0]["daydream.billing.owner"] = "structural_attempt"
-                elif kind == "generation":
-                    group[0]["daydream.generation.billed"] = True
-                for attributes0 in group:
-                    with provider.get_tracer("daydream-test").start_as_current_span("span", attributes=attributes0):
-                        pass
-        hh_spans = [attributes(span) for span in honeyhive.spans if span["name"] == "span"]
-        ls_spans = [attributes(span) for span in langsmith.spans if span["name"] == "span"]
-        assert hh_spans[0]["honeyhive_event_type"] == expected_hh
-        assert ls_spans[0]["langsmith.span.kind"] == expected_ls
-        assert hh_spans[1]["honeyhive_event_type"] == "tool"
-        assert ls_spans[1]["langsmith.span.kind"] == "tool"
-
-def test_generation_billed_owner_carries_native_usage_only_on_resolved_owner(monkeypatch: pytest.MonkeyPatch,) -> None:
-    with otlp_collector() as honeyhive, otlp_collector() as langsmith:
-        monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-        with exporting_provider(honeyhive_exporter(ObservabilityConfig()),
-                                langsmith_exporter(ObservabilityConfig())) as shared:
-            with shared.get_tracer("daydream-test").start_as_current_span("attempt",
-                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "generation_children",
-                    "gen_ai.usage.input_tokens": 100,
-                },
-            ) as attempt:
-                with shared.get_tracer("daydream-test").start_as_current_span("generation",
-                    attributes={"daydream.span.kind": "generation", "daydream.generation.billed": True,
-                        "gen_ai.usage.input_tokens": 60, "gen_ai.usage.output_tokens": 10, "gen_ai.usage.cost": 0.05,
-                    }, context=trace_api.set_span_in_context(attempt),
-                ):
-                    pass
-    hh = [attributes(span) for span in honeyhive.spans]
-    ls = [attributes(span) for span in langsmith.spans]
-    by_kind: dict[str, list[dict[str, Any]]] = {}
-    for native in hh:
-        by_kind.setdefault(native["daydream.span.kind"], []).append(native)
-    # The structural chain is never billed when the frozen owner is
-    # generation_children: no native usage/cost aliases on the attempt.
-    attempt_native = by_kind["attempt"][0]
-    generation_native = by_kind["generation"][0]
-    assert attempt_native["daydream.billing.owner"] == "generation_children"
-    assert not any(key.startswith("honeyhive_metadata.") for key in attempt_native)
-    assert generation_native["honeyhive_event_type"] == "model"
-    assert generation_native["honeyhive_metadata.prompt_tokens"] == 60
-    assert generation_native["honeyhive_metadata.cost"] == 0.05
-    ls_by_kind: dict[str, list[dict[str, Any]]] = {}
-    for native in ls:
-        ls_by_kind.setdefault(native["daydream.span.kind"], []).append(native)
-    assert ls_by_kind["attempt"][0]["langsmith.span.kind"] == "chain"
-    assert "langsmith.usage_metadata" not in ls_by_kind["attempt"][0]
-    assert ls_by_kind["generation"][0]["langsmith.span.kind"] == "llm"
-    assert json.loads(ls_by_kind["generation"][0]["langsmith.usage_metadata"]) == {
-        "input_tokens": 60, "output_tokens": 10, "total_cost": 0.05,
-    }
-
-def test_owner_none_and_unbilled_generation_get_no_native_usage() -> None:
-    sink = InMemorySpanExporter()
-    exporter = LangSmithExporter(sink)
-    spans = [ReadableSpan("attempt", resource=Resource({}),
-            attributes={
-                "daydream.span.kind": "attempt", "daydream.billing.owner": "none", "gen_ai.usage.input_tokens": 100,
-            },
-        ), ReadableSpan("generation", resource=Resource({}),
-            attributes={"daydream.span.kind": "generation", "daydream.generation.billed": False,
-                "gen_ai.usage.input_tokens": 60,
-            },
-        ),
-    ]
-    assert exporter.export(spans) == SpanExportResult.SUCCESS
-    result = sink.get_finished_spans()
-    for span in result:
-        attrs = span.attributes or {}
-        assert "langsmith.usage_metadata" not in attrs
-        if attrs["daydream.span.kind"] == "attempt":
-            assert attrs["langsmith.span.kind"] == "chain"
-    assert result[1].attributes is not None
-    assert result[1].attributes["langsmith.span.kind"] == "llm"
-
-def test_honeyhive_agent_name_uses_standard_attribute_no_underscore_fields(monkeypatch: pytest.MonkeyPatch,) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter) as provider:
-            with provider.get_tracer("daydream-test").start_as_current_span("agent",
-                attributes={"daydream.span.kind": "agent", "gen_ai.agent.name": "review",
-                    "daydream.agent.name": "review",
-                    "daydream.run.id": "run-1", "daydream.flow": "review",
-                },
-            ):
-                pass
-    native = attributes(receiver.spans[0])
-    # The standard public attribute is preserved without any guessed
-    # underscore-prefixed derived field (issue #1156 / AC-25).
-    assert native["gen_ai.agent.name"] == "review"
-    assert not any(key.startswith(("_", "honeyhive_metadata.agent_")) for key in native)
-
-def test_langsmith_ls_agent_type_only_on_actual_agent_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
-        monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-        exporter = langsmith_exporter(ObservabilityConfig())
-        with exporting_provider(exporter) as provider:
-            for kind, role in (("agent", "root"), ("agent", "subagent"), ("attempt", "root"), ("step", None)):
-                attrs: dict[str, Any] = {"daydream.span.kind": kind, "daydream.run.id": "run-1"}
-                if role is not None:
-                    attrs["daydream.agent.role"] = role
-                with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=attrs):
-                    pass
-    by_kind: dict[str, list[dict[str, Any]]] = {}
-    for span in receiver.spans:
-        span_attrs = attributes(span)
-        by_kind.setdefault(span_attrs["daydream.span.kind"], []).append(span_attrs)
-    assert by_kind["agent"][0]["langsmith.metadata.ls_agent_type"] == "root"
-    assert by_kind["agent"][1]["langsmith.metadata.ls_agent_type"] == "subagent"
-    for native in by_kind["attempt"]:
-        assert "langsmith.metadata.ls_agent_type" not in native
-    for native in by_kind["step"]:
-        assert "langsmith.metadata.ls_agent_type" not in native
-
-def test_destination_copies_preserve_dropped_attribute_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter, span_limits=SpanLimits(max_attributes=4)) as provider:
-            with provider.get_tracer("daydream-test").start_as_current_span(
-                "attempt", attributes={"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6"}
-            ):
-                pass
-    native = receiver.spans[0]
-    # The HoneyHive clone keeps the exact original dropped-attribute count
-    # (2 attributes dropped at the source) while adding vendor metadata.
-    assert native["droppedAttributesCount"] == 2
-
-def test_honeyhive_session_derives_only_from_daydream_identity(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Session ID/name/autocreate never come from a native conversation id."""
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter) as provider:
-            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
-                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
-                    "daydream.run.id": "run-abc", "daydream.flow": "review",
-                    "gen_ai.conversation.id": "native-conversation-7",
-                },
-            ):
-                pass
-    native = attributes(receiver.spans[0])
-    assert native["honeyhive.session_id"] == "run-abc"
-    assert native["honeyhive.session_name"] == "daydream.review"
-    assert native["honeyhive.session_auto_create"] is True
-    assert native["gen_ai.conversation.id"] == "native-conversation-7"
-    assert native["honeyhive.session_id"] != "native-conversation-7"

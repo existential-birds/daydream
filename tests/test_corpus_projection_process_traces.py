@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from tests.harness.record_projection import projection_config, seed_projection_store
 from tests.test_corpus_projection import _read_jsonl
@@ -26,7 +28,9 @@ def test_flag_off_is_the_default(tmp_path: Path) -> None:
     off_dir, _out_off = _build(tmp_path / "b", emit_process_traces=False)
     assert (off_dir / "corpus.jsonl").read_bytes() == (out_dir / "corpus.jsonl").read_bytes()
 
+
 def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> None:
+    """Validate emitted mixed-type records; hand-built schema examples miss serializer drift."""
     out_dir, out = _build(tmp_path, emit_process_traces=True)
     records = _read_jsonl(out_dir / "corpus.jsonl")
     types = {r["record_type"] for r in records}
@@ -53,6 +57,9 @@ def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> No
     assert derived
     ids = [r["record_id"] for r in records]
     assert len(ids) == len(set(ids)), "record_ids must be unique across types"
+    schema = json.loads((out_dir / "schema.json").read_text())
+    for record in records:
+        jsonschema.validate(record, schema)
     for rec in derived:
         assert rec["schema_version"] == "3"
         assert rec["session_id"] == "sess-a"

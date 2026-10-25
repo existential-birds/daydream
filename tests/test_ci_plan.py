@@ -108,11 +108,10 @@ def _group(base: str, head: str) -> dict[str, Any]:
     }}
 
 
-@pytest.mark.parametrize("path", [
-    "docs/guide.md", "README.md", "rl/daydream_review/uv.lock", "daydream/prompts/review.md",
-    "daydream/templates/workflows/README.md", "uv.lock", "tests/test_contract.py", ".github/workflows/ci.yml",
+@pytest.mark.parametrize(("path", "queue"), [
+    ("docs/guide.md", False), ("rl/daydream_review/uv.lock", False),
+    ("docs/guide.md", True), ("rl/daydream_review/uv.lock", True), ("tests/test_contract.py", True),
 ])
-@pytest.mark.parametrize("queue", [False, True])
 def test_ci_cli_pr_checks_require_verified_active_queue(
     git_repo: Path, ci_cli: Callable[..., tuple[str, str]], path: str, queue: bool,
 ) -> None:
@@ -165,7 +164,7 @@ def test_ci_cli_verifies_queue_ruleset_at_its_origin(
 
 
 @pytest.mark.parametrize("fault", [
-    "always", "pull_request", "exempt", "omitted", "null", "object", "string", "inaccessible",
+    "always", "omitted", "null", "object", "string", "inaccessible",
     "malformed", "wrong-id", "wrong-source", "wrong-source-type", "wrong-target", "inactive",
     "missing-queue", "missing-origin", "invalid-id", "other-queue-bypass", "float-id",
     "null-source", "empty-source", "null-source-type", "unknown-source-type",
@@ -176,7 +175,7 @@ def test_ci_cli_queue_bypass_or_unverified_ruleset_keeps_full_pr_gate(
     rules = json.loads(json.dumps(_ACTIVE_RULES))
     ruleset: Any = json.loads(json.dumps(_QUEUE_RULESET))
     replies: dict[str, Any] = {_RULES: rules, _RULESET: ruleset}
-    if fault in {"always", "pull_request", "exempt"}:
+    if fault == "always":
         ruleset["bypass_actors"] = [{"actor_id": 7, "actor_type": "Team", "bypass_mode": fault}]
     elif fault == "omitted":
         del ruleset["bypass_actors"]

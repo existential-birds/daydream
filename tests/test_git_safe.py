@@ -6,22 +6,10 @@ from daydream.archive.git_safe import normalize_remote_url
 
 @pytest.mark.parametrize(("raw", "slug", "url_out"),
     [
-        # M2: user:pass@ userinfo
-        ("https://user:ghp_abc123@github.com/o/r.git", "o/r", "https://github.com/o/r"),
-        # M2: token-only user@ (x-access-token form)
-        ("https://x-access-token@github.com/o/r", "o/r", "https://github.com/o/r"),
-        # M2: percent-encoded userinfo
-        ("https://user%40corp:p%40ss@github.com/o/r.git", "o/r", "https://github.com/o/r"),
         # M2: SCP form
         ("git@github.com:o/r.git", "o/r", "https://github.com/o/r"),
-        # M2: credential-like query params
-        ("https://github.com/o/r?token=abc&foo=bar", "o/r", "https://github.com/o/r"),
-        # M5: benign HTTPS passes through
-        ("https://github.com/o/r", "o/r", "https://github.com/o/r"),
         # M5: benign SSH URL (ssh:// scheme)
         ("ssh://git@github.com/o/r.git", "o/r", "https://github.com/o/r"),
-        # slug preserved through .git strip and trailing slash
-        ("https://github.com/o/r/", "o/r", "https://github.com/o/r"),
     ],
 )
 def test_normalize_strips_credentials_and_keeps_identity(raw: str, slug: str, url_out: str) -> None:

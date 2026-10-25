@@ -10,16 +10,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     CostEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
     MetricsEvent,
     OspreyRequestConfig,
     RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
+    ToolResultEvent,
     TurnEndEvent,
 )
 from daydream.backends.osprey import (
@@ -64,11 +68,13 @@ async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_term
     else:
         assert "--allowed-root" not in argv
 
+
 def _over_limit_reader(payload: bytes) -> asyncio.StreamReader:
     reader = asyncio.StreamReader(limit=64)
     reader.feed_data(payload)
     reader.feed_eof()
     return reader
+
 
 async def _collect(
     backend: OspreyBackend, lines: list[dict[str, object]], *, returncode: int = 0,
@@ -98,6 +104,7 @@ async def _collect(
         ]
     return events, spawner
 
+
 async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
     stdout = _over_limit_reader(b"x" * 65)
     backend = OspreyBackend(osprey_binary="fake")
@@ -105,6 +112,7 @@ async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
         await _collect(backend, [], stdout_reader=stdout)
     assert exc_info.value.category == "PROTOCOL"
     assert backend._transports == []
+
 
 async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() -> None:
     """Replacement decoding may still leave invalid JSON; diagnose that as non-JSON rather than an
@@ -118,6 +126,7 @@ async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() 
     assert "byte limit" not in str(exc_info.value)
     assert "\ufffd" in str(exc_info.value)
     assert backend._transports == []
+
 
 async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes() -> None:
     lines = osprey_session({"event": "text_delta", "content": "x"})
@@ -135,17 +144,20 @@ async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes
     assert text.text == "x\ufffd"
     assert type(events[-1]) is ResultEvent
 
+
 async def test_oversized_stderr_diagnostic_does_not_fail_successful_run() -> None:
     lines = osprey_session()
     stderr = _over_limit_reader(b"diagnostic" * 8)
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines, stderr_reader=stderr)
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
+
 async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> None:
     lines = osprey_session()
     stderr = _over_limit_reader(b"provider authentication failed" * 3)
     with pytest.raises(OspreyError, match="stderr diagnostic line exceeded stream limit"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_reader=stderr)
+
 
 async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> None:
     secret = "sk-realvalue123"
@@ -160,32 +172,6 @@ async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> No
     assert secret not in diagnostics[0]
     assert "[REDACTED_ENV_VAR]" in diagnostics[0]
 
-async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
-    lines = osprey_session()
-    events, spawner = await _collect(
-        OspreyBackend(osprey_binary="fake"), lines,
-        stderr_lines=["2026-08-27T23:07:54Z INFO osprey_cli::headless: " "restoring remembered model preference"],
-    )
-    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
-    assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
-
-async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> None:
-    """Even successful children must be reaped, their pipes closed, and their transport removed."""
-    lines = osprey_session()
-    backend = OspreyBackend(osprey_binary="fake")
-    events, spawner = await _collect(backend, lines, workspace=tmp_path)
-    assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
-    kwargs = spawner.kwargs[0]
-    assert kwargs["start_new_session"] is True
-    assert kwargs["cwd"] == str(tmp_path)
-    assert kwargs["stderr"] is asyncio.subprocess.PIPE
-    assert len(spawner.procs) == 1
-    proc = spawner.procs[0]
-    assert proc.returncode == 0
-    assert proc.reaped, "the transport wait must reap the child even after a clean exit"
-    assert proc.stdin.closed, "the transport terminate must close the stdin pipe"
-    assert proc._transport.closed, "the transport terminate must release the pipe fds even after a clean exit"
-    assert backend._transports == [], "the finally must drop the transport from the backend list"
 
 async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
     lines = osprey_session()
@@ -207,57 +193,49 @@ async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
     ]
     assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["Let me think."]
 
-async def test_ignores_blank_thinking_deltas() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": ""},
-        {"event": "thinking_delta", "content": "  \n"},
-        {"event": "text_delta", "content": "Done."}, {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
-    )
-    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-    assert not any(isinstance(event, ThinkingEvent) for event in events)
 
-async def test_result_exposes_session_model_without_usage_metrics() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "text_delta", "content": "Done."},
-        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+async def test_osprey_turns_retain_thinking_boundaries_and_native_identity(tmp_path: Path) -> None:
+    """Retry-separated thinking and a later blank turn survive native transport into persisted steps."""
+    rows = osprey_session(
+        {"event": "turn_start", "turn_id": "first", "timestamp": "2026-08-15T00:00:01Z"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"},
+        {"event": "thinking_delta", "content": " think."},
+        {"event": "driver_retry"},
+        {"event": "thinking_delta", "content": "second attempt"},
+        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "first", "usage_reported": False},
+        {"event": "turn_start", "turn_id": "second", "timestamp": "2026-08-15T00:00:02Z"},
+        {"event": "thinking_delta", "content": ""},
+        {"event": "thinking_delta", "content": "  \n"},
+        {"event": "message_end", "messages": [{"type": "result", "data": {"content": "from message_end"}}]},
+        {"event": "turn_end", "turn_id": "second", "usage_reported": False},
     )
+    rows[-1]["total_turns"] = 2
+    process = FakeCliProcess([json.dumps(row) for row in rows], stderr_lines=["restoring native model"])
     backend = OspreyBackend(osprey_binary="fake")
     assert backend.model == "unknown"
-    events, _ = await _collect(backend, lines)
-    result = next(event for event in events if isinstance(event, ResultEvent))
-    assert result.model_name == "custom-model"
-    assert backend.model == "custom-model"
-
-async def test_separates_thinking_runs_at_protocol_boundaries() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "first attempt"}, {"event": "driver_retry"},
-        {"event": "thinking_delta", "content": "second attempt"}, {"event": "text_delta", "content": "Done."},
-        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
-    )
-    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["first attempt", "second attempt"]
-
-async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": "Let"},
-        {"event": "thinking_delta", "content": " me"}, {"event": "thinking_delta", "content": " think."},
-        {"event": "message_end", "messages": [{"type": "result", "data": {"content": "Done."}}]},
-        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
-    )
-    recorder = make_recorder(
-        tmp_path, path=tmp_path / "trajectory.json", agent_model_name="osprey", session_id="daydream-session",
-    )
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
-            invocation.observe_user_step("prompt")
-            events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-            for event in events:
-                invocation.observe(event)
-    trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
-    assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
+    recorder = make_recorder(tmp_path, agent_model_name="osprey")
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process) as spawn:
+        async with recorder:
+            output, continuation, reason = await run_agent(backend, tmp_path, "prompt", phase=DaydreamPhase.REVIEW)
+    assert (output, reason) == ("Done.from message_end", None)
+    assert continuation is not None and continuation.data["session_id"] == "s-137"
+    assert backend.model == "custom-model" and process.reaped
+    assert spawn.call_args.kwargs["start_new_session"] is True
+    assert spawn.call_args.kwargs["cwd"] == str(tmp_path)
+    assert spawn.call_args.kwargs["stderr"] is asyncio.subprocess.PIPE
+    assert process.returncode == 0 and process.stdin.closed and process._transport.closed
+    assert backend._transports == []
+    trajectory = json.loads(recorder.path.read_text())
+    steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
+    assert [step["message"] for step in steps] == ["Done.", "from message_end"]
+    assert steps[0]["reasoning_content"] == "Let me think.\nsecond attempt"
+    assert steps[1].get("reasoning_content") is None
+    assert all(step.get("metrics") is None and step["model_name"] == "custom-model" for step in steps)
     assert trajectory["agent"]["model_name"] == "custom-model"
-    assert trajectory["steps"][1]["model_name"] == "custom-model"
+    assert "total_cost_usd" not in trajectory["final_metrics"]
+
 
 async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
     lines = osprey_session(
@@ -272,6 +250,9 @@ async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
     events, _ = await _collect(OspreyBackend(model="custom-model", osprey_binary="fake"), lines)
     metrics = next(event for event in events if isinstance(event, MetricsEvent))
     result = next(event for event in events if isinstance(event, ResultEvent))
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert isinstance(request.config, OspreyRequestConfig) and request.timestamp_source == "native"
+    assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in events)
     assert metrics.prompt_tokens == 12
     assert metrics.completion_tokens == 7
     assert metrics.reasoning_tokens == 3
@@ -285,26 +266,6 @@ async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
         "exit_code": 0,
     }
 
-async def test_unreported_usage_permits_omitted_optional_telemetry() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
-    )
-    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-    assert [event.message_id for event in events if isinstance(event, TurnEndEvent)] == ["t-1"]
-    assert not any(isinstance(event, MetricsEvent) for event in events)
-
-async def test_message_end_reconstructs_result_when_no_text_delta_arrives() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "message_end", "messages": [{"type": "result", "data": {"content": "from message_end"}}]},
-        {
-            "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": None,
-            "usage_reported": False, "duration_ms": 0,
-        },
-    )
-    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-    assert [event.text for event in events if isinstance(event, TextEvent)] == ["from message_end"]
 
 async def test_protocol_version_and_unknown_events_fail_closed() -> None:
     backend = OspreyBackend(osprey_binary="fake")
@@ -321,31 +282,6 @@ async def test_protocol_version_and_unknown_events_fail_closed() -> None:
     with pytest.raises(OspreyProtocolError, match="unknown Osprey JSONL event"):
         await _collect(backend, unknown)
 
-def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path: Path) -> None:
-    backend = OspreyBackend(
-        model="m", osprey_binary="fake", approval="deny-untrusted", sandbox=True, allowed_roots=[tmp_path],
-    )
-    command = backend.build_command(
-        "prompt", output_schema_path=tmp_path / "schema.json",
-        continuation=ContinuationToken("osprey", {"session_id": "s", "mode": "fork"}), max_turns=3, read_only=True,
-    )
-    assert command[:11] == [
-        "fake", "agent", "--events-jsonl", "--observation-budget-update-bytes", "65536",
-        "--observation-budget-inline-bytes", "262144", "--observation-budget-admission-bytes", "2097152", "--model",
-        "m",
-    ]
-    assert "--read-only" in command
-    assert command[command.index("--fork-from") + 1] == "s"
-    assert command[command.index("--output-schema") + 1].endswith("schema.json")
-    assert command[command.index("--max-turns") + 1] == "3"
-    assert command[command.index("--approval") + 1] == "deny-untrusted"
-
-async def test_output_schema_is_temp_file_forwarded_and_cleaned() -> None:
-    lines = osprey_session()
-    _, spawner = await _collect(OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"})
-    command = list(spawner.argvs[0])
-    schema_path = Path(command[command.index("--output-schema") + 1])
-    assert not schema_path.exists()
 
 async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_path: Path) -> None:
     schema_path = tmp_path / "schema.json"
@@ -360,6 +296,7 @@ async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_p
         await _collect(OspreyBackend(osprey_binary="fake"), [], output_schema={"type": object})
     assert not schema_path.exists()
 
+
 def test_unsupported_policy_and_tool_search_options_fail_closed() -> None:
     with pytest.raises(OspreyUnsupportedOption, match="interactive approver"):
         OspreyBackend(approval="on-request").build_command("prompt")
@@ -368,6 +305,7 @@ def test_unsupported_policy_and_tool_search_options_fail_closed() -> None:
     with pytest.raises(OspreyUnsupportedOption, match="ephemeral-session"):
         OspreyBackend().build_command("prompt", persist_session=False)
 
+
 async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None:
     lines = osprey_session()
     lines[-1]["outcome"] = "budget_expired"
@@ -375,12 +313,38 @@ async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
     assert exc_info.value.outcome == "budget_expired"
 
+
 async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process_failure() -> None:
-    lines = osprey_session()
-    lines[-1]["outcome"] = "budget_expired"
-    with pytest.raises(OspreyError, match="return code 1") as exc_info:
-        await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1)
+    lines = osprey_session(
+        {"event": "turn_start", "turn_id": "failed-turn", "timestamp": "2026-08-15T00:00:01Z"},
+        {"event": "turn_end", "turn_id": "failed-turn", "usage_reported": True, "duration_ms": 80,
+         "prompt_tokens": 60, "completion_tokens": 5, "cached_tokens": 20, "cache_write_tokens": 30,
+         "thinking_tokens": 2, "cost_usd": "0.02"},
+    )
+    lines[-1].update(outcome="budget_expired", exit_code=1, total_prompt_tokens=60, total_completion_tokens=5,
+                     total_cached_tokens=20, total_cache_write_tokens=30, total_thinking_tokens=2,
+                     total_cost_usd="0.02", session_wallclock_ms=120)
+    process = FakeCliProcess([json.dumps(line) for line in lines], exit_code=1)
+    backend = OspreyBackend(osprey_binary="fake")
+    events: list[AgentEvent] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(OspreyError, match="return code 1") as exc_info:
+            async for event in backend.execute(Path("/repo"), "prompt"):
+                events.append(event)
     assert exc_info.value.category == "PROCESS_EXIT"
+    metric = next(event for event in events if isinstance(event, MetricsEvent))
+    assert (metric.started_at, metric.duration_ms, metric.cache_creation_tokens) == (
+        "2026-08-15T00:00:01Z", 80, 30,
+    )
+    cost = next(event for event in events if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens,
+            cost.reasoning_tokens, cost.cost_usd) == (60, 5, 20, 30, 2, 0.02)
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert (result.session_id, result.provider_name, result.finish_reason, result.duration_ms) == (
+        "s-137", "openai-compatible", "budget_expired", 120,
+    )
+    assert process.reaped and process.returncode == 1 and backend._transports == []
+
 
 async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
     lines = osprey_session()
@@ -388,6 +352,7 @@ async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
         await _collect(
             OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_lines=["provider authentication failed"],
         )
+
 
 @pytest.mark.parametrize(
     "events, message",
@@ -406,11 +371,13 @@ async def test_successful_session_end_requires_a_quiescent_stream(
     with pytest.raises(OspreyError, match=message):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
+
 async def test_terminal_exit_code_must_match_process_status() -> None:
     lines = osprey_session()
     lines[-1]["exit_code"] = 1
     with pytest.raises(OspreyError, match="exit_code"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
 
 def test_non_negative_int_helpers_reject_below_zero() -> None:
     event = {"event": "turn_end", "k": -1}
@@ -422,11 +389,13 @@ def test_non_negative_int_helpers_reject_below_zero() -> None:
     assert _required_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
     assert _optional_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
 
+
 async def test_negative_session_total_cost_is_rejected() -> None:
     lines = osprey_session()
     lines[-1]["total_cost_usd"] = "-0.125"
     with pytest.raises(OspreyError, match="total_cost_usd"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
 
 @pytest.mark.parametrize(
     "events, field",
@@ -458,6 +427,7 @@ async def test_negative_osprey_telemetry_is_rejected(events: list[dict[str, obje
     with pytest.raises(OspreyError, match=field):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
+
 @pytest.mark.parametrize(
     "events, message",
     [
@@ -482,14 +452,22 @@ async def test_invalid_turn_event_order_fails_closed(events: list[dict[str, obje
     with pytest.raises(OspreyProtocolError, match=message):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
+
 async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     lines = osprey_session(
+        {"event": "turn_start", "turn_id": "turn", "timestamp": "2026-08-15T00:00:01Z"},
         {"event": "tool_call", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "arguments": {"id": "7"}},
         {
             "event": "tool_result", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "status": "success",
-            "content": "payload", "duration_ms": 1,
+            "content": "payload", "duration_ms": 37,
         },
+        {"event": "turn_end", "turn_id": "turn", "usage_reported": True, "duration_ms": 80,
+         "prompt_tokens": 60, "completion_tokens": 5, "cached_tokens": 20, "cache_write_tokens": 30,
+         "thinking_tokens": 2, "cost_usd": "0.02"},
     )
+    lines[-1].update(total_prompt_tokens=60, total_completion_tokens=5, total_cached_tokens=20,
+                     total_cache_write_tokens=30, total_thinking_tokens=2, total_cost_usd="0.02",
+                     session_wallclock_ms=120)
     recorder = make_recorder(
         tmp_path, path=tmp_path / "trajectory.json", agent_model_name="osprey", session_id="daydream-session",
     )
@@ -504,10 +482,30 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     assert tool_call["function_name"] == "mcp.fetch"
     assert tool_call["tool_call_id"] == "c-2"
     assert trajectory["steps"][1]["observation"]["results"][0]["source_call_id"] == "c-2"
-    assert "cost_usd" not in trajectory["final_metrics"]
+    metrics = trajectory["steps"][1]["metrics"]
+    assert (metrics["prompt_tokens"], metrics["completion_tokens"], metrics["cached_tokens"], metrics["cost_usd"]) == (
+        60, 5, 20, 0.02,
+    )
+    assert trajectory["final_metrics"]["total_cost_usd"] == 0.02
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert request.timestamp == "2026-08-15T00:00:00Z"
+    metric = next(event for event in events if isinstance(event, MetricsEvent))
+    assert (metric.started_at, metric.duration_ms, metric.cache_creation_tokens, metric.reasoning_tokens) == (
+        "2026-08-15T00:00:01Z", 80, 30, 2,
+    )
+    tool = next(event for event in events if isinstance(event, ToolResultEvent))
+    assert (tool.duration_ms, tool.status) == (37, "success")
+    cost = next(event for event in events if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens,
+            cost.reasoning_tokens, cost.provider_name) == (60, 5, 20, 30, 2, "openai-compatible")
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert (result.session_id, result.provider_name, result.finish_reason, result.duration_ms) == (
+        "s-137", "openai-compatible", "completed", 120,
+    )
 
 
 # --- P18 Task 1: effective request-config admission at the Osprey argv seam --
+
 
 def _p18_osprey_events() -> list[dict[str, object]]:
     """Session events for a temperature-0, persona+toolset Osprey run."""
@@ -519,6 +517,7 @@ def _p18_osprey_events() -> list[dict[str, object]]:
             "duration_ms": 10, "prompt_tokens": 5, "completion_tokens": 3, "model": "custom-model",
         },
     ]
+
 
 async def test_osprey_request_event_temperature_and_label_presence_rules() -> None:
     """Explicit 0.0 is admitted; labels reduce to presence; mode closed values."""
@@ -555,6 +554,7 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     assert request.session_source == "native"
     assert request.timestamp_source == "native"
 
+
 @pytest.mark.parametrize("temperature", [None, 0.7])
 async def test_osprey_temperature_telemetry_matches_explicit_option(temperature: float | None) -> None:
     backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
@@ -590,16 +590,28 @@ async def test_osprey_temperature_telemetry_matches_explicit_option(temperature:
 
 async def test_osprey_resume_and_fork_continuation_modes() -> None:
     for mode, flag in (("resume", "--resume"), ("fork", "--fork-from")):
-        backend = OspreyBackend(model="custom-model", osprey_binary="fake")
+        backend = OspreyBackend(model="custom-model", osprey_binary="fake", approval="deny-untrusted")
         token = ContinuationToken(backend="osprey", data={"session_id": "s-9", "mode": mode})
-        events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()), continuation=token)
+        schema = {"type": "object"}
+        events, spawner = await _collect(
+            backend,
+            osprey_session(*_p18_osprey_events()),
+            continuation=token,
+            output_schema=schema,
+            max_turns=3,
+            read_only=True,
+        )
         argv = list(spawner.argvs[-1])
         assert flag in argv
         assert argv[argv.index(flag) + 1] == "s-9"  # token session drives argv
+        assert argv[:3] == ["fake", "agent", "--events-jsonl"]
+        assert "--read-only" in argv and argv[argv.index("--max-turns") + 1] == "3"
+        assert argv[argv.index("--approval") + 1] == "deny-untrusted"
+        assert not Path(argv[argv.index("--output-schema") + 1]).exists()
         request = next(e for e in events if isinstance(e, RequestEvent))
         config = request.config
         assert isinstance(config, OspreyRequestConfig)
-        assert config.continuation_mode == mode
+        assert config.continuation_mode == mode and request.output_schema == schema
         # Native handshake identity wins over the configured resume token.
         assert request.session_id == "s-137"
         assert request.session_source == "native"

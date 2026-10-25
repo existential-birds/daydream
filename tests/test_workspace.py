@@ -65,6 +65,7 @@ async def _open(repo: Path, owner: PrivateWorkspaceOwner, *, base: str = "main",
     ) as work:
         yield work
 
+
 def test_resolve_base_falls_back_when_pr_lookup_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("daydream.workspace.shutil.which", lambda _name: "/bin/gh")
     monkeypatch.setattr(
@@ -112,6 +113,7 @@ def _push_origin_commit_via_sidecar(tmp_path: Path, bare: Path, branch: str = "m
     _git(sidecar, "push", "origin", branch)
     return sha
 
+
 async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
     # Push a new commit to origin from a sidecar so we can prove no fetch ran.
@@ -134,6 +136,7 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
     # Source remains untouched after exit (no cleanup paths to assert).
     assert repo.exists()
 
+
 async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     expected_head = git_ops.head_sha(repo)
@@ -150,6 +153,7 @@ async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
 
     assert captured_path is not None
     assert not captured_path.exists()
+
 
 async def test_external_worktrees_use_supplied_private_workspace_owner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -184,6 +188,7 @@ async def test_external_worktrees_use_supplied_private_workspace_owner(monkeypat
     assert all(not path.exists() for path in captured)
     assert not (repo / ".daydream" / "worktrees").exists()
 
+
 async def test_open_workspace_without_owner_resolves_default_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -203,6 +208,7 @@ async def test_open_workspace_without_owner_resolves_default_once(monkeypatch: p
 
     assert lookups == 1
 
+
 async def test_open_workspace_rejects_wrong_supplied_owner_before_git_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -218,6 +224,7 @@ async def test_open_workspace_rejects_wrong_supplied_owner_before_git_mutation(
 
     assert _git(second_repo, "worktree", "list", "--porcelain") == before
     assert not (wrong_owner.operational_state_root / "operational").exists()
+
 
 async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: Path,) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
@@ -235,14 +242,13 @@ async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: P
     assert _git(repo, "rev-parse", "origin/main") != new_origin_sha
     assert not any("worktree " in line for line in _git(repo, "worktree", "list", "--porcelain").splitlines()[1:])
 
+
 @pytest.mark.parametrize("namespace,name,lock_state,broken,residue", [
-    pytest.param("worktrees", "run-old-reanchor", None, False, False, id="unlocked-reanchor"),
-    pytest.param("worktrees", "run-old-reanchor", "live", False, False, id="live-reanchor"),
-    pytest.param("worktrees", "run-old-reanchor", None, True, False, id="registry-listed-broken-git-chain"),
-    pytest.param("worktrees", "custom-named-worktree", "live", False, False, id="live-custom-name"),
-    pytest.param("audit", "run-crashed", "stale", False, False, id="stale-audit-lock"),
-    pytest.param("worktrees", "run-known-reanchor", None, False, True, id="registered-and-unknown-residue"),
-])
+        pytest.param("worktrees", "run-old-reanchor", None, True, False, id="registry-listed-broken-git-chain"),
+        pytest.param("worktrees", "custom-named-worktree", "live", False, False, id="live-custom-name"),
+        pytest.param("audit", "run-crashed", "stale", False, False, id="stale-audit-lock"),
+        pytest.param("worktrees", "run-known-reanchor", None, False, True, id="registered-and-unknown-residue"),
+    ])
 async def test_open_workspace_rejects_public_registered_worktrees_without_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, namespace: str, name: str,
     lock_state: str | None, broken: bool, residue: bool,
@@ -277,6 +283,7 @@ async def test_open_workspace_rejects_public_registered_worktrees_without_mutati
         assert unknown.read_bytes() == b"retain me"
     assert _git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational").exists()
+
 
 @pytest.mark.parametrize("namespace_shape", ["ancestor-symlink", "terminal-symlink", "ancestor-file", "terminal-file"],
 )
@@ -319,8 +326,6 @@ async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tm
     assert not (owner.operational_state_root / "operational" / name).exists()
 
 
-
-
 @pytest.mark.parametrize("contents", [
     pytest.param({"worktrees/run-old-reanchor/retained.txt": b"operator bytes\n"}, id="unregistered-directory"),
     pytest.param({"worktrees": None, "audit": None}, id="empty-operational-roots"),
@@ -349,9 +354,6 @@ async def test_open_workspace_rejects_public_operational_residue_without_removin
         assert path.is_dir() if data is None else path.read_bytes() == data
     assert _git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational").exists()
-
-
-
 
 
 async def test_open_workspace_still_refuses_different_ownership_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -383,31 +385,18 @@ async def test_open_workspace_still_refuses_different_ownership_worktree(monkeyp
     assert _git(repo, "worktree", "list", "--porcelain") == before
 
 
-
-async def test_ephemeral_uses_origin_branch_tip(tmp_path: Path) -> None:
-    repo, bare = _make_repo_with_origin(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "feat.txt").write_text("local\n")
-    _git(repo, "add", "feat.txt")
-    _commit(repo, "local feat")
-    _git(repo, "push", "-u", "origin", "feature")
-    # Add an extra commit on origin/feature via sidecar — origin tip diverges
-    # from the local feature branch.
-    new_sha = _push_origin_commit_via_sidecar(tmp_path, bare, branch="feature")
-    _git(repo, "checkout", "main")
-
-    async with open_workspace(repo, branch="feature", base="main", force_ephemeral=False, skip_tests=False,) as ctx:
-        assert ctx.is_ephemeral is True
-        # head_sha should be the origin tip (post-fetch), not local feature tip.
-        assert ctx.head_sha == new_sha
-        assert ctx.base_branch == "main"
-
-
 async def test_unknown_branch_raises(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     with pytest.raises(BranchNotFoundError):
-        async with open_workspace(repo, branch="nope-not-here", base="main", force_ephemeral=False, skip_tests=False,):
+        async with open_workspace(
+            repo,
+            branch="nope-not-here",
+            base="main",
+            force_ephemeral=False,
+            skip_tests=False,
+        ):
             pass  # pragma: no cover
+
 
 async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -422,12 +411,12 @@ async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
         assert ctx.base_branch == base_sha
         assert ctx.base_sha == base_sha  # merge-base of HEAD and its parent
 
+
 async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     with pytest.raises(BranchNotFoundError, match="base ref 'deadbeef' not found"):
         async with open_workspace(repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False):
             pass
-
 
 
 def _dest(tmp_path: Path) -> Path:
@@ -443,75 +432,6 @@ def _ignore(repo: Path, *patterns: str, message: str = "ignore env") -> None:
     _git(repo, "add", ".gitignore")
     _commit(repo, message)
 
-def test_copy_default_only_copies_gitignored(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env", ".env.local")
-
-    (repo / ".env").write_text("SECRET=1\n")
-    # Tracked, non-default-glob name: must not be copied.
-    (repo / ".env.committed").write_text("PUBLIC=1\n")
-    _git(repo, "add", ".env.committed")
-    _commit(repo, "tracked env-style")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-    rel = {str(p) for p in copied}
-    assert ".env" in rel
-    # .env.committed is tracked => not gitignored => not copied.
-    assert ".env.committed" not in rel
-    assert (dest / ".env").read_text() == "SECRET=1\n"
-
-def test_copy_default_skips_tracked_env(tmp_path: Path) -> None:
-    """A tracked ``.env`` file is not copied (already in the worktree)."""
-    repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".env").write_text("TRACKED=1\n")
-    _git(repo, "add", ".env")
-    _commit(repo, "track env")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-    assert copied == []
-    assert not (dest / ".env").exists()
-
-def test_copy_pyproject_override(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env", "local/", message="ignore env+local")
-
-    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["custom.cfg", "local/secrets.toml"]\n')
-    (repo / "custom.cfg").write_text("k=v\n")
-    (repo / "local").mkdir()
-    (repo / "local" / "secrets.toml").write_text("token = 'x'\n")
-    # And a .env that the override should *not* pull in.
-    (repo / ".env").write_text("SHOULD_BE_SKIPPED=1\n")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-    rel = {str(p) for p in copied}
-    assert "custom.cfg" in rel
-    assert str(Path("local/secrets.toml")) in rel
-    # Override replaces the default list entirely.
-    assert ".env" not in rel
-    assert (dest / "custom.cfg").read_text() == "k=v\n"
-    assert (dest / "local" / "secrets.toml").read_text() == "token = 'x'\n"
-
-def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) -> None:
-    """A valid TOML with a non-table ``tool`` value must not raise; defaults apply."""
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env")
-
-    # `tool` is a scalar string here — a chained .get() would raise AttributeError.
-    (repo / "pyproject.toml").write_text('tool = "not-a-table"\n')
-    (repo / ".env").write_text("SECRET=1\n")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-    rel = {str(p) for p in copied}
-    assert ".env" in rel
-    assert (dest / ".env").read_text() == "SECRET=1\n"
 
 @pytest.mark.parametrize("source_kind", ["config", "extra"])
 @pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
@@ -540,6 +460,7 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(tmp_path: Path, so
     assert not (dest / ".env").exists()
     # The external file was never read or modified.
     assert outside.read_text() == "KEEP\n"
+
 
 @pytest.mark.parametrize("root_kind", ["source", "destination"])
 def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
@@ -576,44 +497,6 @@ def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) ->
     assert not (outside_dir / "leak.txt").exists()
     assert secret.read_text() == "KEEP\n"
 
-def test_copy_allows_source_symlink_resolving_inside_source(tmp_path: Path,) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / "actual.cfg").write_text("inside\n")
-    # A RELATIVE symlink whose target stays inside the source root.
-    (repo / "inside-link.cfg").symlink_to("actual.cfg")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("inside-link.cfg")], skip=False)
-
-    assert copied == [Path("inside-link.cfg")]
-    assert (dest / "inside-link.cfg").read_text() == "inside\n"
-    assert not (dest / "inside-link.cfg").is_symlink()
-
-def test_copy_extra_paths_additive(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env", "workspace.json", message="ignore env+workspace")
-
-    (repo / ".env").write_text("E=1\n")
-    (repo / "workspace.json").write_text("{}\n")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("workspace.json")], skip=False,)
-    rel = {str(p) for p in copied}
-    assert ".env" in rel
-    assert "workspace.json" in rel
-
-def test_copy_skip_returns_empty(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    _ignore(repo, ".env")
-    (repo / ".env").write_text("E=1\n")
-
-    dest = _dest(tmp_path)
-
-    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("anything.cfg")], skip=True)
-    assert copied == []
-    assert not (dest / ".env").exists()
 
 async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -627,6 +510,7 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
 
     assert captured_path is not None
     assert not captured_path.exists()
+
 
 async def test_open_workspace_rejects_escape_without_persistent_copy(artifact_runtime_root: Path, tmp_path: Path
 ) -> None:
@@ -649,6 +533,7 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(artifact_ru
     assert len(operational_dirs) == 1
     assert not any(operational_dirs[0].iterdir())
 
+
 async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Warn on a stale local branch and review the fresher remote snapshot."""
     repo, bare = _make_repo_with_origin(tmp_path)
@@ -661,7 +546,7 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
     _git(repo, "push", "-u", "origin", "topic")
     # Push two more commits on origin/topic via sidecar.
     _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
-    _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
+    origin_tip = _push_origin_commit_via_sidecar(tmp_path, bare, branch="topic")
     # 'topic' is currently checked out in repo and now lags origin/topic.
 
     # Pin a wide recording console so the warning text is captured intact,
@@ -672,12 +557,14 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
 
     async with open_workspace(repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False) as ctx:
         assert ctx.is_ephemeral is True
+        assert ctx.head_sha == origin_tip and git_ops.head_sha(ctx.repo) == origin_tip
+        assert ctx.head_branch is None and ctx.base_branch == "main"
+    assert not ctx.repo.exists()
 
     out = rec.export_text()
     assert "topic is checked out in cwd" in out
     assert "2 commits behind origin/topic" in out
     assert "reviewing origin/topic" in out
-
 
 
 def _audit_source_signature(repo: Path) -> tuple[object, ...]:
@@ -688,6 +575,7 @@ def _audit_source_signature(repo: Path) -> tuple[object, ...]:
         (Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index"))).read_bytes(),
         _git(repo, "worktree", "list", "--porcelain"), _git(repo, "remote", "-v"),
     )
+
 
 @pytest.mark.anyio
 async def test_audit_workspace_binds_diff_base_to_recorded_head(tmp_path: Path) -> None:
@@ -706,6 +594,7 @@ async def test_audit_workspace_binds_diff_base_to_recorded_head(tmp_path: Path) 
         assert git_ops.list_remotes(audit.repo, strict=True) == []
         assert _git(audit.repo, "for-each-ref", "refs/remotes") == ""
 
+
 @pytest.mark.anyio
 async def test_audit_workspace_rejects_recorded_head_race_before_snapshot(tmp_path: Path,) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
@@ -722,6 +611,7 @@ async def test_audit_workspace_rejects_recorded_head_race_before_snapshot(tmp_pa
             pytest.fail("raced source yielded an audit workspace")
     assert str(repo) not in str(exc_info.value)
     assert _audit_source_signature(repo) == before
+
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ["malformed-head", "remove-after-preference"])
@@ -747,6 +637,7 @@ async def test_audit_workspace_redacts_diff_base_probe_failures(
     assert str(repo) not in message
     assert head not in message
     assert _audit_source_signature(repo) == before
+
 
 @pytest.mark.anyio
 async def test_audit_workspace_rejects_missing_cloned_diff_base_object(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -803,6 +694,7 @@ async def test_audit_workspace_rejects_missing_cloned_diff_base_object(tmp_path:
     assert str(repo) not in str(exc_info.value)
     assert git_ops.commit_exists(repo, common)
     assert _audit_source_signature(repo) == before
+
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("linked", [False, True])
@@ -871,6 +763,7 @@ async def test_audit_workspace_independent_of_source_storage(tmp_path: Path, lin
     assert _audit_source_signature(repo) == before
     assert outside.read_text() == "must not materialize"
 
+
 @pytest.mark.anyio
 async def test_audit_workspace_unborn_is_independent(tmp_path: Path) -> None:
     repo = tmp_path / "unborn-trunk"
@@ -897,6 +790,7 @@ async def test_audit_workspace_unborn_is_independent(tmp_path: Path) -> None:
     assert captured is not None and not captured.exists()
     assert _audit_source_signature(repo) == before
 
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("failure", [RuntimeError, SystemExit])
 async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path, failure: type[BaseException]) -> None:
@@ -910,6 +804,7 @@ async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path, failure
     assert captured is not None and not captured.exists()
     assert _audit_source_signature(repo) == before
 
+
 @pytest.mark.anyio
 async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> None:
 
@@ -922,9 +817,9 @@ async def test_audit_workspace_cleanup_runs_on_cancellation(tmp_path: Path) -> N
             await anyio.lowlevel.checkpoint()
     assert captured is not None and not captured.exists()
 
+
 @pytest.mark.anyio
-@pytest.mark.parametrize("primary", [False, True])
-@pytest.mark.parametrize("cleanup_error", [OSError, RuntimeError])
+@pytest.mark.parametrize(("primary", "cleanup_error"), [(False, OSError), (True, RuntimeError)])
 async def test_audit_workspace_cleanup_failure_preserves_primary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, primary: bool,
     cleanup_error: type[Exception],
@@ -948,6 +843,7 @@ async def test_audit_workspace_cleanup_failure_preserves_primary(
     assert len(cleanups) == 1
     if primary:
         assert "cleanup failed during primary error" in caplog.text
+
 
 @pytest.mark.anyio
 async def test_audit_workspace_preparation_failure_cleans_temporary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -984,6 +880,7 @@ async def test_audit_workspace_preparation_failure_cleans_temporary(tmp_path: Pa
     assert (outside / "child.txt").read_text() == "secret"
     assert _audit_source_signature(repo) == before
 
+
 @pytest.mark.anyio
 async def test_open_workspace_unborn_requires_explicit_opt_in(tmp_path: Path) -> None:
     repo = tmp_path / "unborn"
@@ -997,6 +894,7 @@ async def test_open_workspace_unborn_requires_explicit_opt_in(tmp_path: Path) ->
         assert work.is_unborn and work.head_sha is None and work.base_sha is None
         assert work.head_branch == work.base_branch == "trunk"
         assert work.repo == repo
+
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("options", [{"branch": "trunk"}, {"base": "trunk"}, {"force_ephemeral": True}])
@@ -1013,3 +911,84 @@ async def test_open_workspace_unborn_rejects_commit_anchored_options(tmp_path: P
             skip_tests=True, allow_unborn=True,
         ):
             pytest.fail("commit-anchored mode admitted unborn repository")
+
+
+async def test_ephemeral_support_files_follow_ignore_extra_and_skip_policy(tmp_path: Path) -> None:
+    """Actual worktrees preserve tracked bytes and copy only admitted local support files."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _ignore(repo, ".env.local", "workspace.json")
+    (repo / ".env").write_text("COMMITTED=1\n")
+    _git(repo, "add", ".env")
+    _commit(repo, "tracked environment")
+    (repo / ".env").write_text("DO_NOT_COPY_WORKING_TRACKED=1\n")
+    (repo / ".env.local").write_text("LOCAL=1\n")
+    (repo / "workspace.json").write_text("{}\n")
+    (repo / "actual.cfg").write_text("inside\n")
+    (repo / "inside-link.cfg").symlink_to("actual.cfg")
+    owner = _private_owner(repo, tmp_path)
+    before = _git(repo, "status", "--porcelain")
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=True,
+        extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
+        skip_tests=True,
+        private_owner=owner,
+    ) as skipped:
+        assert (skipped.repo / ".env").read_text() == "COMMITTED=1\n"
+        assert not (skipped.repo / ".env.local").exists()
+        assert not (skipped.repo / "workspace.json").exists()
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=True,
+        extra_copy=[Path("workspace.json"), Path("inside-link.cfg")],
+        skip_tests=False,
+        private_owner=owner,
+    ) as copied:
+        assert (copied.repo / ".env").read_text() == "COMMITTED=1\n"
+        assert (copied.repo / ".env.local").read_text() == "LOCAL=1\n"
+        assert (copied.repo / "workspace.json").read_text() == "{}\n"
+        assert (copied.repo / "inside-link.cfg").read_text() == "inside\n"
+        assert not (copied.repo / "inside-link.cfg").is_symlink()
+    assert not skipped.repo.exists() and not copied.repo.exists()
+    assert _git(repo, "status", "--porcelain") == before
+
+
+async def test_ephemeral_copy_configuration_overrides_then_falls_back_to_defaults(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _ignore(repo, ".env", ".env.local", "local/")
+    (repo / ".env").write_text("DEFAULT=1\n")
+    (repo / "custom.cfg").write_text("k=v\n")
+    (repo / "local").mkdir()
+    (repo / "local/secrets.toml").write_text("token = 'x'\n")
+    config = repo / "pyproject.toml"
+    config.write_text('[tool.daydream.workspace]\ncopy = ["custom.cfg", "local/secrets.toml"]\n')
+    owner = _private_owner(repo, tmp_path)
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=True,
+        skip_tests=False,
+        private_owner=owner,
+    ) as configured:
+        assert (configured.repo / "custom.cfg").read_text() == "k=v\n"
+        assert (configured.repo / "local/secrets.toml").read_text() == "token = 'x'\n"
+        assert not (configured.repo / ".env").exists()
+    config.write_text('tool = "not-a-table"\n')
+    async with open_workspace(
+        repo,
+        branch=None,
+        base="main",
+        force_ephemeral=True,
+        skip_tests=False,
+        private_owner=owner,
+    ) as fallback:
+        assert (fallback.repo / ".env").read_text() == "DEFAULT=1\n"
+        assert not (fallback.repo / "custom.cfg").exists()
+        assert not (fallback.repo / ".env.local").exists()
+    assert not configured.repo.exists() and not fallback.repo.exists()
+    assert (repo / "custom.cfg").read_text() == "k=v\n" and (repo / ".env").read_text() == "DEFAULT=1\n"

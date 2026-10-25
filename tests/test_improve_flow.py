@@ -132,12 +132,11 @@ def _flow_context_with_audit_root(root: Path, *, audit_repo: Path,) -> FlowConte
         audit_workspace=boundary,
     )
 
-_UNSUPPORTED_IMPROVE_BACKENDS = ("codex", "pi", "osprey")
-_UNSUPPORTED_IMPROVE_SELECTIONS = ("global", "recon", "audit", "vet", "plan_write",)
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("backend_name", _UNSUPPORTED_IMPROVE_BACKENDS)
-@pytest.mark.parametrize("selection", _UNSUPPORTED_IMPROVE_SELECTIONS)
+@pytest.mark.parametrize(("selection", "backend_name"), [
+    ("global", "pi"), ("recon", "codex"), ("audit", "pi"),
+    ("vet", "osprey"), ("plan_write", "osprey"),
+])
 async def test_unsupported_improve_backend_fails_atomic_preflight(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig, backend_name: str, selection: str, tmp_path: Path,
@@ -1209,27 +1208,21 @@ async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("effort", ["quick", "standard"])
-@pytest.mark.parametrize("initialized", [False, True])
 async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    effort: str, initialized: bool,
+    effort: str,
 ) -> None:
-    """Gitlinks are tracked paths, but the independent snapshot has no nested bytes.
-
-    Existing manifest journeys contain only ordinary files. A real local
-    submodule must preserve their audits and expose the unavailable content.
-    """
     repo = improve_monorepo_target
     nested = tmp_path / "submodule-origin"
     init_repo(nested)
     (nested / "nested.py").write_text("ONLY_IN_SUBMODULE = True\n")
     git(nested, "add", "nested.py")
     nested_commit = commit(nested, "seed the local submodule")
-    relative = "apps/billing/vendor"
-    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), relative)
-    commit(repo, "track a local submodule")
-    if not initialized:
-        git(repo, "submodule", "deinit", "-f", "--", relative)
+    initialized, uninitialized = "apps/billing/vendor-initialized", "apps/billing/vendor-uninitialized"
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), initialized)
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), uninitialized)
+    commit(repo, "track initialized and uninitialized submodules")
+    git(repo, "submodule", "deinit", "-f", "--", uninitialized)
     _pin_stack_availability(monkeypatch, tmp_path)
     before = (head_sha(repo), _git_status_porcelain(repo))
     backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
@@ -1237,25 +1230,31 @@ async def test_submodule_references_do_not_block_owned_files_or_claim_nested_con
     assert await _run_improve(make_config, repo, improve_effort=effort) == 0
 
     categories = EFFORT_TIERS[effort].categories or AUDIT_CATEGORIES
-    ordinary = set(git(repo, "ls-files").splitlines()) - {relative}
-    reference = {"path": relative, "commit": nested_commit}
+    ordinary = set(git(repo, "ls-files").splitlines()) - {initialized, uninitialized}
+    references = [{"path": initialized, "commit": nested_commit}, {"path": uninitialized, "commit": nested_commit}]
     for category in categories:
         assignments = [entry for entry in backend.assignment_reads if entry["category"] == category]
         assert Counter(path for entry in assignments for path in entry["primary_files"]) == Counter(ordinary)
-        assert [item for entry in assignments for item in entry["submodule_references"]] == [reference]
+        assert sorted([item for entry in assignments for item in entry["submodule_references"]],
+            key=lambda item: item["path"]) == references
     coverage = _load_improve_json(repo, "coverage.json")
     assert coverage["failed_assignments"] == {}
     assert coverage["not_audited"] == coverage["partially_audited"] == []
-    assert coverage["unavailable_submodule_contents"] == [{**reference, "file_count": None, "reason": "not-captured"}]
+    assert coverage["unavailable_submodule_contents"] == [
+        {**references[0], "file_count": None, "reason": "not-captured"},
+        {**references[1], "file_count": None, "reason": "not-captured"},
+    ]
     assert sum(group["primary_file_count"] for group in coverage["groups"]) == len(ordinary)
-    assert sum(group["submodule_reference_count"] for group in coverage["groups"]) == 1
+    assert sum(group["submodule_reference_count"] for group in coverage["groups"]) == 2
     report = improve_artifact(repo, "report.md").read_text()
-    assert "Submodule contents were not audited" in report and f"`{relative}`" in report
+    assert "Submodule contents were not audited" in report
+    assert f"`{initialized}`" in report and f"`{uninitialized}`" in report
     durable = repo / ".daydream/improve/primary-manifests"
     documents = [json.loads(path.read_text()) for path in durable.glob("group-*.json")]
-    assert [item for doc in documents for item in doc.get("submodule_references", [])] == [reference]
+    assert sorted([item for doc in documents for item in doc.get("submodule_references", [])],
+        key=lambda item: item["path"]) == references
     assert (head_sha(repo), _git_status_porcelain(repo)) == before
-    assert (repo / relative / "nested.py").exists() is initialized
+    assert (repo / initialized / "nested.py").exists() and not (repo / uninitialized / "nested.py").exists()
 
 
 @pytest.mark.anyio
@@ -1322,6 +1321,10 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert len(audit_calls) == 4  # quick also hunts tech-debt/code bloat
+    assert sorted(_load_improve_json(improve_scaled_monorepo_target, "audit-findings.json")["categories_run"]) == [
+        "correctness", "security", "tech-debt", "tests",
+    ]
+    assert all(call["read_only"] for call in audit_calls)
     for call in audit_calls:
         assert group_roots(call["prompt"]) == ["."]
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
@@ -1475,6 +1478,8 @@ async def test_vet_batches_are_bounded_and_parallel(
     code = await _run_improve(make_config, improve_monorepo_target, improve_focus="security", file_config=file_config)
 
     assert code == 0
+    assert _load_improve_json(improve_monorepo_target, "audit-findings.json")["categories_run"] == ["security"]
+    assert all(call["read_only"] for call in stub.calls if call["marker"] == "audit")
     vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
     assert len(vet_calls) == 3
     for call in vet_calls:
@@ -1713,22 +1718,6 @@ async def test_malformed_discovery_preserves_diagnostics_and_continues_audit(
         assert private_value not in console_output
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("effort", "focus", "expected_categories"),
-    [pytest.param("quick", None, ["correctness", "security", "tech-debt", "tests"], id="quick-effort",),
-        pytest.param("standard", "security", ["security"], id="focus-security"),
-    ],
-)
-async def test_effort_and_focus_select_the_audited_categories_read_only(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, effort: str, focus: str | None,
-    expected_categories: list[str], make_config: MakeConfig,
-) -> None:
-    await _run_improve(make_config, improve_monorepo_target, improve_effort=effort, improve_focus=focus)
-    audited = _load_improve_json(improve_monorepo_target, "audit-findings.json")
-    assert sorted(audited["categories_run"]) == expected_categories
-    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert audit_calls and all(call["read_only"] for call in audit_calls)
-
-@pytest.mark.anyio
 async def test_repo_with_no_test_files_still_receives_a_plan(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -1802,76 +1791,62 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("replacement", ["symlink-to-file", "file-to-symlink", "file-to-gitlink"])
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
     improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
-    replacement: str,
 ) -> None:
-    """Only final deletions are diff-only assignments; type replacements survive.
-
-    Git emits separate deletion/addition blocks for a type change. The same
-    real branch also keeps text/binary deletions to distinguish the two cases.
-    """
     repo = improve_branch_target
-    deleted = "web/App.tsx"
-    binary = "web/logo.png"
-    replaced = "apps/billing/replaced.py"
+    deleted, binary = "web/App.tsx", "web/logo.png"
+    regular, linked, gitlink = ("apps/billing/link-to-regular.py", "apps/billing/regular-to-link.py",
+        "apps/billing/regular-to-gitlink.py")
     target = "apps/billing/replacement-target.py"
     (repo / target).write_text("NEW_TARGET_CONTENT = True\n")
-    if replacement == "symlink-to-file":
-        (repo / replaced).symlink_to("replacement-target.py")
-    else:
-        (repo / replaced).write_text("OLD_REGULAR_CONTENT = True\n")
+    (repo / regular).symlink_to("replacement-target.py")
+    (repo / linked).write_text("OLD_LINK_CONTENT = True\n")
+    (repo / gitlink).write_text("OLD_GITLINK_CONTENT = True\n")
     (repo / binary).write_bytes(b"\x89PNG\x00binary payload")
-    git(repo, "add", binary, replaced, target)
-    commit(repo, "seed binary and replacement before the branch")
+    git(repo, "add", binary, regular, linked, gitlink, target)
+    commit(repo, "seed three tracked type replacements")
     git(repo, "branch", "-f", "main", "HEAD")
-    (repo / replaced).unlink()
-    reference = None
-    if replacement == "symlink-to-file":
-        (repo / replaced).write_text("SURVIVING_REGULAR_CONTENT = 12345\n")
-    elif replacement == "file-to-symlink":
-        (repo / replaced).symlink_to("replacement-target.py")
-    else:
-        nested = tmp_path / "replacement-origin"
-        init_repo(nested)
-        (nested / "nested.py").write_text("NESTED_CONTENT_NOT_CAPTURED = True\n")
-        git(nested, "add", "nested.py")
-        nested_commit = commit(nested, "seed replacement submodule")
-        git(repo, "rm", "--cached", "--", replaced)
-        git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), replaced)
-        reference = {"path": replaced, "commit": nested_commit}
+    (repo / regular).unlink()
+    (repo / regular).write_text("SURVIVING_REGULAR_CONTENT = 12345\n")
+    (repo / linked).unlink()
+    (repo / linked).symlink_to("replacement-target.py")
+    (repo / gitlink).unlink()
+    nested = tmp_path / "replacement-origin"
+    init_repo(nested)
+    (nested / "nested.py").write_text("NESTED_CONTENT_NOT_CAPTURED = True\n")
+    git(nested, "add", "nested.py")
+    nested_commit = commit(nested, "seed replacement submodule")
+    git(repo, "rm", "--cached", "--", gitlink)
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), gitlink)
+    reference = {"path": gitlink, "commit": nested_commit}
     (repo / "apps/billing/api.py").write_text('def service_name():\n    return "billing-v3"\n')
-    git(repo, "add", "apps/billing/api.py", replaced)
+    git(repo, "add", "apps/billing/api.py", regular, linked, gitlink)
     git(repo, "rm", deleted, binary)
-    commit(repo, "replace tracked type and remove frontend files on the audited branch")
-    source_bytes = (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
+    commit(repo, "replace three tracked types and delete frontend files")
+    source_bytes = {path: (repo / path).read_bytes() for path in (regular, linked, f"{gitlink}/nested.py")}
     before = (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage"))
     backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
 
     assert await _run_improve(make_config, repo, improve_focus="branch") == 0
 
     assert len(backend.assignment_reads) == len(AUDIT_CATEGORIES)
-    ordinary = [".gitmodules", "apps/billing/api.py"] if reference else ["apps/billing/api.py", replaced]
+    ordinary = [".gitmodules", "apps/billing/api.py", regular, linked]
     for assignment in backend.assignment_reads:
         assert assignment["primary_files"] == ordinary
-        assert assignment["deleted_files"] == sorted([deleted, binary])
-        assert assignment["submodule_references"] == ([reference] if reference else [])
-        if not reference:
-            assert assignment["primary_sha256"][replaced] == hashlib.sha256(source_bytes).hexdigest()
+        assert assignment["deleted_files"] == [deleted, binary]
+        assert assignment["submodule_references"] == [reference]
+        assert assignment["primary_sha256"][regular] == hashlib.sha256(source_bytes[regular]).hexdigest()
+        assert assignment["primary_sha256"][linked] == hashlib.sha256(source_bytes[linked]).hexdigest()
     coverage = _load_improve_json(repo, "coverage.json")
-    assert coverage["groups"][0]["primary_files"] == sorted(
-        ordinary + [deleted, binary] + ([replaced] if reference else [])
-    )
-    assert coverage["groups"][0]["file_count"] == len(ordinary) + 2 + bool(reference)
-    assert coverage["groups"][0]["submodule_reference_count"] == bool(reference)
+    assert coverage["groups"][0]["primary_files"] == sorted(ordinary + [deleted, binary, gitlink])
+    assert coverage["groups"][0]["file_count"] == 7
+    assert coverage["groups"][0]["submodule_reference_count"] == 1
     assert coverage["groups"][0]["status"] == "audited"
     assert coverage["not_audited"] == coverage["partially_audited"] == []
     assert (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage")) == before
-    assert (
-        (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
-    ) == source_bytes
-    assert (repo / replaced).is_symlink() is (replacement == "file-to-symlink")
+    assert {path: (repo / path).read_bytes() for path in source_bytes} == source_bytes
+    assert not (repo / regular).is_symlink() and (repo / linked).is_symlink()
 
 
 @pytest.mark.anyio
@@ -2500,18 +2475,6 @@ async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
     return await _run_improve(make_config, repo, improve_plan_description="add rate limiting")
 
 @pytest.mark.anyio
-async def test_plan_subverb_skips_audit_and_writes_single_plan(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
-) -> None:
-    code = await _run_plan_subverb(make_config, improve_monorepo_target)
-    assert code == 0
-    assert stub.calls and all(call["read_only"] for call in stub.calls)
-    assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
-    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert len(plans) == 1
-    assert "rate limiting" in plans[0].read_text().lower()
-
-@pytest.mark.anyio
 async def test_plan_subverb_repairs_schema_invalid_plan_once(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
@@ -2675,9 +2638,12 @@ async def test_sloppy_but_salvageable_output_is_normalized_and_written(
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
+    assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
+    assert stub.calls and all(call["read_only"] for call in stub.calls)
     assert len(plan_calls) == 1
     assert len(plans) == 1
     plan_text = plans[0].read_text(encoding="utf-8")
+    assert "rate limiting" in plan_text.lower()
     sloppy_role = "Billing role " + "x" * 293
     assert sloppy_role[:299] + "…" in plan_text
     assert sloppy_role not in plan_text
@@ -3099,44 +3065,36 @@ async def test_improve_timing_completeness_preserves_p09_audit_isolation(
     plan_diagnostics = json.loads((dd / "plan-write-diagnostics.json").read_text())
     assert (plan_diagnostics["artifact_provenance"]["session_id"] == trajectory["session_id"])
 
-_VET_FINDINGS = [{"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
-    {"fingerprint": "b", "title": "B", "path": "b.py", "line": 2},
-    {"fingerprint": "c", "title": "C", "path": "c.py", "line": 3},
-]
-
-
-def test_apply_vet_verdicts_normalizes_schema_severity_for_prioritization() -> None:
-    kept, _ = _apply_vet_verdicts(
-        [_VET_FINDINGS[0]], [{"vet_id": 1, "keep": True, "reason": "confirmed", "severity": "medium",}],
-        rejected_at_sha="sha",
-    )
-    assert kept[0]["severity"] == "MED"
-
 def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> None:
-    findings = [{"fingerprint": "original", "title": "Misattributed finding", "category": "correctness",
-            "path": "apps/billing/api.py", "line": 10, "body": "The evidence belongs to catalog.",
-            "evidence": ["`apps/billing/api.py:10`"],
-        }
-    ]
-    (tmp_path / "apps/billing").mkdir(parents=True)
-    (tmp_path / "apps/catalog").mkdir(parents=True)
-    (tmp_path / "apps/billing/api.py").write_text("first\n" * 10)
-    (tmp_path / "apps/catalog/api.py").write_text("first\n" * 20)
-    services = [Service("billing", Path("apps/billing"), "test"), Service("catalog", Path("apps/catalog"), "test"),]
+    for root, source in (("apps/billing", "first\n" * 10), ("apps/catalog", "first\n" * 20), ("frontend", "x = 1\n")):
+        (tmp_path / root).mkdir(parents=True)
+        (tmp_path / root / "api.py").write_text(source)
+    services = [Service("billing", Path("apps/billing"), "test"), Service("catalog", Path("apps/catalog"), "test"),
+        Service("frontend", Path("frontend"), "test")]
     partitions = [Partition("billing", "apps/billing", "test", "billing", ()),
         Partition("catalog", "apps/catalog", "test", "catalog", ()),
+        Partition("frontend", "frontend", "directory", None, ())]
+    findings: list[dict[str, Any]] = [
+        {"fingerprint": "original", "title": "Misattributed finding", "category": "correctness",
+            "path": "apps/billing/api.py", "line": 10, "body": "The evidence belongs to catalog.",
+            "evidence": ["`apps/billing/api.py:10`"]},
+        {"fingerprint": "frontend", "title": "Frontend finding", "category": "correctness", "severity": "high",
+            "path": "./frontend/api.py", "line": 1, "evidence": ["./frontend/api.py:1"]},
+        {"fingerprint": "unknown", "title": "Unknown severity", "severity": "CRITICAL"},
     ]
+    kept, rejected = _apply_vet_verdicts(findings, [
+        {"vet_id": 1, "keep": True, "path": "apps/catalog/api.py", "line": 20, "severity": "medium"},
+        {"vet_id": 2, "keep": True, "path": "./frontend/api.py", "line": 1}, {"vet_id": 3, "keep": True},
+    ], rejected_at_sha="sha", repo=tmp_path, services=services, partitions=partitions)
+    assert rejected == []
+    assert [(finding["evidence"], finding["services"], finding["partition"], finding["severity"])
+        for finding in kept[:2]] == [
+        (["`apps/catalog/api.py:20`"], ["catalog"], "catalog", "MED"),
+        (["./frontend/api.py:1"], ["frontend"], "frontend", "HIGH"),
+    ]
+    assert len(kept) == 3 and kept[0]["fingerprint"] != "original" and kept[1]["fingerprint"] != "frontend"
+    assert kept[2] == {"fingerprint": "unknown", "title": "Unknown severity"}
 
-    kept, _ = _apply_vet_verdicts(
-        findings, [{"vet_id": 1, "keep": True, "path": "apps/catalog/api.py", "line": 20}], rejected_at_sha="sha",
-        repo=tmp_path, services=services, partitions=partitions,
-    )
-
-    assert len(kept) == 1
-    assert kept[0]["evidence"] == ["`apps/catalog/api.py:20`"]
-    assert kept[0]["services"] == ["catalog"]
-    assert kept[0]["partition"] == "catalog"
-    assert kept[0]["fingerprint"] != "original"
 
 @pytest.mark.parametrize("citation", ["../outside.py:1", "missing.py:1", "valid.py:3", "valid.py:2:3",],)
 def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(tmp_path: Path, citation: str,) -> None:
@@ -3151,22 +3109,6 @@ def test_stamp_finding_rejects_evidence_crossing_a_symlink(tmp_path: Path,) -> N
     (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
     stamped = _stamp_finding({"evidence": ["escape/secret.py:1"]}, "security", [], [], repo=tmp_path,)
     assert stamped is None
-
-def test_stamp_finding_attributes_dot_slash_evidence_to_partition_and_service(tmp_path: Path,) -> None:
-    (tmp_path / "frontend").mkdir()
-    (tmp_path / "frontend" / "app.py").write_text("x = 1\n")
-
-    partition = Partition(
-        name="frontend", root="frontend", source="directory", service=None, files=("frontend/app.py",),
-    )
-    service = Service(name="frontend", root=Path("frontend"), source="config")
-    stamped = _stamp_finding(
-        {"evidence": ["./frontend/app.py:1"]}, "correctness", [service], [partition], repo=tmp_path,
-    )
-
-    assert stamped is not None
-    assert stamped["partition"] == "frontend"
-    assert stamped["services"] == ["frontend"]
 
 def _nested_service_repo(tmp_path: Path) -> Path:
     """A repo whose ``services/api/inner`` nests inside ``services/api``."""

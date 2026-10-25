@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,6 @@ import daydream.pr_comment_renderer as renderer
 from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import (
     FALLBACK_NOTE,
-    _format_duration,
     render_run_info,
     render_run_info_block,
 )
@@ -27,8 +27,6 @@ from tests.harness.trajectory import make_recorder, observe_claude_shape
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
 _SINGLE_PHASE = _FIXTURE_DIR / "single_phase_claude.json"
 _MULTI_PHASE_CODEX = _FIXTURE_DIR / "multi_phase_codex.json"
-_SIBLING_FIX = _FIXTURE_DIR / "sibling_fix.json"
-_MULTI_PHASE_CLAUDE = _FIXTURE_DIR / "multi_phase_claude.json"
 _MIXED_MODELS = _FIXTURE_DIR / "mixed_models.json"
 _CODEX_WITH_CACHED = _FIXTURE_DIR / "codex_with_cached.json"
 _UNKNOWN_MODEL = _FIXTURE_DIR / "unknown_model.json"
@@ -99,6 +97,7 @@ def _sonnet5_transition_step() -> dict[str, Any]:
     step["timestamp"] = "2026-08-31T12:00:00.000000Z"
     return step
 
+
 def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
     """Rendering after the transition uses the archived step's usage date."""
     step = _sonnet5_transition_step()
@@ -124,9 +123,6 @@ def test_m6b_user_override_synthesizes_cost_for_unknown_model(tmp_path: Path, mo
     assert "not in the price table" not in out
 
 
-
-
-
 def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     """Thousand separators on >=1,000; sub-cent cost renders <$0.01; cache-hit omitted when input == 0."""
     p = _single_phase_trajectory(tmp_path, name="subcent.json", prompt=500, completion=10, cached=0, cost_usd=0.001,)
@@ -149,12 +145,12 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "0 in → 10 out" in out3
 
 
-
 def test_value_and_path_renderers_are_byte_identical() -> None:
     paths = [_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B]
     trajectories = [Trajectory.model_validate_json(path.read_bytes()) for path in paths]
 
     assert render_run_info(trajectories) == render_run_info_block(paths)
+
 
 def test_value_renderer_does_not_read_ambient_user_prices(monkeypatch: pytest.MonkeyPatch,) -> None:
 
@@ -166,6 +162,7 @@ def test_value_renderer_does_not_read_ambient_user_prices(monkeypatch: pytest.Mo
 
     assert "- **Cost:**" in render_run_info([trajectory])
 
+
 def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
     trajectory = Trajectory.model_validate_json(_MULTI_PHASE_CODEX.read_bytes())
 
@@ -173,6 +170,7 @@ def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
 
     assert "- **Cost:** —" in rendered
     assert "not in the price table" in rendered
+
 
 def test_value_renderer_preserves_resolved_price_policy(tmp_path: Path) -> None:
     trajectory = Trajectory.model_validate_json(_write_trajectory(
@@ -203,20 +201,6 @@ def test_path_renderer_skips_price_lookup_when_no_document_is_valid(tmp_path: Pa
     assert attempts == 0
 
 
-def test_aggregates_across_multiple_trajectory_files() -> None:
-    """Parent and sibling fixes combine to 13K input, 6K cached, and 2.5K output.
-
-    Including review, the run totals 23K input, 11K cached, and 3.5K output."""
-    out = render_run_info_block([_MULTI_PHASE_CODEX, _SIBLING_FIX])
-    assert "23,000 in" in out
-    assert "11,000 cached" in out
-    assert "3,500 out" in out
-    assert "- **Steps / tool calls:** 3 / 4" in out
-    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert "13,000" in fix_row
-    assert "2,500" in fix_row
-
-
 def test_e2e_single_phase_claude_renders_full_block() -> None:
     out = render_run_info_block([_SINGLE_PHASE])
     assert "- **Mode:**" not in out
@@ -239,22 +223,6 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     assert "not in the price table" not in out
     assert out.rstrip().endswith("</sub>")
 
-def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
-    out = render_run_info_block([_MULTI_PHASE_CLAUDE])
-    assert "</details>" not in out
-    assert "- **Model:** claude-sonnet-4-5" in out
-    assert "- **Cost:** $0.18" in out
-    assert "- **Tokens:** 13,800 in (8,300 cached, 60% hit) → 3,100 out" in out
-    assert "- **Steps / tool calls:** 4 / 8" in out
-    rows = [line for line in out.splitlines() if line.startswith("| ") and "|" in line[2:]]
-    phase_rows = [r for r in rows if not r.startswith("| Phase |") and not r.startswith("|---")]
-    assert len(phase_rows) == 4
-    labels_in_order = [r.split("|")[1].strip() for r in phase_rows]
-    assert labels_in_order == ["Review", "Parse Feedback", "Fix", "Test & Heal"]
-    fix_row = next(r for r in phase_rows if r.startswith("| Fix |"))
-    assert "7,000" in fix_row
-    assert "2,000" in fix_row
-    assert "$0.10" in fix_row
 
 def test_e2e_mixed_models_renders_mixed_label() -> None:
     """Mixed Claude/Codex output retains both models and synthesizes missing Codex cost."""
@@ -272,6 +240,7 @@ def test_e2e_mixed_models_renders_mixed_label() -> None:
     assert "$0.03" in fix_row  # synthesized
     assert "not in the price table" not in out
 
+
 def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     """A 70% cache hit on gpt-5.5 yields $0.067, displayed as $0.07."""
     out = render_run_info_block([_CODEX_WITH_CACHED])
@@ -284,6 +253,7 @@ def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     assert "20,000" in review_row
     assert "$0.07" in review_row
 
+
 def test_e2e_unknown_model_emits_named_footnote() -> None:
     out = render_run_info_block([_UNKNOWN_MODEL])
     assert "- **Cost:** —" in out
@@ -294,6 +264,7 @@ def test_e2e_unknown_model_emits_named_footnote() -> None:
         # Columns: Phase, Model, Tools, Input (cached), Output, Cost, Latency
         assert cells[5] == "—", f"Cost cell should be '—' for unknown model: {row!r}"
     assert "<sub>Cost unavailable: model `gpt-6.0-experimental` is not in the price table.</sub>" in out
+
 
 def test_e2e_deep_mode_aggregates_fork_files() -> None:
     """Parent review/parse and two sibling fixes form one rollup with summed Fix totals."""
@@ -316,7 +287,6 @@ def test_e2e_deep_mode_aggregates_fork_files() -> None:
     assert "$0.07" in fix_row  # 0.04 + 0.03
 
 
-
 def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     """Cached tokens are a subset of prompt tokens, including in malformed input."""
     p = _single_phase_trajectory(tmp_path, prompt=10, completion=5, cached=20, cost_usd=0.0)
@@ -327,6 +297,7 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     cells = [c.strip() for c in review_row.split("|")]
     # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[4] == "10 (100%)"
+
 
 def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
     """Clamp corrupt negative counts to zero and omit the zero-cache hit ratio."""
@@ -356,6 +327,7 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     assert cells[2] == "gpt-5.5"
     assert "not in the price table" not in out
 
+
 def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
     """The backend name is a fallback, not an actual model identity."""
     p = _single_phase_trajectory(tmp_path, model="osprey", phase="exploration", prompt=0, completion=0, cached=0)
@@ -366,60 +338,6 @@ def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
     exploration_row = next(line for line in out.splitlines() if line.startswith("| Exploration |"))
     assert [cell.strip() for cell in exploration_row.split("|")][2] == "unknown"
     assert "| osprey |" not in out
-
-
-@pytest.mark.parametrize(("seconds", "expected"),
-    [(None, "—"), (0.0, "<1s"), (0.5, "<1s"), (0.999, "<1s"), (1.0, "1s"), (30.0, "30s"), (59.9, "59s"),
-        (60.0, "1m"), (61.0, "1m 1s"), (150.0, "2m 30s"), (3599.0, "59m 59s"), (3600.0, "1h"), (3660.0, "1h 1m"),
-        (7200.0, "2h"), (7380.0, "2h 3m"),
-    ], ids=["none", "zero", "half", "sub-second", "1s", "30s", "59s", "1m", "1m1s", "2m30s", "59m59s",
-        "1h", "1h1m", "2h", "2h3m",
-    ],
-)
-def test_format_duration(seconds: float | None, expected: str) -> None:
-    """_format_duration covers None, sub-second, seconds, minutes, and hours."""
-    assert _format_duration(seconds) == expected
-
-
-def test_duration_in_rollup() -> None:
-    out = render_run_info_block([_SINGLE_PHASE])
-    assert "- **Duration:** 1s" in out
-
-def test_latency_column_in_phase_table() -> None:
-    out = render_run_info_block([_MULTI_PHASE_CLAUDE])
-    assert "| Latency |" in out
-    # Each phase spans exactly 1 second in the fixture.
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    assert review_row.rstrip().endswith("| 1s |")
-    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert fix_row.rstrip().endswith("| 1s |")
-    # Total duration across all 4 phases: 00:00:00 to 00:00:07 = 7s.
-    assert "- **Duration:** 7s" in out
-
-def test_duration_degrades_gracefully(tmp_path: Path) -> None:
-    p = _write_trajectory(tmp_path,
-        steps=[{"step_id": 1, "timestamp": None, "source": "user", "message": "go",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            }, {"step_id": 2, "timestamp": None, "source": "agent", "message": "ok", "model_name": "gpt-5.5",
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-                "metrics": {"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 0, "cost_usd": 0.01},
-            },
-        ],
-    )
-    out = render_run_info_block([p])
-    assert "- **Duration:** —" in out
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    assert review_row.rstrip().endswith("| — |")
-
-def test_deep_mode_latency_aggregates_across_forks() -> None:
-    out = render_run_info_block([_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B])
-    # Fix phase: fork A starts at 01:00, fork B ends at 02:01 -> 61s.
-    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert fix_row.rstrip().endswith("| 1m 1s |")
-    # Total run: 00:00:00 to 02:00:01 -> 121s.
-    assert "- **Duration:** 2m 1s" in out
-
-
 
 
 def _write_reconciled_trajectory(tmp_path: Path) -> Path:
@@ -438,6 +356,7 @@ def _write_reconciled_trajectory(tmp_path: Path) -> Path:
 
     return asyncio.run(_build())
 
+
 def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -> None:
     """Render reconciled per-phase output totals, not the smaller message-usage sum."""
     path = _write_reconciled_trajectory(tmp_path)
@@ -447,3 +366,71 @@ def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -
     assert "50 out" not in rendered   # no collapsed value leaks
     assert "$0.50" in rendered
     assert "Cost unavailable" not in rendered
+
+
+def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path) -> None:
+    """A complete report renders heterogeneous phase durations and unions overlapping fork spans."""
+    start = datetime(2026, 5, 2, tzinfo=UTC)
+    spans = [
+        ("intent", 0.0, 0.5),
+        ("review", 1.0, 60.9),
+        ("parse", 61.0, 121.0),
+        ("fix", 122.0, 182.0),
+        ("test", 184.0, 3784.0),
+        ("verify", 3785.0, 7445.0),
+        ("diagram", None, None),
+    ]
+    steps: list[dict[str, Any]] = []
+    for phase, first, last in spans:
+        user = _user_step(phase)
+        user.update(
+            step_id=len(steps) + 1, timestamp=None if first is None else (start + timedelta(seconds=first)).isoformat()
+        )
+        agent = _agent_step(step_id=len(steps) + 2, phase=phase, model="gpt-5.5", cost_usd=0.01)
+        agent["timestamp"] = None if last is None else (start + timedelta(seconds=last)).isoformat()
+        steps.extend([user, agent])
+    parent = _write_trajectory(tmp_path, steps=steps)
+    fork = _write_trajectory(
+        tmp_path,
+        name="fork.json",
+        session_id="fork",
+        steps=[
+            {**_user_step("fix"), "timestamp": (start + timedelta(seconds=150)).isoformat()},
+            {
+                **_agent_step(step_id=2, phase="fix", model="gpt-5.5", cost_usd=0.01),
+                "timestamp": (start + timedelta(seconds=183)).isoformat(),
+            },
+        ],
+    )
+    report = render_run_info_block([parent, fork])
+    latencies = {
+        line.split("|")[1].strip(): line.split("|")[-2].strip()
+        for line in report.splitlines()
+        if line.startswith("| ") and not line.startswith("| Phase |")
+    }
+    assert latencies == {
+        "Understand Intent": "<1s",
+        "Review": "59s",
+        "Parse Feedback": "1m",
+        "Fix": "1m 1s",
+        "Test & Heal": "1h",
+        "Verify Recommendations": "1h 1m",
+        "Diagram": "—",
+    }
+    assert "| Latency |" in report and "- **Duration:** 2h 4m" in report
+
+
+def test_duration_degrades_gracefully(tmp_path: Path) -> None:
+    p = _write_trajectory(tmp_path,
+        steps=[{"step_id": 1, "timestamp": None, "source": "user", "message": "go",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+            }, {"step_id": 2, "timestamp": None, "source": "agent", "message": "ok", "model_name": "gpt-5.5",
+                "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
+                "metrics": {"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 0, "cost_usd": 0.01},
+            },
+        ],
+    )
+    out = render_run_info_block([p])
+    assert "- **Duration:** —" in out
+    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
+    assert review_row.rstrip().endswith("| — |")

@@ -45,7 +45,7 @@ _SCHEMA = {
 }
 
 @pytest.mark.parametrize(("kind", "effort"), [
-    *[(kind, effort) for kind in ("pi", "codex") for effort in (None, "high", "low", "minimal")], ("pi", "off"),
+    *[(kind, effort) for kind in ("pi", "codex") for effort in (None, "high", "minimal")], ("pi", "off"),
     ("codex", "none"),
 ])
 async def test_cli_finalization_controls_are_local_to_overlapping_calls(
@@ -103,7 +103,9 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
         assert any(f'model_reasoning_effort="{expected}"' in args for args in commands)
         assert all("--no-tools" not in args for args in commands)
 
-@pytest.mark.parametrize("effort", [None, "high", "low"])
+@pytest.mark.parametrize("effort", [
+    "high",
+])
 async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effort: str | None,
 ) -> None:

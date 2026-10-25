@@ -2,6 +2,7 @@
 Verify default/disabled evaluation and separate recommended versus reviewed patches in
 deep and shallow flows.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,6 +22,7 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive import scan
+from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
@@ -64,6 +66,7 @@ def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
     config.update(overrides)
     return RunConfig(**config)
 
+
 class _ArchiveCaptureBackend(StubBackend):
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if prompt.startswith("The daydream changes are already staged"):
@@ -81,11 +84,13 @@ class _ArchiveCaptureBackend(StubBackend):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
+
 def _deep_python_trajectory(run_dir: Path) -> Path:
     candidates = sorted((run_dir / "trajectories").glob("deep-python*.json"))
     assert len(candidates) == 1
     assert re.fullmatch(r"deep-python(?:--[0-9a-f]{64})?\.json", candidates[0].name)
     return candidates[0]
+
 
 def _install_deep_capture_backend(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, *, real_internal_phases: bool = False,
@@ -102,6 +107,7 @@ def _install_deep_capture_backend(
         monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok(**k),)
         monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
     return stub
+
 
 async def _run_real_phases_deep(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote, *,
@@ -133,6 +139,7 @@ async def _run_real_phases_deep(
     )
     return remote, exit_code
 
+
 async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
     before = kwargs["capture_tree_key"]()
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
@@ -142,6 +149,7 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
             passed=True, input_tree_key=before, output_tree_key=after,
         ),),
     )
+
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
@@ -167,6 +175,15 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     trajectory = json.loads((run_dir / "trajectory.json").read_text())
+    siblings = [json.loads(path.read_bytes()) for path in (run_dir / "trajectories").glob("*.json")]
+    assert len(siblings) >= 2
+    for document in (trajectory, *siblings):
+        assert document["session_id"] == manifest["session_id"]
+        assert atif_validate(document, validate_images=False)
+        assert [step["step_id"] for step in document["steps"]] == list(range(1, len(document["steps"]) + 1))
+        assert all(
+            step["extra"]["daydream_run_flow"] == "deep" for step in document["steps"] if step["source"] == "agent"
+        )
     assert not any("Run the project's test suite" in step.get("message", "") for step in trajectory["steps"])
     verdict = json.loads((multi_stack_target / ".daydream/deep/test-verdict.json").read_text())
     assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
@@ -176,6 +193,10 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert metrics["total_findings"] is not None
     assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is not None
+    assert metrics["erosion"] == metrics["verbosity"] == 0.0
+    with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
+        row = connection.execute("SELECT erosion, verbosity, total_findings, cost_per_finding_usd FROM runs").fetchone()
+    assert row == (0.0, 0.0, metrics["total_findings"], metrics["cost_per_finding_usd"])
     assert (run_dir / "evaluation.json").is_file()
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
     assert manifest["pipeline_status"] == "succeeded"
@@ -215,6 +236,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert verdicts["verdicts"][0]["issue_id"] == item["id"]
     assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
     assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]
+
 
 async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
@@ -287,6 +309,7 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     assert "reason_code" not in remote_ends[0]
     assert remote_ends[0]["metadata"]["stop_reason"] == "no_ci"
 
+
 async def test_deep_rejects_unauthorized_heal_file_before_archiving_recommendation(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
@@ -358,16 +381,19 @@ async def test_failed_findings_export_retains_requested_diagnostics(
     assert fake_gh.calls("POST") == []
     assert (bundle / "manifest.json").read_bytes() == (_only_archived_run(archive_dir) / "manifest.json").read_bytes()
 
+
 def _commit_scanned_file(target: Path, name: str, body: str) -> None:
     """Put source bytes through the real egress path: commit -> diff.patch -> archive scan."""
     (target / name).write_text(body, encoding="utf-8")
     git(target, "add", name)
     git(target, "commit", "-m", f"add {name}")
 
+
 async def _assert_target_is_reusable(target: Path) -> None:
     """Diagnostic publication must leave the target ready for another review."""
     exit_code = await run(_deep_run_config(target, output_mode="review"))
     assert exit_code == 0
+
 
 async def test_dump_artifacts_copies_credentials_in_diff(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
@@ -401,6 +427,7 @@ async def test_dump_artifacts_copies_credentials_in_diff(
     out = "".join(capfd.readouterr())
     assert all(canary not in out for canary in canaries)
     await _assert_target_is_reusable(multi_stack_target)
+
 
 @pytest.mark.parametrize("failure", ["evaluation", "filesystem", "index", "upload"])
 async def test_collection_failure_preserves_deep_review_exports(
@@ -460,17 +487,23 @@ async def test_collection_failure_preserves_deep_review_exports(
     if failure == "upload":
         archived = archive_dir / "runs" / document["session_id"]
         assert (archived / "trajectory.json").read_bytes() == trajectory.read_bytes()
+        assert (archived / "findings.json").read_bytes() == findings.read_bytes()
     out = "".join(capfd.readouterr())
     assert "Data Collection" in out
     assert "SECRET_COLLECTION_FAILURE" not in out
     assert "/private/runtime" not in out
+
 
 async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
-    exit_code = await run(_deep_run_config(multi_stack_target, run_eval=False,))
+    from daydream.commands.review import _parse_args
+
+    config = _parse_args([str(multi_stack_target), "--no-eval", "--yes", "--no-cleanup",
+                          "--test-command", f"{sys.executable} -c pass"])
+    exit_code = await run(config)
     assert exit_code == 0
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
@@ -480,6 +513,7 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is None
     assert not (run_dir / "evaluation.json").exists()
+
 
 def _fix_editing_backend(repo: Path) -> ScriptedBackend:
     """Use shallow dispatch with a real tracked main.py edit so recommended-patch capture is nonempty."""
@@ -524,6 +558,7 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
 
     return ScriptedBackend(responder=responder, model="mock-model")
 
+
 async def test_shallow_run_captures_recommended_patch(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
@@ -552,6 +587,14 @@ async def test_shallow_run_captures_recommended_patch(
     assert recommended_text != diff_text
     assert "+# daydream recommended change" in recommended_text
     assert "+# daydream recommended change" not in diff_text
+    manifest = json.loads((run_dir / "manifest.json").read_bytes())
+    assert (manifest["status"], manifest["run"]["flow"], manifest["run"]["skill"],
+            manifest["run"]["fix_backend"], manifest["run"]["test_backend"]) == (
+        "complete", "normal", "python", "claude", "claude")
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT status, run_flow, fix_backend, test_backend FROM runs").fetchall() == [
+            ("complete", "normal", "claude", "claude")]
+
 
 @pytest.mark.parametrize(("has_recommendation", "post_window", "expected_verdict", "expected_hunks"), [
     (True, "existing\nrecommended = 1\n", "applied", 1),
@@ -573,6 +616,7 @@ def test_fix_applied_signal_uses_captured_recommendation_only(
     assert signal.verdict == expected_verdict
     assert signal.hunks_total == signal.hunks_applied == expected_hunks
 
+
 @pytest.mark.parametrize(("file_contents", "expected_verdict"),
     [
         pytest.param("existing\nrecommended = 1\n", "applied", id="recommended-line-present"),
@@ -590,6 +634,7 @@ def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file
         file_at_fetcher=lambda repo, path, sha: file_contents,
     )
     assert sig.verdict == expected_verdict
+
 
 async def test_deep_run_archives_location_and_shipped_duplication_axes(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
@@ -648,6 +693,11 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert "grounding_rate" not in manifest["metrics"]
     assert manifest["metrics"]["total_findings"] == 3
+    assert (manifest["metrics"]["location_in_hunk_rate"], manifest["metrics"]["shipped_duplicate_pairs"]) == (0.6667, 1)
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT location_in_hunk_rate, shipped_duplicate_pairs FROM runs").fetchall() == [
+            (0.6667, 1)]
+
 
 class _CodexEvidenceBackend(StubBackend):
     """Emit one isolated standard-event evidence stream on the Python child."""
@@ -685,6 +735,7 @@ class _CodexEvidenceBackend(StubBackend):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
+
 def _install_codex_evidence_backend(target: Path, monkeypatch: pytest.MonkeyPatch, *, evidence: bool,
 ) -> _CodexEvidenceBackend:
     """Install the evidence backend while keeping unrelated phases tool-free."""
@@ -694,6 +745,7 @@ def _install_codex_evidence_backend(target: Path, monkeypatch: pytest.MonkeyPatc
     backend.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend,)
     return backend
+
 
 async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flags(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
@@ -739,6 +791,7 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
         "parser_coverage_gap",
     ]
 
+
 async def test_codex_evidence_integrity_clean_archive_stays_clean(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
@@ -753,6 +806,7 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     assert evaluation["tools"]["by_type"] == {"read": 1}
     assert training["noise_flags"] == []
     assert training["training_quality"] == "clean"
+
 
 async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
@@ -789,6 +843,7 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
         for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
     ]
     assert diagnostics[0]["metadata"]["warnings"]["reasons"] == {"tool_not_string": 1}
+
 
 class _JoinedArtifactEvidenceBackend(StubBackend):
     """Exercise sanctioned artifact reads at the external backend boundary."""
@@ -862,6 +917,7 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
                 yield replace(event, structured_output={**payload, "candidates": [candidate]},)
                 continue
             yield event
+
 
 async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, artifact_runtime_root: Path,
@@ -975,6 +1031,7 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     assert "grounding_rate" not in manifest["metrics"]
     assert "coverage_ratio" not in manifest["metrics"]
 
+
 def _retry_stop_event(*, reason: str, attempts: int, backoff_s: float, backend_s: float, retry_recovery_spent_s: float,
     circuit_state: str,
 ) -> dict[str, Any]:
@@ -984,6 +1041,7 @@ def _retry_stop_event(*, reason: str, attempts: int, backoff_s: float, backend_s
             "retry_recovery_spent_s": retry_recovery_spent_s, "partial_edit_handling": "discarded",
         },
     }
+
 
 def _finalize_minimal_run(*, archive_dir: Path, tmp_path: Path, session_id: str, phase_events: list[dict[str, Any]],
 ) -> Path:
@@ -1000,6 +1058,7 @@ def _finalize_minimal_run(*, archive_dir: Path, tmp_path: Path, session_id: str,
     )
     return archive_dir / "runs" / session_id
 
+
 @pytest.fixture
 def archive_run_with_retry_stops(archive_dir: Path, tmp_path: Path) -> Path:
     return _finalize_minimal_run(
@@ -1015,6 +1074,7 @@ def archive_run_with_retry_stops(archive_dir: Path, tmp_path: Path) -> Path:
         ],
     )
 
+
 @pytest.fixture
 def legacy_archive_run(archive_dir: Path, tmp_path: Path) -> Path:
     return _finalize_minimal_run(
@@ -1022,13 +1082,15 @@ def legacy_archive_run(archive_dir: Path, tmp_path: Path) -> Path:
         phase_events=[],
     )
 
+
 def test_the_manifest_carries_a_retry_and_circuit_summary(archive_run_with_retry_stops: Path) -> None:
     manifest = json.loads((archive_run_with_retry_stops / "manifest.json").read_text(encoding="utf-8"))
     summary = manifest["retry_summary"]
     assert summary["stops"] == {"retry_recovery_allowance_exhausted": 1, "circuit_open": 1}
     assert summary["attempts"] == 3 and summary["backoff_s"] == 1.75
     assert summary["circuit_states"] == ["open"]
-    assert "deadline" not in json.dumps(summary)      # durations and counts only
+    assert "deadline" not in json.dumps(summary)  # durations and counts only
+
 
 def test_a_run_without_retry_events_has_no_retry_summary(legacy_archive_run: Path) -> None:
     manifest = json.loads((legacy_archive_run / "manifest.json").read_text(encoding="utf-8"))

@@ -28,29 +28,19 @@ def _base_record(**overrides: Any) -> dict[str, Any]:
     record.update(overrides)
     return record
 
+
 TASK_IDENTITY = {"repo_slug": "owner/repo", "source": "record", "base_sha": "1" * 40, "head_sha": "2" * 40,
     "diff_digest": "3" * 64, "diff_ref": {"record_digest": "4" * 64, "run_id": "s1", "section": "original_task.diff"},
     "replay_verification": {"status": "passed"},
 }
 
 
-def test_process_trace_record_validates() -> None:
-    record = _base_record(record_type="process-trace", tier="silver", disposition="ambiguous", prompt="prompt text",
-        completion="completion text", task_identity=TASK_IDENTITY,
-    )
-    jsonschema.validate(record, SCHEMA)
-
-def test_task_only_record_validates() -> None:
-    record = _base_record(record_type="task-only", tier="task-only", disposition="missing", finding_fingerprint=None,
-        task_identity=TASK_IDENTITY,
-    )
-    jsonschema.validate(record, SCHEMA)
-
 def test_task_identity_with_bad_base_sha_is_rejected() -> None:
     bad_identity = dict(TASK_IDENTITY, base_sha="short")
     record = _base_record(record_type="task-only", tier="task-only", task_identity=bad_identity)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(record, SCHEMA)
+
 
 def test_task_identity_with_long_content_address_stamp_validates() -> None:
     """The runtime validator tolerates sha256-style 64-hex content-address

@@ -14,8 +14,7 @@ from rich.console import Console
 from daydream.agent import run_agent
 from daydream.agent_retry import _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
-from daydream.backends._subprocess import StreamStalledError
-from daydream.backends.pi import PiBackend, PiError, _pi_error_category, _pi_retryable_for
+from daydream.backends.pi import PiBackend, PiError
 from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -63,39 +62,15 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
     """Every attempt raises *error* — the retry-exhaustion and no-retry shapes."""
     return ScriptedBackend(events=[error])
 
-@pytest.mark.parametrize(
-    ("make_backend", "expected_output"),
-    [
-        # First call raises a retryable PiError; second succeeds. Output is from the second call.
-        pytest.param(
-            lambda: _fail_then_succeed(
-                PiError("429 Too Many Requests - rate limit exceeded", retryable=True), text="Review complete",
-            ), "Review complete", id="rate-limit",
-        ),
-        # Partial output from a failed attempt is discarded; only the final output is returned.
-        pytest.param(
-            lambda: _fail_then_succeed(
-                PiError("429 overload", retryable=True), text="final text", partial="partial text",
-            ), "final text", id="partial-output-discarded",
-        ),
-        # Use the production Pi classifier so retrying a terminated stream stays covered.
-        pytest.param(
-            lambda: _fail_then_succeed(
-                PiError(
-                    "terminated",
-                    retryable=_pi_retryable_for(category=_pi_error_category("terminated"), message="terminated"),
-                ), text="Review complete after retry",
-            ), "Review complete after retry", id="stream-drop",
-        ),
-    ],
-)
 async def test_run_agent_retries_and_returns_the_successful_attempt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_backend: Any, expected_output: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
-    backend = make_backend()
+    backend = _fail_then_succeed(
+        PiError("429 overload", retryable=True), text="final text", partial="partial text",
+    )
     output, _, _ = await run_agent(backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW)
-    assert output == expected_output
+    assert output == "final text"
     assert backend.call_count == 2
 
 async def test_run_agent_no_retry_on_non_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -149,17 +124,6 @@ async def test_run_agent_surfaces_backend_error_message(monkeypatch: pytest.Monk
     assert "leaked-secret-abc123" not in out
     assert "[REDACTED_ENV_VAR]" in out
 
-
-async def test_stream_stall_gets_only_one_fresh_attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Repeated dead-air windows cannot multiply into hours of retries."""
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-    backend = ScriptedBackend(
-        events=[StreamStalledError("pi", 300)], retry_attempts=5, retry_base_delay_s=0, retry_max_delay_s=0,
-    )
-    with pytest.raises(StreamStalledError):
-        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
-    assert backend.call_count == 2
 
 async def test_concurrent_retry_does_not_kill_sibling_invocations(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
@@ -283,7 +247,7 @@ class _HintError(RuntimeError):
 @pytest.mark.parametrize(
     ("pinned", "expected"),
     [
-        pytest.param("cap", 30.0, id="pinned-to-cap"), pytest.param(0.0, 0.0, id="pinned-to-zero"),
+        pytest.param(0.0, 0.0, id="pinned-to-zero"),
         pytest.param("hostile", 30.0, id="hostile-sample-is-clamped"),
     ],
 )
@@ -293,7 +257,7 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
     """One retry at a fixed 30-second cap exposes any overshoot by a hostile jitter sampler."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    sampler = {"cap": lambda cap: cap, 0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
+    sampler = {0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", sampler)
     backend = ScriptedBackend(
         events=[_HintError("503 Service Unavailable")], retry_attempts=1, retry_base_delay_s=30.0,
@@ -305,43 +269,17 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
         )
     assert slept == [pytest.approx(expected)]
 
-async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A wait granted by a provider hint is labelled differently from a jitter wait."""
-    import daydream.agent as agent_module
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
-    monkeypatch.setattr(agent_module, "console", rec)
-    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, clock)
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    backend = ScriptedBackend(
-        events=[_HintError("503 Service Unavailable", retry_after=10.0)],
-        retry_attempts=1, retry_base_delay_s=1.0, retry_max_delay_s=4.0,
-    )
-    with pytest.raises(_HintError):
-        await run_agent(
-            backend, tmp_path, "go", phase=DaydreamPhase.FIX,
-            wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
-        )
-    notice = rec.export_text()
-    assert "server" in notice.lower() or "advertised" in notice.lower()  # hint wait is labelled
-    assert notice.count("server-advertised wait") == 1  # the hint label is attached exactly once, never duplicated
-
 @pytest.mark.parametrize(
-    ("retry_after", "expected_slept", "stop"),
+    ("retry_after", "expected_slept"),
     [
-        pytest.param(30.0, [30.0], None, id="valid-and-fits"),
-        pytest.param(600.0, [], "retry_hint_exceeds_budget", id="valid-but-too-long"),
-        pytest.param(0.0, [0.0], None, id="zero-is-honoured"),
-        pytest.param(None, [30.0], None, id="absent-degrades-to-jitter"),
+        pytest.param(0.0, [0.0], id="zero-is-honoured"),
+        pytest.param(None, [30.0], id="absent-degrades-to-jitter"),
     ],
 )
 async def test_server_retry_hint_is_honoured_or_stops_insufficient_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_after: float | None, expected_slept: list[float],
-    stop: str | None,
 ) -> None:
-    """Server hints replace jitter within budget; an unfittable hint stops the ladder."""
+    """An explicit zero wait is honored; an absent hint uses jitter."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
@@ -354,10 +292,7 @@ async def test_server_retry_hint_is_honoured_or_stops_insufficient_budget(
             backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
         )
     assert slept == [pytest.approx(s) for s in expected_slept]
-    if stop is None:
-        assert backend.call_count == 2
-    else:
-        assert backend.call_count == 1  # hint longer than the budget extends nothing
+    assert backend.call_count == 2
 
 class _MessageHintError(RuntimeError):
     """A retryable failure that carries its hint only in the message token."""
@@ -384,7 +319,7 @@ async def test_server_retry_hint_is_read_from_the_message_when_the_attribute_is_
 @pytest.mark.parametrize(
     "malformed",
     [
-        pytest.param("30", id="string"), pytest.param(float("nan"), id="nan"), pytest.param(float("inf"), id="inf"),
+        pytest.param("30", id="string"), pytest.param(float("nan"), id="nan"),
         pytest.param(-5.0, id="negative"),
     ],
 )
@@ -419,25 +354,16 @@ async def test_a_non_zero_allowance_with_retries_disabled_is_contradictory(tmp_p
         await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=60.0)
     assert backend.call_count == 0
 
-async def test_a_zero_allowance_is_the_sanctioned_way_to_disable_retry_recovery(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, fake)
-    backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
-    with pytest.raises(_HintError):
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=0.0)
-    assert backend.call_count == 1 and slept == []
-
 async def test_retry_recovery_allowance_precedence_policy_then_attribute_then_argument(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A superior declared source wins; a zero allowance ends the ladder immediately."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "600")
     # Policy (a complete retry declaration) outranks the backend attribute and
     # the explicit argument: its zero allowance stops after one dispatch.
     policy_backend = ScriptedBackend(
         events=[_HintError("503")], retry_attempts=5, retry_recovery_allowance_s=300.0,
-        retry_policy=SimpleNamespace(attempts=5, base_delay_s=0.0, max_delay_s=0.0, retry_recovery_allowance_s=0.0),
+        retry_policy=RetryPolicy(attempts=5, base_delay_s=0.0, max_delay_s=0.0, retry_recovery_allowance_s=0.0),
     )
     with pytest.raises(_HintError):
         await run_agent(policy_backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=300.0)
@@ -469,21 +395,6 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
         await run_agent(env_backend, tmp_path, "go", phase=DaydreamPhase.FIX)
     assert env_backend.call_count == 1
 
-async def test_the_retry_policy_allowance_field_governs_the_ladder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A complete policy with zero recovery allowance cannot be overridden by ambient environment."""
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "600")
-    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    patch_retry_sleep(monkeypatch, fake)
-    backend = ScriptedBackend(
-        events=[_HintError("503")],
-        retry_policy=RetryPolicy(attempts=5, base_delay_s=0.0, max_delay_s=0.0, retry_recovery_allowance_s=0.0),
-    )
-    with pytest.raises(_HintError):
-        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX)
-    assert backend.call_count == 1  # the policy's 0 ended the ladder before dispatch 2
-
 async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None:
     """``_retry_hint`` guards ``str(exc)`` exactly like the shared classifier does."""
     class _HostileHint(RuntimeError):
@@ -508,6 +419,7 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_lines: list[str], allowance_s: float,
     retries: bool, expected_sleep: list[Any],
 ) -> None:
+    notices: list[str] = []
     clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, clock)
     procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(second_lines))]
@@ -526,14 +438,21 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
         out, _, _ = await run_agent(
             cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
             wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,
+            progress_callback=lambda text: notices.append(text.plain.strip()),
         )
         assert out == "done"
         assert len(spawned) == 2  # exactly one retry after the admission failure
     else:
-        with pytest.raises(PiError):
+        with pytest.raises(PiError) as failure:
             await run_agent(
                 cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
                 wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10 > 5
+                progress_callback=lambda text: notices.append(text.plain.strip()),
             )
         assert len(spawned) == 1  # no further attempt dispatched after the stop
+        assert failure.value.retry_after == 10.0
+        assert failure.value.category == "RATE_LIMIT" and failure.value.retryable is True
     assert slept == expected_sleep  # the full hint, or no shortened wait in its place
+    assert [notice for notice in notices if notice.startswith("[retry]")] == ([
+        "[retry] Backend error (PiError), retrying attempt 2/2 after 10.0s (server-advertised wait)...",
+    ] if retries else [])

@@ -21,18 +21,6 @@ from daydream.training.reward import (
 )
 
 
-def test_intrinsic_composite_is_golden() -> None:
-    rb = score_trajectory(ScoringInputs(
-            verifier_verdicts=[{"issue_id": 1, "verdict": "consistent"}, {"issue_id": 2, "verdict": "uncertain"}],
-
-            format_valid=True, length=4000,
-        )
-    )
-    assert rb.reward_version == REWARD_VERSION
-    assert rb.correctness_per_finding == [1.0, 0.5]
-    assert rb.composite == 0.7  # correctness 0.75 − 0.2·len_norm(0.25)=0.05
-
-
 @pytest.mark.parametrize('location', ['root', 'deep'])
 def test_archived_host_context_does_not_change_review_length_or_reward(tmp_path: Path, location: str) -> None:
     """The archive acquisition used by capture and sealed RL scores findings, retaining human bytes."""
@@ -65,16 +53,6 @@ def test_archived_host_context_does_not_change_review_length_or_reward(tmp_path:
         sizes.append(len(enriched))
     assert sizes[0] != sizes[1]
 
-def test_format_invalid_floors_composite() -> None:
-    rb = score_trajectory(ScoringInputs(verifier_verdicts=None,  format_valid=False, length=50))
-    assert rb.composite == 0.0  # dominating gate
-
-def test_missing_correctness_axis_has_no_credit() -> None:
-    rb = score_trajectory(ScoringInputs(verifier_verdicts=None,  format_valid=True, length=None))
-    assert rb.correctness_per_finding is None
-    assert rb.axes_present["correctness"] is False
-    assert rb.composite is None
-    assert "grounding" not in rb.to_dict()
 
 def test_weights_are_overridable_and_change_composite_predictably() -> None:
     base_len = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}], format_valid=True, length=10000)

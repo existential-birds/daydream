@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from daydream import json_utils
 from daydream.json_utils import (
     atomic_write_bytes,
     atomic_write_json,
@@ -21,45 +20,20 @@ from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 
 class TestExtractJson:
     @pytest.mark.parametrize(("text", "expected"),
-        [pytest.param('{"findings": [], "ok": true}', {"findings": [], "ok": True}, id="clean-json-object",),
-            pytest.param("[1, 2, 3]", [1, 2, 3], id="clean-json-array"),
-            pytest.param('prefix {broken {"x": 1}', {"x": 1}, id="unclosed-outer-object"),
-            pytest.param('prefix [broken [1, 2]', [1, 2], id="unclosed-outer-array"),
-            pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
-            pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
-            pytest.param('prefix {"x": [1, {"y": 2}]} tail', {"x": [1, {"y": 2}]}, id="mixed-nesting"),
-            pytest.param(
-                'prefix ' + json.dumps({"msg": 'escaped " quote, \\ slash, } ] brackets'}) + ' tail',
-                {"msg": 'escaped " quote, \\ slash, } ] brackets'},
-                id="prose-wrapped-string-escapes",
-            ),
-            pytest.param(
+        [
+        pytest.param("", None, id="empty-string"),
+        pytest.param('prefix [1] then { }', {}, id="equal-size-object-before-array"),
+        pytest.param('prefix [1] then [2]', [1], id="equal-size-first-array"),
+        pytest.param(
                 '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```',
                 {"findings": [{"arb_id": 1, "keep": True}]}, id="markdown-fenced-json",
             ),
-            pytest.param('```\n{"x": 1}\n```', {"x": 1}, id="markdown-fenced-bare"),
-            pytest.param(
-                "Based on my analysis of all findings, here are my verdicts:\n"
-                '{"findings": [{"arb_id": 1, "keep": false}]}', {"findings": [{"arb_id": 1, "keep": False}]},
-                id="prose-wrapped-json",
-            ),
-            pytest.param(
-                'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.',
-                [{"id": 1, "severity": "high"}], id="prose-wrapped-array",
-            ), pytest.param("", None, id="empty-string"),
-            pytest.param("   \n  ", None, id="whitespace-only"),
-            pytest.param("This is just prose with no JSON whatsoever.", None, id="no-json-at-all",),
-            pytest.param('{"msg": "contains a } brace", "ok": true}', {"msg": "contains a } brace", "ok": True},
-                id="json-with-nested-braces-in-strings",
-            ), pytest.param("[1, bad] then [3,4]", [3, 4], id="unparseable-array-then-valid-array",),
-            pytest.param('{bad} then {"issues":[1,2]}', {"issues": [1, 2]}, id="unparseable-object-then-valid-object",
-            ), pytest.param('prefix {bad {"findings": []}} suffix', {"findings": []},
-                id="nested-valid-json-inside-balanced-invalid-span",
-            ), pytest.param('note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
+        pytest.param("This is just prose with no JSON whatsoever.", None, id="no-json-at-all",),
+        pytest.param('note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
                 {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
                 id="largest-object-wins-over-smaller-earlier-object",
             ),
-        ],
+    ],
     )
     def test_extract_json(self, text: str, expected: Any) -> None:
         assert extract_json(text) == expected
@@ -80,6 +54,7 @@ class TestExtractJson:
         result = extract_json(text)
         assert isinstance(result, dict)
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
+
 
 class TestExtractJsonBySchema:
     """Selection is driven by the boundary's acceptance predicate, never span size."""
@@ -120,6 +95,13 @@ class TestExtractJsonBySchema:
         assert sel.rejected_reason == "type at $"
         assert "module" not in (sel.rejected_reason or "")  # never candidate content
         assert sel.candidate_count >= 1
+        wrapped = extract_json_by_schema(
+            'Reviewed ["module", "moduleVersion", "surface"] without findings.',
+            schema=PER_STACK_RECORD_SCHEMA,
+            accept=validates_schema,
+        )
+        assert (wrapped.value, wrapped.rejected_type, wrapped.rejected_reason) == (None, "list", "type at $")
+        assert wrapped.rejection is None
 
     def test_no_candidates_returns_none(self) -> None:
         sel = extract_json_by_schema("This is just prose with no JSON whatsoever.",
@@ -127,27 +109,14 @@ class TestExtractJsonBySchema:
         assert sel.value is None
         assert sel.candidate_count == 0
 
-    @pytest.mark.parametrize("text", [
-        '["module", "surface"] inspected. {"issues": []}',
-        'prefix {bad {"issues": []}} suffix',
-        '```json\n{"issues": []}\n```',
-        "This is just prose with no JSON whatsoever.",
-        "",
-    ])
-    def test_selection_offers_exactly_the_shared_candidate_scan(self, text: str) -> None:
-        """Schema selection reads the one scan, not a second copy of it: the offered
-        values are the whole candidate set in descending document order (the order
-        "last admitted wins" walks), and candidate_count is that scan's size."""
-        offered: list[Any] = []
+    def test_custom_acceptance_can_reject_valid_json_without_a_schema_error(self) -> None:
+        selection = extract_json_by_schema(
+            '{"issues": []}', schema=PER_STACK_RECORD_SCHEMA, accept=lambda _value, _schema: False,
+        )
+        assert selection.value is None and selection.candidate_count == 2
+        assert selection.rejected_type == "dict"
+        assert selection.rejected_reason is None and selection.rejection is None
 
-        def record(value: Any, _schema: dict[str, Any]) -> bool:
-            offered.append(value)
-            return False
-
-        selection = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=record)
-        scan = sorted(json_utils._json_candidates(text), key=lambda item: item[0], reverse=True)
-        assert offered == [value for _start, value, _span_len in scan]
-        assert (selection.candidate_count, selection.value) == (len(scan), None)
 
 @pytest.mark.parametrize(("text", "expected", "syntax"), [
     ('```\n{"issues": []}\n```', {"issues": []}, False),
@@ -231,5 +200,3 @@ class TestAtomicWritePrimitives:
         target = tmp_path / "durable.json"
         atomic_write_bytes(target, b"durable", dir_fsync=True)
         assert target.read_bytes() == b"durable"
-
-

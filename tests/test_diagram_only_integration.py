@@ -791,6 +791,8 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     assert artifact["findings"], "the review half of the artifact is still populated"
     assert artifact["diagrams"]["results"]["sequence"]["status"] == "rendered"
     expected = _artifact(target)["results"]["sequence"]["mermaid"]
+    artifact["diagrams"]["results"]["sequence"]["mermaid"] = "sequenceDiagram\n    P1->>P9: FORGED_STORED_GRAPH"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
 
     monkeypatch.chdir(target)
     rc = _post_findings_cli(artifact_path, artifact["head_sha"])
@@ -801,6 +803,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     assert artifact["run_info"] in body
     assert SEQUENCE_HEADING in body
     assert expected in body
+    assert "FORGED_STORED_GRAPH" not in body
     # A diagram in a review artifact posts as part of the review, not as a
     # separate issue comment.
     assert _issue_comments(fake_gh) == []

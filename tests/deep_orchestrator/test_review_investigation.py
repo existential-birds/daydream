@@ -1,4 +1,5 @@
 """Bounded review stages through runner.run, real Git and the external Backend seam."""
+
 from __future__ import annotations
 
 import asyncio
@@ -36,6 +37,7 @@ from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inp
 
 StageResponse = Callable[[dict[str, Any], dict[str, Any]],
                          Iterable[AgentEvent] | AsyncGenerator[AgentEvent, None] | None]
+
 
 class StagedBackend(EmptyReviewBackend):
     """A provider that remembers nothing beyond the current request."""
@@ -127,55 +129,184 @@ def read_events(repo: Path, path: str, *, event_id: str) -> Iterable[AgentEvent]
     yield ToolResultEvent(id=event_id, output=source, is_error=False)
 
 
-@pytest.mark.parametrize(('fault', 'reason'), [('no-tool-read', None),
-    ('unknown', 'malformed_output'), ('duplicate', 'malformed_output'),
-    ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
-    ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
-    ('missing-grounds', 'evidence_incomplete'), ('invalid-disposition', 'malformed_output'),
-    ('truncated-tool-output', None),
-    ('unmatched-tool-result', None), ('optional-failures', None)])
-async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
-    investigation: InvestigationRun, fault: str, reason: str) -> None:
-    @investigation.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        concrete = candidate(disposition='confirmed', finding=record())
-        if fault == 'unknown':
-            output['targets'][0]['target_id'] = 'foreign.py'
-        elif fault == 'duplicate':
-            output['targets'] *= 2
-        elif fault in {'omitted', 'read-all'}:
-            output['targets'] = []
-        elif fault == 'handoff-bytes':
-            output['notes'] = 'x' * 70_000
-        else:
-            output['candidates'] = [concrete] * (129 if fault == 'handoff-items' else 1)
-            if fault == 'missing-grounds':
-                concrete['grounds'] = ''
-            elif fault == 'invalid-disposition':
-                concrete['disposition'] = []
-        if fault in {'read-all', 'truncated-tool-output'}:
-            yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
-            yield ToolResultEvent(id='read', output=(investigation.repo / 'api.py').read_text(), is_error=False,
-                                  truncated=fault == 'truncated-tool-output')
-        elif fault == 'unmatched-tool-result':
-            yield ToolResultEvent(id='unmatched-source', is_error=False,
-                                  output=(investigation.repo / 'api.py').read_text())
-        elif fault == 'optional-failures':
-            yield ToolStartEvent(id='optional', name='Bash', input={'command': 'rg definitely_absent .'})
-            yield ToolResultEvent(id='optional', output='x' * (2 * 1024 * 1024 + 1),
-                                  is_error=True, exit_code=1, truncated=True)
-            yield ToolResultEvent(id='unassociated', output='failed optional lookup', is_error=True)
+async def test_scope_population_keeps_assignment_and_triage_decisions_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One bad sibling cannot borrow IDs, optional tool authority, or another scope's findings."""
+    discovery = {
+        "no-tool-read": None,
+        "unknown": "malformed_output",
+        "duplicate": "malformed_output",
+        "omitted": "malformed_output",
+        "read-all": "malformed_output",
+        "handoff-bytes": "evidence_incomplete",
+        "handoff-items": "evidence_incomplete",
+        "missing-grounds": "evidence_incomplete",
+        "invalid-disposition": "malformed_output",
+        "truncated-tool-output": None,
+        "unmatched-tool-result": None,
+        "optional-failures": None,
+    }
+    triage = {
+        "rejected": None,
+        "confirmed": None,
+        "missing-finding": "malformed_output",
+        "unresolved": "evidence_incomplete",
+        "unknown-contradiction": "malformed_output",
+        "contradiction": "evidence_incomplete",
+        "unknown": "malformed_output",
+        "duplicate": "malformed_output",
+        "omitted": "malformed_output",
+        "extra-target": "malformed_output",
+    }
+    cases = {
+        **{"discovery-" + key: reason for key, reason in discovery.items()},
+        **{"triage-" + key: reason for key, reason in triage.items()},
+    }
+    repo = tmp_path / "decision_population"
+    before = {f"{case}/api.py": "def hello():\n    return 'world'\n" for case in cases}
+    seed_feature_branch(
+        repo, base=before, feature={path: body.replace("world", "universe") for path, body in before.items()}
+    )
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    scope_cases: dict[str, str] = {}
+    closed: dict[str, str] = {}
 
-    data = await investigation.finish('python', reason=reason, findings=('Grounded defect',) if reason is None else (),
-                                      statuses=('complete',) if reason is None else ('incomplete', 'failed'))
-    terminal = stage_ends(investigation, 'python')[-1]
-    assert (terminal['status'], terminal.get('reason_code')) == (
-        ('succeeded', None) if reason is None else ('failed', 'domain_failure'))
-    if fault == 'no-tool-read':
-        assert data['terminal_result']['analysis_state'] == 'complete'
-        assert terminal['metadata']['observed_tool_starts'] == 0
-    if fault == 'optional-failures':
-        assert terminal['metadata']['admitted'] is True and terminal['metadata']['observed_tool_starts'] == 1
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage["scope_id"] == "structure":
+            return
+        scope_id = stage['scope_id']
+        case = stage["assigned_files"][0].split("/")[0] if stage["stage"] == "first_pass" else scope_cases[scope_id]
+        scope_cases[scope_id] = case
+        family, fault = case.split("-", 1)
+        path = f"{case}/api.py"
+        finding = dict(record(), file=path, description="Confirmed " + case, evidence=f"{path}:2")
+        concrete = candidate(disposition="confirmed", file=path, finding=finding)
+        if family == "discovery":
+            if fault == "unknown":
+                output["targets"][0]["target_id"] = "foreign.py"
+            elif fault == "duplicate":
+                output["targets"] *= 2
+            elif fault in {"omitted", "read-all"}:
+                output["targets"] = []
+            elif fault == "handoff-bytes":
+                output["notes"] = "x" * 70_000
+            else:
+                output["candidates"] = [concrete] * (129 if fault == "handoff-items" else 1)
+                if fault == "missing-grounds":
+                    concrete["grounds"] = ""
+                elif fault == "invalid-disposition":
+                    concrete["disposition"] = []
+            if fault in {"read-all", "truncated-tool-output"}:
+                yield ToolStartEvent(id=case, name="Read", input={"file_path": path})
+                yield ToolResultEvent(
+                    id=case,
+                    output=(repo / path).read_text(),
+                    is_error=False,
+                    truncated=fault == "truncated-tool-output",
+                )
+            elif fault == "unmatched-tool-result":
+                yield ToolResultEvent(id=case, output=(repo / path).read_text(), is_error=False)
+            elif fault == "optional-failures":
+                yield ToolStartEvent(id=case, name="Bash", input={"command": "rg definitely_absent ."})
+                yield ToolResultEvent(
+                    id=case, output="x" * (2 * 1024 * 1024 + 1), is_error=True, exit_code=1, truncated=True
+                )
+                yield ToolResultEvent(id="unassociated", output="failed optional lookup", is_error=True)
+            return
+        contract = stage['response_contract']
+        assert contract["schema"] == review.backend.calls[-1]["output_schema"]
+        validator = Draft202012Validator(contract['schema'])
+        if stage["stage"] == "first_pass":
+            output["candidates"] = [
+                concrete if fault == "contradiction" else candidate(disposition="rejected", file=path),
+                candidate(file=path),
+            ]
+            assert validator.is_valid(output)
+            assert not validator.is_valid(dict(output, candidates=[candidate(candidate_id="invented-native-id")]))
+            return
+        pending, = stage['candidates']
+        (closed_id,) = stage["closed_candidate_ids"]
+        closed[scope_id] = closed_id
+        assert closed_id != pending["candidate_id"]
+        assert stage["progress"] == stage["assigned_target_ids"] == [] and contract["skeleton"]["targets"] == []
+        assert stage["assigned_candidate_ids"] == [pending["candidate_id"]] and pending["disposition"] == "open"
+        disposition = (
+            "confirmed"
+            if fault in {"confirmed", "missing-finding"}
+            else "unresolved"
+            if fault == "unresolved"
+            else "rejected"
+        )
+        output["candidates"] = [
+            candidate(
+                disposition=disposition,
+                candidate_id=pending["candidate_id"],
+                file=path,
+                finding=finding if fault == "confirmed" else None,
+            )
+        ]
+        if fault == "unknown":
+            output["candidates"][0]["candidate_id"] = closed_id
+        elif fault == "duplicate":
+            output["candidates"] *= 2
+        elif fault == "omitted":
+            output["candidates"] = []
+        elif fault == "contradiction":
+            output["notes"] = f"{path}:2 already returns a greeting that current callers accept."
+            output["contradictions"] = [closed_id]
+        elif fault == "unknown-contradiction":
+            output["contradictions"] = ["foreign-candidate"]
+        elif fault == "extra-target":
+            output["targets"] = [{"target_id": path, "status": "reviewed", "reason": ""}]
+        if fault in {"rejected", "extra-target"}:
+            assert validator.is_valid(output) is (fault == "rejected")
+
+    review.backend.stage_response = response
+    assert (
+        await review.run(
+            deep_shard_enabled=True, deep_shard_max_files=1, deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32
+        )
+        == 0
+    )
+    data = review.load()
+    assert len(scope_cases) == len(cases) and set(scope_cases.values()) == set(cases)
+    expected = {"Confirmed discovery-" + fault for fault, reason in discovery.items() if reason is None}
+    expected |= {"Confirmed triage-confirmed", "Confirmed triage-contradiction"}
+    assert len(data["findings"]) == len(expected) and {finding["title"] for finding in data["findings"]} == expected
+    assert scopes(data)["structure"]["status"] == "complete"
+    for scope_id, case in scope_cases.items():
+        reason = cases[case]
+        outcome = scopes(data)[scope_id]
+        assert outcome["files"] == [f"{case}/api.py"]
+        assert outcome["status"] == ("incomplete" if reason else "complete")
+        assert outcome["reason_codes"] == ([reason] if reason else [])
+        events = stage_ends(review, scope_id)
+        family, fault = case.split("-", 1)
+        assert [event["metadata"]["attempt"] for event in events] == ([1, 1] if family == "triage" else [1])
+        if family == "triage":
+            assert [stage["stage"] for stage in review.backend.stages if stage["scope_id"] == scope_id] == [
+                "first_pass",
+                "triage",
+            ]
+            assert (
+                closed[scope_id]
+                != next(stage for stage in reversed(review.backend.stages) if stage["scope_id"] == scope_id)[
+                    "assigned_candidate_ids"
+                ][0]
+            )
+            if fault in {"rejected", "extra-target"}:
+                assert events[-1]["metadata"]["failure_class"] == ("assignment_mismatch" if reason else None)
+        else:
+            assert (events[0]["status"], events[0].get("reason_code")) == (
+                ("failed", "domain_failure") if reason else ("succeeded", None)
+            )
+            if fault == "no-tool-read":
+                assert events[0]["metadata"]["observed_tool_starts"] == 0
+            elif fault == "optional-failures":
+                assert events[0]["metadata"]["admitted"] is True
+                assert events[0]["metadata"]["observed_tool_starts"] == 1
 
 
 def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
@@ -564,14 +695,13 @@ async def test_isolated_first_pass_and_triage_failures_preserve_later_independen
     assert 'RuntimeError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
 
 
-@pytest.mark.parametrize('failed_stage', ['first_pass', 'triage'])
-@pytest.mark.parametrize(('stop', 'reason', 'diagnostic'), [
-    ('auth', 'authentication_failure', 'AuthenticationFailure: review invocation failed'),
-    ('admission', 'evidence_incomplete', 'Stage evidence admission failed'),
-    ('wall', 'host_wall_budget_exhaustion', 'wall_budget_exceeded'),
-    ('pipeline', 'host_pipeline_budget_exhaustion', 'pipeline_budget_exceeded'),
-    ('tools', 'host_tool_budget_exhaustion', 'tool_call_budget_exceeded'),
-])
+@pytest.mark.parametrize(('failed_stage', 'stop', 'reason', 'diagnostic'), [
+    ('first_pass', 'auth', 'authentication_failure', 'AuthenticationFailure: review invocation failed'),
+    ('first_pass', 'admission', 'evidence_incomplete', 'Stage evidence admission failed'),
+    ('first_pass', 'wall', 'host_wall_budget_exhaustion', 'wall_budget_exceeded'),
+    ('first_pass', 'pipeline', 'host_pipeline_budget_exhaustion', 'pipeline_budget_exceeded'),
+    ('first_pass', 'tools', 'host_tool_budget_exhaustion', 'tool_call_budget_exceeded'),
+    ('triage', 'wall', 'host_wall_budget_exhaustion', 'wall_budget_exceeded')])
 async def test_later_stopping_failure_retains_original_failure_and_stopping_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str,
     stop: str, reason: str, diagnostic: str,
@@ -756,6 +886,7 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
 
     assert metadata[-1]['remaining_tool_calls'] > 0
     assert len(request_prompts) == len(stages)
+
 
 @pytest.mark.parametrize(('sandbox', 'long_grounds'), [(False, False), (True, False), (False, True)],
                          ids=['exact-path-inputs', 'inline-inputs', 'clipped-closed-conclusion'])
@@ -1118,69 +1249,6 @@ async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retai
     assert events[-1]['metadata']['retained_findings'] == (2 if decision == 'confirmed' else 1)
     assert data['terminal_result']['analysis_state'] == ('incomplete' if decision == 'unresolved' else 'complete')
     assert scopes(data)['python']['partial_evidence'] is (decision == 'unresolved')
-
-
-@pytest.mark.parametrize(('decision', 'reason'), [
-    ('rejected', None), ('confirmed', None), ('missing-finding', 'malformed_output'),
-    ('unresolved', 'evidence_incomplete'), ('unknown-contradiction', 'malformed_output'),
-    ('contradiction', 'evidence_incomplete'), ('unknown', 'malformed_output'),
-    ('duplicate', 'malformed_output'), ('omitted', 'malformed_output'), ('extra-target', 'malformed_output')])
-async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
-    investigation: InvestigationRun, decision: str, reason: str | None) -> None:
-    backend = investigation.backend
-    contracts: list[dict[str, Any]] = []
-
-    @backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        assert "return 'universe'" in (investigation.repo / 'api.py').read_text()
-        contract = stage['response_contract']
-        contracts.append(contract)
-        assert contract['schema'] == backend.calls[-1]['output_schema']
-        validator = Draft202012Validator(contract['schema'])
-        if stage['stage'] == 'first_pass':
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())
-                                    if decision == 'contradiction' else candidate(disposition='rejected'), candidate()]
-            assert validator.is_valid(output)
-            invented = dict(output, candidates=[candidate(candidate_id='invented-native-id')])
-            assert not validator.is_valid(invented)
-        else:
-            pending, = stage['candidates']
-            closed_id, = stage['closed_candidate_ids']
-            assert stage['progress'] == stage['assigned_target_ids'] == []
-            assert contract['skeleton']['targets'] == []
-            assert closed_id != pending['candidate_id']
-            assert pending['candidate_id'] and pending['disposition'] == 'open'
-            assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
-            disposition = ('confirmed' if decision in {'confirmed', 'missing-finding'}
-                           else 'unresolved' if decision == 'unresolved' else 'rejected')
-            output['candidates'] = [candidate(disposition=disposition, candidate_id=pending['candidate_id'],
-                                               finding=record() if decision == 'confirmed' else None)]
-            if decision == 'unknown':
-                output['candidates'][0]['candidate_id'] = closed_id
-            elif decision == 'duplicate':
-                output['candidates'] *= 2
-            elif decision == 'omitted':
-                output['candidates'] = []
-            elif decision == 'contradiction':
-                # The same captured source refutes the earlier reasoning; no changed premise is needed.
-                output['notes'] = "api.py:2 already returns a greeting that current callers accept."
-                output['contradictions'] = [closed_id]
-            elif decision == 'unknown-contradiction':
-                output['contradictions'] = ['foreign-candidate']
-            elif decision == 'extra-target':
-                output['targets'] = [{'target_id': 'api.py', 'status': 'reviewed', 'reason': ''}]
-            if decision in {'rejected', 'extra-target'}:
-                assert validator.is_valid(output) is (decision == 'rejected')
-
-    await investigation.finish('python', reason=reason,
-                               findings=('Grounded defect',) if decision in {'confirmed', 'contradiction'} else ())
-    assert [s['stage'] for s in backend.stages if s['scope_id'] == 'python'] == ['first_pass', 'triage']
-    assert len(contracts) == 2 and all(contract['schema'] and contract['skeleton'] for contract in contracts)
-    events = stage_ends(investigation, 'python')
-    assert [event['metadata']['attempt'] for event in events] == [1, 1]
-    if decision in {'rejected', 'extra-target'}:
-        assert events[-1]['metadata']['failure_class'] == (
-            'assignment_mismatch' if decision == 'extra-target' else None)
 
 
 @pytest.mark.parametrize(('confirmed', 'fault', 'integration_starts'), [

@@ -7,6 +7,7 @@ from tests.harness.scripts import cli_main
 
 FIXTURE = Path(__file__).parent / "fixtures" / "training" / "calibration"
 
+
 def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
     """Real-path: cli.main over the checked-in fixture, twice."""
     out1, out2 = tmp_path / "r1", tmp_path / "r2"
@@ -18,15 +19,13 @@ def test_fixture_run_produces_valid_replayable_artifact(tmp_path: Path) -> None:
     assert cli_main([*argv, str(out1)]) == 0
     art = json.loads((out1 / "calibration.json").read_text())
     assert art["schema_version"] == "calibration-artifact"
+    assert art["record_count"] == 12
+    assert art["metrics"]["class_balance"] == {"accepted": 6, "rejected": 6}
+    assert art["version_stamps"]["reward_version"] == "2026.09.04-1"
+    assert "grounding_axis" not in art["metrics"]["per_axis_correlations"]
     assert art["stage0_analysis"]["status"] in {"unavailable", "ok"}  # explicit, never missing
     assert cli_main([*argv, str(out2)]) == 0
-    assert (out1 / "calibration.json").read_bytes() == (out2 / "calibration.json").read_bytes()  # AC 1
-
-def test_no_production_default_mutation() -> None:
-    src = Path("daydream/training/calibration.py").read_text()
-    assert "DEFAULT_WEIGHTS" not in src  # M10: never imported-and-mutated
-    # reward.py itself untouched:
-    assert Path("daydream/training/reward.py").read_text().count("DEFAULT_WEIGHTS =") == 1
+    assert {p.name: p.read_bytes() for p in out1.iterdir()} == {p.name: p.read_bytes() for p in out2.iterdir()}
 
 
 def test_calibration_consumes_canonical_record_projection_and_preserves_reward_policy(tmp_path: Path) -> None:

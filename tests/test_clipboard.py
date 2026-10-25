@@ -12,14 +12,13 @@ from daydream import clipboard
 from daydream.clipboard import copy_to_clipboard
 
 
-@pytest.mark.parametrize(("available", "text", "expected_argv"),
-    [pytest.param({"pbcopy"}, "hello", ["pbcopy"], id="pbcopy-success"),
-        pytest.param({"pbcopy", "xclip", "xsel", "clip.exe"}, "x", ["pbcopy"], id="pbcopy-first",),
-        pytest.param({"xclip", "xsel", "clip.exe"}, "x", ["xclip", "-selection", "clipboard"], id="xclip-before-xsel",
-        ), pytest.param({"xsel", "clip.exe"}, "x", ["xsel", "--clipboard", "--input"], id="xsel-before-clip-exe",),
-        pytest.param({"clip.exe"}, "x", ["clip.exe"], id="clip-exe-fallback"),
-    ],
-)
+@pytest.mark.parametrize(('available', 'text', 'expected_argv'), [
+    pytest.param({"pbcopy", "xclip", "xsel", "clip.exe"}, "x", ["pbcopy"], id="pbcopy-first",),
+    pytest.param({"xclip", "xsel", "clip.exe"}, "x", ["xclip", "-selection", "clipboard"], id="xclip-before-xsel",
+        ),
+    pytest.param({"xsel", "clip.exe"}, "x", ["xsel", "--clipboard", "--input"], id="xsel-before-clip-exe",),
+    pytest.param({"clip.exe"}, "x", ["clip.exe"], id="clip-exe-fallback"),
+])
 def test_copy_to_clipboard_success_and_selection(
     monkeypatch: pytest.MonkeyPatch, available: set[str], text: str, expected_argv: list[str],
 ) -> None:
