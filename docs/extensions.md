@@ -131,8 +131,11 @@ and pointered issues. Legacy Markdown-only output blocks plan publication.
 
 Pi review stages bind `HostToolBinding(deadline=..., accept=...)` through
 `run_agent(host_tools=..., output_schema=..., result_schema=...)`. The synchronous
-callback prepares and atomically admits one complete canonical stage or raises a
-correctable `HostToolRejected`. `output_schema` describes model selectors;
+callback prepares and atomically admits one complete canonical stage or raises
+`HostToolRejected` for a correctable preacceptance submission fault. It raises
+`HostToolFatal` for a confirmed host/input/lifecycle failure, preserving its cause;
+unexpected callback exceptions have an indeterminate mutation outcome and cannot
+authorize replay. `output_schema` describes model selectors;
 `result_schema` describes canonical retained output. Live handlers, credentials,
 counters and authority belong to the invocation, including preacceptance retries.
 
@@ -154,14 +157,24 @@ hashes, rename paths, roles and fragment metadata, validating original canonical
 inputs again before acceptance. Optional `supporting_files` associates relevance
 and remains forgiving. See [source/admission lifetime and limits](runtime.md#pi-host-tool-lifetime-and-limits).
 
-Only successful host acceptance lets the existing terminal tool terminate.
-Rejected calls remain native history and trajectory evidence while contributing
-no admitted semantic state. Accepted work survives later native execution failure,
-which still marks execution incomplete. No possibly accepted mutation is replayed.
+Successful host acceptance returns the canonical result and terminates normally.
+Correctable errors identify the rejected field/selector and a concrete correction
+within the original allowance. Terminal outcomes explain why changing the
+submission cannot resolve the failure, close authority, and stop native generation
+and submission recovery. Binding-local fatal state remains authoritative; native
+details cannot grant acceptance or permission to retry. Rejected calls remain
+native history and trajectory evidence while contributing no admitted semantic
+state. Accepted work survives later native execution failure, which still marks
+execution incomplete. No possibly accepted mutation is replayed.
 Native provider/model/authentication, genuine conversation roles, ordinary tools,
 and sibling ownership remain with their existing owners.
 
 This additive callback keyword and source-option metadata retain extension API 8.
+The private callback error envelope and typed exception contract are introduced
+by this unreleased change and ship together with the native extensions. Callers
+must use `HostToolRejected` to certify a correctable preacceptance fault; arbitrary
+`ValueError` does not certify that no mutation occurred. No released callback
+protocol needs migration.
 The superseded reader was unpublished PR machinery and has no released migration.
 Private stage/cache contract 13 invalidates incompatible cached stage results.
 Prompt overrides must preserve the supplied response schema; sanctioned inputs and

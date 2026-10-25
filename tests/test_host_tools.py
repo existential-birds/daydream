@@ -14,7 +14,8 @@ import httpx
 import pytest
 
 from daydream import host_tools as policy
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolRejected
+from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.harness.fake_clock import FakeClock
 
 _SCHEMA = {"type": "object", "additionalProperties": False,
@@ -24,8 +25,8 @@ _RESULT = {"verdict": "complete", "findings": []}
 
 
 @asynccontextmanager
-async def _endpoint(binding: HostToolBinding) -> AsyncIterator[httpx.AsyncClient]:
-    binding.configure_schema(_SCHEMA)
+async def _endpoint(binding: HostToolBinding, schema: dict[str, Any] = _SCHEMA) -> AsyncIterator[httpx.AsyncClient]:
+    binding.configure_schema(schema)
     async with binding.session() as server:
         async with httpx.AsyncClient(base_url=server.url, headers={
             "Authorization": server.packet()["authorization"],
@@ -49,17 +50,64 @@ async def test_http_terminal_schema_rejection_does_not_call_acceptance(fault: st
                       "array": [], "null": None}[fault]
     async with _endpoint(binding) as client:
         assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
-        assert (await client.post("/admit", json={"id": "invalid", "name": NATIVE_SUBMIT,
-            "arguments": arguments, "terminal": True})).json()["allowed"]
-        rejected = (await client.post("/submit", json={"id": "invalid", "arguments": arguments})).json()
+        rejected = (await client.post("/admit", json={"id": "invalid", "name": NATIVE_SUBMIT,
+            "arguments": arguments, "terminal": True})).json()
         assert rejected["id"] == "invalid" and rejected["accepted"] is False
+        assert rejected["outcome"] == "correctable" and rejected["code"] == "invalid_submission"
         assert "schema" in rejected["error"].lower()
+        assert {"missing": '"verdict"', "extra": "undeclared", "number": "JSON object",
+                "array": "JSON object", "null": "JSON object"}[fault] in rejected["error"]
         assert binding.authority_open and installed == [] and not binding.accepted
         assert (await client.post("/admit", json={"id": "corrected", "name": NATIVE_SUBMIT,
             "arguments": _RESULT, "terminal": True})).json()["allowed"]
         response = await client.post("/submit", json={"id": "corrected", "arguments": _RESULT})
         assert response.json() == {"id": "corrected", "accepted": True, "result": _RESULT}
     assert installed == [_RESULT] and binding.calls == 2 and binding.rejections == 1 and binding.cleanup_complete
+
+
+@pytest.mark.parametrize("fault", ["judgment", "range-shape", "range-bound", "selector-shape"])
+async def test_http_schema_feedback_identifies_nested_fields_and_concrete_corrections(fault: str) -> None:
+    """Nested schema failures explain the relevant judgment or selector correction.
+
+    Root-object schema tests miss anyOf branch selection and nested source range
+    constraints; a generic validator name leaves a valid model unable to correct
+    those payloads and raw validator messages can disclose submitted contents.
+    """
+    schema = {"type": "object", "required": ["judgments"], "properties": {"judgments": {
+        "type": "array", "items": {"type": "object", "required": ["judgment", "evidence_refs"],
+            "properties": {"judgment": {"type": "string", "minLength": 1},
+                           "evidence_refs": SOURCE_SELECTORS_SCHEMA}}}}}
+    selector: dict[str, Any] = {"source_id": "source:" + "a" * 64, "basis": "supplied_diff", "source_range": None}
+    judgment: dict[str, Any] = {"judgment": "checked", "evidence_refs": [selector.copy()]}
+    if fault == "judgment":
+        del judgment["judgment"]
+    elif fault == "selector-shape":
+        judgment["evidence_refs"] = [{"basis": "supplied_diff"}]
+    else:
+        judgment["evidence_refs"][0]["source_range"] = ("private-token" if fault == "range-shape" else
+                                                        {"start": 0, "end": 1})
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        installed.append(value)
+        return _RESULT
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    async with _endpoint(binding, schema) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": schema})).json()["ready"]
+        response = (await client.post("/admit", json={"id": "invalid", "name": NATIVE_SUBMIT,
+            "arguments": {"judgments": [judgment]}, "terminal": True})).json()
+        assert response["allowed"] is False
+        assert response["outcome"] == "correctable" and response["id"] == "invalid"
+        assert 'judgments' in response["error"] and "private-token" not in response["error"]
+        assert {"judgment": '"judgment"', "range-shape": "object", "range-bound": "at least 1",
+                "selector-shape": '"source_id"'}[fault] in response["error"]
+        if fault.startswith("range-"):
+            assert 'source_range' in response["error"]
+        valid = {"judgments": [{"judgment": "checked", "evidence_refs": [selector]}]}
+        assert installed == [] and binding.authority_open
+        assert (await client.post("/admit", json={"id": "corrected", "name": NATIVE_SUBMIT,
+            "arguments": valid, "terminal": True})).json()["allowed"]
+        assert (await client.post("/submit", json={"id": "corrected", "arguments": valid})).json()["accepted"]
+    assert installed == [valid] and binding.calls == 2 and binding.cleanup_complete
 
 
 @pytest.mark.parametrize("fault", ["json", "frame", "items", "depth", "unauthorized",
@@ -71,6 +119,8 @@ async def test_http_admission_bounds_reject_before_acceptance(
 
     Normal native JSON and schema checks cannot exercise malformed HTTP bodies or
     invalid Unicode; the callback endpoint owns these pre-mutation bounds.
+    Item/depth overflow payloads remain schema-valid so a later schema rejection
+    cannot mask removing the intended request bound.
     """
     monkeypatch.setattr(policy, "_MAX_ITEMS", 128)
     monkeypatch.setattr(policy, "_MAX_DEPTH", 16)
@@ -80,16 +130,18 @@ async def test_http_admission_bounds_reject_before_acceptance(
         return value
     binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
     async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
         if fault == "json":
             response = await client.post("/admit", content=b"{broken")
         elif fault == "frame":
             response = await client.post("/admit", content=b"x" * (policy._MAX_FRAME_BYTES + 1))
         elif fault == "items":
             response = await client.post("/admit", json={"id": "items", "name": NATIVE_SUBMIT,
-                "arguments": {"values": list(range(130))}, "terminal": True})
+                "arguments": {"verdict": "complete", "findings": list(range(130))}, "terminal": True})
         elif fault == "depth":
             response = await client.post("/admit", content=(b'{"id":"depth","name":"structured_output",'
-                b'"arguments":{"v":' + b"[" * 18 + b"0" + b"]" * 18 + b"}}"))
+                b'"arguments":{"verdict":"complete","findings":' + b"[" * 18 + b"0" + b"]" * 18
+                + b'},"terminal":true}'))
         elif fault == "argument-bytes":
             response = await client.post("/admit", json={"id": "large", "name": NATIVE_SUBMIT,
                 "arguments": {"verdict": "x" * policy._MAX_ARGUMENT_BYTES, "findings": []}, "terminal": True})
@@ -115,15 +167,32 @@ async def test_http_admission_bounds_reject_before_acceptance(
             assert response.json()["allowed"] is False
         assert installed == [] and not binding.accepted
         assert binding.authority_open is (fault not in {"json", "frame", "unicode-id"})
+        if fault != "unauthorized":
+            assert response.json()["outcome"] == (
+                "fatal" if fault in {"json", "frame", "unicode-id"} else "correctable")
+        if fault in {"items", "depth"}:
+            expected_error = (
+                f"The entire host request exceeds {policy._MAX_ITEMS} items; submit fewer argument items"
+                if fault == "items" else
+                f"Host request nesting exceeds {policy._MAX_DEPTH} levels; flatten the submitted arguments")
+            assert response.json() == {
+                "id": fault, "outcome": "correctable", "code": "invalid_submission", "error": expected_error,
+                "allowed": False, "accepted": False,
+            }
+            assert binding.calls == 1
+        if fault == "argument-bytes":
+            assert "entire" in response.json()["error"] and str(policy._MAX_ARGUMENT_BYTES) in response.json()["error"]
     assert binding.calls == int(fault in {"items", "depth", "unicode-argument", "unicode-key", "argument-bytes"})
     assert binding.cleanup_complete
 
 
-async def test_http_readiness_requires_matching_terminal_definition_before_submission() -> None:
+@pytest.mark.parametrize("fault", ["schema", "admit", "submit"])
+async def test_http_readiness_requires_matching_terminal_definition_before_submission(fault: str) -> None:
     """A reachable endpoint cannot stand in for the active model-facing native schema.
 
     The installed success journey cannot detect an endpoint that accepts a terminal
-    call before the extension confirms its exact active definition.
+    call before the extension confirms its exact active definition. Previously a
+    broken readiness contract invited payload correction and could reopen later.
     """
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
@@ -132,20 +201,21 @@ async def test_http_readiness_requires_matching_terminal_definition_before_submi
     binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
     async with _endpoint(binding) as client:
         assert not (await client.get("/status")).json()["ready"]
-        response = await client.post("/ready", json={"tool_name": NATIVE_SUBMIT,
-            "schema": {"type": "object"}})
-        assert response.status_code == 400 and not (await client.get("/status")).json()["ready"]
-        assert (await client.post("/admit", json={"id": "not-ready", "name": NATIVE_SUBMIT,
-            "arguments": _RESULT, "terminal": True})).json()["allowed"]
-        response = await client.post("/submit", json={"id": "not-ready", "arguments": _RESULT})
-        assert response.json()["id"] == "not-ready" and response.json()["accepted"] is False
-        assert "readiness" in response.json()["error"]
-        assert installed == []
-        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
-        assert (await client.get("/status")).json()["ready"]
-        response = await client.post("/submit", json={"id": "not-ready", "arguments": _RESULT})
-        assert response.json() == {"id": "not-ready", "accepted": True, "result": _RESULT}
-    assert installed == [_RESULT] and binding.calls == 1 and binding.cleanup_complete
+        payload = ({"tool_name": NATIVE_SUBMIT, "schema": {"type": "object"}} if fault == "schema" else
+                   {"id": "not-ready", "name": NATIVE_SUBMIT, "arguments": _RESULT, "terminal": True})
+        response = (await client.post("/ready" if fault == "schema" else f"/{fault}", json=payload)).json()
+        assert not binding.authority_open and installed == []
+        assert response["outcome"] == "fatal" and response["code"] == "native_readiness"
+        assert response["accepted"] is False and "cannot resolve" in response["error"]
+        if fault != "schema":
+            assert response["id"] == "not-ready"
+        assert not binding.authority_open and installed == []
+        corrected = (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()
+        assert corrected["outcome"] == "fatal" and corrected["code"] == "native_readiness"
+    with pytest.raises(HostToolFatal, match="cannot resolve"):
+        async with binding.session():
+            pytest.fail("fatal readiness must not reopen")
+    assert installed == [] and binding.calls == 0 and binding.cleanup_complete
 
 
 async def test_native_rejections_spend_original_allowance_and_retry_does_not_renew_it() -> None:
@@ -165,18 +235,164 @@ async def test_native_rejections_spend_original_allowance_and_retry_does_not_ren
     async with binding.session():
         with pytest.raises(HostToolRejected, match="alone"):
             binding.admit("mixed", NATIVE_SUBMIT, _RESULT, terminal=False)
-        with pytest.raises(HostToolRejected, match="already charged"):
-            binding.admit("mixed", NATIVE_SUBMIT, _RESULT, terminal=True)
         binding.admit("ordinary", "read", {"path": "/source", "offset": 1, "limit": 2})
         assert binding.calls == 2
     binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
     assert binding.deadline == deadline
     async with binding.session():
-        with pytest.raises(HostToolRejected, match="Original cumulative tool allowance"):
+        with pytest.raises(HostToolFatal, match="Original cumulative tool allowance"):
             binding.admit("corrected", NATIVE_SUBMIT, _RESULT, terminal=True)
-        with pytest.raises(HostToolRejected, match="no matching"):
+        with pytest.raises(HostToolFatal, match="Original cumulative tool allowance"):
             binding.submit("corrected", _RESULT)
     assert binding.calls == 3 and installed == [] and binding.cleanup_complete
+
+
+@pytest.mark.parametrize("fault", ["schema", "semantic", "items", "none"])
+async def test_last_available_native_call_cannot_invite_an_impossible_correction(
+    monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """The final call accepts valid output or terminates an unrepairable allowance.
+
+    Existing cumulative-budget coverage only rejected the next start; it missed
+    schema/native validation or domain rejection inviting another provider turn
+    after the last authorized start had already consumed the remaining capacity.
+    """
+    monkeypatch.setattr(policy, "_MAX_ITEMS", 128)
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        if fault == "semantic":
+            raise HostToolRejected('target "target.py": add the required judgment')
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    binding.restrict(deadline=None, tool_call_budget=1)
+    arguments = {"schema": {"verdict": "complete", "findings": False},
+                 "items": {"verdict": "complete", "findings": list(range(130))}}.get(fault, _RESULT)
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        response = (await client.post("/admit", json={"id": "last", "name": NATIVE_SUBMIT,
+            "arguments": arguments, "terminal": True})).json()
+        if fault in {"semantic", "none"}:
+            assert response["allowed"] is True
+            response = (await client.post("/submit", json={"id": "last", "arguments": arguments})).json()
+        if fault == "none":
+            assert response == {"id": "last", "accepted": True, "result": _RESULT}
+            assert binding.accepted and installed == [_RESULT] and binding.fatal_error is None
+        else:
+            assert not binding.authority_open and response["allowed"] is False
+            assert response["id"] == "last" and response["outcome"] == "fatal"
+            assert response["code"] == "capacity_exhausted" and response["accepted"] is False
+            assert "no calls remain" in response["error"] and not binding.authority_open
+            assert installed == [] and not binding.accepted and not binding.possibly_accepted
+            assert binding.fatal_error is not None and isinstance(binding.fatal_error.__cause__, HostToolRejected)
+            repeat = (await client.post("/admit", json={"id": "retry", "name": NATIVE_SUBMIT,
+                "arguments": _RESULT, "terminal": True})).json()
+            assert repeat["code"] == "capacity_exhausted"
+    assert binding.calls == 1 and binding.cleanup_complete
+
+
+@pytest.mark.parametrize("fault", ["duplicate-start", "unmatched-submit", "changed-submit"])
+async def test_broken_native_correlation_is_terminal_without_acceptance(fault: str) -> None:
+    """Correlation faults cannot be repaired through another model submission.
+
+    The ordinary correction journey only uses fresh, matching tool IDs; it does
+    not catch reusing an ID or changing arguments after host authorization.
+    """
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        packet = {"id": "terminal", "name": NATIVE_SUBMIT, "arguments": _RESULT, "terminal": True}
+        assert (await client.post("/admit", json=packet)).json()["allowed"]
+        if fault == "duplicate-start":
+            response = (await client.post("/admit", json=packet)).json()
+        else:
+            response = (await client.post("/submit", json={
+                "id": "foreign" if fault == "unmatched-submit" else "terminal",
+                "arguments": {**_RESULT, "verdict": "changed"} if fault == "changed-submit" else _RESULT,
+            })).json()
+        assert not binding.authority_open and installed == []
+        assert response["outcome"] == "fatal" and response["code"] == "native_correlation"
+        assert response["accepted"] is False and "cannot resolve" in response["error"]
+        assert not binding.authority_open and not binding.possibly_accepted and installed == []
+    assert binding.calls == 1 and binding.cleanup_complete
+
+
+@pytest.mark.parametrize("fault", ["known-input", "value-error", "mutated-value-error"])
+async def test_callback_failure_guarantees_are_host_owned_and_preserve_causes(fault: str) -> None:
+    """Only explicit callback guarantees can certify no acceptance occurred.
+
+    Earlier HTTP cases fail before callback entry; they cannot catch arbitrary
+    ValueError being mislabeled correctable after a callback has installed state,
+    or a known input outage losing its cause and inviting selector corrections.
+    """
+    installed: list[Any] = []
+    original = FileNotFoundError("private-captured-input") if fault == "known-input" else ValueError("private-token")
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        if fault == "known-input":
+            raise HostToolFatal("Frozen input for target.py is unavailable; TOKEN=callback-secret-123",
+                                code="input_unavailable") from original
+        if fault == "mutated-value-error":
+            installed.append(value)
+        raise original
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        assert (await client.post("/admit", json={"id": "terminal", "name": NATIVE_SUBMIT,
+            "arguments": _RESULT, "terminal": True})).json()["allowed"]
+        response = (await client.post("/submit", json={"id": "terminal", "arguments": _RESULT})).json()
+        preacceptance = fault == "known-input"
+        assert binding.possibly_accepted is not preacceptance and not binding.accepted and not binding.authority_open
+        assert response["id"] == "terminal" and response["outcome"] == ("fatal" if preacceptance else "indeterminate")
+        assert response["code"] == ("input_unavailable" if preacceptance else "callback_failed")
+        if preacceptance:
+            assert response["accepted"] is False and response["allowed"] is False
+        else:
+            assert "accepted" not in response and "allowed" not in response and "do not resubmit" in response["error"]
+        assert "private-" not in response["error"] and "callback-secret" not in response["error"]
+        assert len(response["error"].encode()) <= 1024
+        assert binding.fatal_error is not None and binding.fatal_error.__cause__ is original
+    with pytest.raises(HostToolFatal):
+        async with binding.session():
+            pytest.fail("terminal callback outcome must not reopen")
+    assert installed == ([_RESULT] if fault == "mutated-value-error" else []) and binding.cleanup_complete
+
+
+async def test_correctable_callback_keeps_its_code_and_accepts_only_the_correction() -> None:
+    """Callback-authored correction details survive binding and transport intact.
+
+    Schema errors originate in the binding, and terminal-callback tests never
+    reach another accepted submission; neither catches reconstructing a callback
+    rejection with a generic code or forbidding an ordinary semantic correction.
+    """
+    installed: list[Any] = []
+    rejected = False
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        nonlocal rejected
+        if not rejected:
+            rejected = True
+            raise HostToolRejected("target.py judgment: add the required explanation; "
+                                   "Authorization: Bearer callback-secret-123", code="missing_judgment")
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        for identifier in ["invalid", "corrected"]:
+            assert (await client.post("/admit", json={"id": identifier, "name": NATIVE_SUBMIT,
+                "arguments": _RESULT, "terminal": True})).json()["allowed"]
+            response = (await client.post("/submit", json={"id": identifier, "arguments": _RESULT})).json()
+            if identifier == "invalid":
+                assert response["outcome"] == "correctable" and response["code"] == "missing_judgment"
+                assert "target.py judgment" in response["error"] and response["accepted"] is False
+                assert "callback-secret" not in response["error"] and "REDACTED" in response["error"]
+                assert binding.authority_open and not binding.possibly_accepted and installed == []
+            else:
+                assert response == {"id": identifier, "accepted": True, "result": _RESULT}
+    assert installed == [_RESULT] and binding.calls == 2 and binding.rejections == 1 and binding.cleanup_complete
 
 
 @pytest.mark.parametrize("order", ["closure-first", "deadline-first", "acceptance-first"])
@@ -194,22 +410,24 @@ async def test_acceptance_and_authority_closure_have_one_synchronous_order(
         installed.append(value)
         return value
     binding = HostToolBinding(deadline=110, accept=accept)
-    binding.configure_schema(_SCHEMA)
-    async with binding.session():
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
         binding.admit("terminal", NATIVE_SUBMIT, _RESULT, terminal=True)
         if order == "acceptance-first":
             assert binding.submit("terminal", _RESULT) == _RESULT
             binding.close_authority()
             fake.advance(10)
             assert binding.submit("terminal", _RESULT) == _RESULT
-            with pytest.raises(HostToolRejected, match="closed"):
+            assert (await client.post("/submit", json={"id": "terminal", "arguments": _RESULT})).json() == {
+                "id": "terminal", "accepted": True, "result": _RESULT}
+            with pytest.raises(HostToolFatal, match="closed|expired"):
                 binding.submit("different-terminal", _RESULT)
         else:
             if order == "closure-first":
                 binding.close_authority()
             else:
                 fake.advance(10)
-            with pytest.raises(HostToolRejected, match="closed|expired"):
+            with pytest.raises(HostToolFatal, match="closed|expired"):
                 binding.submit("terminal", _RESULT)
     assert installed == ([_RESULT] if order == "acceptance-first" else [])
     assert binding.accepted is (order == "acceptance-first") and binding.calls == 1
@@ -233,12 +451,12 @@ async def test_oversized_canonical_result_cannot_be_truncated_into_native_succes
     binding.configure_schema(_SCHEMA)
     async with binding.session():
         binding.admit("terminal", NATIVE_SUBMIT, _RESULT, terminal=True)
-        with pytest.raises(HostToolRejected, match="invalid canonical result"):
+        with pytest.raises(HostToolFatal, match="invalid canonical result"):
             binding.submit("terminal", _RESULT)
         assert binding.possibly_accepted and not binding.accepted and not binding.authority_open
-        with pytest.raises(HostToolRejected, match="closed"):
+        with pytest.raises(HostToolFatal, match="invalid canonical result"):
             binding.submit("terminal", _RESULT)
-    with pytest.raises(ValueError, match="another native attempt"):
+    with pytest.raises(HostToolFatal, match="invalid canonical result"):
         async with binding.session():
             pytest.fail("uncertain acceptance must not reopen")
     assert calls == [_RESULT] and binding.cleanup_complete

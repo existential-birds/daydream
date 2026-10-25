@@ -794,8 +794,11 @@ def _capture_pi_subprocess(
             arguments: dict[str, Any] = {}
             permissions: dict[str, dict[str, Any]] = {}
             finalized: dict[str, dict[str, Any]] = {}
+            pending_rows: list[bytes] = []
             async def readline() -> bytes:
                 nonlocal ready_pending, terminal_call
+                if pending_rows:
+                    return pending_rows.pop(0)
                 if ready_pending:
                     ready_pending = False
                     return b'{"type":"daydream_host_tools_ready"}\n'
@@ -815,6 +818,12 @@ def _capture_pi_subprocess(
                     arguments[call_id] = row.get("args")
                     permissions[call_id] = await request("/admit", {"id": call_id, "name": row["toolName"],
                         "arguments": row.get("args"), "terminal": terminal_call == call_id})
+                    receipt = permissions[call_id]
+                    if receipt.get("outcome") in {"fatal", "indeterminate"}:
+                        pending_rows.append(raw)
+                        return (json.dumps({"type": "daydream_host_tool_fatal", "id": call_id,
+                            "outcome": receipt["outcome"], "code": receipt["code"], "error": receipt["error"]})
+                            + "\n").encode()
                 elif event_type == "tool_execution_end" and row.get("toolName") == "structured_output":
                     call_id = row["toolCallId"]
                     receipt = permissions[call_id]
@@ -827,6 +836,8 @@ def _capture_pi_subprocess(
                     else:
                         native = {"isError": True, "content": [{"type": "text",
                                   "text": receipt.get("error", "Rejected native terminal call")}]}
+                        if receipt.get("outcome") in {"fatal", "indeterminate"}:
+                            native["details"] = {"host_submission_status": receipt["outcome"], "code": receipt["code"]}
                     finalized[call_id] = native
                     row.update(isError=native["isError"], result={key: val for key, val in native.items()
                                                                if key != "isError"})

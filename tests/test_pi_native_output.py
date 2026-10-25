@@ -125,8 +125,9 @@ async def test_native_stock_pagination_and_corrected_source_submission_are_admit
     """
     repo = tmp_path / "source-repo"
     supporting = "".join(f"Page {index:02}: café 界 independently known bytes\n" for index in range(1, 22))
-    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n", "supporting.txt": supporting},
-                               feature={"api.py": "VALUE = 1\n", "supporting.txt": supporting})
+    sources = {"supporting.txt": supporting, "oversized.txt": "x" * (64 * 1024 + 1) + "\n"}
+    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n", **sources},
+                               feature={"api.py": "VALUE = 1\n", **sources})
     base = git(repo, "rev-parse", "main")
     diff = git(repo, "diff", "--no-ext-diff", "main", "HEAD") + "\n"
     revision = {"merge_base_sha": base, "head_sha": head}
@@ -155,6 +156,10 @@ async def test_native_stock_pagination_and_corrected_source_submission_are_admit
     expected = {"evidence_refs": canonical_refs, "note": submitted["note"]}
     rejected = {"evidence_refs": [{"source_id": "source:" + "0" * 64, "source_range": None,
                                    "basis": "supplied_diff"}], "note": "REJECTED_SEMANTIC_NOTE"}
+    invalid_range = {"evidence_refs": [{"source_id": source["source_id"],
+        "source_range": {"start": 1, "end": 99}, "basis": "supplied_diff"}], "note": "Invalid range"}
+    oversized = {"evidence_refs": [selectors[0], {"path": "oversized.txt", "side": "new",
+        "source_range": {"start": 1, "end": 1}, "basis": "source_inspection"}], "note": "One line of a large blob"}
     installed: list[dict[str, Any]] = []
     def accept(value: Any) -> dict[str, Any]:
         canonical = {"evidence_refs": canonicalize_source_selectors(
@@ -165,8 +170,10 @@ async def test_native_stock_pagination_and_corrected_source_submission_are_admit
     native_provider.turns = [[(f"page-{index}", "read", {"path": path, "offset": 2 * index + 1, "limit": 2})]
                              for index in range(10)]
     native_provider.turns += [[("rejected", "structured_output", rejected)],
+                              [("invalid-range", "structured_output", invalid_range)],
+                              [("oversized", "structured_output", oversized)],
                               [("accepted", "structured_output", submitted)]]
-    count = 12
+    count = 14
     budget = ReviewInvestigationBudget.from_limits(ReviewLimits(60, count, count))
     binding = HostToolBinding(deadline=time.monotonic() + 60, accept=accept)
     recorder = make_recorder(repo, agent_model_name="output-model", backend_name="pi")
@@ -198,27 +205,32 @@ async def test_native_stock_pagination_and_corrected_source_submission_are_admit
             assert "".join(lines[2 * page:2 * page + 2]) in history[f"page-{page}"]
             assert lines[2 * page + 2].strip() not in history[f"page-{page}"]
             assert f"offset={2 * page + 3}" in history[f"page-{page}"]
-        if index == 11:
-            assert "outside the assigned inventory" in history["rejected"]
+        if index >= 11:
+            assert "assigned inventory" in history["rejected"]
             assert "REJECTED_SEMANTIC_NOTE" in json.dumps(messages)
+        if index >= 12:
+            assert "source_range" in history["invalid-range"] and source["source_id"] in history["invalid-range"]
+        if index >= 13:
+            assert "oversized.txt" in history["oversized"] and "whole" in history["oversized"].lower()
+            assert "65536" in history["oversized"] and "range" in history["oversized"].lower()
     trajectory = json.loads(recorder.path.read_text())
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
     observations = {item["source_call_id"]: item["content"] for step in trajectory["steps"]
                     for item in (step.get("observation") or {}).get("results", [])}
-    expected_ids = [f"page-{index}" for index in range(10)] + ["rejected", "accepted"]
+    expected_ids = [f"page-{index}" for index in range(10)] + ["rejected", "invalid-range", "oversized", "accepted"]
     assert [call["tool_call_id"] for call in calls] == expected_ids
-    assert "outside the assigned inventory" in observations["rejected"]
+    assert "assigned inventory" in observations["rejected"]
     assert json.loads(observations["accepted"])["details"] == expected
     assert "REJECTED_SEMANTIC_NOTE" in json.dumps(trajectory), "rejection remains raw native evidence"
     assert all(step["source"] != "user" or "REJECTED_SEMANTIC_NOTE" not in json.dumps(step)
                for step in trajectory["steps"])
     assert binding.calls == budget.observed_tool_starts == count and budget.remaining_tool_calls == 0
-    assert binding.rejections == 1 and not binding.authority_open
+    assert binding.rejections == 3 and not binding.authority_open
     assert binding.native_settled and binding.cleanup_complete
     lifecycle = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
     assert lifecycle["host_authority_closed"] and lifecycle["host_native_settled"]
     assert lifecycle["host_cleanup_complete"]
-    assert lifecycle["host_tool_call_count"] == count and lifecycle["host_tool_rejection_count"] == 1
+    assert lifecycle["host_tool_call_count"] == count and lifecycle["host_tool_rejection_count"] == 3
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10 * count
 
 
@@ -259,16 +271,21 @@ async def test_native_terminal_batch_rejection_precedes_acceptance(
 
 
 @pytest.mark.parametrize("allowance", [1, 2], ids=["spent-by-native-schema-rejection", "correction-capacity"])
+@pytest.mark.parametrize("malformation", ["schema", "argument-size"])
 async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
-    tmp_path: Path, native_provider: _NativeProvider, allowance: int,
+    tmp_path: Path, native_provider: _NativeProvider, allowance: int, malformation: str,
 ) -> None:
     """A native schema failure spends host allowance before a corrected callback can mutate.
 
     Unbound warning tests and direct HTTP schema checks cannot catch charging
-    after Pi validation; direct execute also excludes run_agent's later observer.
+    after Pi validation, a misleading null-object error after native argument-size
+    clipping, or a provider request after the last call fails. Direct execute also
+    excludes run_agent's later observer.
     """
     accepted = {"verdict": "complete", "findings": []}
-    native_provider.turns = [[("invalid-schema", "structured_output", {"verdict": "incomplete", "findings": False})],
+    invalid = ({"verdict": "incomplete", "findings": False} if malformation == "schema" else
+               {"verdict": "x" * (128 * 1024), "findings": []})
+    native_provider.turns = [[("invalid-schema", "structured_output", invalid)],
                              [("corrected", "structured_output", accepted)]]
     marker = tmp_path / "accepted-review"
     installed: list[Any] = []
@@ -288,25 +305,108 @@ async def test_native_schema_rejection_charges_host_before_corrected_acceptance(
         failure = exc
     assert (failure is None) is (allowance == 2)
     if failure is not None:
-        assert failure.category == "STREAM_TRUNCATION" and "did not settle" in str(failure)
-    assert len(native_provider.requests) == (2 if allowance == 2 else 3)
-    history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[1]["messages"]
-               if message["role"] == "tool"}
-    assert history["invalid-schema"].startswith('Validation failed for tool "structured_output":')
+        assert failure.category == "HOST_TOOLS" and failure.retryable is False
+        assert "allowance" in str(failure).lower() and "cannot" in str(failure).lower()
+    assert len(native_provider.requests) == allowance, "fatal admission must not dispatch another provider request"
     assert installed == ([accepted] if allowance == 2 else [])
     assert marker.exists() is (allowance == 2)
     if allowance == 2:
         assert marker.read_text() == "complete" and binding.accepted_result == accepted
+        history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[1]["messages"]
+                   if message["role"] == "tool"}
+        if malformation == "schema":
+            assert history["invalid-schema"].startswith('Validation failed for tool "structured_output":')
+        else:
+            assert "argument object" in history["invalid-schema"] and "131072" in history["invalid-schema"]
+            assert "reduce" in history["invalid-schema"].lower()
     else:
-        exhausted_history = {message["tool_call_id"]: message["content"]
-            for message in native_provider.requests[2]["messages"] if message["role"] == "tool"}
-        assert "Original cumulative tool allowance exhausted" in exhausted_history["corrected"]
         assert binding.accepted_result is None
-    assert binding.calls == 2 and binding.rejections == int(allowance == 1)
-    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == ["invalid-schema", "corrected"]
+    assert binding.calls == allowance and binding.rejections == 1
+    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
+        ["invalid-schema", "corrected"] if allowance == 2 else ["invalid-schema"])
     assert [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error] == (
-        ["invalid-schema"] if allowance == 2 else ["invalid-schema", "corrected"])
+        ["invalid-schema"])
     assert not binding.authority_open and binding.native_settled and binding.cleanup_complete
+
+
+@pytest.mark.parametrize("lost_evidence", ["none", "fatal-details", "settlement"])
+async def test_native_unavailable_host_input_stops_generation_before_retry_or_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, lost_evidence: str,
+) -> None:
+    """A real frozen-source failure ends /submit without correction or backend replay.
+
+    Endpoint tests cannot prove that shipped extensions stop Pi's provider loop;
+    admission exhaustion does not exercise /submit or authoritative classification
+    when native error details or settlement disappear after the callback fails.
+    """
+    repo = tmp_path / "unavailable-source"
+    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n", "supporting.txt": "Frozen bytes\n"},
+        feature={"api.py": "VALUE = 1\n", "supporting.txt": "Frozen bytes\n"})
+    diff = git(repo, "diff", "main", "HEAD") + "\n"
+    revision = {"head_sha": head, "merge_base_sha": git(repo, "rev-parse", "main")}
+    assigned = part_source_mapping(diff, {"kind": "file", "file": "api.py"},
+        artifact_sha256=hashlib.sha256(diff.encode()).hexdigest(), revision=revision,
+        old_path="api.py", new_path="api.py")["source_refs"]
+    selectors = [{"path": "supporting.txt", "side": "new", "source_range": {"start": 1, "end": 1},
+                  "basis": "source_inspection"}]
+    # Prove the submission and frozen reference are valid before the real Git
+    # metadata disappears; selector errors cannot accidentally satisfy this test.
+    assert canonicalize_source_selectors(selectors, assigned, revision=revision, source_root=repo,
+                                        require_assigned=False)
+    submitted = {"verdict": "complete", "findings": []}
+    native_provider.turns = [[("failed-input", "structured_output", submitted)]]
+    callback_calls = 0
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        nonlocal callback_calls
+        callback_calls += 1
+        if callback_calls == 1:
+            (repo / ".git").rename(repo / ".git-unavailable")
+        canonicalize_source_selectors(selectors, assigned, revision=revision, source_root=repo, require_assigned=False)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    native_rows: list[dict[str, Any]] = []
+    lines = CliTransport.lines
+    async def observe_native(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
+        async for line in lines(transport, *args, **kwargs):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                yield line
+                continue
+            native_rows.append(row)
+            if lost_evidence == "settlement" and row.get("type") == "agent_settled":
+                continue
+            if lost_evidence == "fatal-details":
+                if row.get("type") == "tool_execution_end" and row.get("toolCallId") == "failed-input":
+                    row.get("result", {}).pop("details", None)
+                elif row.get("type") == "message_end" and row.get("message", {}).get("role") == "toolResult":
+                    row["message"].pop("details", None)
+            yield json.dumps(row)
+    monkeypatch.setattr(CliTransport, "lines", observe_native)
+    backend = PiBackend(model="output-model")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
+    recorder = make_recorder(tmp_path, backend_name="pi")
+    async with recorder:
+        with pytest.raises(PiError) as failure:
+            await run_agent(backend, tmp_path, "Submit the frozen-source review.", phase=DaydreamPhase.REVIEW,
+                host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
+                tool_call_budget=4, progress_callback=lambda _: None)
+    assert len(native_provider.requests) == 1, "fatal /submit must stop before any further provider request"
+    assert callback_calls == 1 and binding.accepted_result is None
+    assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
+    assert "supporting.txt" in str(failure.value) and "cannot" in str(failure.value).lower()
+    assert not binding.authority_open and binding.cleanup_complete
+    assert binding.native_settled is (lost_evidence != "settlement")
+    errors = [row for row in native_rows if row.get("type") == "tool_execution_end"
+              and row.get("toolCallId") == "failed-input" and row.get("isError") is True]
+    assert len(errors) == 1 and "supporting.txt" in json.dumps(errors)
+    trajectory = json.loads(recorder.path.read_text())
+    diagnostics = [item for step in trajectory["steps"] for item in step.get("extra", {}).get("backend_diagnostics", [])
+                   if item["code"] == "pi_host_tool_fatal"]
+    assert len(diagnostics) == 1 and diagnostics[0]["metadata"]["code"] == "input_unavailable"
+    assert diagnostics[0]["metadata"]["cause_type"] == "GitError"
+    assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
 
 
 @pytest.mark.parametrize("fault", ["missing-extension", "broken-extension", "unsupported-capability",
@@ -394,10 +494,11 @@ async def test_required_terminal_admission_rejects_unsupported_dispatch_before_p
 async def test_native_reused_tool_identity_cannot_repeat_effect_or_hide_correlation_failure(
     tmp_path: Path, native_provider: _NativeProvider,
 ) -> None:
-    """A repeated native call ID spends once and remains a settlement failure after acceptance.
+    """A repeated native call ID spends once and stops before a further generation.
 
     Unique-ID correction and idempotent host callback tests cannot detect a native
-    adapter silently pairing two execution results with one original choice.
+    adapter silently pairing two execution results with one original choice, or
+    continuing after the host revokes authority for broken correlation.
     """
     source = tmp_path.resolve() / "source"
     source.write_text("first stock read only\n")
@@ -410,16 +511,16 @@ async def test_native_reused_tool_identity_cannot_repeat_effect_or_hide_correlat
         return value
     binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
     events = []
-    with pytest.raises(PiError, match="identity conflict"):
+    with pytest.raises(PiError) as failure:
         async for event in PiBackend(model="output-model").execute(tmp_path, "Reject reused native identities.",
             output_schema=_SCHEMA, read_only=True, host_tools=binding, persist_session=False):
             events.append(event)
-    assert len(native_provider.requests) == 3
-    history = [message["content"] for message in native_provider.requests[-1]["messages"] if message["role"] == "tool"]
-    assert history[0] == "first stock read only\n" and "already charged" in history[1]
-    assert installed == [accepted] and binding.accepted_result == accepted
-    assert binding.calls == 2 and binding.cleanup_complete
-    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == ["same-native-id", "submit"]
+    assert len(native_provider.requests) == 2
+    assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
+    assert "identity" in str(failure.value).lower()
+    assert installed == [] and binding.accepted_result is None
+    assert binding.calls == 1 and binding.cleanup_complete and binding.native_settled
+    assert [event.id for event in events if isinstance(event, ToolStartEvent)] == ["same-native-id"]
 
 
 @pytest.mark.parametrize("cancel_at", ["active-read", "late-start"])

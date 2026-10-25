@@ -41,9 +41,12 @@ proof of a read, understanding or an executed check.
 The existing `structured_output` terminal tool calls one invocation-local host
 callback. Only a sole terminal call in a completed native generation may enter
 admission. The host validates required judgments, original captured inputs, source
-selectors and shared retention limits before installing the entire stage. Rejection
-returns a correlated native error and changes no findings, decisions, notes or
-capacity. Correction uses the same conversation and cumulative wall/tool allowance.
+selectors and shared retention limits before installing the entire stage. A
+correctable payload rejection returns a correlated native error naming the
+field/selector, violated constraint and concrete correction. It changes no
+findings, decisions, notes or retention capacity. Correction uses the same
+conversation and cumulative wall/tool allowance. A rejected real tool start
+still consumes that allowance; exhausted capacity cannot invite another call.
 Successful acceptance installs state once, returns canonical output and permits
 native termination; duplicate accepted callbacks cannot admit or charge retention
 again. Unbound structured calls retain their ordinary serializer behavior.
@@ -52,7 +55,19 @@ Recheck open authority and the original deadline immediately before synchronous
 installation, with no await or detached thread between that check and mutation.
 Closure-first denies mutation; acceptance-first retains admitted work even when
 native settlement later fails. A possibly accepted callback cannot be replayed.
-Preacceptance retries use existing cumulative policy. Frames, arguments, results,
+Confirmed host/input/lifecycle failures are terminal: retain the failed condition
+and underlying cause, close affected authority, and explain that changing the
+submission cannot repair it. Native continuation and before-settle submission
+recovery stop, and backend/agent retry preserves the nonretryable host failure
+instead of relabeling it as stream truncation. Frozen-input validation never
+recaptures changed bytes under earlier judgments. Unknown callback failures are
+indeterminate, even when raised as `ValueError`; never infer safe replay from a
+native error flag or missing receipt.
+
+Ordinary transient preacceptance retries use existing cumulative policy. The
+binding owns the first terminal failure and cannot reopen after it. `/admit` and
+`/submit` enforce readiness, correlation, authority, deadline and cumulative
+capacity with the same recovery semantics. Frames, arguments, results,
 items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
 Every real native tool start counts, including failed submissions, with no separate
 eight-call ceiling or hidden nested tool execution.

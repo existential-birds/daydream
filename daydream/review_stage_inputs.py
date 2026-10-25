@@ -148,7 +148,7 @@ class StageInputFactory:
     def _revalidate_canonical(self) -> None:
         for expected in self.canonical:
             if self._canonical(expected.label, expected.path) != expected:
-                raise inputs.SanctionedInputUnavailable("canonical review inputs changed")
+                raise inputs.SanctionedInputUnavailable(f"sanctioned input {expected.label!r} changed after capture")
 
     def canonicalize_source_selectors(self, selectors: Any, expected_refs: Iterable[dict[str, Any]], *,
                                       require_assigned: bool = True) -> list[dict[str, Any]]:

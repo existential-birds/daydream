@@ -8,7 +8,15 @@ export default function (pi: ExtensionAPI) {
   let failed = false;
   let ready = false;
   let terminalCallId: string | undefined;
-  const admissions = new Map<string, { allowed: boolean; error?: string; consumed?: boolean }>();
+  type Admission = { id?: string; allowed?: boolean; outcome?: string; code?: string; error?: string; consumed?: boolean };
+  const admissions = new Map<string, Admission>();
+  let terminalFailure: Admission | undefined;
+  const stop = (id: string, status: Admission) => {
+    failed = true;
+    terminalFailure ??= status;
+    process.stdout.write(JSON.stringify({ type: "daydream_host_tool_fatal", id,
+      outcome: status.outcome, code: status.code, error: status.error }) + "\n");
+  };
   const request = async (path: string, value: any) => {
     const body = JSON.stringify(value);
     if (Buffer.byteLength(body) > packet.max_frame_bytes) throw new Error("Host frame limit");
@@ -17,10 +25,14 @@ export default function (pi: ExtensionAPI) {
       headers: { Authorization: packet.authorization, "Content-Type": "application/json" },
       body, signal: AbortSignal.timeout(packet.request_timeout_ms),
     });
-    if (!response.ok) throw new Error("Host endpoint unavailable");
     const text = await response.text();
     if (Buffer.byteLength(text) > packet.max_frame_bytes) throw new Error("Host response frame limit");
-    return JSON.parse(text) as any;
+    const result = JSON.parse(text);
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid host response");
+    if (!response.ok && result.outcome !== "fatal" && result.outcome !== "indeterminate") {
+      throw new Error("Host endpoint unavailable");
+    }
+    return result as any;
   };
   // Pi reports extension load errors without necessarily stopping. Install the
   // input barrier before parsing so missing/invalid authority stays fail closed.
@@ -59,30 +71,49 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_start", async event => {
     try {
       if (!ready || failed) throw new Error("Host authority unavailable");
-      if (admissions.has(event.toolCallId)) {
-        admissions.set(event.toolCallId, { allowed: false, error: "Native tool identity was already charged" });
-        return;
-      }
       let argumentsValue = event.toolName === packet.tool_name ? event.args : null;
-      if (Buffer.byteLength(JSON.stringify(argumentsValue) ?? "null") > packet.max_argument_bytes) {
+      const argumentsOversized = Buffer.byteLength(JSON.stringify(argumentsValue) ?? "null") > packet.max_argument_bytes;
+      if (argumentsOversized) {
         argumentsValue = null;
       }
-      admissions.set(event.toolCallId, await request("/admit", {
+      const status = await request("/admit", {
         id: event.toolCallId, name: event.toolName, arguments: argumentsValue,
         terminal: !event.parentToolCallId && terminalCallId === event.toolCallId,
-      }));
+        ...(argumentsOversized ? { arguments_oversized: true } : {}),
+      });
+      if (status.id !== event.toolCallId) throw new Error("Uncorrelated host admission response");
+      const rejection = ["correctable", "fatal", "indeterminate"].includes(status.outcome)
+        && typeof status.error === "string" && status.error.length > 0 && typeof status.code === "string";
+      if (!(status.allowed === true && status.outcome === undefined)
+          && !(rejection && (status.outcome !== "correctable" || status.allowed === false))) {
+        throw new Error("Unconfirmed host admission response");
+      }
+      admissions.set(event.toolCallId, status);
+      if (status.outcome === "fatal" || status.outcome === "indeterminate") stop(event.toolCallId, status);
     } catch {
-      failed = true;
+      const status = terminalFailure ?? { outcome: "indeterminate", code: "native_correlation",
+        error: "Host tool admission could not be confirmed; changing the submission cannot resolve it. Invocation aborted." };
+      admissions.set(event.toolCallId, status);
+      stop(event.toolCallId, status);
     }
   });
   pi.on("tool_call", async event => {
     const status = admissions.get(event.toolCallId);
+    if (terminalFailure) return { block: true, reason: String(terminalFailure.error).slice(0, 1024), terminate: true };
     if (!ready || failed || !status || status.consumed) {
-      return { block: true, reason: "Host-tool authority is unavailable or expired" };
+      const failure = { outcome: "indeterminate", code: "native_correlation",
+        error: "Host tool execution has no unused admission receipt; changing the submission cannot resolve it. Invocation aborted." };
+      stop(event.toolCallId, failure);
+      return { block: true, reason: failure.error, terminate: true };
     }
     status.consumed = true;
     if (status.allowed) return;
     return { block: true, reason: String(status.error).slice(0, 1024) };
+  });
+  pi.on("tool_execution_end", (_event, ctx) => {
+    // Abort after Pi retains the correlated native error. This also covers native
+    // schema rejection, which bypasses tool_call, and disables session recovery.
+    if (terminalFailure) ctx.abort();
   });
   try {
     const packetPath = process.env.DAYDREAM_PI_HOST_PACKET;

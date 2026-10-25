@@ -13,16 +13,16 @@ import json
 import secrets
 from typing import Any
 
-from daydream import clock, host_tools as policy
-from daydream.host_tools import HostToolBinding, HostToolRejected
+from daydream import host_tools as policy
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 
 
 def _bounded_items(value: Any, remaining: int, depth: int = 0) -> int:
     if depth > policy._MAX_DEPTH:
-        raise ValueError("item depth exceeded")
+        raise ValueError(f"Host request nesting exceeds {policy._MAX_DEPTH} levels; flatten the submitted arguments")
     remaining -= 1
     if remaining < 0:
-        raise ValueError("item limit exceeded")
+        raise ValueError(f"The entire host request exceeds {policy._MAX_ITEMS} items; submit fewer argument items")
     if isinstance(value, str):
         value.encode("utf-8", errors="strict")
     if isinstance(value, dict):
@@ -78,7 +78,10 @@ class PiHostToolServer:
         def finished(completed: asyncio.Task[None]) -> None:
             self._tasks.discard(completed)
             if not completed.cancelled() and completed.exception() is not None:
-                self.binding.close_authority()
+                error = HostToolFatal("Native host callback transport failed unexpectedly", code="callback_failed",
+                                      preacceptance=not self.binding.possibly_accepted)
+                error.__cause__ = completed.exception()
+                self.binding.fail(error)
 
         task.add_done_callback(finished)
 
@@ -94,8 +97,24 @@ class PiHostToolServer:
                       f"Content-Length: {len(data)}\r\n\r\n").encode() + data)
         await writer.drain()
 
+    def _error(self, error: HostToolRejected | HostToolFatal, call_id: Any = None) -> dict[str, Any]:
+        response: dict[str, Any] = {
+            "outcome": error.outcome if isinstance(error, HostToolFatal) else "correctable",
+            "code": error.code, "error": str(error),
+        }
+        if not isinstance(error, HostToolFatal) or error.preacceptance:
+            response.update(allowed=False, accepted=False)
+        if policy._valid_call_id(call_id):
+            response["id"] = call_id
+        return response
+
+    def _fatal(self, message: str, *, code: policy.HostToolFailureCode) -> HostToolFatal:
+        return self.binding.fail(HostToolFatal(message, code=code,
+                                               preacceptance=not self.binding.possibly_accepted))
+
     async def _request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         admitting = complete = False
+        authenticated = False
         submitting = False
         submission_id: Any = None
         try:
@@ -122,75 +141,96 @@ class PiHostToolServer:
                 if not secrets.compare_digest(headers.get("authorization", ""), "Bearer " + self._secret):
                     await self._reply(writer, 403, {"error": "Unauthorized transport"})
                     return
+                authenticated = True
                 admitting = path in {"/admit", "/submit"}
                 submitting = path == "/submit"
                 if "transfer-encoding" in headers:
                     raise ValueError("chunked requests are unsupported")
                 length = headers.get("content-length", "0")
                 if len(length) > 20 or not length.isdigit() or int(length) > policy._MAX_FRAME_BYTES:
-                    await self._reply(writer, 413, {"error": "Host frame byte limit exceeded"})
+                    await self._reply(writer, 413, self._error(self._fatal(
+                        f"Host request exceeds the {policy._MAX_FRAME_BYTES} whole-frame byte limit",
+                        code="invalid_frame")))
                     return
                 body = await reader.readexactly(int(length))
                 value = json.loads(body) if body else {}
                 if not isinstance(value, dict):
                     raise ValueError("expected object")
                 submission_id = value.get("id")
+                if path in {"/admit", "/submit"}:
+                    if path == "/admit":
+                        self.binding.ensure_open()
+                    if not self.ready:
+                        raise self._fatal("Native tool readiness was not established before admission/submission",
+                                          code="native_readiness")
                 try:
                     _bounded_items(value, policy._MAX_ITEMS)
-                except (ValueError, UnicodeError, RecursionError):
+                except (ValueError, UnicodeError, RecursionError) as exc:
                     if path == "/admit":
-                        self.binding.admit(value.get("id"), value.get("name"), None, malformed=True)
+                        message = ("Host arguments contain invalid UTF-8 text; replace invalid characters"
+                                   if isinstance(exc, UnicodeError) else str(exc))
+                        self.binding.admit(value.get("id"), value.get("name"), None, malformed=message)
                     raise
                 if method == "GET" and path == "/status":
-                    await self._reply(writer, 200, {"ready": self.ready and self.binding.authority_open
-                                                 and clock.monotonic() < self.binding.deadline})
+                    self.binding.ensure_open()
+                    await self._reply(writer, 200, {"ready": self.ready})
                     return
                 if method != "POST":
-                    await self._reply(writer, 405, {"error": "Expected POST"})
+                    await self._reply(writer, 405, self._error(self._fatal(
+                        "Native host endpoint requires POST", code="invalid_frame"), submission_id))
                     return
                 if path == "/ready":
                     self.binding.ensure_open()
                     if (set(value) != {"tool_name", "schema"} or self.binding.schema is None
                             or value["tool_name"] != policy.NATIVE_SUBMIT or value["schema"] != self.binding.schema):
-                        raise ValueError("Native terminal schema differs from the bound schema")
+                        raise self._fatal("Native terminal schema differs from the bound schema",
+                                          code="native_readiness")
                     self.ready = True
                     await self._reply(writer, 200, {"ready": True})
                     return
                 if path == "/admit":
+                    oversized = (f"The entire structured_output argument object exceeds {policy._MAX_ARGUMENT_BYTES} "
+                                 "UTF-8 bytes; reduce the submitted arguments before retrying"
+                                 if value.get("arguments_oversized") is True else False)
                     self.binding.admit(value.get("id"), value.get("name"), value.get("arguments"),
-                                       terminal=value.get("terminal") is True)
+                                       terminal=value.get("terminal") is True, malformed=oversized)
                     complete = True
-                    await self._reply(writer, 200, {"allowed": True})
+                    await self._reply(writer, 200, {"id": submission_id, "allowed": True})
                     return
                 if path == "/submit":
-                    if not self.ready:
-                        raise HostToolRejected("Native terminal readiness was not established")
                     result = self.binding.submit(value.get("id"), value.get("arguments"))
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "accepted": True, "result": result})
                     return
-                await self._reply(writer, 404, {"error": "Unknown host endpoint"})
-        except HostToolRejected as exc:
+                await self._reply(writer, 404, self._error(self._fatal(
+                    "Unknown native host endpoint", code="invalid_frame"), submission_id))
+        except (HostToolRejected, HostToolFatal) as exc:
             complete = True
-            if submitting and self.binding.possibly_accepted:
+            if isinstance(exc, HostToolRejected) and submitting and self.binding.possibly_accepted:
                 # A trusted callback failure after its mutation boundary cannot
                 # be presented as a correctable semantic rejection.
-                await self._reply(writer, 400, {"id": submission_id, "error": "Host acceptance outcome is unconfirmed"})
-                return
-            response: dict[str, Any] = {"allowed": False, "accepted": False, "error": str(exc)}
-            if submitting:
-                response["id"] = submission_id
-            await self._reply(writer, 200, response)
-        except (ValueError, UnicodeError, RecursionError, asyncio.IncompleteReadError):
-            await self._reply(writer, 400, {"error": "Invalid bounded host frame"})
+                exc = self._fatal("Host acceptance outcome is unconfirmed", code="callback_failed")
+            await self._reply(writer, 200, self._error(exc, submission_id))
+        except (ValueError, UnicodeError, RecursionError, asyncio.IncompleteReadError) as exc:
+            if authenticated:
+                failure = HostToolFatal("Invalid bounded native host request cannot be correlated safely",
+                                        code="invalid_frame", preacceptance=not self.binding.possibly_accepted)
+                failure.__cause__ = exc
+                error = self.binding.fail(failure)
+                await self._reply(writer, 400, self._error(error, submission_id))
+            else:
+                await self._reply(writer, 400, {"error": "Invalid bounded host frame"})
         except (TimeoutError, OSError):
             pass  # A timed-out/disconnected transport cannot establish success.
-        except Exception:
-            self.binding.close_authority()
+        except Exception as exc:
+            failure = HostToolFatal("Native host callback failed unexpectedly", code="callback_failed",
+                                    preacceptance=not self.binding.possibly_accepted)
+            failure.__cause__ = exc
+            error = self.binding.fail(failure)
             # Unexpected callback failure may have crossed the acceptance boundary;
             # keep its native result generic and prohibit replay via the binding.
             try:
-                await self._reply(writer, 400, {"error": "Host callback failed"})
+                await self._reply(writer, 400, self._error(error, submission_id))
             except OSError:
                 pass
         finally:

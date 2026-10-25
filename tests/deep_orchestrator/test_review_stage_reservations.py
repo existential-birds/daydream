@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import AsyncGenerator, Iterable
 from copy import deepcopy
@@ -16,8 +15,7 @@ from daydream import review_result
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
-from daydream.host_tools import HostToolBinding, HostToolRejected
-from daydream.review_investigation import HANDOFF_MAX_BYTES, ReviewInvestigation
+from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     StagedBackend,
@@ -45,7 +43,7 @@ class NativeStageBackend(StagedBackend, PiBackend):
         binding.configure_schema(schema)
         seen_request = False
         submissions: dict[str, Any] = {}
-        admission_errors: dict[str, str] = {}
+        admission_errors: dict[str, HostToolRejected | HostToolFatal] = {}
         async with binding.session():
             async for event in super().execute(cwd, prompt, *args, **kwargs):
                 if isinstance(event, RequestEvent):
@@ -57,16 +55,16 @@ class NativeStageBackend(StagedBackend, PiBackend):
                 if isinstance(event, ToolStartEvent):
                     try:
                         binding.admit(event.id, event.name, event.input, terminal=event.name == 'structured_output')
-                    except HostToolRejected as exc:
-                        admission_errors[event.id] = str(exc)
+                    except (HostToolRejected, HostToolFatal) as exc:
+                        admission_errors[event.id] = exc
                     if event.name == 'structured_output':
                         submissions[event.id] = deepcopy(event.input)
                 elif isinstance(event, ToolResultEvent) and event.id in submissions and not event.is_error:
                     try:
                         if event.id in admission_errors:
-                            raise HostToolRejected(admission_errors[event.id])
+                            raise admission_errors[event.id]
                         canonical = binding.submit(event.id, submissions[event.id])
-                    except HostToolRejected as exc:
+                    except (HostToolRejected, HostToolFatal) as exc:
                         event = replace(event, is_error=True, output=str(exc))
                     else:
                         event = replace(event, output=str(canonical))
@@ -77,19 +75,31 @@ class NativeStageBackend(StagedBackend, PiBackend):
                         assert isinstance(submitted, dict)
                         binding.admit('default-submit', 'structured_output', submitted, terminal=True)
                         yield ToolStartEvent(id='default-submit', name='structured_output', input=submitted)
-                        canonical = binding.submit('default-submit', submitted)
-                        yield ToolResultEvent(id='default-submit', output=str(canonical), is_error=False)
+                        try:
+                            canonical = binding.submit('default-submit', submitted)
+                        except (HostToolRejected, HostToolFatal) as exc:
+                            yield ToolResultEvent(id='default-submit', output=str(exc), is_error=True)
+                        else:
+                            yield ToolResultEvent(id='default-submit', output=str(canonical), is_error=False)
+                        if binding.fatal_error is not None:
+                            raise binding.fatal_error
                     event = replace(event, structured_output=binding.accepted_result)
                 yield event
+                if binding.fatal_error is not None:
+                    if isinstance(event, ToolStartEvent):
+                        yield ToolResultEvent(id=event.id, output=str(binding.fatal_error), is_error=True)
+                    raise binding.fatal_error
             binding.native_settled = True
 
 
-@pytest.mark.parametrize('fault', ['foreign-source', 'invalid-judgment', 'tampered-original',
+@pytest.mark.parametrize('fault', ['foreign-source', 'invalid-judgment', 'not-reviewed-reason',
                                  'prior-admitted', 'handoff-bytes'])
 async def test_native_correction_admits_only_the_valid_whole_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    """Native transport tests cannot prove rejected stage state and shared capacity stay untouched."""
+    """Transport feedback alone misses actionable domain corrections that preserve prior state and shared capacity."""
+    from daydream.review_investigation import HANDOFF_MAX_BYTES, ReviewInvestigation
+
     review = many_file_review(tmp_path, monkeypatch, count=9 if fault == 'prior-admitted' else 1, docs_count=0)
     backend = NativeStageBackend(review.repo)
     backend.fanout_concurrency = 1
@@ -145,23 +155,14 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
         bad['notes'] = 'REJECTED SEMANTIC NOTE'
         bad['candidates'] = [candidate(disposition='confirmed', finding=dict(
             record(), description='Rejected defect'))]
-        original_path: Path | None = None
-        original_bytes: bytes | None = None
-        original_times: tuple[int, int] | None = None
         if fault == 'foreign-source':
             bad['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
         elif fault in {'invalid-judgment', 'prior-admitted'}:
             bad['candidates'][0]['grounds'] = ''
+        elif fault == 'not-reviewed-reason':
+            bad['targets'][0].update(status='not_reviewed', reason='', evidence_refs=[])
         elif fault == 'handoff-bytes':
             bad['notes'] += 'x' * HANDOFF_MAX_BYTES
-        else:
-            # Corrupt the canonical diff itself, leaving prepared copies intact.
-            original_path = artifact_dir_for(review.repo, allow_standalone=True) / 'diff.patch'
-            assert original_path.is_file()
-            original_stat = original_path.stat()
-            original_times = (original_stat.st_atime_ns, original_stat.st_mtime_ns)
-            original_bytes = original_path.read_bytes()
-            original_path.write_bytes(original_bytes + b'corrupt canonical input\n')
         try:
             yield ToolStartEvent(id='rejected-submit', name='structured_output', input=bad)
             yield ToolResultEvent(id='rejected-submit', output='Receipt.', is_error=False)
@@ -169,10 +170,6 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
             assert retained_state() == before, 'rejected plans must preserve all admitted state and shared capacity'
             if fault == 'handoff-bytes':
                 assert investigation.assertion_failure_class == 'admission_failure'
-            if original_path is not None:
-                assert original_bytes is not None and original_times is not None
-                original_path.write_bytes(original_bytes)
-                os.utime(original_path, ns=original_times)
             if fault != 'prior-admitted':
                 output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             yield ToolStartEvent(id='corrected-submit', name='structured_output', input=output)
@@ -188,10 +185,6 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
             assert retained_state() == accepted
         finally:
             monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', retained_limit)
-            if original_path is not None:
-                assert original_bytes is not None and original_times is not None
-                original_path.write_bytes(original_bytes)
-                os.utime(original_path, ns=original_times)
 
     data = await review.finish('python', findings=('Grounded defect',))
     assert checked
@@ -219,6 +212,135 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
                        if result['source_call_id'] == 'rejected-submit']
     assert rejected_result['extra']['is_error'] is True
     assert rejected_result['content'] and len(rejected_result['content'].encode()) <= 1024
+    diagnostic = rejected_result['content']
+    if fault == 'foreign-source':
+        assert 'targets[0]' in diagnostic and 'evidence_refs' in diagnostic and 'choose' in diagnostic
+    elif fault in {'invalid-judgment', 'prior-admitted'}:
+        assert 'candidates[0].grounds' in diagnostic and 'nonblank' in diagnostic and 'supply' in diagnostic
+    elif fault == 'not-reviewed-reason':
+        assert 'targets[0].reason' in diagnostic and 'not_reviewed' in diagnostic and 'supply' in diagnostic
+    else:
+        assert str(HANDOFF_MAX_BYTES) in diagnostic and 'cumulative' in diagnostic and 'shorten' in diagnostic
+
+
+@pytest.mark.parametrize('fault', ['corrupt-canonical', 'delete-canonical', 'target-capacity', 'handoff-capacity',
+                                 'handoff-byte-capacity', 'triage-byte-capacity', 'triage-byte-correction'])
+async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Bounds need required triage rows and projections; optional payload shrink must still admit within capacity."""
+    from daydream import review_investigation
+
+    triage = fault.startswith('triage-')
+    correction = fault == 'triage-byte-correction'
+    review = many_file_review(tmp_path, monkeypatch, count=1 if triage else 9, docs_count=0,
+                             supporting_sources={'a': 'X\n'} if triage else None)
+    backend = NativeStageBackend(review.repo)
+    backend.fanout_concurrency = 1
+    review.backend = backend
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '2')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
+    admitted: list[dict[str, Any]] = []
+    bindings: list[HostToolBinding] = []
+    unfinished: list[str] = []
+    investigations: dict[str, review_investigation.ReviewInvestigation] = {}
+    run_investigation = review_investigation.ReviewInvestigation.run
+
+    async def observe_run(investigation: review_investigation.ReviewInvestigation, *args: Any,
+                          **kwargs: Any) -> tuple[dict[str, Any], str | None]:
+        investigations[investigation.scope_id] = investigation
+        return await run_investigation(investigation, *args, **kwargs)
+
+    monkeypatch.setattr(review_investigation.ReviewInvestigation, 'run', observe_run)
+
+    @backend.script()
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        binding = backend.calls[-1]['host_tools']
+        bindings.append(binding)
+        if not admitted:
+            admitted.extend({**target, 'evidence_refs': deepcopy(stage['source_refs'][target['target_id']][:1])}
+                            for target in output['targets'])
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            if triage:
+                output['candidates'].extend(candidate(file='a', line=1, trigger='x', consequence='x', grounds='x')
+                                            for _ in range(8))
+                output['notes'] = 'x' * (62_000 if correction else 62_800)
+            if fault == 'handoff-byte-capacity':
+                # One admitted large note leaves too little room for the next
+                # stage's unavoidable host progress, even with no optional text.
+                output['notes'] = 'x' * 63_500
+            yield ToolStartEvent(id='accepted-submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='accepted-submit', output='Submitted.', is_error=False)
+            return
+        assert len(bindings) == 2, 'invalid frozen inputs must stop replacement and later-stage dispatch'
+        unfinished.extend(stage['assigned_target_ids'])
+        original = artifact_dir_for(review.repo, allow_standalone=True) / 'diff.patch'
+        if fault == 'corrupt-canonical':
+            original.write_bytes(original.read_bytes() + b'permanently changed input\n')
+        elif fault == 'delete-canonical':
+            original.unlink()
+        elif fault == 'target-capacity':
+            # Earlier publication remains valid, but no new required target ID
+            # can fit the shared allocation, even without evidence or prose.
+            allocated = investigations['python'].coverage._target_decision_bytes
+            monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', sum(allocated.values()))
+        elif fault == 'handoff-capacity':
+            monkeypatch.setattr(review_investigation, 'HANDOFF_MAX_ITEMS', 2)
+        elif triage:
+            assert stage['stage'] == 'triage'
+            output.update(notes='', supporting_files=[], candidates=[candidate(
+                candidate_id=item['candidate_id'], file='a', line=1, trigger='x', consequence='x', grounds='x',
+                disposition='unresolved') for item in stage['candidates']])
+            if correction:
+                before = deepcopy(investigations['python'].handoff)
+                bad = {**output, 'notes': 'OPTIONAL_TRIAGE_TEXT' * 300}
+                yield ToolStartEvent(id='oversized-submit', name='structured_output', input=bad)
+                yield ToolResultEvent(id='oversized-submit', output='Submitted.', is_error=False)
+                assert not binding.accepted and not binding.possibly_accepted and binding.fatal_error is None
+                assert investigations['python'].handoff == before
+                yield ToolStartEvent(id='corrected-submit', name='structured_output', input=output)
+                yield ToolResultEvent(id='corrected-submit', output='Submitted.', is_error=False)
+                assert binding.accepted and binding.fatal_error is None
+                return
+        else:
+            output.update(notes='', candidates=[], supporting_files=[])
+        yield ToolStartEvent(id='fatal-submit', name='structured_output', input=output)
+        yield ToolResultEvent(id='fatal-submit', output='Submitted.', is_error=False)
+        pytest.fail('native continuation must stop after an unrecoverable host failure')
+
+    assert await review.run() == (1 if fault == 'delete-canonical' else 0)
+    data = review.load()
+    scope = scopes(data)['python']
+    assert scope['status'] == 'incomplete' and scope['partial_evidence'] is True
+    assert scope['reason_codes'] == ['backend_failure' if fault.endswith('capacity') else 'evidence_incomplete']
+    assert scope['target_decisions'] == admitted
+    assert not set(unfinished).intersection(target['target_id'] for target in scope['target_decisions'])
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    assert len(bindings) == 2
+    failed = bindings[-1]
+    assert failed.authority_open is False
+    if correction:
+        assert failed.accepted and failed.fatal_error is None
+    else:
+        assert failed.accepted is False and failed.possibly_accepted is False
+        fatal = failed.fatal_error
+        assert fatal is not None and fatal.code == (
+            'capacity_exhausted' if fault.endswith('capacity') else 'input_unavailable') and fatal.preacceptance is True
+        if not fault.endswith('capacity'):
+            assert type(fatal.__cause__).__name__ == 'SanctionedInputUnavailable'
+            assert 'canonical-diff' in str(fatal)
+        assert 'Changing the submission cannot resolve' in str(fatal)
+        assert str(review.repo) not in str(fatal)
+    if triage:
+        retained = investigations['python'].handoff['candidates']
+        assert retained[0]['disposition'] == 'confirmed' and len(retained) == 9
+        assert all(item['disposition'] == ('unresolved' if correction else 'open') for item in retained[1:])
+    metadata = [event['metadata'] for event in stage_ends(review, 'python')]
+    assert [item['admitted'] for item in metadata] == [True, correction]
+    assert all(item['attempt'] == 1 for item in metadata)
+    persisted = saved_coverage(review.repo / '.daydream/deep').to_dict()['stack_outcomes']
+    assert next(item for item in persisted if item['scope_id'] == 'python')['target_decisions'] == admitted
 
 
 @pytest.mark.parametrize('order', ['closure-first', 'acceptance-first'])
@@ -249,8 +371,7 @@ async def test_native_stage_authority_order_preserves_truthful_retained_work(
                 retryable = True
             raise SettlementFailure('Native settlement failed after domain acceptance')
 
-    reason = 'backend_failure' if order == 'acceptance-first' else 'evidence_incomplete'
-    data = await review.finish('python', reason=reason,
+    data = await review.finish('python', reason='backend_failure',
         findings=('Grounded defect',) if order == 'acceptance-first' else (), statuses=('failed', 'incomplete'))
     assert attempted == 1
     scope = scopes(data)['python']

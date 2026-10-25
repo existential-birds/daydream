@@ -52,6 +52,11 @@ separately record authority closure, native settlement and aggregate cleanup of
 callbacks, native process and endpoint, after cleanup on every exit path. Domain
 acceptance retains canonical findings independently of later native failure;
 rejected selector payloads remain raw evidence without entering semantic handoffs.
+A terminal host-admission diagnostic retains the typed failure code, mutation
+certainty, safe condition/input context and available native call/generation
+correlation. The binding's failure and underlying cause remain host evidence;
+native details alone cannot establish acceptance, safe rejection or retryability.
+Observed usage remains billable even when the host failure stops the invocation.
 A successful callback cannot establish native settlement; suppressing a late
 result cannot prove cleanup. See
 [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).

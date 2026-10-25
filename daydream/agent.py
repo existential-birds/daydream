@@ -843,8 +843,9 @@ async def _run_agent(
                     exception_max_retries = min(
                         max_attempts, getattr(exc, "max_retries", max_attempts)
                     )
-                    if host_tools is not None and host_tools.possibly_accepted:
-                        # A callback may have installed state even if transport settlement failed.
+                    if host_tools is not None and (host_tools.possibly_accepted or host_tools.fatal_error is not None):
+                        # A terminal host failure cannot be corrected by replay; a
+                        # callback may also have installed state before settlement failed.
                         exception_max_retries = 0
                     if attempt < exception_max_retries and classification.retries_allowed:
                         # Activate the cumulative retry-recovery allowance on the

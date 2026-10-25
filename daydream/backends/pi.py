@@ -101,6 +101,7 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
         "agent_settled",
         "daydream_host_tools_ready",
         "daydream_host_tools_failed",
+        "daydream_host_tool_fatal",
         "turn_start",
         "turn_end",
         "message_start",
@@ -864,6 +865,10 @@ class PiBackend:
         seen_host_results: dict[str, tuple[str | None, str]] = {}
         ambiguous_host_identity = False
         host_submission_indeterminate = False
+        native_host_failure = False
+        host_failure_call_id: str | None = None
+        host_failure_generation_id: str | None = None
+        terminal_total_emitted = False
         host_server = None
 
         transport: CliTransport | None = None
@@ -941,6 +946,8 @@ class PiBackend:
                                    metadata=metadata)
 
         def terminal_events() -> tuple[CostEvent, ResultEvent]:
+            nonlocal terminal_total_emitted
+            terminal_total_emitted = True
             native_session = session_id or effective_session_id
             return (
                 CostEvent(
@@ -1109,6 +1116,21 @@ class PiBackend:
                     continue
                 if event_type == "daydream_host_tools_failed":
                     raise PiError("Required native host-tool binding is unavailable", category="HOST_TOOLS")
+                if event_type == "daydream_host_tool_fatal" and host_tools is not None:
+                    # Native details only explain the stop. Binding-local state
+                    # remains the authority for acceptance and retry decisions.
+                    native_host_failure = True
+                    host_failure_generation_id = last_generation_id
+                    native_id = event.get("id")
+                    if isinstance(native_id, str) and 0 < len(native_id.encode()) <= 512:
+                        host_failure_call_id = native_id
+                    native_message, _ = _pi_diagnostic_text(str(event.get("error", "")), 1024)
+                    yield DiagnosticEvent(code="pi_host_tool_native_error", message=native_message,
+                        metadata={"call_id": host_failure_call_id,
+                                  "outcome": event.get("outcome") if event.get("outcome") in
+                                  {"fatal", "indeterminate"} else "unavailable",
+                                  "generation_id": last_generation_id})
+                    continue
                 if lifecycle is not None and isinstance(event_type, str) and event_type in _PI_EVENT_TYPES:
                     lifecycle.native_event()
                 if event_type in {"agent_start", "turn_start", "message_start", "tool_execution_start"}:
@@ -1306,6 +1328,16 @@ class PiBackend:
                         lifecycle.active_tools(active_tool_calls)
                     call_id = event.get("toolCallId")
                     result = event.get("result")
+                    if (host_tools is not None and isinstance(result, dict)
+                            and isinstance(result.get("details"), dict)
+                            and result["details"].get("host_submission_status") in {"fatal", "indeterminate"}
+                            and isinstance(call_id, str)):
+                        host_failure_call_id = call_id
+                        host_failure_generation_id = last_generation_id
+                    elif (host_tools is not None and host_tools.fatal_error is not None
+                          and event.get("toolName") == "structured_output" and isinstance(call_id, str)):
+                        host_failure_call_id = call_id
+                        host_failure_generation_id = last_generation_id
                     if (host_tools is not None and event.get("toolName") == "structured_output"
                             and event.get("isError") is True and isinstance(result, dict)
                             and result.get("details") == {"host_submission_status": "indeterminate"}):
@@ -1391,7 +1423,7 @@ class PiBackend:
                         model_source="native",
                         provider_source="native" if last_provider is not None else None,
                     )
-                    if stop_reason == "error":
+                    if stop_reason == "error" and not (host_tools is not None and host_tools.fatal_error is not None):
                         for terminal in terminal_events():
                             yield terminal
                         raise PiError(
@@ -1456,6 +1488,11 @@ class PiBackend:
             for terminal in terminal_events():
                 yield terminal
 
+            if host_tools is not None and host_tools.fatal_error is not None:
+                raise host_tools.fatal_error
+            if native_host_failure:
+                raise PiError("Native host-tool admission did not receive a confirmed continuation outcome",
+                              retryable=False, category="HOST_TOOLS")
             if host_submission_indeterminate:
                 raise PiError("Native host submission did not receive a confirmed outcome",
                               retryable=False, category="HOST_TOOLS")
@@ -1492,6 +1529,21 @@ class PiBackend:
                 if metrics is not None:
                     yield metrics
                 yield terminal_events()[0]
+            if host_tools is not None and host_tools.fatal_error is not None:
+                fatal = host_tools.fatal_error
+                if not terminal_total_emitted:
+                    yield terminal_events()[0]
+                fatal_message, _ = _pi_diagnostic_text(str(fatal), 1024)
+                cause = fatal.__cause__
+                cause_metadata = ({"cause_type": type(cause).__name__,
+                                   "cause_message": _pi_diagnostic_text(str(cause), 1024)[0]}
+                                  if cause is not None else {})
+                yield DiagnosticEvent(code="pi_host_tool_fatal", message=fatal_message,
+                    metadata={"outcome": fatal.outcome, "code": fatal.code, "retryable": False,
+                              "call_id": host_failure_call_id,
+                              "generation_id": host_failure_generation_id or last_generation_id,
+                              **cause_metadata})
+                raise PiError(str(fatal), retryable=False, category="HOST_TOOLS") from fatal
             raise
         except BaseException:
             native_failed = True

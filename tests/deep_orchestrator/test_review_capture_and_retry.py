@@ -617,6 +617,7 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A real canonical read failure must isolate its scope without hiding the successful sibling's evidence."""
     review = InvestigationRun(multi_stack_target, tmp_path, monkeypatch)
     real_read = Path.read_text
     canonical_reads = 0
@@ -646,21 +647,28 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
 
 async def test_changed_prepared_input_identity_blocks_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
+    """Malformed payload coverage missed an otherwise valid native submission after its prepared file changed."""
     review = staged_review(tmp_path, monkeypatch, files=1)
+    review.backend = NativeStageBackend(review.repo)
+    bindings: list[Any] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
         diff = pointers['review-assignment'] if 'review-assignment' in pointers else pointers['diff']
         diff.write_text('Changed after the prepared exact-path input was read.\n')
-        output['targets'][0]['unknown_duplicate_id'] = None
+        bindings.append(review.backend.calls[-1]['host_tools'])
 
-    await review.finish('python', reason='evidence_incomplete')
+    await review.finish('python', reason='evidence_incomplete', statuses=('failed',))
+    assert len(bindings) == 1
+    fatal = bindings[0].fatal_error
+    assert fatal is not None and fatal.code == 'input_unavailable' and fatal.preacceptance
+    assert type(fatal.__cause__).__name__ == 'SanctionedInputUnavailable'
+    assert 'review-assignment' in str(fatal) and 'Changing the submission cannot resolve' in str(fatal)
     event, = stage_ends(review, 'python')
     assert event['metadata']['failure_class'] == 'admission_failure'
     assert event['metadata']['admitted'] is False and event['metadata']['attempt'] == 1
-    assert event['metadata']['observed_tool_starts'] == 0
+    assert event['metadata']['observed_tool_starts'] == 1
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])

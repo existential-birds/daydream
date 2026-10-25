@@ -47,6 +47,7 @@ export default function (pi: ExtensionAPI) {
     let starts = 0;
     let submitted = false;
     let submissionIndeterminate = false;
+    let submissionFatal = false;
     let reminded = false;
     let warned = false;
     let pendingRecovery = false;
@@ -89,7 +90,7 @@ export default function (pi: ExtensionAPI) {
       if (event.toolName === "structured_output" && !event.isError) submitted = true;
     });
     pi.on("agent_before_settle", (event) => {
-      if (event.outcome !== "completed" || submitted || submissionIndeterminate || reminded
+      if (event.outcome !== "completed" || submitted || submissionIndeterminate || submissionFatal || reminded
           || (allowance !== undefined && allowance - starts <= 0)) return;
       reminded = true;
       pendingRecovery = true;
@@ -124,14 +125,22 @@ export default function (pi: ExtensionAPI) {
             const text = await response.text();
             if (Buffer.byteLength(text) > host.max_frame_bytes) throw new Error("Host response frame limit");
             const result = JSON.parse(text);
-            if (!response.ok || !result || typeof result !== "object" || Array.isArray(result)
+            if (!result || typeof result !== "object" || Array.isArray(result)
                 || result.id !== toolCallId) throw new Error("Unconfirmed host response");
-            if (result.accepted === true && result.result
+            if (response.ok && result.accepted === true && result.outcome === undefined && result.result
                 && typeof result.result === "object" && !Array.isArray(result.result)) {
               return { content: [{ type: "text", text: "Review result accepted." }],
                 details: result.result, terminate: true };
             }
-            if (result.accepted === false && typeof result.error === "string" && result.error.length > 0) {
+            if ((result.outcome === "fatal" || result.outcome === "indeterminate")
+                && typeof result.error === "string" && result.error.length > 0) {
+              submissionFatal = true;
+              ctx.abort();
+              return { content: [{ type: "text", text: result.error.slice(0, 1024) }],
+                details: { host_submission_status: result.outcome, code: result.code }, isError: true, terminate: true };
+            }
+            if (response.ok && result.accepted === false && result.outcome === "correctable"
+                && typeof result.error === "string" && result.error.length > 0) {
               return { content: [{ type: "text", text: result.error.slice(0, 1024) }], isError: true };
             }
             throw new Error("Unconfirmed host submission outcome");

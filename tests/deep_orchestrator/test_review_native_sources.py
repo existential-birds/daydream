@@ -11,8 +11,10 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
+from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
+from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import canonicalize_source_selectors, source_id
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate
@@ -154,11 +156,11 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
 
 @pytest.mark.parametrize('fault', [None, 'contained-range', 'foreign-id', 'assigned-range', 'supporting-range',
                                   'supporting-only', 'forged-hash', 'missing', 'traversal', 'binary', 'oversized',
-                                  'symlink'])
+                                  'symlink', 'storage-reread'])
 def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob(
-    tmp_path: Path, fault: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str | None,
 ) -> None:
-    """Canonical citation tests cannot prove that the model never chooses a supporting hash."""
+    """Canonical references miss selector feedback; vague errors cannot guide a valid bounded correction."""
     repo = tmp_path / 'pinned_selectors'
     supported = 'FIRST = "界"\u2028STILL_FIRST = True\nSECOND = True\n'
     before = 'UNCHANGED = True\nVALUE = 0\nTRAILING = True\n'
@@ -205,9 +207,51 @@ def test_source_selectors_construct_supporting_evidence_from_the_pinned_git_blob
         # Keep the range valid for each blob so a missing size/UTF-8/regular-file
         # guard cannot pass this regression at an unrelated range check.
         choices[1]['source_range'] = {'start': 1, 'end': 1}
+    if fault == 'storage-reread':
+        # A later assigned selector makes the last processed field differ from
+        # the supporting reference whose real Git reread loses storage. Other
+        # selector cases cover admission, but miss this diagnostic attribution.
+        choices.append({'source_id': source_id(assigned), 'basis': 'supplied_diff', 'source_range': None})
+        real_show = queries.show
+        unavailable = repo / '.git-unavailable'
+
+        def lose_storage(source_repo: Path, ref: str, path: str) -> bytes:
+            contents = real_show(source_repo, ref, path)
+            if source_repo == repo and path == 'support.py':
+                (repo / '.git').rename(unavailable)
+            return contents
+
+        monkeypatch.setattr(queries, 'show', lose_storage)
+        try:
+            with pytest.raises(HostToolFatal) as fatal:
+                canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+        finally:
+            if unavailable.exists():
+                unavailable.rename(repo / '.git')
+        assert fatal.value.code == 'input_unavailable' and fatal.value.preacceptance
+        assert isinstance(fatal.value.__cause__, GitError)
+        diagnostic = str(fatal.value)
+        assert 'evidence_refs[1]' in diagnostic and 'support.py' in diagnostic and '(new)' in diagnostic
+        assert 'evidence_refs[2]' not in diagnostic
+        assert 'Changing the submission cannot resolve' in diagnostic and str(repo) not in diagnostic
+        return
     if fault not in {None, 'contained-range'}:
-        with pytest.raises(ValueError):
+        with pytest.raises(HostToolRejected) as rejected:
             canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
+        message = str(rejected.value)
+        assert 'evidence_refs' in message
+        assert any(word in message.lower() for word in ('choose', 'use', 'remove', 'supply'))
+        if fault == 'foreign-id':
+            assert choices[0]['source_id'] in message and 'assigned' in message
+        elif fault == 'assigned-range':
+            assert '1..3' in message and 'null' in message
+        elif fault == 'supporting-range':
+            assert '1..2' in message and 'start <= end' in message
+        elif fault == 'oversized':
+            assert 'whole pinned blob' in message and '65536' in message
+            assert 'narrowing source_range cannot' in message
+        elif fault == 'supporting-only':
+            assert 'reviewed' in message and 'source_id' in message
         return
     canonical = canonicalize_source_selectors(choices, [assigned], revision=revision, source_root=repo)
     expected_assigned = {**assigned, 'source_range': {'start': 2, 'end': 2}} if fault == 'contained-range' else assigned
