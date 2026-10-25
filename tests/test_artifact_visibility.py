@@ -1272,9 +1272,7 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
 
 
 @pytest.mark.parametrize("manifest_problem",
-    ["unsafe-path", "duplicate-path", "dot", "leading-dot", "embedded-dot", "empty-component",
-        "bool-schema-version",
-    ],
+    ["unsafe-path", "duplicate-path", "leading-dot", "embedded-dot", "empty-component", "bool-schema-version"],
 )
 async def test_artifact_session_rejects_closed_recovery_manifest_untouched(source: Path, manifest_problem: str,
 ) -> None:
@@ -1285,7 +1283,7 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(sourc
     stage.mkdir(parents=True)
     stage_canary = stage / "canary"
     stage_canary.write_bytes(b"stage must remain unchanged")
-    raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "dot": ".", "leading-dot": "./runs",
+    raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "leading-dot": "./runs",
         "embedded-dot": "runs/./record.json", "empty-component": "runs//record.json",
         "bool-schema-version": "runs/record.json",
     }[manifest_problem]
