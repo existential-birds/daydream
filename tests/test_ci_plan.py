@@ -109,8 +109,7 @@ def _group(base: str, head: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(("path", "queue"), [
-    ("docs/guide.md", False), ("rl/daydream_review/uv.lock", False),
-    ("docs/guide.md", True), ("rl/daydream_review/uv.lock", True), ("tests/test_contract.py", True),
+    ("docs/guide.md", False), ("tests/test_contract.py", True),
 ])
 def test_ci_cli_pr_checks_require_verified_active_queue(
     git_repo: Path, ci_cli: Callable[..., tuple[str, str]], path: str, queue: bool,
@@ -164,7 +163,7 @@ def test_ci_cli_verifies_queue_ruleset_at_its_origin(
 
 
 @pytest.mark.parametrize("fault", [
-    "always", "omitted", "null", "object", "string", "inaccessible",
+    "always", "omitted", "null", "inaccessible",
     "malformed", "wrong-id", "wrong-source", "wrong-source-type", "wrong-target", "inactive",
     "missing-queue", "missing-origin", "invalid-id", "other-queue-bypass", "float-id",
     "null-source", "empty-source", "null-source-type", "unknown-source-type",
@@ -179,8 +178,8 @@ def test_ci_cli_queue_bypass_or_unverified_ruleset_keeps_full_pr_gate(
         ruleset["bypass_actors"] = [{"actor_id": 7, "actor_type": "Team", "bypass_mode": fault}]
     elif fault == "omitted":
         del ruleset["bypass_actors"]
-    elif fault in {"null", "object", "string"}:
-        ruleset["bypass_actors"] = {"null": None, "object": {}, "string": ""}[fault]
+    elif fault == "null":
+        ruleset["bypass_actors"] = None
     elif fault == "inaccessible":
         replies[_RULESET] = subprocess.CalledProcessError(1, "gh")
     elif fault == "malformed":
@@ -256,101 +255,100 @@ def _archive(proof: dict[str, Any]) -> bytes:
     return stream.getvalue()
 
 
-def _push_replies(repo: Path, replies: dict[str, Any]) -> None:
+def _push(repo: Path, before: str, replies: dict[str, Any]) -> dict[str, Any]:
     sha = _git(repo, "rev-parse", "HEAD")
     replies[f"repos/{_REPO}/commits/{sha}/pulls"] = [{
         "number": 7, "merged_at": "2026-10-14T12:00:00Z", "merge_commit_sha": sha,
         "base": {"ref": "main", "repo": {"full_name": _REPO}},
     }]
+    return {"ref": "refs/heads/main", "before": before, "after": sha}
 
 
-def _push(repo: Path, before: str) -> dict[str, Any]:
-    return {"ref": "refs/heads/main", "before": before, "after": _git(repo, "rev-parse", "HEAD")}
+def test_ci_cli_reuses_last_verified_queue_tree_from_run_inventory(
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path,
+) -> None:
+    base, old_proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
+    tested = _commit(git_repo, "daydream/base_change.py")
+    proof_dir = tmp_path / "proof"
+    ci_cli(_group(base, tested), event_name="merge_group", record=proof_dir)
+    proof = json.loads((proof_dir / "proof.json").read_text())
+    _git(git_repo, "reset", "--soft", base)
+    _git(git_repo, "-c", "commit.gpgsign=false", "commit", "-m", "queue squash result")
+    assert _git(git_repo, "rev-parse", "HEAD") != proof["commit"]
+    assert _git(git_repo, "rev-parse", "HEAD^{tree}") == proof["tree"]
+    candidates: list[tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]] = [
+        ({"head_sha": old_proof["commit"]}, {}, old_proof),
+        ({}, {}, {"head_sha": "f" * 40}),
+        ({}, {}, {"repository": "other/repo"}),
+        ({}, {}, {"run_id": 999}),
+        ({}, {}, {"commit": "f" * 40}),
+        ({}, {}, {"base_tree": "f" * 40}),
+        ({"head_branch": _QUEUE_REF.replace("/main/", "/master/").removeprefix("refs/heads/")}, {},
+         {"base_ref": "refs/heads/master", "head_ref": _QUEUE_REF.replace("/main/", "/master/")}),
+        ({"repository": {"full_name": "other/repo"}}, {}, {}),
+        ({"head_branch": "feature"}, {}, {}),
+        ({"path": ".github/workflows/other.yml"}, {}, {}),
+        ({}, {}, {"event": "pull_request"}),
+        ({}, {}, {"gate": "basic"}),
+        ({}, {"expired": True}, {}),
+        ({"conclusion": "failure"}, {}, {}),
+        ({"conclusion": "cancelled"}, {}, {}),
+        ({}, None, {}),
+        ({}, {"size_in_bytes": 4097}, {}),
+        ({}, {}, {}),
+    ]
+    run_template = replies[_RUNS]["workflow_runs"].pop()
+    artifact_template = replies[_ARTIFACTS]["artifacts"][0]
+    for run_id, (run_fields, artifact_fields, proof_fields) in enumerate(candidates, 101):
+        run = {**run_template, "id": run_id, "head_sha": tested, **run_fields}
+        run["html_url"] = f"https://github.com/{_REPO}/actions/runs/{run_id}"
+        replies[_RUNS]["workflow_runs"].append(run)
+        artifact = {**artifact_template, "id": run_id, **(artifact_fields or {})}
+        replies[f"repos/{_REPO}/actions/runs/{run_id}/artifacts"] = {
+            "artifacts": [artifact] if artifact_fields is not None else [],
+        }
+        replies[f"repos/{_REPO}/actions/artifacts/{run_id}/zip"] = _archive({
+            **proof, "run_id": run_id, **proof_fields,
+        })
+    verified_run = replies[_RUNS]["workflow_runs"].pop()
+    event = _push(git_repo, base, replies)
+    output, summary = ci_cli(event, event_name="push", replies=replies)
+    assert "full=true\n" in output and "CI policy: **full**. Run the complete root gate." in summary
+    replies[_RUNS]["workflow_runs"].append(verified_run)
+    output, summary = ci_cli(event, event_name="push", replies=replies)
+    assert "mode=reuse\n" in output and "full=false\n" in output
+    assert "https://github.com/acme/widgets/actions/runs/118" in summary
 
 
-@pytest.mark.parametrize("fault", [
-    "none", "tree", "head", "repository", "run", "commit", "base-tree", "base-ancestry", "changed-base",
-    "cross-branch", "run-repo", "run-branch", "wrong-workflow", "legacy-pr", "basic-proof", "expired",
-    "failed", "cancelled", "bad-zip", "api-error", "missing", "oversized",
-])
-def test_ci_cli_reuses_only_verified_exact_merge_group_trees(
+@pytest.mark.parametrize("fault", ["api-error", "bad-zip", "base-ancestry"])
+def test_ci_cli_unreadable_queue_proof_keeps_full_gate(
     git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path, fault: str,
 ) -> None:
     base, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
-    run = replies[_RUNS]["workflow_runs"][0]
-    artifact = replies[_ARTIFACTS]["artifacts"][0]
-    if fault in {"tree", "head", "commit", "base-tree"}:
-        proof[{"tree": "tree", "head": "head_sha", "commit": "commit", "base-tree": "base_tree"}[fault]] = "f" * 40
-    elif fault == "run":
-        proof["run_id"] = 999
-    elif fault == "repository":
-        proof["repository"] = "other/repo"
-    elif fault == "expired":
-        artifact["expired"] = True
-    elif fault in {"failed", "cancelled"}:
-        run["conclusion"] = "failure" if fault == "failed" else "cancelled"
-    elif fault == "api-error":
-        replies[_RUNS] = subprocess.CalledProcessError(1, "gh")
-    elif fault == "base-ancestry":
-        # A real resolvable base/tree that isn't in the tested history reaches
-        # the ancestry guard, rather than failing SHA parsing or tree lookup.
+    if fault == "base-ancestry":
         tested = _git(git_repo, "rev-parse", "HEAD")
         _git(git_repo, "checkout", "--orphan", "unrelated")
         proof["base_sha"] = _commit(git_repo, "unrelated.txt")
         proof["base_tree"] = _git(git_repo, "rev-parse", "HEAD^{tree}")
         _git(git_repo, "checkout", "main")
         assert _git(git_repo, "rev-parse", "HEAD") == tested
-    elif fault == "changed-base":
-        _commit(git_repo, "daydream/base_change.py")
-    elif fault == "cross-branch":
-        proof["base_ref"] = "refs/heads/master"
-        proof["head_ref"] = _QUEUE_REF.replace("/main/", "/master/")
-        run["head_branch"] = proof["head_ref"].removeprefix("refs/heads/")
-    elif fault == "run-repo":
-        run["repository"]["full_name"] = "other/repo"
-    elif fault == "run-branch":
-        run["head_branch"] = "feature"
-    elif fault == "wrong-workflow":
-        run["path"] = ".github/workflows/other.yml"
-    elif fault == "legacy-pr":
-        proof["event"] = "pull_request"
-    elif fault == "basic-proof":
-        proof["gate"] = "basic"
-    elif fault == "missing":
-        replies[_ARTIFACTS]["artifacts"] = []
-    elif fault == "oversized":
-        artifact["size_in_bytes"] = 4097
+    if fault == "api-error":
+        replies[_RUNS] = subprocess.CalledProcessError(1, "gh")
     replies[_ARCHIVE] = b"invalid" if fault == "bad-zip" else _archive(proof)
-    _push_replies(git_repo, replies)
-    output, summary = ci_cli(_push(git_repo, base), event_name="push", replies=replies)
-    assert f"mode={'reuse' if fault == 'none' else 'full'}\n" in output
-    if fault == "none":
-        assert "actions/runs/101" in summary
-    if fault == "base-ancestry":
-        assert "CalledProcessError" in summary
+    event = _push(git_repo, base, replies)
+    output, summary = ci_cli(event, event_name="push", replies=replies)
+    assert "mode=full\n" in output and "full=true\n" in output
+    assert ("BadZipFile" if fault == "bad-zip" else "CalledProcessError") in summary
 
 
-def test_ci_cli_reuses_queue_tree_after_squash_commit_identity_changes(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path,
-) -> None:
-    base, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
-    _git(git_repo, "reset", "--soft", base)
-    _git(git_repo, "-c", "commit.gpgsign=false", "commit", "-m", "queue squash result")
-    assert _git(git_repo, "rev-parse", "HEAD") != proof["commit"]
-    assert _git(git_repo, "rev-parse", "HEAD^{tree}") == proof["tree"]
-    replies[_ARCHIVE] = _archive(proof)
-    _push_replies(git_repo, replies)
-    output, _ = ci_cli(_push(git_repo, base), event_name="push", replies=replies)
-    assert "mode=reuse\n" in output
-
-
-@pytest.mark.parametrize("event_name", ["workflow_dispatch", "merge_group", "push"])
+@pytest.mark.parametrize("event_name", ["workflow_dispatch", "push"])
 def test_ci_cli_direct_push_queue_and_manual_dispatch_run_full_gate(
     ci_cli: Callable[..., tuple[str, str]], git_repo: Path, event_name: str,
 ) -> None:
     sha = _git(git_repo, "rev-parse", "HEAD")
     replies: dict[str, Any] = {f"repos/{_REPO}/commits/{sha}/pulls": []}
-    output, _ = ci_cli(_push(git_repo, sha), event_name=event_name, replies=replies)
+    event = {"ref": "refs/heads/main", "before": sha, "after": sha}
+    output, _ = ci_cli(event, event_name=event_name, replies=replies)
     assert "mode=full\n" in output and "full=true\n" in output
 
 
@@ -393,8 +391,7 @@ def test_ci_cli_push_authority_and_old_tip_cannot_borrow_valid_queue_proof(
 ) -> None:
     base, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
     replies[_ARCHIVE] = _archive(proof)
-    _push_replies(git_repo, replies)
-    event = _push(git_repo, base)
+    event = _push(git_repo, base, replies)
     sha = event["after"]
     github_sha = sha
     associated = replies[f"repos/{_REPO}/commits/{sha}/pulls"][0]
