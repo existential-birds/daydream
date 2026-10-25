@@ -108,19 +108,14 @@ def _group(base: str, head: str) -> dict[str, Any]:
     }}
 
 
-@pytest.mark.parametrize(("path", "queue"), [
-    ("docs/guide.md", False), ("tests/test_contract.py", True),
-])
 def test_ci_cli_pr_checks_require_verified_active_queue(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], path: str, queue: bool,
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]],
 ) -> None:
     base = _git(git_repo, "rev-parse", "HEAD")
-    head = _commit(git_repo, path)
-    output, _ = ci_cli(_pr(base, head), replies={
-        _RULES: _ACTIVE_RULES if queue else [], _RULESET: _QUEUE_RULESET,
-    })
-    assert f"mode={'basic' if queue else 'full'}\n" in output
-    assert f"full={'false' if queue else 'true'}\n" in output
+    head = _commit(git_repo, "docs/guide.md")
+    output, _ = ci_cli(_pr(base, head), replies={_RULES: []})
+    assert "mode=full\n" in output
+    assert "full=true\n" in output
 
 
 @pytest.mark.parametrize("fault", [
@@ -157,8 +152,9 @@ def test_ci_cli_verifies_queue_ruleset_at_its_origin(
     rules = json.loads(json.dumps(_ACTIVE_RULES))
     rules[0].update(ruleset_source=source, ruleset_source_type=source_type)
     ruleset = {**_QUEUE_RULESET, "source": source, "source_type": source_type}
-    sha = _git(git_repo, "rev-parse", "HEAD")
-    output, _ = ci_cli(_pr(sha, sha), replies={_RULES: rules, _RULESET: ruleset})
+    base = _git(git_repo, "rev-parse", "HEAD")
+    head = _commit(git_repo, "tests/test_contract.py")
+    output, _ = ci_cli(_pr(base, head), replies={_RULES: rules, _RULESET: ruleset})
     assert "mode=basic\n" in output and "full=false\n" in output
 
 
@@ -269,6 +265,8 @@ def test_ci_cli_reuses_last_verified_queue_tree_from_run_inventory(
 ) -> None:
     base, old_proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
     tested = _commit(git_repo, "daydream/base_change.py")
+    output, _ = ci_cli(_group(base, tested), event_name="merge_group")
+    assert "mode=full\n" in output and "full=true\n" in output
     proof_dir = tmp_path / "proof"
     ci_cli(_group(base, tested), event_name="merge_group", record=proof_dir)
     proof = json.loads((proof_dir / "proof.json").read_text())
@@ -422,12 +420,3 @@ def test_ci_cli_push_authority_and_old_tip_cannot_borrow_valid_queue_proof(
     assert "mode=full\n" in output and "full=true\n" in output
     if fault in {"unrelated-before", "unresolvable-before"}:
         assert "CalledProcessError" in summary
-
-
-def test_ci_cli_valid_merge_group_requests_complete_gate(
-    ci_cli: Callable[..., tuple[str, str]], git_repo: Path,
-) -> None:
-    base = _git(git_repo, "rev-parse", "HEAD")
-    head = _commit(git_repo, "daydream/app.py")
-    output, _ = ci_cli(_group(base, head), event_name="merge_group", replies={_RULES: _ACTIVE_RULES})
-    assert "mode=full\n" in output and "full=true\n" in output
