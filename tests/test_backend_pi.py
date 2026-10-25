@@ -104,15 +104,11 @@ assert sys.modules["daydream.host_tools_server"] is None
     assert observation["process_outcome"] == "success"
 
 
-@pytest.mark.parametrize("kind", ["text", "thinking", "toolcall", "tool", "diagnostic"])
+@pytest.mark.parametrize("kind", ["generation", "tool", "diagnostic"])
 async def test_interrupted_pi_updates_retain_only_admitted_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
-    """The installed delta-only schema survives interruption without turning diagnostics into progress.
-
-    Runner journeys own end-to-end export proof; this seam protects Pi frame admission,
-    including missing outer message, empty/malformed deltas, and tool updates.
-    """
+    """Content-free Pi progress retains malformed/non-progress guards through interruption."""
     frames: list[dict[str, Any]] = [
         {"type": "session", "id": "private-session-canary"},
         {"type": "message_start", "message": {"role": "assistant"}},
@@ -134,10 +130,14 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(
             {"type": "tool_execution_update", "partialResult": "invalid"},
             {"type": "tool_execution_update", "partialResult": {"content": [{"text": "private-canary"}]}},
         ])
-    elif kind != "diagnostic":
-        frames.append({"type": "message_update", "assistantMessageEvent": {
-            "type": f"{kind}_delta", "contentIndex": 0, "delta": "private-canary",
-        }})
+    elif kind == "generation":
+        frames.extend({"type": "message_update", "assistantMessageEvent": {
+            "type": f"{delta_kind}_delta", "contentIndex": index, "delta": delta,
+        }} for index, (delta_kind, deltas) in enumerate((
+            ("text", ["private-text-canary"]),
+            ("thinking", ["private-", "thinking-canary"]),
+            ("toolcall", ['{"path":', '"private-toolcall-canary"', '}']),
+        )) for delta in deltas)
     lines = ["", "private stderr-canary", *[json.dumps(frame) for frame in frames]]
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
@@ -150,10 +150,8 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(
             wall_scopes.append(scope)
         return scope
 
-    # This case owns admission of every scripted frame before interruption.
-    # Stage only the agent's wall scope until its actual reader blocks for more
-    # bytes; setup/scheduling latency must not truncate the admission scenario.
-    # Cleanup scopes retain their ordinary real-time bounds.
+    # Interrupt only after the real reader consumes every frame and blocks for more bytes.
+    # Only the agent wall scope is staged; cleanup keeps its ordinary real-time bounds.
     monkeypatch.setattr("daydream.agent.anyio", SimpleNamespace(move_on_after=staged_wall_scope, sleep=anyio.sleep))
     recorder = make_recorder(tmp_path, backend_name="pi")
     async with recorder:
@@ -176,9 +174,9 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(
     assert evidence["idle_detection_enabled"] is False
     assert evidence["response_idle_timeout_s"] == 0.0 and evidence["tool_idle_timeout_s"] == 0.0
     assert evidence["raw_line_count"] == len(lines)
-    for field, admitted_kind in (("text_delta_count", "text"), ("thinking_delta_count", "thinking"),
-                                 ("toolcall_delta_count", "toolcall"), ("tool_progress_count", "tool")):
-        assert evidence[field] == int(kind == admitted_kind)
+    assert (evidence["text_delta_count"], evidence["thinking_delta_count"], evidence["toolcall_delta_count"]) == (
+        (1, 2, 3) if kind == "generation" else (0, 0, 0))
+    assert evidence["tool_progress_count"] == int(kind == "tool")
     assert (evidence["last_progress_s"] is None) == (kind == "diagnostic")
     assert evidence["active_tool_count"] == int(kind == "tool")
     assert "private" not in json.dumps(evidence)
