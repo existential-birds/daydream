@@ -10,11 +10,6 @@ from daydream.benchmark.workspace import init_workspace
 
 @pytest.mark.parametrize("payload",
     [
-        "cases: null\n",
-        "cases: {}\n",
-        "cases: 7\n",
-        "cases:\n  - nope\n",
-        "cases:\n  - case_id: broken\n",
         "x: 1\nx: 2\n",
         "x: !!python/object/apply:os.system ['false']\n",
         "",
@@ -27,25 +22,33 @@ def test_manifest_loader_bounds_every_invalid_shape(tmp_path: Path, payload: str
         load_benchmark_manifest(tmp_path, canonicalize_case_order=True)
     assert str(excinfo.value) == f"{tmp_path}: invalid benchmark.yaml"
 
-def test_manifest_loader_preserves_absent_cases_default(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize("payload", [
+    "cases: null\n", "cases: {}\n", "cases: 7\n", "cases:\n  - nope\n", "cases:\n  - case_id: broken\n",
+])
+def test_manifest_loader_bounds_invalid_cases_with_valid_root_fields(tmp_path: Path, payload: str) -> None:
+    """Missing root metadata must not hide acceptance of an invalid case index."""
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["review.example"], ["judge.example"])
-    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    path = root / "benchmark.yaml"
+    raw = yaml.safe_load(path.read_text())
     raw.pop("cases")
-    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-
-    loaded = load_benchmark_manifest(root, canonicalize_case_order=True)
-
-    assert loaded.cases == []
+    path.write_text(yaml.safe_dump(raw, sort_keys=False) + payload)
+    with pytest.raises(WorkspaceCorrupt) as rejected:
+        load_benchmark_manifest(root, canonicalize_case_order=True)
+    assert str(rejected.value) == f"{root}: invalid benchmark.yaml"
 
 def test_manifest_loader_canonicalizes_copy_without_mutating_manifest(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["review.example"], ["judge.example"])
     raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw.pop("cases")
+    manifest_path = root / "benchmark.yaml"
+    manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert load_benchmark_manifest(root, canonicalize_case_order=True).cases == []
     first = {"case_id": "pr-000002-" + "b" * 12, "case_file": "cases/b.yaml", "pr_number": 2}
     second = {"case_id": "pr-000001-" + "a" * 12, "case_file": "cases/a.yaml", "pr_number": 1}
     raw["cases"] = [first, second]
-    manifest_path = root / "benchmark.yaml"
     manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False))
     original_bytes = manifest_path.read_bytes()
 

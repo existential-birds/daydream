@@ -11,7 +11,6 @@ import yaml
 
 from daydream import cli as top_cli
 from daydream.benchmark import migrate, schema, storage
-from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.schema import _schema_ready
 from tests.harness.git_helpers import commit as _commit, git as _git, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
@@ -134,265 +133,184 @@ def _write_legacy_unreplayable_case(ws: Path, case_id: str, *, schema_version: i
     return case_path
 
 
-def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path: Path) -> None:
-    ws, case_id, title = _seed_v1_workspace(tmp_path)
-    report = migrate.migrate_workspace(ws)
-    assert [c.case_id for c in report.cases] == [case_id]
-    assert report.cases[0].finding_ids_recomputed == 1
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["schema_version"] == 2
-    f = raw["curation"]["findings"][0]
-    assert f["finding_id"] == schema.derive_finding_id(f, case_id=case_id)  # now case-scoped
-    assert f["title"] == title and f["provenance"]["kind"] == "authored"    # authored content preserved
-    # migrated doc fully validates
-    schema.CaseDocument.model_validate(_schema_ready(raw))
-
-def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Path) -> None:
-    """The sole legacy base candidate is verified before splitting provenance."""
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    requested_tip = raw["snapshot"]["requested_base_sha"]
-    merge_base = raw["snapshot"]["original_base_sha"]
-    raw["snapshot"]["original_base_sha"] = requested_tip
-    del raw["snapshot"]["requested_base_sha"]
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-
-    report = migrate.migrate_workspace(ws)
-    assert report.errors == []
-    assert [c.case_id for c in report.cases] == [case_id]
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["schema_version"] == 2
-    assert raw["snapshot"]["requested_base_sha"] == requested_tip
-    assert raw["snapshot"]["original_base_sha"] == merge_base
-    assert raw["snapshot"]["base_resolution"] == "merge_base_v1"
-    schema.CaseDocument.model_validate(_schema_ready(raw))  # no longer corrupt
-
-def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Path) -> None:
-    """An old v2 blind backfill is verified and repaired without touching ids."""
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    migrate.migrate_workspace(ws)                       # v1 -> v2 (field present)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["schema_version"] == 2
-    finding_ids = [f["finding_id"] for f in raw["curation"]["findings"]]
-    requested_tip = raw["snapshot"]["requested_base_sha"]
-    merge_base = raw["snapshot"]["original_base_sha"]
-    raw["snapshot"]["original_base_sha"] = requested_tip
-    del raw["snapshot"]["requested_base_sha"]          # simulate pre-break v2
-    del raw["snapshot"]["base_resolution"]
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-
-    report = migrate.migrate_workspace(ws)
-    assert report.errors == []
-    assert report.cases[0].finding_ids_recomputed == 0  # ids untouched
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["schema_version"] == 2                  # no bump
-    assert raw["snapshot"]["requested_base_sha"] == requested_tip
-    assert raw["snapshot"]["original_base_sha"] == merge_base
-    assert raw["snapshot"]["base_resolution"] == "merge_base_v1"
-    assert [f["finding_id"] for f in raw["curation"]["findings"]] == finding_ids
-    schema.CaseDocument.model_validate(_schema_ready(raw))
-
-    second = migrate.migrate_workspace(ws)              # idempotent
-    assert second.cases == [] and second.errors == []
-
-def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -> None:
-    """Unreplayable snapshots carry requested_base_sha as nullable, so a v2
-    case that omits it is left byte-unchanged (no repair needed, no rewrite)."""
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    migrate.migrate_workspace(ws)                       # v1 -> v2 (field present)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    raw["snapshot"] = {
-        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": None,
-        "original_head_sha": raw["pull_request"]["head"]["sha"],
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
-        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
-    }
-    raw["curation"]["state"] = "unreplayable"
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    before = case_path.read_bytes()
-
-    report = migrate.migrate_workspace(ws)
-    after = storage.load_yaml_strict(case_path)
-    assert report.cases == [] and report.errors == []
-    assert case_path.read_bytes() == before
-    assert "requested_base_sha" not in after["snapshot"]
-
-@pytest.mark.parametrize("legacy_version", [1, 2])
-def test_migrate_repairs_legacy_draft_unreplayable_curation(tmp_path: Path, legacy_version: int) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=legacy_version)
-    before = storage.load_yaml_strict(case_path)
-    immutable_before = {key: deepcopy(before[key])
-        for key in ("pull_request", "snapshot", "source", "candidates", "prioritization")
-        if key in before
-    }
-    findings_before = deepcopy(before["curation"]["findings"])
-    exclusions_before = deepcopy(before["curation"]["exclusions"])
-
-    report = migrate.migrate_workspace(ws)
-
-    assert report.errors == []
-    assert [case.case_id for case in report.cases] == [case_id]
-    migrated = storage.load_yaml_strict(case_path)
-    assert migrated["schema_version"] == 2
-    assert migrated["curation"]["state"] == "unreplayable"
-    assert migrated["curation"]["snapshot_attested"] is False
-    assert migrated["curation"]["clean_attested"] is False
-    assert migrated["curation"]["gold_status"] == "findings"
-    assert migrated["curation"]["exclusions"] == exclusions_before
-    if legacy_version == 1:
-        expected_findings = deepcopy(findings_before)
-        expected_findings[0]["finding_id"] = schema.derive_finding_id(expected_findings[0], case_id=case_id)
-        assert migrated["curation"]["findings"] == expected_findings
-    else:
-        assert migrated["curation"]["findings"] == findings_before
-    for key, expected in immutable_before.items():
-        assert migrated[key] == expected
-    schema.CaseDocument.model_validate(schema._schema_ready(migrated))
-
-@pytest.mark.parametrize("curation_state", ["ready", "stale", "excluded"])
-def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(tmp_path: Path, curation_state: str) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2, curation_state=curation_state)
-    before = case_path.read_bytes()
-
-    report = migrate.migrate_workspace(ws)
-
-    assert report.cases == []
-    assert len(report.errors) == 1
-    assert "unreplayable snapshot and curation states must match" in report.errors[0]
-    assert case_path.read_bytes() == before
-
-def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_upgrade_cli_migrates_native_population_and_preserves_noops(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """One real workspace upgrades v1/v2 records while leaving a valid no-op byte-identical."""
     parent = tmp_path / "workspace parent with spaces"
     parent.mkdir()
-    ws, case_id, _ = _seed_v1_workspace(parent)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2)
-    before = case_path.read_bytes()
+    ws, original_id, title = _seed_v1_workspace(parent)
+    template = storage.load_yaml_strict(ws / "cases" / f"{original_id}.yaml")
+    requested = template["snapshot"]["requested_base_sha"]
+    merge_base = template["snapshot"]["original_base_sha"]
+    head = template["snapshot"]["original_head_sha"]
+    cases = {number: deepcopy(template) for number in (101, 102, 103, 104, 105, 106)}
+    cases[102]["snapshot"]["original_base_sha"] = requested
+    del cases[102]["snapshot"]["requested_base_sha"]
+    cases[103]["schema_version"] = 2
+    cases[103]["snapshot"]["original_base_sha"] = requested
+    del cases[103]["snapshot"]["requested_base_sha"]
+    cases[104]["schema_version"] = 2
+    cases[104]["snapshot"] = {
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": None,
+        "original_head_sha": head, "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
+    }
+    cases[104]["curation"]["state"] = "unreplayable"
+    ids = {number: schema.case_id_for(number, head) for number in cases}
+    for number, doc in cases.items():
+        doc["case_id"] = ids[number]
+        doc["pull_request"].update(number=number, url=f"https://github.com/o/r/pull/{number}")
+        if doc["schema_version"] == 2:
+            finding = doc["curation"]["findings"][0]
+            finding["finding_id"] = schema.derive_finding_id(finding, case_id=ids[number])
+        storage.atomic_write_yaml(ws / "cases" / f"{ids[number]}.yaml", doc)
+    manifest_path = ws / "benchmark.yaml"
+    manifest = storage.load_yaml_strict(manifest_path)
+    manifest["cases"] = [{"case_id": ids[n], "pr_number": n, "case_file": f"cases/{ids[n]}.yaml"} for n in cases]
+    storage.atomic_write_yaml(manifest_path, manifest)
+    _write_legacy_unreplayable_case(ws, ids[105], schema_version=1)
+    _write_legacy_unreplayable_case(ws, ids[106], schema_version=2)
+    paths = {number: ws / "cases" / f"{case_id}.yaml" for number, case_id in ids.items()}
+    before = {number: path.read_bytes() for number, path in paths.items()}
+    originals = {number: storage.load_yaml_strict(path) for number, path in paths.items()}
+    manifest_before = manifest_path.read_bytes()
+    expected = [
+        f"case {ids[101]}: finding_ids_recomputed=1 changed=True",
+        f"case {ids[102]}: finding_ids_recomputed=1 changed=True",
+        f"case {ids[103]}: finding_ids_recomputed=0 changed=True",
+        f"case {ids[105]}: finding_ids_recomputed=1 changed=True",
+        f"case {ids[106]}: finding_ids_recomputed=0 changed=True",
+    ]
 
     with pytest.raises(SystemExit) as dry_exit:
         top_cli.main(["benchmark", "upgrade", str(ws), "--dry-run"])
     assert dry_exit.value.code == 0
-    assert "changed=True" in capsys.readouterr().out
-    assert case_path.read_bytes() == before
+    assert capsys.readouterr().out.splitlines() == expected
+    assert {n: path.read_bytes() for n, path in paths.items()} == before
+    assert manifest_path.read_bytes() == manifest_before
+    assert not (ws / ".benchmark.lock").exists()
 
     with pytest.raises(SystemExit) as write_exit:
         top_cli.main(["benchmark", "upgrade", str(ws)])
     assert write_exit.value.code == 0
-    assert "changed=True" in capsys.readouterr().out
-    migrated = storage.load_yaml_strict(case_path)
-    assert migrated["curation"]["state"] == "unreplayable"
-    assert migrated["curation"]["exclusions"][0]["note"] == ("authored exclusion note must be preserved"
-    )
-    after = case_path.read_bytes()
+    assert capsys.readouterr().out.splitlines() == expected
+    migrated = {number: storage.load_yaml_strict(path) for number, path in paths.items()}
+    assert {n: doc["schema_version"] for n, doc in migrated.items()} == {101: 2, 102: 2, 103: 2, 104: 2, 105: 2, 106: 2}
+    finding = migrated[101]["curation"]["findings"][0]
+    assert finding["finding_id"] == schema.derive_finding_id(finding, case_id=ids[101])
+    assert finding["title"] == title and finding["provenance"]["kind"] == "authored"
+    assert {n: (migrated[n]["snapshot"]["requested_base_sha"], migrated[n]["snapshot"]["original_base_sha"],
+                migrated[n]["snapshot"]["base_resolution"]) for n in (102, 103)} == {
+        102: (requested, merge_base, "merge_base_v1"), 103: (requested, merge_base, "merge_base_v1"),
+    }
+    assert migrated[103]["curation"]["findings"] == originals[103]["curation"]["findings"]
+    assert paths[104].read_bytes() == before[104]
+    assert "requested_base_sha" not in migrated[104]["snapshot"]
+    assert {n: (migrated[n]["curation"]["state"], migrated[n]["curation"]["snapshot_attested"],
+                migrated[n]["curation"]["clean_attested"], migrated[n]["curation"]["gold_status"])
+            for n in (105, 106)} == {
+        105: ("unreplayable", False, False, "findings"), 106: ("unreplayable", False, False, "findings"),
+    }
+    v1_findings = deepcopy(originals[105]["curation"]["findings"])
+    v1_findings[0]["finding_id"] = schema.derive_finding_id(v1_findings[0], case_id=ids[105])
+    assert migrated[105]["curation"]["findings"] == v1_findings
+    assert migrated[106]["curation"]["findings"] == originals[106]["curation"]["findings"]
+    for number in (105, 106):
+        assert migrated[number]["curation"]["exclusions"] == originals[number]["curation"]["exclusions"]
+        assert migrated[number]["curation"]["exclusions"][0]["note"] == "authored exclusion note must be preserved"
+        assert {k: v for k, v in migrated[number].items() if k not in ("schema_version", "curation")} == {
+            k: v for k, v in originals[number].items() if k not in ("schema_version", "curation")
+        }
+    for doc in migrated.values():
+        schema.CaseDocument.model_validate(_schema_ready(doc))
+    assert manifest_path.read_bytes() == manifest_before
+    after = {number: path.read_bytes() for number, path in paths.items()}
 
     with pytest.raises(SystemExit) as second_exit:
         top_cli.main(["benchmark", "upgrade", str(ws)])
     assert second_exit.value.code == 0
-    assert case_path.read_bytes() == after
+    assert capsys.readouterr().out == ""
+    assert {n: path.read_bytes() for n, path in paths.items()} == after
 
-def test_upgrade_cli_reports_invalid_unchanged_v2_without_rewriting(tmp_path: Path, capsys: pytest.CaptureFixture[str]
+
+def test_upgrade_cli_retains_independent_errors_while_migrating_valid_cases(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2, curation_state="stale")
-    before = case_path.read_bytes()
+    """A native manifest reports every bad case without losing valid migration progress."""
+    ws, original_id, _ = _seed_v1_workspace(tmp_path)
+    template = storage.load_yaml_strict(ws / "cases" / f"{original_id}.yaml")
+    head = template["snapshot"]["original_head_sha"]
+    cases = {number: deepcopy(template) for number in (101, 102, 103, 104, 105, 106, 107)}
+    cases[102]["curation"]["findings"].append(deepcopy(cases[102]["curation"]["findings"][0]))
+    cases[103]["schema_version"] = "bogus"
+    cases[101]["snapshot"]["base_tree_sha"] = "f" * 40
+    ids = {number: schema.case_id_for(number, head) for number in cases}
+    for number, doc in cases.items():
+        doc["case_id"] = ids[number]
+        doc["pull_request"].update(number=number, url=f"https://github.com/o/r/pull/{number}")
+        storage.atomic_write_yaml(ws / "cases" / f"{ids[number]}.yaml", doc)
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    manifest["cases"] = [{"case_id": ids[n], "pr_number": n, "case_file": f"cases/{ids[n]}.yaml"} for n in cases]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
+    _write_legacy_unreplayable_case(ws, ids[104], schema_version=2, curation_state="ready")
+    _write_legacy_unreplayable_case(ws, ids[105], schema_version=2, curation_state="stale")
+    _write_legacy_unreplayable_case(ws, ids[106], schema_version=2, curation_state="excluded")
+    invalid = {number: ws / "cases" / f"{ids[number]}.yaml" for number in (101, 102, 103, 104, 105, 106)}
+    before = {number: path.read_bytes() for number, path in invalid.items()}
 
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(SystemExit) as outcome:
         top_cli.main(["benchmark", "upgrade", str(ws)])
+    assert outcome.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [f"case {ids[107]}: finding_ids_recomputed=1 changed=True"]
+    errors = dict(part.split(": ", 1) for part in captured.err.split("error: ")[1:])
+    assert set(errors) == {ids[n] for n in invalid}
+    assert "duplicate" in errors[ids[102]]
+    assert "unsupported schema_version" in errors[ids[103]]
+    assert "unreplayable snapshot and curation states must match" in errors[ids[104]]
+    assert "unreplayable snapshot and curation states must match" in errors[ids[105]]
+    assert "unreplayable snapshot and curation states must match" in errors[ids[106]]
+    assert "source trees" in errors[ids[101]]
+    assert {number: path.read_bytes() for number, path in invalid.items()} == before
+    valid = storage.load_yaml_strict(ws / "cases" / f"{ids[107]}.yaml")
+    assert valid["schema_version"] == 2
+    schema.CaseDocument.model_validate(_schema_ready(valid))
 
-    assert exc_info.value.code == 1
-    assert "unreplayable snapshot and curation states must match" in capsys.readouterr().err
-    assert case_path.read_bytes() == before
-
-def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path: Path) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    migrate.migrate_workspace(ws, dry_run=True)
-    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
-    migrate.migrate_workspace(ws)
-    second = migrate.migrate_workspace(ws)
-    assert second.cases == []   # no-op second run
-
-def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    # corrupt the case: duplicate finding_id (uniqueness violated)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    raw["curation"]["findings"].append(dict(raw["curation"]["findings"][0]))
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    report = migrate.migrate_workspace(ws)
-    assert report.cases == []                        # no case rewritten
-    assert any("duplicate" in e for e in report.errors)
-    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1  # untouched
-
-@pytest.mark.parametrize("failure", ["missing_mirror", "tree_mismatch"])
-def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, failure: str) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    if failure == "missing_mirror":
-        shutil.rmtree(ws / "cache" / "repository.git")
-    else:
-        raw = storage.load_yaml_strict(case_path)
-        raw["snapshot"]["base_tree_sha"] = "f" * 40
-        storage.atomic_write_yaml(case_path, raw)
-    before = case_path.read_bytes()
-
-    report = migrate.migrate_workspace(ws)
-
-    assert report.cases == []
-    assert len(report.errors) == 1
-    assert "provenance" in report.errors[0] or "source trees" in report.errors[0]
-    assert case_path.read_bytes() == before
 
 def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: Path) -> None:
-    """Imported legacy snapshots have no trees to verify and keep their candidate."""
-
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = ws / "cases" / f"{case_id}.yaml"
-    raw = storage.load_yaml_strict(case_path)
+    """Missing mirror rejects a ready case but cannot block an imported record in the same batch."""
+    ws, ready_id, _ = _seed_v1_workspace(tmp_path)
+    ready_path = ws / "cases" / f"{ready_id}.yaml"
+    raw = storage.load_yaml_strict(ready_path)
     base_tip = raw["pull_request"]["base"]["sha"]
-    head_sha = raw["snapshot"]["original_head_sha"]
+    head = raw["snapshot"]["original_head_sha"]
+    imported_id = schema.case_id_for(102, head)
+    raw["case_id"] = imported_id
+    raw["pull_request"].update(number=102, url="https://github.com/o/r/pull/102")
     raw["snapshot"] = {
         "status": "imported", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": base_tip,
-        "original_head_sha": head_sha, "error": None,
+        "original_head_sha": head, "error": None,
     }
-    storage.atomic_write_yaml(case_path, raw)
+    imported_path = ws / "cases" / f"{imported_id}.yaml"
+    storage.atomic_write_yaml(imported_path, raw)
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    manifest["cases"].append({"case_id": imported_id, "pr_number": 102, "case_file": f"cases/{imported_id}.yaml"})
+    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
+    before = ready_path.read_bytes()
     shutil.rmtree(ws / "cache" / "repository.git")
 
     report = migrate.migrate_workspace(ws)
 
-    assert report.errors == []
-    migrated = storage.load_yaml_strict(case_path)
+    assert [(case.case_id, case.finding_ids_recomputed) for case in report.cases] == [(imported_id, 1)]
+    assert len(report.errors) == 1
+    assert report.errors[0].startswith(f"{ready_id}:") and "provenance" in report.errors[0]
+    assert ready_path.read_bytes() == before
+    migrated = storage.load_yaml_strict(imported_path)
     assert migrated["snapshot"]["requested_base_sha"] == base_tip
     assert "base_resolution" not in migrated["snapshot"]
 
-def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-
-    # --dry-run reports the upgrade (finding recomputed, would change) without writing.
-    rc = _handle_benchmark_command(["upgrade", str(ws), "--dry-run"])
-    assert rc == 0
-    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
-    out = capsys.readouterr().out
-    assert "changed=True" in out and "finding_ids_recomputed=1" in out
-
-    # A real run rewrites the v1 case and exits 0.
-    rc = _handle_benchmark_command(["upgrade", str(ws)])
-    assert rc == 0
-    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 2
-
-    # The no-op second run still exits 0.
-    rc = _handle_benchmark_command(["upgrade", str(ws)])
-    assert rc == 0
-
-def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    raw["schema_version"] = "bogus"
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    rc = _handle_benchmark_command(["upgrade", str(ws)])
-    assert rc == 1
-    assert "error" in capsys.readouterr().err
 
 def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
     """migrate_workspace must recover_startup under the workspace lock (like every
