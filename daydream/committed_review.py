@@ -384,7 +384,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
             "finalization_s": limits.finalization_s,
             "tool_calls": limits.tool_calls,
         },
-        "selections": {},
+        "native_contexts": {},
         "strategies": {
             "discovery": strategies["discovery.generic_fallback"].content,
             "challenge": strategies["arbitration"].content.replace(
@@ -396,9 +396,9 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         backend = _resolve_backend(config, phase, cwd=source, execution_input=execution_input)
         if not isinstance(backend, PiBackend):
             raise ValueError("committed review currently requires native Pi for discovery and challenge")
-        selection = backend.freeze_selection(source)
+        native_context = backend.bind_review_context(source)
         backends[kind] = backend
-        settings["selections"][kind] = {"backend": "pi", **selection, "phase": phase}
+        settings["native_contexts"][kind] = {"backend": "pi", **native_context, "phase": phase}
     owner = resolve_private_workspace_owner(source, locations=private_root_locations())
     context = RunContext(InteractionPolicy(interactive=False, quiet=config.quiet))
     async with open_workspace(

@@ -124,7 +124,9 @@ system instruction, never a synthetic user turn. Read
 
 The package-level committed-review request/result callable owns assignments,
 semantic claim revisions and fresh challenge as one Review program. It reuses
-native Pi host tools and source selectors directly. Each publication claim
+native Pi host tools and source selectors directly. Pi's native CLI owns model,
+provider, thinking and authentication resolution in the original configuration
+context; stock read/search tools use the captured source. Each publication claim
 requires counterevidence-seeking challenge in a distinct conversation against
 the original captured source, including confident investigator claims and
 semantic revisions. Substantive rejection evidence and unresolved concerns are

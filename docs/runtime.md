@@ -32,10 +32,12 @@ because a failed replacement may preserve an older complete artifact.
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
 is the production package entry. It defaults to native Pi and review-only policy;
-`config` resolves global/file and `review`/`arbiter` phase overrides before work.
-It freezes requested native model/provider/thinking selections, retains native
-credential refresh, and rejects later settings/model-registry changes. Requested
-settings and native observations in the trajectory remain distinct evidence.
+`config` resolves Daydream global/file and `review`/`arbiter` phase overrides before work.
+Pi's CLI starts in the original source's configuration context and resolves its
+model, provider, thinking and authentication before generation. The host passes
+only explicit overrides and records opaque configuration identities to reject
+later settings/model-registry changes; native credential refresh remains live.
+Requested overrides and observed generation settings remain distinct evidence.
 The resolved profile supplies `discovery.generic_fallback` and `arbitration`
 strategies; protected host obligations cannot be disabled by profile prose.
 
@@ -77,8 +79,12 @@ routes fail before model dispatch.
 
 ## Pi host-tool lifetime and limits
 
-Pi keeps its stock read/search tools, offsets and pagination. Existing private
-artifact/sanctioned-input owners furnish frozen diff parts and source context.
+Pi keeps its stock read/search tools, offsets and pagination. Committed reviews
+bind those tools, the model-visible working directory and native AGENTS context
+to the captured source while native configuration and its trust policy remain
+rooted in the original source.
+Existing private artifact/sanctioned-input owners furnish frozen diff parts and
+source context.
 Models select assigned source IDs or supporting path/side/LF ranges; the host
 constructs canonical `evidence_refs` from the full assignment inventory and pinned
 regular Git blobs. Exact continuation fragments retain their null source ranges.

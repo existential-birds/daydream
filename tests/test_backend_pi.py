@@ -456,9 +456,9 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
     assert result_events[0].continuation is None
 
 
-@pytest.mark.parametrize("freeze", [False, True])
+@pytest.mark.parametrize("bound", [False, True])
 async def test_pi_api_key_never_enters_process_argv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, freeze: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool,
 ) -> None:
     sentinel = "synthetic-pi-api-key-sentinel"
     monkeypatch.setenv("PI_PROVIDER", "zai")
@@ -466,17 +466,14 @@ async def test_pi_api_key_never_enters_process_argv(
     monkeypatch.setenv("PI_THINKING", "medium")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     backend = PiBackend(model="glm-5.2")
-    if freeze:
-        backend.freeze_selection(tmp_path)
+    if bound:
+        backend.bind_review_context(tmp_path)
     flat_args, mock_exec = await _run_and_capture_args(backend)
-    assert ("--provider" in flat_args) is not freeze
-    if not freeze:
-        assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
     assert sentinel not in flat_args
     assert "--api-key" not in flat_args
     assert mock_exec.call_args.kwargs["env"]["ZAI_API_KEY"] == sentinel
-    if not freeze:
-        assert flat_args[flat_args.index("--thinking") + 1] == "medium"
+    assert flat_args[flat_args.index("--thinking") + 1] == "medium"
 
 async def test_pi_api_key_unknown_provider_warns_and_skips(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -714,13 +711,13 @@ def test_public_model_reflects_pi_settings_before_execute(pi_workspace: Path) ->
     assert backend.model == "gpt-5.6-luna"
 
 
-async def test_frozen_pi_selection_pins_native_defaults_but_leaves_auth_refresh_live(
+async def test_bound_pi_context_preserves_native_configuration_and_auth_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Snapshot dispatch must not replace the configured provider or reload selection.
+    """Configuration context survives relocation without resolving the native model.
 
-    Existing settings tests defer selection to native Pi; their argv assertions
-    miss a review snapshot losing the original workspace's defaults between phases.
+    Ordinary settings tests cannot detect binding the CLI to the captured cwd or
+    accepting changed run configuration. Authentication must remain refreshable.
     """
     agent_dir = tmp_path / "pi-agent"
     agent_dir.mkdir()
@@ -736,15 +733,16 @@ async def test_frozen_pi_selection_pins_native_defaults_but_leaves_auth_refresh_
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_THINKING", raising=False)
     backend = PiBackend(cwd=original)
-    selection = backend.freeze_selection(original)
-    assert selection["requested_thinking"] is None, "inherited native policy is not a pinned CLI request"
-    assert selection["requested_model"] is None and selection["requested_provider"] is None
+    identity = backend.bind_review_context(original)
+    assert backend.bind_review_context(original) == identity
+    assert backend.model == "pi-native"
     monkeypatch.setenv("PI_PROVIDER", "other-provider")
     monkeypatch.setenv("NOUS_API_KEY", "refreshed-loopback-credential")
     (agent_dir / "auth.json").write_text('{"refreshed": true}')
     args, process = await _run_and_capture_args(backend, cwd=snapshot)
     assert "--model" not in args and "--provider" not in args
     assert "--thinking" not in args
+    assert process.call_args.kwargs["cwd"] == str(original)
     assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
     assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"
     settings.write_text(json.dumps({"defaultProvider": "another-run"}))

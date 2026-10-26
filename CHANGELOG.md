@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run/source-bound findings with typed coverage atomically
   ([#1645](https://github.com/existential-birds/daydream/issues/1645)). Existing
   CLI routing and extension contracts are unchanged; this is additive functionality.
+  Pi's native CLI retains model, provider, thinking and authentication resolution
+  in the original configuration context while stock reads/searches review the
+  captured committed source.
 
 - **pi:** admit review submissions inside the native terminal tool, with
   correctable source selectors and host-built canonical references while keeping

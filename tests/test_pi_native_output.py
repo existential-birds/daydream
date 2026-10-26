@@ -31,7 +31,6 @@ from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
 from daydream.committed_review_model import validate_committed_result
-from daydream.config import DEFAULT_PI_MODEL
 from daydream.host_tools import HostToolBinding
 from daydream.host_tools_server import PiHostToolServer
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -73,8 +72,10 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
     config.mkdir()
     (config / "settings.json").write_text(json.dumps({"retry": {"enabled": False, "maxRetries": 0}}))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(config))
-    for name in ("PI_API_KEY", "NOUS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    for name in tuple(os.environ):
+        if name.endswith(("_API_KEY", "_TOKEN", "_TOKEN_FILE")) or name.startswith(("AWS_", "AZURE_", "GOOGLE_")):
+            monkeypatch.delenv(name, raising=False)
     fixture = _NativeProvider(config)
 
     class Provider(_QuietHTTPHandler):
@@ -142,16 +143,19 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
                 "def ratio(total, count):\n    return 0 if count == 0 else total / count\n")
-    head = seed_feature_branch(repo, base={"ratio.py": original}, feature={"ratio.py": captured})
+    context = "Review the committed ratio implementation carefully.\n"
+    head = seed_feature_branch(repo, base={"ratio.py": original, "AGENTS.md": context},
+                               feature={"ratio.py": captured, "AGENTS.md": context})
     base = git(repo, "rev-parse", "main")
     working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
                if case == "defect" else captured)
     if case == "defect":
         (repo / "ratio.py").write_text(working)
+        (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
     # rather than bypassing their resolution with a test-only explicit backend.
     settings = native_provider.config / "settings.json"
-    expected_model = DEFAULT_PI_MODEL if case == "fallback" else "alternate-model" if empty else "output-model"
+    expected_model = "native-inherited-model" if case == "fallback" else "alternate-model" if empty else "output-model"
     expected_provider = "nous" if case == "fallback" else "output-fixture"
     settings.write_text(json.dumps({
         **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
@@ -160,7 +164,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         "defaultThinkingLevel": "low",
         "defaultProjectTrust": "ask" if case == "defect" else "always",
         "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium",
-                                "output-fixture/alternate-model": "high", f"nous/{DEFAULT_PI_MODEL}": "high"},
+                                "output-fixture/alternate-model": "high", "nous/native-inherited-model": "high"},
         **({"enabledModels": ["output-fixture/alternate-model", "output-fixture/output-model"]}
            if case in {"empty", "scope-only"} else {"enabledModels": ["output-fixture/alternate-model"]}
            if case == "false-positive" else {}),
@@ -186,27 +190,42 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     models["providers"]["output-fixture"]["models"].append({**model, "id": "alternate-model"})
     if case == "fallback":
         models["providers"] = {"nous": {**models["providers"]["output-fixture"],
-            "apiKey": "$NOUS_API_KEY", "authHeader": True, "models": [{**model, "id": DEFAULT_PI_MODEL}]}}
+            "apiKey": "$NOUS_API_KEY", "authHeader": True, "models": [{**model, "id": expected_model}]}}
         monkeypatch.setenv("PI_API_KEY", "synthetic-implicit-fallback-alias")
     models_path.write_text(json.dumps(models))
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
     monkeypatch.delenv("PI_PROVIDER", raising=False)
-    if case not in {"false-positive", "scope-only"}:
-        # Ordinary installed Pi supplies the independent selection control; the
-        # committed entry must preserve its actual wire model after relocating.
-        native_provider.turns = [[("ordinary-submit", "structured_output", {"verdict": "complete", "findings": []})]]
-        ordinary = [event async for event in PiBackend(cwd=repo).execute(
-            repo, "Submit the empty result.", output_schema=_SCHEMA, read_only=True, persist_session=False)]
-        assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
-        assert next(event.model_name for event in ordinary if isinstance(event, ResultEvent)) == expected_model
-        native_provider.requests.clear()
-        native_provider.authorizations.clear()
-        native_provider.turns.clear()
+    # The unmodified native CLI is the independent selection control, including
+    # absent defaults: Daydream must not insert its ordinary fallback in this path.
+    arguments = ["pi", "--mode", "json", "--no-session", "--no-skills", "--no-extensions", "--no-tools",
+                 "--no-context-files"]
+    if case == "false-positive":
+        arguments.extend(["--model", "output-model:high"])
+    control_env = os.environ.copy()
+    if case == "fallback":
+        control_env["NOUS_API_KEY"] = "synthetic-implicit-fallback-alias"
+    control = await asyncio.create_subprocess_exec(*arguments, "-p", "Return the empty result.", cwd=repo,
+        env=control_env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, stderr = await asyncio.wait_for(control.communicate(), 30)
+    finally:
+        if control.returncode is None:
+            try:
+                control.kill()
+            except ProcessLookupError:
+                pass
+            await asyncio.wait_for(control.wait(), 5)
+    assert control.returncode == 0, stderr.decode()
+    assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
+    native_provider.requests.clear()
+    native_provider.authorizations.clear()
     assignments_seen: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
     counterevidence = "The captured count == 0 guard returns zero before division; the proposed trigger cannot fail."
 
     def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        assert context.strip() in json.dumps(request["messages"])
+        assert "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
         users = [message for message in request["messages"] if message["role"] == "user"]
         assert len(users) == 1
         content = users[0]["content"]
@@ -218,7 +237,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         if not tools:
             assignments_seen.append(assignment)
             histories[kind] = request["messages"]
-            return [(f"{kind}-read", "read", {"path": str(Path(assignment["captured_root"]) / "ratio.py")})]
+            return [(f"{kind}-read", "read", {"path": "ratio.py"})]
         assert len(tools) == 1 and tools[0]["tool_call_id"] == f"{kind}-read"
         assert tools[0]["content"] == captured
         refs_by_target = {part["target_id"]: [{"source_id": next(
@@ -302,6 +321,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
                for execution in value["execution"])
     assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
+    assert (repo / "AGENTS.md").read_text() == (
+        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if case == "defect" else context)
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 

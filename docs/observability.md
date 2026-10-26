@@ -70,24 +70,21 @@ second look cannot discharge it. Retained challenge verdicts include substantive
 grounds and canonical source references. Missing verdicts and native failures
 remain unfinished work rather than rejection evidence.
 
-Native configuration inputs are frozen before dispatch, including the merged
-original project/global per-model thinking policy and project-trust input. The
-packaged extension resolves inherited settings with the original native trust
-policy. A selection-only SDK session uses in-memory settings/session storage,
-loads no resources or tools, performs no model generation, and is disposed before
-the ordinary invocation continues. Native setters apply its selected model and
-clamped thinking without writing settings. Fully absent model configuration retains
-Daydream's DEFAULT_PI_MODEL/nous fallback; an explicit blank project model retains
-native saved-model reset and registry fallback. Requested model/provider/thinking
-metadata is null where native selection remains authoritative. Explicit phase/environment
-overrides and model thinking suffixes retain their native precedence over saved
-providers and enabled-model scopes. Native scope resolution preserves the saved
-model when admitted by the scope and otherwise selects its first resolved entry.
-The PI_API_KEY compatibility alias retains ordinary Daydream routing, including
-NOUS_API_KEY for its implicit default provider; credentials remain in the child
-environment and are separate from requested native selection metadata.
-Actual generation model/provider observations remain
-separate evidence from requested inputs; frozen configuration alone proves neither.
+Before dispatch, the host records opaque identities for the original native
+configuration inputs. It rejects configuration drift without interpreting or
+merging model settings. The ordinary Pi CLI starts in that original context and
+owns defaults, enabled-model scopes, provider, thinking, trust and authentication
+resolution before its first generation. Explicit phase/environment overrides
+remain explicit native CLI inputs. The extension binds stock read/search tools,
+the model-visible working directory and native AGENTS context to the captured
+source; it does not create another model-selection session or write settings.
+
+The result's `settings.native_contexts` records configuration identities and
+phase associations. Actual generation model/provider/thinking observations
+remain separate trajectory evidence; configuration identities and requested
+overrides alone do not prove which model generated a response. Credentials remain
+outside persisted configuration and public evidence, and native credential refresh
+remains supported.
 
 The sealed result records admission, native settlement and cleanup independently
 for each assignment. A completed process or accepted submission cannot establish

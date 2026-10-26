@@ -100,7 +100,9 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   challenge obligations and derived coverage. Every proposed publication claim
   needs fresh counterevidence-seeking challenge against captured source in a
   distinct native context. Semantic revisions renew that obligation; absent or
-  failed verdicts retain unresolved concerns. CLI route/default cutover and
+  failed verdicts retain unresolved concerns. Pi owns native model, provider,
+  thinking and authentication resolution; the host retains configuration drift
+  identities and explicit phase policy. CLI route/default cutover and
   remaining flow retirement have separate owners; read
   [its runtime contract](docs/runtime.md#committed-review-requestresult).
 - Keep changing budgets, pacing, and progress state authoritative on the host.
