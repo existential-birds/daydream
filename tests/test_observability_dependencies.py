@@ -8,10 +8,10 @@ import textwrap
 import pytest
 
 
-@pytest.mark.parametrize(
-    "missing", ["opentelemetry.exporter.otlp.proto.grpc", "opentelemetry.exporter.otlp.proto.http", "traceloop"],
-)
-@pytest.mark.parametrize("destination", ["off", "langsmith", "honeyhive", "otlp"])
+@pytest.mark.parametrize(("missing", "destination"), [
+    ("traceloop", "off"), ("opentelemetry.exporter.otlp.proto.grpc", "langsmith"),
+    ("opentelemetry.exporter.otlp.proto.http", "honeyhive"), ("traceloop", "otlp"),
+])
 def test_missing_tracing_dependency(missing: str, destination: str) -> None:
     # A fresh interpreter avoids SDK imports cached by other tests. Blocking one
     # package reproduces an editable checkout whose dependencies were not refreshed.
@@ -21,10 +21,13 @@ def test_missing_tracing_dependency(missing: str, destination: str) -> None:
                 import sys
 
                 missing, destination = sys.argv[1:]
+                blocked = (
+                    "opentelemetry.exporter.otlp.proto.grpc", "opentelemetry.exporter.otlp.proto.http", "traceloop"
+                ) if destination == "off" else (missing,)
 
                 class MissingDependency(importlib.abc.MetaPathFinder):
                     def find_spec(self, fullname, path, target=None):
-                        if fullname == missing or fullname.startswith(missing + "."):
+                        if any(fullname == prefix or fullname.startswith(prefix + ".") for prefix in blocked):
                             raise ModuleNotFoundError("private import diagnostic", name=fullname)
 
                 sys.meta_path.insert(0, MissingDependency())

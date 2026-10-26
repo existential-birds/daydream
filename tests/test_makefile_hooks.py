@@ -103,6 +103,11 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     _stage_file(worktree, "daydream/spike_a.py", "x = 1\n")
     _stage_file(worktree, "tests/spike_b.py", "y = 2\n")
     _stage_file(worktree, "notes.md", "not python\n")
+    _stage_file(worktree, "scripts/out_of_scope.py", "y = 2\n")
+    _stage_file(worktree, "mypy_stubs/out_of_scope.py", "z = 3\n")
+    scope_py = worktree / "daydream" / "scope.py"
+    _stage_file(worktree, "daydream/scope.py", "STAGED_VALUE = 1\n")
+    scope_py.write_text("STAGED_VALUE = import os  # unstaged experiment\n", encoding="utf-8")
     # Only staged bytes may reach Ruff.
     (worktree / "daydream" / "unstaged.py").write_text("z = 3\n", encoding="utf-8")
     # NUL-delimited paths must bypass Git's C-quoting for non-ASCII names.
@@ -112,34 +117,21 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     uv_calls = [r for r in recs if r["command"] == "uv"]
     # Feed each in-scope staged Python blob through stdin; exclude unstaged and non-Python files.
-    assert len(uv_calls) == 3
+    assert len(uv_calls) == 4
     by_path = {r["args"][4]: r for r in uv_calls}
-    assert set(by_path) == {"daydream/spike_a.py", "tests/spike_b.py", "daydream/\u00e9t\u00e9.py"}
+    assert set(by_path) == {
+        "daydream/spike_a.py", "tests/spike_b.py", "daydream/\u00e9t\u00e9.py", "daydream/scope.py",
+    }
     for path, r in by_path.items():
         assert r["args"] == ["run", "ruff", "check", "--stdin-filename", path, "-"]
         assert r["cwd"] == str(worktree)
     assert by_path["daydream/spike_a.py"]["stdin"] == "x = 1\n"
     assert by_path["tests/spike_b.py"]["stdin"] == "y = 2\n"
+    assert by_path["daydream/scope.py"]["stdin"] == "STAGED_VALUE = 1\n"
     assert by_path["daydream/\u00e9t\u00e9.py"]["stdin"] == "x = 4\n"
     assert by_path["daydream/\u00e9t\u00e9.py"]["args"][4] == "daydream/\u00e9t\u00e9.py"
     assert {r["command"] for r in recs} <= {"uv", "git"}
 
-def test_pre_commit_lints_index_content_not_working_tree(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _main_repo, worktree = linked_worktree
-    # Leave lint-breaking worktree bytes under the same path to prove Ruff reads the clean index blob.
-    scope_py = worktree / "daydream" / "scope.py"
-    _stage_file(worktree, "daydream/scope.py", "STAGED_VALUE = 1\n")
-    scope_py.write_text("STAGED_VALUE = import os  # unstaged experiment\n", encoding="utf-8")
-
-    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    uv_calls = [r for r in recs if r["command"] == "uv"]
-    assert len(uv_calls) == 1
-    call = uv_calls[0]
-    assert call["args"][4] == "daydream/scope.py"
-    assert call["stdin"] == "STAGED_VALUE = 1\n"
 
 def test_pre_commit_exits_zero_without_staged_python(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
@@ -149,23 +141,6 @@ def test_pre_commit_exits_zero_without_staged_python(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert not [r for r in recs if r["command"] == "uv"]
 
-def test_pre_commit_skips_python_files_outside_lint_scope(
-    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _main_repo, worktree = linked_worktree
-    # Match the CI lint scope: daydream, tests and RL. Scripts and stubs must not acquire
-    # commit-only requirements that CI never enforces.
-    _stage_file(worktree, "daydream/in_scope.py", "x = 1\n")
-    _stage_file(worktree, "scripts/out_of_scope.py", "y = 2\n")
-    _stage_file(worktree, "mypy_stubs/out_of_scope.py", "z = 3\n")
-
-    proc, recs = _run_pre_commit(worktree, tmp_path, monkeypatch)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    uv_calls = [r for r in recs if r["command"] == "uv"]
-    assert len(uv_calls) == 1
-    call = uv_calls[0]
-    assert call["args"] == ["run", "ruff", "check", "--stdin-filename", "daydream/in_scope.py", "-"]
-    assert call["stdin"] == "x = 1\n"
 
 def test_pre_commit_propagates_ruff_failure(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch

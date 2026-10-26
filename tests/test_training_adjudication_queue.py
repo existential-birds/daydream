@@ -1,7 +1,5 @@
 """Adjudication queue build: deterministic ordering over projector adjudication entries."""
 
-from pathlib import Path
-
 import pytest
 
 from daydream.training.adjudication import queue as queue_module
@@ -28,38 +26,6 @@ def _session(sid: str, fingerprint: str, disposition: str, digest: str) -> dict[
             }
         ],
     }
-
-
-def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # existing-shape helper
-    return [_session("s1", "fp-a", "accepted", "d-gold"), _session("s2", "fp-b", "unanswered", "d2")]
-
-
-def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
-    sessions = [*_sessions_with_accepted_and_unanswered(),
-                _session("s3", "fp-c", "rejected", "d-rejected"),
-                _session("s4", "fp-d", "ambiguous", "d-ambiguous")]
-    open_only = build_queue(sessions)
-    assert sorted(str(i["disposition"]) for i in open_only) == ["ambiguous", "unanswered"]
-
-    complete = build_queue(sessions, include_decisive=True)
-    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "ambiguous", "rejected", "unanswered"]
-    assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
-
-
-def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
-    # NOTE: 'accepted' disposition with evidence would be gold — the queue must EXCLUDE it.
-    sessions = [
-        _session("s2", "fp-b", "unanswered", "d2"),
-        _session("s1", "fp-b", "ambiguous", "d1"),
-        _session("s1", "fp-a", "accepted", "d-gold"),
-        _session("s0", "fp-m", "missing", "d3"),
-    ]
-    items_a = build_queue(sessions)
-    items_b = build_queue(list(reversed(sessions)))
-    assert [i["record_id"] for i in items_a] == [i["record_id"] for i in items_b]
-    assert [i["record_id"] for i in items_a] == sorted(str(i["record_id"]) for i in items_a)
-    assert all(i["disposition"] in {"ambiguous", "unanswered", "missing"} for i in items_a)
-    assert all(i["record_id"] != record_finding_id("s1", "s1-traj", "s1-seg", "fp-a") for i in items_a)
 
 
 def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:

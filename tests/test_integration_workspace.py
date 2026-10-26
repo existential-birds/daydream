@@ -7,10 +7,12 @@ review execution while workspace and Git operations remain real.
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops, runner
 from daydream.backends import ResultEvent, TextEvent
@@ -20,6 +22,7 @@ from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
+from tests.test_workspace import _push_origin_commit_via_sidecar
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -149,19 +152,18 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When --branch X is also checked out locally and stale, warn + use origin/X."""
-    # Push feat/Y to origin first (canonical commit on origin).
-    origin_sha = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Y")
-    # Check out feat/Y locally from main, BEFORE fetching, so the local
-    # branch is stale relative to origin/feat/Y.
-    _git(repo_with_origin, "checkout", "-b", "feat/Y", "main")
-    local_sha = _git(repo_with_origin, "rev-parse", "feat/Y")
-    assert local_sha != origin_sha
-
-    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
-    warnings_emitted: list[str] = []
-    # ``_resolve_ref`` does ``from daydream.ui import ... print_warning``
-    # inside the function, so patch the symbol on its origin module.
-    monkeypatch.setattr("daydream.ui.print_warning", lambda _console, msg: warnings_emitted.append(msg),)
+    first_origin_sha = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Y")
+    _git(repo_with_origin, "fetch", "origin")
+    _git(repo_with_origin, "checkout", "--track", "-b", "feat/Y", "origin/feat/Y")
+    assert _git(repo_with_origin, "rev-parse", "HEAD") == first_origin_sha
+    _push_origin_commit_via_sidecar(tmp_path, bare_origin, branch="feat/Y")
+    origin_sha = _push_origin_commit_via_sidecar(tmp_path, bare_origin, branch="feat/Y")
+    assert _git(repo_with_origin, "rev-parse", "origin/feat/Y") == first_origin_sha
+    assert first_origin_sha != origin_sha
+    assert _git(bare_origin, "rev-list", "--count", f"{first_origin_sha}..{origin_sha}") == "2"
+    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [])
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200, height=25)
+    monkeypatch.setattr("daydream.agent.console", rec)
 
     captured: dict[str, Any] = {}
 
@@ -169,6 +171,9 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
+        captured["head_branch"] = work.head_branch
+        captured["base_branch"] = work.base_branch
+        assert _git(work.repo, "rev-parse", "HEAD") == origin_sha
 
     _stub_run_loop_deep(monkeypatch, _capture)
 
@@ -176,14 +181,17 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     exit_code = await runner.run(config)
 
     assert exit_code == 0
-    # Warning fires per the Stale-local-handling rule.
-    assert any("feat/Y" in m and "origin/feat/Y" in m for m in warnings_emitted), (
-        f"expected stale-local warning; got: {warnings_emitted}"
-    )
+    out = rec.export_text()
+    assert "feat/Y is checked out in cwd" in out
+    assert "2 commits behind origin/feat/Y" in out
+    assert "reviewing origin/feat/Y" in out
     # The ephemeral worktree was checked out at origin/feat/Y, NOT the local SHA.
     assert captured["is_ephemeral"] is True
     assert captured["head_sha"] == origin_sha
     assert str(captured["repo"]).startswith(str(artifact_runtime_root.parent / "workspaces"))
+
+    assert (captured["head_branch"], captured["base_branch"]) == (None, "main")
+    assert not captured["repo"].exists()
 
 
 # --- Test 4: --comment + no open PR ----------------------------------------

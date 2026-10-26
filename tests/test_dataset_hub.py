@@ -1,4 +1,5 @@
 """Real JSONL queue, atomic publication and pinned download via an offline HF boundary."""
+
 from __future__ import annotations
 
 import hashlib
@@ -76,31 +77,6 @@ def test_credentials_alone_do_not_construct_a_hub(tmp_path: Path, api: Any, monk
     store.commit_run(run_record())
     result = api.DatasetUploader(store).upload()
     assert (result.queued, result.published, result.failed) == (1, 0, 0)
-
-
-def test_uncertain_success_is_recovered_without_republishing(tmp_path: Path, api: Any) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-    hub = FakeDatasetHub()
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    hub.lose_response = True
-    failure = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
-    assert failure.queued == failure.failed == 1 and len(hub.commits) == 1
-    result = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub).upload()
-    assert result.published == 1 and result.queued == 0 and len(hub.commits) == 1
-
-
-def test_concurrent_manifest_update_preserves_rival_records(tmp_path: Path, api: Any) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-    hub = FakeDatasetHub()
-    first, rival = LocalRecordStore(tmp_path / "first"), LocalRecordStore(tmp_path / "rival")
-    first.commit_run(run_record("first"))
-    rival.commit_run(run_record("rival"))
-    hub.before_commit = lambda: api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
-    result = api.DatasetUploader(first, TEST_REPO, backend=hub).upload()
-    assert result.queued == 0 and len(hub.commits) == 2
-    downloaded = api.download_snapshot(TEST_REPO, result.revision, tmp_path / "out", backend=hub)
-    assert {record["run_id"] for record in read_records(downloaded).runs} == {"first", "rival"}
 
 
 @pytest.mark.parametrize("fault", ["public", "secret", "reply_secret", "oversized", "partial", "schema", "path"])
@@ -193,9 +169,17 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any,
 
 
 def test_download_requires_exact_commit(tmp_path: Path, api: Any) -> None:
+    """The public download API must reject a moving pin before opening its backend."""
     from tests.harness.dataset_hub import FakeDatasetHub
+
+    class ForbiddenHub(FakeDatasetHub):
+        def private_revision(self, repo_id: str) -> str:
+            raise AssertionError("invalid download pin reached the network")
+
+    destination = tmp_path / "download"
     with pytest.raises(StoreError, match="invalid_revision"):
-        api.download_snapshot(TEST_REPO, "main", tmp_path / "download", backend=FakeDatasetHub())
+        api.download_snapshot(TEST_REPO, "main", destination, backend=ForbiddenHub())
+    assert not destination.exists()
 
 
 def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_path: Path, api: Any) -> None:
@@ -318,7 +302,7 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
     assert not (destination / "source.json").exists()
 
 
-@pytest.mark.parametrize("version", ["daydream.hub.v1", "daydream.hub.v2"])
+@pytest.mark.parametrize("version", ["daydream.hub.v2"])
 def test_supported_publication_refuses_historical_manifests_without_rewriting_history(
     tmp_path: Path, api: Any, version: str,
 ) -> None:

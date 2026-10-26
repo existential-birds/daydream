@@ -308,10 +308,10 @@ _CACHE_VERSION = 5
 def exploration_cache_key(
     head_sha: str, diff: str, tier: str, *, strategies: dict[str, str] | None = None,
 ) -> str:
-    """Hash format version, HEAD, diff, tier and effective strategies for exact reuse.
+    """Hash version, HEAD, the captured diff, tier and effective strategies for exact reuse.
 
-    Uncommitted edits are intentionally excluded. Bump _CACHE_VERSION when artifact
-    rendering changes so an upgrade cannot reuse older output bytes.
+    Tracked worktree edits affect reuse through the diff supplied by the caller.
+    Bump _CACHE_VERSION when artifact rendering changes to force regeneration.
     """
     payload = json.dumps([_CACHE_VERSION, head_sha, diff, tier, strategies or {}], sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

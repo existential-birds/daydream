@@ -441,23 +441,6 @@ async def test_invalid_destination_setup_fails_before_agent_work(
     assert backend.calls == []
     assert destination in capsys.readouterr().out.lower()
 
-async def test_workspace_failure_exports_root_before_a_trajectory_exists(
-    tmp_path: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with otlp_collector() as receiver:
-        _configure(monkeypatch, receiver.base_url, "otlp")
-        assert await runner.run(make_config(tmp_path, output_mode="review")) == 1
-    assert len(receiver.spans) == 1
-    root = receiver.spans[0]
-    identity = attributes(root)
-    assert identity["daydream.span.kind"] == "run"
-    assert root["status"]["code"] == "STATUS_CODE_ERROR"
-    assert "daydream.session.id" not in identity
-    assert "daydream.trajectory.id" not in identity
-    assert "traceloop.association.properties.session_id" not in identity
-    assert not (tmp_path / ".daydream/runs").exists()
-
-
 # --- P18 Task 3: sanitized resource reaches every destination identically ------
 
 
@@ -475,9 +458,12 @@ async def test_all_destinations_receive_same_sanitized_resource(
 ) -> None:
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",
-        "deployment.environment.name=offline-audit,"
-        "service.name=false-operator,telemetry.sdk.name=not-otel,telemetry.sdk.version=9.9.9,"
-        "service.instance.id=operator-instance-uuid,api_key=opaque-resource-secret",
+        "deployment.environment.name=offline-audit,custom.zone=zone%2Done,"
+        "empty.value=,zero.value=0,unicode.key=caf%C3%A9,"
+        "service.name=false-operator,service.version=0.0.0-operator,"
+        "telemetry.sdk.name=not-otel,telemetry.sdk.language=rust,telemetry.sdk.version=9.9.9,"
+        "daydream.observability.contract.version=0.0.0-operator,"
+        "service.instance.id=operator-instance-uuid,comma.key=a%2Cb%3Dc,api_key=opaque-resource-secret",
     )
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
     ext_dir.write_module(_FLOW)
@@ -488,7 +474,9 @@ async def test_all_destinations_receive_same_sanitized_resource(
             monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
             monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
             assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
+        manifest = json.loads((Path(__file__).parent / "fixtures/observability_contract/manifest.json").read_text())
         for receiver in (generic, langsmith, honeyhive):
+            assert "opaque-resource-secret" not in json.dumps([request["body"] for request in receiver.requests])
             resources = resources_on_wire(receiver)
             assert resources, "no resource spans decoded"
             for resource in resources:
@@ -499,6 +487,12 @@ async def test_all_destinations_receive_same_sanitized_resource(
                 assert resource["telemetry.sdk.version"] == package_version("opentelemetry-sdk")
                 assert resource["service.instance.id"] == "operator-instance-uuid"
                 assert resource["deployment.environment.name"] == "offline-audit"
+                assert resource["daydream.observability.contract.version"] == str(manifest["source"]["commit"])[:7]
+                assert resource["custom.zone"] == "zone-one"
+                assert resource["unicode.key"] == "café"
+                assert resource["comma.key"] == "a,b=c"
+                assert resource["empty.value"] == ""
+                assert resource["zero.value"] == "0"
                 assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
                 assert "opaque-resource-secret" not in json.dumps(resource)
         assert resources_on_wire(generic) == resources_on_wire(langsmith) == resources_on_wire(honeyhive)

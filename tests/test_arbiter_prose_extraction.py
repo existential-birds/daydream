@@ -2,8 +2,8 @@
 
 A Pi response can mention metadata["sender"]["login"] before its fenced
 findings object. Extraction must select the candidate the requested schema admits.
-Tests drive phase_arbiter_review through run_agent with only the backend
-mocked, applying the real Pi text-to-structured-output contract.
+Tests drive phase_arbiter_review through run_agent with native-shaped text
+events; the host chooses schema-valid fallback JSON, while Pi forwards prose.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import pytest
 
 from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.phases import phase_arbiter_review
 from daydream.phases.review import ReviewOutputError
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
@@ -65,35 +64,18 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
     return diff_path, intent_path, alternatives_path
 
 
-def _pi_like_backend(message: str) -> ScriptedBackend:
-    """Mirrors the pi backend: schema-aware selection over the final text, gated on the schema."""
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        structured = extract_json_by_schema(
-            message, schema=output_schema, accept=validates_schema
-        ).value if output_schema else None
-        return [TextEvent(text=message),
-            ResultEvent(structured_output=structured, continuation=None),
-        ]
-
-    return ScriptedBackend(responder=respond, model="glm-5.2")
-
 
 def _prose_only_backend(message: str) -> ScriptedBackend:
-    """No structured output at all, so run_agent's text fallback is the only path."""
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        return [TextEvent(text=message),
-            ResultEvent(structured_output=None, continuation=None),
-        ]
-
-    return ScriptedBackend(responder=respond, model="glm-5.2")
+    """Pi forwards prose; actual run_agent fallback selects the requested schema."""
+    return ScriptedBackend(events=[TextEvent(text=message),
+                                  ResultEvent(structured_output=None, continuation=None)], model="glm-5.2")
 
 
 # The issue-1445 message shape: incidental prose JSON (the dependency-impact list
 # the old prompt asked for) followed by the real answer, an empty issues array.
 PROSE_WITH_INCIDENTAL_JSON = (
     'The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
+    'Incidental object: {"a": [1,2,3,4,5,6,7,8], "note": "incidental"}. '
     'No defects established. {"issues": []}'
 )
 
@@ -114,7 +96,7 @@ async def test_arbiter_extracts_findings_from_prose_wrapped_message(
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _pi_like_backend(ARBITER_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
+        cast(Backend, _prose_only_backend(ARBITER_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
         diff_path=diff_path, intent_path=intent_path, alternatives_path=alternatives_path, allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
@@ -131,50 +113,13 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     with pytest.raises(ReviewOutputError) as failure:
         await phase_arbiter_review(
-            cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
+            cast(Backend, _prose_only_backend(MALFORMED_MESSAGE)), make_work(tmp_path),
+            selected_records=SELECTED_RECORDS,
             diff_path=diff_path, intent_path=intent_path, alternatives_path=alternatives_path, allow_standalone=True,
         )
 
     assert failure.value.reason_code.value == "malformed_output"
 
-
-# Model text has truncated JSON while ResultEvent already carries a complete
-# answer. Log mode must retain that result instead of falling back to prose.
-PROSE_WITH_TRUNCATED_JSON = (
-    "## Adjudication\n\n"
-    "**arb_id 1** -- Confirmed real, but mis-severitied. The setLevel line has "
-    "lived beside the instrumentation calls in app.py:28 since 2023; the refactor "
-    "split it off by oversight. This is log-hygiene, not correctness -- low.\n\n"
-    # A truncated (never-closed) JSON tail: unbalanced, so extract_json() finds no
-    # object here and run_agent's text fallback yields a bare string.
-    '{"findings": [{"arb_id": 1, "keep": true, "severity": "low", "rationale": "only the web proc'
-)
-
-# What the backend actually managed to extract into the ResultEvent: the full,
-# well-formed structured answer.
-STRUCTURED_OUTPUT: dict[str, Any] = {"findings": [{"arb_id": 1, "keep": True, "severity": "low", "confidence": "HIGH",
-            "description": "init_instrumentation() omits the ddtrace setLevel.",
-            "rationale": "Confirmed against code; log-hygiene only.", "evidence": "app.py:28",
-        }, {"arb_id": 2, "keep": False, "severity": "low", "confidence": "MEDIUM", "description": "Not a real defect.",
-            "rationale": "Rejected on inspection.", "evidence": "integration.py:502",
-        },
-    ]
-}
-
-
-def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
-    """Emit schema-gated structured data separately from unparseable prose.
-
-    Keeping text unparseable prevents fallback extraction from masking a lost
-    ResultEvent payload in log mode.
-    """
-
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        return [TextEvent(text=text),
-            ResultEvent(structured_output=structured if output_schema else None, continuation=None),
-        ]
-
-    return ScriptedBackend(responder=respond, model="glm-5.2")
 
 def test_rejection_diagnostic_names_type_and_content_free_reason() -> None:
     failure = StructuredOutputFailure("prose", "malformed_output",
@@ -189,16 +134,3 @@ def test_rejection_diagnostic_names_type_and_content_free_reason() -> None:
 def test_rejection_diagnostic_without_detail_is_unchanged() -> None:
     assert str(ReviewOutputError(StructuredOutputFailure("prose", "malformed_output"))) == \
            "malformed_output: reviewer response did not satisfy its schema"
-
-
-async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
-    """Both Pi fakes emit structured output only when output_schema was requested."""
-    schema: dict[str, Any] = {"type": "object"}
-    fakes = (_pi_like_backend(ARBITER_MESSAGE), _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),)
-    for fake in fakes:
-        with_schema = [event async for event in fake.execute(Path("."), "prompt", schema)]
-        without_schema = [event async for event in fake.execute(Path("."), "prompt")]
-        assert isinstance(with_schema[-1], ResultEvent)
-        assert with_schema[-1].structured_output is not None
-        assert isinstance(without_schema[-1], ResultEvent)
-        assert without_schema[-1].structured_output is None

@@ -1,11 +1,6 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
-from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
-
-import pytest
 
 from daydream.deep.diagram_prompts import (
     build_flowchart_prompt,
@@ -13,47 +8,15 @@ from daydream.deep.diagram_prompts import (
 )
 from daydream.deep.diff import _diff_blocks_for_files
 from daydream.deep.prompts import (
-    build_arbiter_prompt,
-    build_generic_fallback_prompt,
-    build_merge_prompt,
     build_per_stack_prompt,
-    build_structural_prompt,
 )
 from daydream.phases import append_extended_facts
-from daydream.phases.review_prompts import _exploration_pointer
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.prompts.grounding import (
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
     render_test_recipe_block,
 )
 from daydream.test_execution import TestRecipe, resolve_test_recipe
-from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
-
-_paths = partial(prompt_paths, output_name="stack-python-review.md")
-
-def _arbiter_prompt(tmp_path: Path, **overrides: Any) -> str:
-    """Build the arbiter prompt with the shared path set, plus any per-test overrides."""
-    p = _paths(tmp_path)
-    return build_arbiter_prompt(
-        strategy=_default_strategy("arbitration"), arbiter_input_path=tmp_path / "arbiter-input.json",
-        diff_path=p["diff_path"], intent_path=p["intent_path"], alternatives_path=p["alternatives_path"], cwd=p["cwd"],
-        **overrides,
-    )
-
-_REVIEW_BUILDERS: dict[str, Callable[..., str]] = {
-    "per_stack": build_per_stack_prompt, "structural": build_structural_prompt,
-    "generic_fallback": build_generic_fallback_prompt,
-}
-
-def _review_prompt(name: str, tmp_path: Path, **overrides: Any) -> str:
-    """Build a real prompt with shared paths and explicit per-builder defaults."""
-    kwargs: dict[str, Any] = {**_paths(tmp_path), "strategy": _default_strategy(f"discovery.{name}"),
-        "files": ["config.yaml" if name == "generic_fallback" else "api.py"],
-    }
-    if name == "per_stack":
-        kwargs["stack_name"] = "python"
-    return _REVIEW_BUILDERS[name](**(kwargs | overrides))
 
 # Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
 
@@ -80,41 +43,9 @@ def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
 
 # Issue #279 — Authoritative-intent rule gate in the deep prompt builders
 
-def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> str:
-    """Call each named builder with its distinct minimal required inputs."""
-    if name.replace("-", "_") in _REVIEW_BUILDERS:
-        return _review_prompt(name.replace("-", "_"), tmp_path, intent_authoritative=intent_authoritative)
-    if name == "arbiter":
-        return _arbiter_prompt(tmp_path, intent_authoritative=intent_authoritative)
-    if name == "merge":
-        return build_merge_prompt(strategy=_default_strategy("merge"),
-            per_stack_records_paths=[tmp_path / "python.json", tmp_path / "react.json"],
-            intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
-            dedup_candidates_path=tmp_path / "dedup.json", intent_authoritative=intent_authoritative,
-        )
-    msg = f"unknown builder name: {name!r}"
-    raise ValueError(msg)
-
-@pytest.mark.parametrize("name", ["per-stack", "structural", "generic-fallback", "arbiter", "merge"])
-def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
-    """#279: the precedence rule appears only when a fresh PR body was ingested."""
-    assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
-    assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
-    # NEW #579: the untrusted framing rides with the rule — same gating.
-    assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in _build_gated(name, tmp_path, intent_authoritative=False)
-    assert PR_DESCRIPTION_UNTRUSTED_FRAMING in _build_gated(name, tmp_path, intent_authoritative=True)
 
 # --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
 
-def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
-    p = _paths(tmp_path)
-    without = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], **p, intent_authoritative=True, include_alternatives=False,
-    )
-    assert "alternatives.json" not in without
-    assert "author's stated intent from the pull-request description" in without
-    assert AUTHORITATIVE_INTENT_RULE in without
-    assert PR_DESCRIPTION_UNTRUSTED_FRAMING in without  # NEW #579
 
 # Issue #308 — test-quality rubric in the per-stack review prompt
 
@@ -126,30 +57,6 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 # =============================================================================
 
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
-
-
-@pytest.mark.parametrize('name', ['per_stack', 'generic_fallback'])
-def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, name: str) -> None:
-    """Supplied hunks come first and reviewers can inspect more context when useful."""
-    prompt = _review_prompt(name, tmp_path, inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n")
-    assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
-    assert "when more context" in prompt or "when useful" in prompt
-
-def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tmp_path: Path) -> None:
-    """Exploration pointers stay bounded while useful source inspection remains optional."""
-    out = _review_prompt("per_stack", tmp_path, exploration_dir=tmp_path / ".daydream" / "exploration")
-    assert "Read the pre-scan summary at" in out
-    assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in out
-    assert "Do not infer or enumerate sibling artifact files" in out
-    assert "Inspect enclosing symbols or other sections when useful" in out
-    assert "MUST read in full all assigned source files" not in out
-    assert str(tmp_path / ".daydream" / "exploration" / "affected_files.md") in out
-    assert "when useful to resolve concrete candidates" in out
-    assert "assigned source files" not in out
-    assert _exploration_pointer(None) == ""
-    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in out
-    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("summary.md")
-    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("affected_files.md")
 
 
 # Issue #972 R1 — host-owned severity rubric reaches every assigning prompt

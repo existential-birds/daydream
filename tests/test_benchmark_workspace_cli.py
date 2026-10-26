@@ -1,6 +1,7 @@
 import hashlib
 import importlib.metadata
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -15,9 +16,9 @@ from daydream.benchmark import cli as benchmark_cli
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import calibrate
 from daydream.benchmark.harbor.build import task_spec_approval, task_spec_digest
-from daydream.benchmark.schema import derive_finding_id, derive_workspace_state
+from daydream.benchmark.schema import BenchmarkManifest, derive_finding_id, derive_workspace_state
 from daydream.benchmark.storage import load_yaml_strict
-from daydream.benchmark.workspace import validate_workspace
+from daydream.benchmark.workspace import validate_workspace, workspace_status
 from tests.test_benchmark_calibrate import _env, _scripted_http, _scripted_responses
 from tests.test_benchmark_curate_tui import _scripted
 from tests.test_benchmark_curation import _seed_ready_case
@@ -82,26 +83,46 @@ def test_benchmark_help_lists_subcommands() -> None:
     r = subprocess.run(  # noqa: S603 - args are not user-controlled
         [sys.executable, "-m", "daydream", "benchmark", "--help"], capture_output=True, text=True
     )
-    assert r.returncode == 0 and "init" in r.stdout and "status" in r.stdout and "validate" in r.stdout
+    assert r.returncode == 0
+    assert "init" in r.stdout and "status" in r.stdout and "validate" in r.stdout and "import-prs" in r.stdout
 
-def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
+def test_benchmark_init_status_validate_roundtrip(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     ws = tmp_path / "ws"
-    r = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "daydream", "benchmark", "init", str(ws), "--repo", "OWNER/REPO",
-            "--reviewer-host", "api.anthropic.com", "--judge-host", "api.anthropic.com",
-        ], capture_output=True, text=True,
-    )
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert r.stdout.splitlines() == [
+    with pytest.raises(SystemExit) as initialized:
+        top_cli.main(["benchmark", "init", str(ws), "--repo", "OWNER/REPO",
+            "--reviewer-host", "https://user:pass@API.Anthropic.COM:443/path", "--judge-host", "api.anthropic.com",
+        ])
+    assert initialized.value.code == 0
+    assert capsys.readouterr().out.splitlines() == [
         "classification: confidential",
         "egress boundary: api.anthropic.com api.anthropic.com",
     ]
-    assert (ws / "benchmark.yaml").exists()
+    manifest = BenchmarkManifest.model_validate(load_yaml_strict(ws / "benchmark.yaml"))
+    assert manifest.source.model_dump() == {
+        "provider": "github", "hostname": "github.com", "repository": "OWNER/REPO",
+        "repository_id": None, "visibility": "unresolved",
+    }
+    assert manifest.privacy.reviewer_allowed_hosts == manifest.privacy.judge_allowed_hosts == ["api.anthropic.com"]
+    assert manifest.pull_requests == [] and manifest.cases == []
+    assert stat.S_IMODE(ws.stat().st_mode) == 0o700
+    for name in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
+        assert (ws / name).is_dir() and stat.S_IMODE((ws / name).stat().st_mode) == 0o700
+    assert not (ws / "harbor").exists()
+    assert (ws / ".gitignore").read_bytes() == b"*\n!.gitignore\n"
+    assert stat.S_IMODE((ws / "benchmark.yaml").stat().st_mode) == 0o600
+    assert stat.S_IMODE((ws / ".gitignore").stat().st_mode) == 0o600
 
     r2 = subprocess.run(  # noqa: S603
         [sys.executable, "-m", "daydream", "benchmark", "status", str(ws)], capture_output=True, text=True,
     )
-    assert r2.returncode == 0 and "empty" in r2.stdout and "unresolved" in r2.stdout
+    assert r2.returncode == 0 and r2.stdout.splitlines() == [
+        "workspace state: empty", "repository identity: unresolved",
+        "repository identity/access verification: not yet run", "ledger entries: 0",
+    ]
+    status = workspace_status(ws)
+    assert status.workspace_state == "empty" and not status.repository_identity_resolved
+    assert status.ledger.pull_requests == [] and status.case_snapshots == []
+    assert status.source == manifest.source
 
     r3 = subprocess.run(  # noqa: S603
         [sys.executable, "-m", "daydream", "benchmark", "validate", str(ws)], capture_output=True, text=True,
@@ -129,10 +150,17 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path: Path, cap
     assert _tree_bytes(ws) == before                # validate is read-only: nothing written
 
 def test_validate_exit_code_contract_preserved(tmp_path: Path) -> None:
-    assert validate_workspace(_write_curated_workspace(tmp_path / "r1", "ready"))[0] == 0
-    assert validate_workspace(_write_curated_workspace(tmp_path / "r2", "draft"))[0] == 2
+    ready = _write_curated_workspace(tmp_path / "r1", "ready")
+    assert validate_workspace(ready) == (0, "ready")
+    status = workspace_status(ready)
+    assert status.workspace_state == "ready" and status.repository_identity_resolved is True
+    assert validate_workspace(_write_curated_workspace(tmp_path / "r2", "draft")) == (
+        2, "incomplete: workspace state curating",
+    )
     assert validate_workspace(_write_minimal_invalid_workspace(tmp_path / "r3"))[0] == 1
-    assert validate_workspace(_write_curated_workspace(tmp_path / "r4", "ready", resolved=False))[0] == 2
+    assert validate_workspace(_write_curated_workspace(tmp_path / "r4", "ready", resolved=False)) == (
+        2, "incomplete: repository identity unresolved",
+    )
 
 def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
     tmp_path: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -174,6 +202,10 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
         "bundle": bundle_path.read_bytes(),
     }
 
+    projected = workspace_status(ws)
+    assert projected.workspace_state == "stale"
+    assert projected.case_snapshots[0]["task_spec_approval"] == "stale"
+    assert validate_workspace(ws) == (2, "incomplete: workspace state stale")
     with pytest.raises(SystemExit) as status:
         top_cli.main(["benchmark", "status", str(ws)])
     assert status.value.code == 0

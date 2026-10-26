@@ -22,17 +22,23 @@ from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
 from daydream.review_rationale import valid_review_context
 from daydream.review_reporting import REVIEW_CONTEXT_SCHEMA
-from daydream.review_result import TERMINAL_RESULT_SCHEMA, validate_terminal_result
+from daydream.review_result import (
+    RUN_TARGET_DECISIONS_MAX_BYTES,
+    TERMINAL_RESULT_SCHEMA,
+    published_attribution_bytes,
+    validate_terminal_result,
+)
 
 FINDINGS_SCHEMA_VERSION = 2
 
 MAX_ARTIFACT_BYTES = 1_048_576
+MAX_RAW_ARTIFACT_BYTES = MAX_ARTIFACT_BYTES + RUN_TARGET_DECISIONS_MAX_BYTES
 
 
-def _enforce_max_artifact_bytes(size: int) -> None:
-    if size > MAX_ARTIFACT_BYTES:
+def _enforce_max_artifact_bytes(size: int, limit: int = MAX_ARTIFACT_BYTES) -> None:
+    if size > limit:
         raise FindingsValidationError(
-            f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
+            f"artifact size check failed: {size} bytes exceeds the {limit}-byte cap"
         )
 
 _FINDING_PROPERTIES = {
@@ -217,13 +223,14 @@ def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
     try:
         _validate_artifact(artifact)
         payload = _artifact_payload(artifact)
-        if len(payload) > MAX_ARTIFACT_BYTES and 'review_context' in artifact:
+        attribution = published_attribution_bytes(artifact.get('terminal_result', {}))
+        if len(payload) - attribution > MAX_ARTIFACT_BYTES and 'review_context' in artifact:
             core = {key: value for key, value in artifact.items() if key != 'review_context'}
             core_payload = _artifact_payload(core)
-            _enforce_max_artifact_bytes(len(core_payload))
+            _enforce_max_artifact_bytes(len(core_payload) - attribution)
             fitted = {**core, 'review_context': copy.deepcopy(artifact['review_context'])}
             context = fitted['review_context']
-            while len(payload) > MAX_ARTIFACT_BYTES:
+            while len(payload) - attribution > MAX_ARTIFACT_BYTES:
                 verification = context['verification']
                 if context['author_reported'] is not None:
                     context['author_reported'] = None
@@ -247,7 +254,7 @@ def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
                     break
                 payload = _artifact_payload(fitted)
             logging.getLogger(__name__).warning('Optional review context omitted to fit the findings artifact budget')
-        _enforce_max_artifact_bytes(len(payload))
+        _enforce_max_artifact_bytes(len(payload) - attribution)
         atomic_write_bytes(path, payload)
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         raise FindingsValidationError(f"artifact write failed: {path}: {exc}") from exc
@@ -273,8 +280,11 @@ def load_findings_artifact(
     """
     try:
         size = path.stat().st_size
-        _enforce_max_artifact_bytes(size)
-        raw = path.read_text(encoding="utf-8")
+        _enforce_max_artifact_bytes(size, MAX_RAW_ARTIFACT_BYTES)
+        with path.open('rb', buffering=0) as stream:
+            captured = stream.read(MAX_RAW_ARTIFACT_BYTES + 1)
+        _enforce_max_artifact_bytes(len(captured), MAX_RAW_ARTIFACT_BYTES)
+        raw = captured.decode('utf-8')
     except (OSError, UnicodeError) as exc:
         raise FindingsValidationError(f"artifact read failed: {path}: {exc}") from exc
 
@@ -284,6 +294,11 @@ def load_findings_artifact(
         raise FindingsValidationError(f"artifact JSON parse failed: {exc}") from exc
 
     _validate_artifact(data)
+    try:
+        _enforce_max_artifact_bytes(
+            len(_artifact_payload(data)) - published_attribution_bytes(data.get('terminal_result', {})))
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise FindingsValidationError(f'artifact size encoding failed: {exc}') from exc
 
     for field_name, expected in (
         ("repo", expected_repo),

@@ -16,6 +16,8 @@ from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
     _root_phase_events,
+    _run_uid_pool,
+    _source_uids_by_description,
 )
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import saved_coverage
@@ -59,6 +61,17 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     assert items_file.is_file(), f"merged-items.json missing at {items_file}"
     items_payload = json.loads(items_file.read_text())
     assert isinstance(items_payload.get("items"), list)
+    items = items_payload["items"]
+    assert "structural" in {item.get("lens") for item in items}
+    assert all(isinstance(item.get("id"), int) for item in items)
+    assert [item["id"] for item in items] == list(range(1, len(items) + 1))
+    tiny_deep = tiny_diff_target / ".daydream" / "deep"
+    assert _run_uid_pool(tiny_deep) == {"generic:1", "structure:1"}
+    by_description = _source_uids_by_description(tiny_deep)
+    assert by_description["Sample issue"] == ["generic:1"]
+    assert by_description["Structural maintainability concern"] == ["structure:1"]
+    for item in items:
+        assert item["source_uids"] == [item["uid"]], item
 
     # (c) Review-prompt count for tiny diff is STRICTLY LESS than multi_stack.
     tiny_reviews = _count_review_prompts(tiny_calls)
@@ -187,28 +200,6 @@ async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     assert any(expected_api_hunk in Path(part["path"]).read_text()
                for part in catalog['parts'] if part["file"] == "api.py")
     assert diff_path_str not in structural_prompts[0]
-
-async def test_ac6_single_stack_merged_items_carry_structural_lens(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``."""
-
-    _silence(monkeypatch)
-    _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
-    mute_side_effects()
-
-    rc = await run(make_config(tiny_diff_target))
-    assert rc == 0
-
-    items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
-    assert items_file.is_file()
-    items = json.loads(items_file.read_text())["items"]
-    lenses = {i.get("lens") for i in items}
-    # Structural findings reach the canonical item list tagged correctly.
-    assert "structural" in lenses, f"no structural-lens items in {lenses}"
-    # And every item carries a fresh contiguous integer id (normalize_items).
-    assert all(isinstance(i.get("id"), int) for i in items), "non-integer id in merged items"
-    assert [i["id"] for i in items] == list(range(1, len(items) + 1)), "ids not contiguous"
 
 async def test_ac_fix_resume_on_tiny_diff(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

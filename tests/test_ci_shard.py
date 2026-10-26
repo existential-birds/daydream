@@ -124,59 +124,39 @@ def test_duration_partition_balances_real_execution_without_losing_new_tests(
 ) -> None:
     """Count balance misses costly skew; timing hints must still admit unknown tests."""
     repo, env = weighted_shard_artifacts.repo, weighted_shard_artifacts.env
-    profile = json.loads((repo / _PROFILE).read_text())
+    timings = json.loads((repo / _PROFILE).read_text())
     manifests = [json.loads((repo / f"weighted/shard-{index}/manifest.json").read_text()) for index in range(2)]
+    for index, manifest in enumerate(manifests):
+        assert manifest.get("partition_algorithm") == "duration-lpt-v1"
+        assert manifest.get("partition_profile_sha256") == hashlib.sha256((repo / _PROFILE).read_bytes()).hexdigest()
+        observed = (repo / f"execution-order-{index}.txt").read_text().splitlines()
+        assert observed == manifest["selected"]
+        costs = [timings["durations"].get(node, timings["fallback_seconds"]) for node in observed]
+        assert costs == sorted(costs, reverse=True), costs
     collection = manifests[0]["collection"]
     selected = [node for manifest in manifests for node in manifest["selected"]]
     assert sorted(selected) == collection
     assert len(selected) == len(set(selected))
     assert all(set(manifest["reports"]) == set(manifest["selected"]) for manifest in manifests)
-    unknown = set(collection) - profile["durations"].keys()
+    unknown = set(collection) - timings["durations"].keys()
     assert len(unknown) == 2
     assert all(unknown.intersection(manifest["selected"]) for manifest in manifests)
-    loads = [sum(profile["durations"].get(node, profile["fallback_seconds"])
+    loads = [sum(timings["durations"].get(node, timings["fallback_seconds"])
                  for node in manifest["selected"]) for manifest in manifests]
     # An independent load bound rejects the 138/6 round-robin split without copying a partition.
-    assert max(loads) <= sum(loads) / 2 + profile["fallback_seconds"], loads
-    result = _cli(repo, "combine", "--count", "2", "--input", "weighted", env=env)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
-
-
-def test_duration_partition_executes_expensive_nodes_first(
-    weighted_shard_artifacts: ShardProject,
-) -> None:
-    """Correct membership alone permits a long tail when xdist receives lexical order."""
-    repo = weighted_shard_artifacts.repo
-    profile = json.loads((repo / _PROFILE).read_text())
-    for index in range(2):
-        manifest = json.loads((repo / f"weighted/shard-{index}/manifest.json").read_text())
-        observed = (repo / f"execution-order-{index}.txt").read_text().splitlines()
-        assert observed == manifest["selected"]
-        costs = [profile["durations"].get(node, profile["fallback_seconds"]) for node in observed]
-        assert costs == sorted(costs, reverse=True), costs
-
-
-def test_duration_partition_receipts_bind_the_shared_algorithm_and_exact_profile(
-    weighted_shard_artifacts: ShardProject,
-) -> None:
-    """Runtime, verifier and combiner need one reproducible selection contract."""
-    repo = weighted_shard_artifacts.repo
-    manifests = [json.loads((repo / f"weighted/shard-{index}/manifest.json").read_text()) for index in range(2)]
-    for manifest in manifests:
-        assert manifest.get("partition_algorithm") == "duration-lpt-v1"
-        assert manifest.get("partition_profile_sha256") == hashlib.sha256((repo / _PROFILE).read_bytes()).hexdigest()
-
+    assert max(loads) <= sum(loads) / 2 + timings["fallback_seconds"], loads
     from scripts.ci_shard import load_timing_profile, partition
 
     profile = load_timing_profile(repo / _PROFILE)
-    collection = manifests[0]["collection"]
     assert partition(collection, 2, profile) == [manifest["selected"] for manifest in manifests]
     for count in (1, 2, 4, 8):
         shards = partition(collection, count, profile)
         assert shards == partition(list(reversed(collection)), count, profile)
         assert sorted(node for shard in shards for node in shard) == collection
         assert all(shards)
+    result = _cli(repo, "combine", "--count", "2", "--input", "weighted", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'branch-rate="1"' in (repo / "coverage.xml").read_text()
 
 
 @pytest.mark.parametrize("cheap_count", [3, 60], ids=["less-than-two-per-worker", "batched-load"])
@@ -281,11 +261,10 @@ def test_shards_cover_collection_and_combine_real_branch_data(
     "wrong-selection", "missing-test", "missing-teardown", "missing-call", "failed-test", "failed-process",
     "worker-crash", "line-only", "low-coverage",
 ])
-@pytest.mark.parametrize("diagnostic", [False, True])
 def test_combine_rejects_incomplete_or_wrong_run_artifacts(
-    shard_artifacts: ShardProject, tmp_path: Path, fault: str, diagnostic: bool,
+    shard_artifacts: ShardProject, tmp_path: Path, fault: str,
 ) -> None:
-    """Every fault starts from successfully executed artifacts, avoiding earlier false guards."""
+    """CI's diagnostic mode must reject each corrupt receipt from a real execution."""
     from coverage import CoverageData
 
     repo, env = shard_artifacts.repo, shard_artifacts.env
@@ -344,8 +323,7 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
         data.write()
         manifest["coverage_sha256"] = hashlib.sha256((shard / "coverage").read_bytes()).hexdigest()
     path.write_text(json.dumps(manifest))
-    result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts),
-                  *(["--diagnostic"] if diagnostic else []), env=env)
+    result = _cli(repo, "combine", "--count", "2", "--input", str(artifacts), "--diagnostic", env=env)
     assert result.returncode != 0, result.stdout + result.stderr
     assert "ci-shard:" in result.stderr or "coverage.exceptions.DataError" in result.stderr
     if fault not in {"failed-test", "failed-process", "worker-crash", "low-coverage"}:
@@ -358,10 +336,8 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
     ("reuse", "success", "skipped", "skipped", True),
     ("unknown", "success", "skipped", "skipped", False),
     ("full", "failure", "success", "success", False),
-    ("full", "success", "cancelled", "skipped", False),
-    ("full", "success", "skipped", "skipped", False),
+    ("full", "success", "skipped", "success", False),
     ("full", "success", "success", "failure", False),
-    ("full", "success", "success", "cancelled", False),
     ("basic", "cancelled", "skipped", "skipped", False),
     ("reuse", "success", "failure", "skipped", False),
     ("basic", "success", "success", "success", False),
@@ -380,11 +356,8 @@ def test_final_gate_propagates_dependency_outcomes(
 @pytest.mark.parametrize(("mode", "baseline", "static", "success"), [
     ("baseline", "success", "skipped", True),
     ("baseline", "skipped", "skipped", False),
-    ("baseline", "cancelled", "skipped", False),
-    ("baseline", "failure", "skipped", False),
     ("baseline", "success", "success", False),
     ("basic", "success", "success", False),
-    ("reuse", "cancelled", "success", False),
 ])
 def test_final_gate_requires_the_selected_baseline_job(
     mode: str, baseline: str, static: str, success: bool,

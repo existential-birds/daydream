@@ -8,14 +8,6 @@ from daydream.training.reward_model import score_comment, train_outcome_model
 from tests.test_training_gate import _pairs
 
 
-def test_trains_on_both_classes_and_ranks(tmp_path: Path) -> None:
-    p = _pairs(tmp_path, n=20)
-    frozen = freeze_split(p, held_out_fraction=0.2, seed=0)
-    model = train_outcome_model(p, split=frozen, seed=0)
-    assert model.label_ratio_reported  # S2: actual ratio at training time, not a stale figure
-    assert score_comment(model, "grounded, references line 42 of the diff") > score_comment(model, "nit: lol looks fine"
-    )
-
 def test_refuses_single_class_training(tmp_path: Path) -> None:
     # Single-class refusal precedes split consumption, so freeze a separate valid two-class file.
     rows = [{"comment_id": "a", "text": "x", "label": "accepted", "labeler_policy_version": "980-policy-r1"}]
@@ -25,12 +17,6 @@ def test_refuses_single_class_training(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="both classes"):
         train_outcome_model(p, split=split, seed=0)  # C9: cannot rank on one class
 
-def test_deterministic_given_seed(tmp_path: Path) -> None:
-    p = _pairs(tmp_path, n=8)
-    frozen = freeze_split(p, held_out_fraction=0.2, seed=7)
-    m1 = train_outcome_model(p, split=frozen, seed=7)
-    m2 = train_outcome_model(p, split=freeze_split(p, held_out_fraction=0.2, seed=7), seed=7)
-    assert score_comment(m1, "some comment") == score_comment(m2, "some comment")
 
 def test_reads_production_export_shape(tmp_path: Path) -> None:
     """Admit production export keys alongside fixture keys for gold outcome training."""

@@ -1,7 +1,6 @@
 """Integration tests for the full review-fix-test flow."""
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, Callable
 from io import StringIO
@@ -12,15 +11,10 @@ import pytest
 from rich.console import Console
 
 from daydream import remote_ci
-from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
-    CostEvent,
     ResultEvent,
     TextEvent,
-    ThinkingEvent,
-    ToolResultEvent,
-    ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
 from daydream.deep import fix_steps
@@ -29,10 +23,7 @@ from daydream.phases import phase_alternative_review
 from daydream.pr_review import PRInfo
 from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
 from daydream.run_config import RunConfig
-from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import run
-from daydream.trajectory import DaydreamPhase
-from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import host_test_command
@@ -50,22 +41,11 @@ from tests.harness.stub_backend import force_interactive, install_stub_backend, 
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
 
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-
-#: The byte-identical CostEvent + ResultEvent tail every scripted stream ends with.
-_TERMINAL_EVENTS: tuple[AgentEvent, ...] = (
-    CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-    ResultEvent(structured_output=None, continuation=None),
-)
-
 _COMMENT_PR = PRInfo(
     number=7, head_sha="0" * 40, base_sha="1" * 40, base_ref="main", head_ref="feature", owner="acme", repo="widgets",
     url="https://example/pr/7",
 )
 
-def strip_ansi(text: str) -> str:
-    """Strip ANSI escape codes from text for assertion comparisons."""
-    return _ANSI_ESCAPE.sub("", text)
 
 def _load_trajectory(project: Path, session_id: str) -> dict[str, Any]:
     """Load the recorded trajectory for ``session_id`` from ``project``'s run dir."""
@@ -85,41 +65,6 @@ def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
 
 _FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
 
-async def render_agent(
-    monkeypatch: pytest.MonkeyPatch, events: list[Any], *, quiet: bool, prompt: str = "Test prompt",
-    color_system: str | None = None,
-) -> str:
-    """Run scripted events through a pinned terminal and return raw ANSI output.
-
-    force_terminal, width=120, and NEON_THEME remove host display differences.
-    Styling assertions use raw output; text assertions call strip_ansi."""
-    output = StringIO()
-    extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
-    monkeypatch.setattr(
-        "daydream.agent.console",
-        Console(file=output, force_terminal=True, no_color=False, width=120, theme=NEON_THEME, **extra),
-    )
-    await run_agent(
-        ScriptedBackend(events=events, model="mock-model"), Path("/tmp"), prompt, phase=DaydreamPhase.REVIEW,
-        run_context=RunContext(InteractionPolicy(quiet=quiet)),
-    )
-    return output.getvalue()
-
-async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Five consecutive thinking panels render once each, in order."""
-    thoughts = [f"thought {i} of the stream" for i in range(5)]
-    events: list[Any] = [
-        *[ThinkingEvent(text=t) for t in thoughts], ResultEvent(structured_output=None, continuation=None),
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
-    assert plain_text.count("Thinking") == 5, "each thought must render its Thinking title once"
-    cursor = -1
-    for t in thoughts:
-        idx = plain_text.find(t)
-        assert idx != -1, f"thought {t!r} did not render"
-        assert idx > cursor, f"thought {t!r} rendered out of order"
-        cursor = idx
-
 
 @pytest.fixture
 def target_project(tmp_path: Path) -> Path:
@@ -135,15 +80,19 @@ async def test_full_fix_flow(
     target_project: Path, tmp_path: Path, install_backend: Callable[[object], object],
     make_config: Callable[..., 'RunConfig'], no_ci_remote: NoCIRemote,
 ) -> None:
-    """The shallow flow writes a report, applies a fix, tests it, and commits."""
-    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+    """A cold shallow review resumes its recorded findings, fixes, validates, and commits."""
+    backend = _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]])
+    install_backend(backend)
     # The real push and ls-remote verification need a bare origin.
     no_ci_remote.connect(target_project, bare_remote(tmp_path / "origin.git"))
     head_before = _git(target_project, "rev-parse", "HEAD")
     config = make_config(
-        target_project, stack="python", quiet=True, shallow=True, assume="yes", pr_number=no_ci_remote.pr_number,
-        pr_repo=no_ci_remote.base_repository,
+        target_project, stack="python", quiet=True, shallow=True, non_interactive=True,
+        pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
     )
+    assert await run(config) == 0
+    assert _git(target_project, "rev-parse", "HEAD") == head_before
+    config.assume, config.start_at = "yes", "fix"
     exit_code = await run(config)
     assert exit_code == 0
     report = target_project / ".review-output.md"
@@ -155,6 +104,8 @@ async def test_full_fix_flow(
     assert json.loads((target_project / ".daydream" / "deep" / "test-verdict.json").read_text())["passed"]
     assert "-> str" in (target_project / "main.py").read_text()
     assert _git(target_project, "rev-parse", "HEAD") != head_before
+    assert "Daydream-Run:" in _git(target_project, "log", "-1", "--format=%B")
+    assert not any("daydream changes are already staged" in prompt for prompt in backend.prompts)
 
 @pytest.mark.parametrize("protect_untracked_related", [False, True])
 async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
@@ -632,185 +583,6 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     # the host executes the canonical suite again and requires its green exit.
     assert (suite_dir / "suite-count.txt").read_text() == "2"
 
-async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Render the full Glob lifecycle, streamed text cursor, and stable thinking title."""
-    tool_use_id = "test-glob-lifecycle-123"
-    glob_result = """/project/src/main.py
-/project/src/utils/helper.py
-/project/tests/test_main.py"""
-    events = [
-        ThinkingEvent(text="Analyzing the project structure..."),
-        TextEvent(text="I'll search for Python files in the project."),
-        ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "**/*.py", "path": "/project"}),
-        ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False, prompt="Test prompt for Glob tool"))
-    assert "Thinking" in plain_text
-    assert "Analyzing the project structure" in plain_text
-    assert "I'll search for Python files" in plain_text
-    assert "Glob" in plain_text
-    assert "**/*.py" in plain_text
-    assert "Found 3 files" in plain_text
-    assert "main.py" in plain_text
-    assert "helper.py" in plain_text
-    assert "test_main.py" in plain_text
-
-async def test_glob_tool_panel_singular_file_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that LiveToolPanel shows singular 'file' for 1 result in normal mode."""
-    tool_use_id = "test-glob-singular-456"
-    glob_result = "/project/main.py"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "*.py"}),
-        ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False), *_TERMINAL_EVENTS,
-    ]
-    output_text = await render_agent(monkeypatch, events, quiet=False)
-    assert "Found 1 file" in output_text
-    assert "Found 1 files" not in output_text
-    assert "main.py" in output_text
-
-async def test_glob_tool_panel_truncates_long_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that LiveToolPanel truncates long Glob results in normal mode."""
-    tool_use_id = "test-glob-truncate-789"
-    # 25 files exceeds max_lines=20 from _build_result_content_internal.
-    mock_files = [f"/project/src/module{i}.py" for i in range(25)]
-    glob_result = "\n".join(mock_files)
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "**/*.py"}),
-        ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False), *_TERMINAL_EVENTS,
-    ]
-    output_text = await render_agent(monkeypatch, events, quiet=False)
-    assert "Found 25 files" in output_text
-    assert "and 5 more" in output_text  # 25 total - 20 displayed
-
-async def test_quiet_mode_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that quiet mode shows header only (no output section)."""
-    tool_use_id = "test-output-panel-001"
-    read_result = "def hello():\n    return 'world'"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Read", input={"file_path": "/project/main.py"}),
-        ToolResultEvent(id=tool_use_id, output=read_result, is_error=False), *_TERMINAL_EVENTS,
-    ]
-    output_text = await render_agent(monkeypatch, events, quiet=True)
-    plain_text = strip_ansi(output_text)
-    assert "Read" in plain_text
-    assert "/project/main.py" in plain_text
-    assert "Output" not in plain_text
-    assert "hello" not in plain_text
-    assert "world" not in plain_text
-    assert "╭" in output_text or "│" in output_text
-
-async def test_quiet_mode_bash_panel_shows_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Quiet-mode Bash panel shows the command (issue #1108), like Read shows file_path."""
-    tool_use_id = "test-bash-quiet-1108"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "git diff --stat"}),
-        ToolResultEvent(id=tool_use_id, output="", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
-    assert "$ git diff --stat" in plain_text
-
-async def test_quiet_mode_bash_panel_renders_more_than_bare_name_without_description(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A description-less Bash call renders more than the bare `🔨 Bash` line."""
-    tool_use_id = "test-bash-quiet-nodesc-1108"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "ls -la /tmp"}),
-        ToolResultEvent(id=tool_use_id, output="", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
-    assert "ls -la /tmp" in plain_text or "ls -la /tm" in plain_text
-    assert "$ ls" in plain_text
-
-async def test_quiet_mode_bash_panel_redacts_command_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Panel command is redacted via redact_structured_text before display."""
-    tool_use_id = "test-bash-quiet-redact-1108"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "DB_PASSWORD=hunter2 make db-up"}),
-        ToolResultEvent(id=tool_use_id, output="", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
-    assert "hunter2" not in plain_text
-    assert "$ DB_PASSWORD=[REDACTED_ENV_VAR] make db-up" in plain_text
-
-async def test_quiet_mode_bash_panel_redacts_before_truncating(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Secret redaction happens on the complete command before the 200-char slice."""
-    # Redact before slicing at 200: the raw secret straddles that boundary,
-    # while the redaction marker starts at column 194 and remains visible.
-    filler = "x" * 180
-    command = f"{filler} token=opaque-test-12345"
-    tool_use_id = "test-bash-redact-order-1108"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": command}),
-        ToolResultEvent(id=tool_use_id, output="", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
-    assert "opaque-test-12345" not in plain_text, "secret must never reach the panel"
-    assert "opaque" not in plain_text, "a partial secret must not survive truncation"
-    assert 'token="[REDA' in plain_text, "the truncated redaction marker must reach the panel"
-    assert "[REDACTED_CREDENTIAL]" not in plain_text, "the complete command must be redacted before slicing"
-
-async def test_quiet_mode_empty_result_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that quiet mode shows header only for empty results (no output section)."""
-    tool_use_id = "test-empty-result-002"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "true"}),
-        ToolResultEvent(id=tool_use_id, output="", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    output_text = await render_agent(monkeypatch, events, quiet=True)
-    assert "Bash" in output_text
-    assert "Output" not in output_text  # quiet mode: header only
-    assert "╭" in output_text or "│" in output_text
-
-async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that quiet mode shows header only with red border for errors."""
-    tool_use_id = "test-error-result-003"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "false"}),
-        ToolResultEvent(id=tool_use_id, output="Command failed with exit code 1", is_error=True), *_TERMINAL_EVENTS,
-    ]
-    # Force truecolor for consistent RGB color codes across environments.
-    output_text = await render_agent(monkeypatch, events, quiet=True, color_system="truecolor")
-    assert "Bash" in output_text
-    assert "Command failed" not in output_text  # quiet mode: header only, no error body
-    assert "╭" in output_text or "│" in output_text
-    assert re.search(r"\x1b\[[0-9;]*38;2;255;85;85(?:;[0-9;]+)?m[╭│╰─]", output_text), (
-        "the failed tool's border must render red, not merely carry ANSI styling"
-    )
-
-async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Suppress the redundant Skill launch output already named in its header."""
-    tool_use_id = "test-skill-collapse-001"
-    events = [
-        ToolStartEvent(id=tool_use_id, name="Skill", input={"skill": "review-python"}),
-        ToolResultEvent(id=tool_use_id, output="Launching skill: review-python", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
-    assert "Skill" in plain_text
-    assert "review-python" in plain_text
-    # No Output panel: the header already shows the skill name, so the redundant
-    # "Launching skill:" result is suppressed.
-    assert "Output" not in plain_text
-    assert "Launching skill:" not in plain_text
-
-async def test_concurrent_tool_panels_display_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Multiple tool starts before any result must render all results without corruption."""
-    # 3 concurrent commands: all started before any complete.
-    events = [
-        ToolStartEvent(id="cmd-1", name="shell", input={"command": "git diff -- file1.py"}),
-        ToolStartEvent(id="cmd-2", name="shell", input={"command": "git diff -- file2.py"}),
-        ToolStartEvent(id="cmd-3", name="shell", input={"command": "git diff -- file3.py"}),
-        ToolResultEvent(id="cmd-1", output="+added line in file1", is_error=False),
-        ToolResultEvent(id="cmd-2", output="+added line in file2", is_error=False),
-        ToolResultEvent(id="cmd-3", output="+added line in file3", is_error=False), *_TERMINAL_EVENTS,
-    ]
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
-    assert "+added line in file1" in plain_text
-    assert "+added line in file2" in plain_text
-    assert "+added line in file3" in plain_text
-    assert "git diff -- file1.py" in plain_text
-    assert "git diff -- file2.py" in plain_text
-    assert "git diff -- file3.py" in plain_text
 
 def _two_commit_repo(repo: Path, filename: str, before: str, after: str, branch: str) -> Path:
     """A repo with *filename* committed on ``main`` and modified on *branch*."""

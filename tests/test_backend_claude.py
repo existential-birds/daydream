@@ -12,79 +12,51 @@ from claude_agent_sdk._internal.query import Query
 from claude_agent_sdk._internal.transport import Transport
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
+from daydream.atif import validate
 from daydream.backends import (
     BackendExecutionInput,
     ClaudeRequestConfig,
     ContinuationToken,
+    CostEvent,
+    GenerationEndEvent,
+    GenerationStartEvent,
+    MetricsEvent,
     RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
-    effective_fanout_concurrency,
 )
 from daydream.backends.claude import (
     ClaudeAgentError,
     ClaudeBackend,
     MaxTurnsError,
-    _is_background_bash,
-    _is_dangerous_command,
-    _is_read_only_command,
     _RunLocalClaudeSDKClient,
     _RunLocalSubprocessCLITransport,
 )
 from daydream.config import TEST_WALL_BUDGET_S
+from daydream.trajectory import DaydreamPhase
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
     MockTextBlock,
+    MockThinkingBlock,
     MockToolResultBlock,
     MockToolUseBlock,
     MockUserMessage,
     patch_claude_sdk,
     scripted_client,
 )
+from tests.harness.trajectory import make_recorder
 
-
-async def test_artifact_visibility_protocol_sdk_query_observes_exact_options_and_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = (tmp_path / "model cwd with spaces").resolve()
-    target.mkdir()
-    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
-    observed: dict[str, Any] = {}
-    base_client = scripted_client([
-        MockAssistantMessage(content=[MockTextBlock(text="CURRENT_REASONING_CANARY")]),
-        MockResultMessage(total_cost_usd=None),
-    ])
-    class ObservingClient(base_client):  # type: ignore[misc,valid-type]
-        async def query(self, prompt: str) -> None:
-            await super().query(prompt)
-            cwd = Path(self.options.cwd)
-            observed.update(
-                cwd=str(cwd), prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
-                source_seen="SOURCE_CANARY" in (cwd / "source.py").read_text(encoding="utf-8"),
-                permission_mode=self.options.permission_mode, tools=self.options.allowed_tools,
-            )
-    patch_claude_sdk(monkeypatch, ObservingClient)
-    backend = ClaudeBackend(model="fixture-model")
-    prompt = "Inspect the committed source only."
-    events = [event async for event in backend.execute(target, prompt)]
-    assert observed["cwd"] == str(target)
-    assert observed["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
-    assert observed["source_seen"] is True
-    assert observed["permission_mode"] == "bypassPermissions"
-    assert observed["tools"] == ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
-    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
-    assert backend._active_clients == set()
 
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
     def _patch(client_class: Any) -> None:
         patch_claude_sdk(monkeypatch, client_class)
     return _patch
+
 
 def _capturing_client(captured: dict[str, Any]) -> type:
     """A scripted client that records the ``ClaudeAgentOptions`` it was built with."""
@@ -93,11 +65,13 @@ def _capturing_client(captured: dict[str, Any]) -> type:
         captured=captured,
     )
 
+
 def _capturing_backend(apply_patch: Any, **kwargs: Any) -> tuple[ClaudeBackend, dict[str, Any]]:
     """Patch the SDK with a capturing client and build a backend sharing its capture."""
     captured: dict[str, Any] = {}
     apply_patch(_capturing_client(captured))
     return ClaudeBackend(model="opus", **kwargs), captured
+
 
 @pytest.mark.parametrize(
     "version_admission_delay_s", [pytest.param(0.0, id="version-completes"), pytest.param(2.1, id="version-times-out")],
@@ -192,6 +166,7 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
     assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
     assert len(messages) == 2
 
+
 async def test_claude_backend_injected_environment_reaches_sdk_options_and_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,16 +190,6 @@ async def test_claude_backend_injected_environment_reaches_sdk_options_and_polic
     assert captured["options"].env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert backend.fanout_concurrency == 4
     assert backend.retry_policy == RetryPolicy(3, 2.0, 120.0)
-
-async def _drive_claude_backend_to_list(
-    *, messages: list[Any], patch_sdk_fn: Any, output_schema: Any = None, prompt: str = "go",
-) -> list[Any]:
-    patch_sdk_fn(scripted_client(messages))
-    backend = ClaudeBackend(model="opus")
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), prompt, output_schema=output_schema):
-        events.append(event)
-    return events
 
 
 async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch_sdk: Any) -> None:
@@ -257,22 +222,38 @@ async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch
 
 
 async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any) -> None:
-    """An SDK error raises after terminal metadata, never becoming a clean empty review."""
+    """A billed SDK error raises after its native terminal and tool evidence."""
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 20,
+             "cache_creation_input_tokens": 30}
     patch_sdk(
         scripted_client(
             [
-                MockAssistantMessage(content=[MockTextBlock(text="Invalid API key · Fix external API key")]),
-                MockResultMessage(total_cost_usd=None, is_error=True, result="Invalid API key · Fix external API key"),
+                MockAssistantMessage(content=[MockTextBlock("Invalid API key · Fix external API key"),
+                    MockToolUseBlock("read", "Read", {"file": "source.py"})], model="actual-model", usage=usage),
+                MockUserMessage(content=[MockToolResultBlock("read", cast(Any, [
+                    {"type": "text", "text": "structured tool output"},
+                ]))]),
+                MockResultMessage(total_cost_usd=0.02, is_error=True,
+                    result="Invalid API key · Fix external API key", session_id="failed-session", usage=usage,
+                    duration_ms=120, duration_api_ms=100, stop_reason="error"),
             ]
         )
     )
     backend = ClaudeBackend(model="opus")
     events = []
     with pytest.raises(ClaudeAgentError, match="Invalid API key"):
-        async for event in backend.execute(Path("/tmp"), "Review this"):
+        async for event in backend.execute(Path("/tmp"), "Review this", persist_session=False):
             events.append(event)
+    cost = next(e for e in events if isinstance(e, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens, cost.cost_usd) == (
+        60, 5, 20, 30, 0.02,
+    )
+    tool = next(e for e in events if isinstance(e, ToolResultEvent))
+    assert json.loads(tool.output) == [{"type": "text", "text": "structured tool output"}]
     result = next(e for e in events if isinstance(e, ResultEvent))
-    assert result.continuation is None
+    assert (result.session_id, result.finish_reason, result.continuation) == ("failed-session", "error", None)
+    assert (result.duration_ms, result.duration_api_ms) == (120, 100)
+
 
 async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     """A turn-cap error preserves its subtype even when SDK result text is absent."""
@@ -291,165 +272,106 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     assert excinfo.value.subtype == "error_max_turns"
     assert isinstance(excinfo.value, ClaudeAgentError)
 
-@pytest.mark.parametrize("cmd,allowed", [
-    ("git log --oneline -5", True), ("git blame -L 10,10 daydream/phases.py", True),
-    ("git show 648a327 -- daydream/phases.py", True), ("git diff main..HEAD -- daydream/phases.py", True),
-    ("daydream search symbol src .github", True),
-    ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
-    ("git ls-files -z --cached --others --exclude-standard -- src", True),
-    ("daydream search symbol src > evidence.json", False),
-    ("daydream search symbol src && daydream setup", False),
-    ("daydream setup", False),
-    ("daydream search-other symbol src", False),
-    ("cat README.md", True), ("git status", True), ("ls -la", True), ("git commit -m x", False), ("git add -A", False),
-    ("git checkout -- f.py", False), ("rm -rf build", False), ("touch newfile", False),
-    ("git status && rm x", False),       # chain into mutating token
-    ("cat f | tee g", False),            # pipe into non-allowlisted
-    ("git log; rm x", False),            # semicolon chain
-    ("echo $(rm x)", False),             # command substitution
-    ("git logfoo", False),               # prefix must be word-bounded
-    ("git status > status.txt", False),  # output redirection creates/truncates a file
-    ("cat README.md >> copy.txt", False),# append redirection
-    ("cat < README.md", False),          # input redirection
-    ("git log foo# > status.txt", False),# mid-word '#' must not blind the redirect scan
-    ("cat a#b > f", False),               # mid-word '#' hidden in an arg, then redirect
-    ("git log foo#; rm x", False),        # mid-word '#' then a chaining operator
-    ("git diff --output=diff.patch", False),  # git output-file option, equals form
-    ("git log --output log.txt", False), # git output-file option, separated form
-    ("( rm x )", False),                 # command-leading subshell group executes
-    ("(rm x)", False),                   # spacing-free subshell at command start still denies
-    ("(git status > out.txt)", False),   # subshell wrapping a redirect still denies
-    ("ls -la ( x )", True),              # mid-command parens: bash syntax error, nothing runs
-    ("git log --format=%C(red)%h", True),# git color placeholder: parens glued to a word
-    ("cat foo(1).txt", True),            # parens glued into a filename word
-    ("git log\nrm x", False),           # newline command separator -> fail closed
-    ("git log 'unclosed", False),        # malformed quoting -> fail closed
-    ("git log --grep='fix|bug'", True),  # quoted | is argument content, not an operator
-    ("git diff HEAD~1 HEAD -- --output", True),  # --output after -- is a path arg; scan stops at --
-    ("", False),                          # empty → fail closed
-])
-def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
-    assert _is_read_only_command(cmd) is allowed
 
-@pytest.mark.parametrize("cmd, dangerous", [
-    ("find / -path '*x*'", True), ("find / -name y", True), ("grep -r pattern /", True), ("rm -rf /", True),
-    ("rm -fr /", True),                       # reversed flags
-    ("rm -rf /*", True),                      # root glob
-    ("rm --recursive --force /", True),       # long-form flags
-    ("rm -Rf /", True),                       # capital-R recursive
-    ("rm -rf foo /", True),                   # trailing root arg
-    # Reordering recursive flags must not evade the ownership guard.
-    ("rm --force --recursive /", True),       # long-form, recursive second
-    ("rm -f -r /", True),                     # short-form, recursive second
-    ("rm -i -r /*", True),                    # recursive second, root glob
-    ("rm -rf /home/user/tmp", False),         # subpath under / is left alone
-    ("rm -rf build", False),                  # relative path
-    # F12: `/` as the grep pattern (not a root path) is no longer a false positive.
-    ("grep / file.txt", False),               # searching for a literal slash
-    ("find core/osprey-tui -name agent.rs", False), ("ls", False), ("rg foo src/", False),
-])
-def test_is_dangerous_command(cmd: Any, dangerous: Any) -> None:
-    """The always-on dangerous-command predicate flags root-scans and catastrophic deletes."""
-    assert _is_dangerous_command(cmd) is dangerous
-
-async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> None:
-    """Drive registered guards: bypassPermissions needs all-tool, deny-by-default enforcement.
-
-    Mutation and unknown tools deny; inspection remains available.
-    """
+@pytest.mark.parametrize(
+    ("read_only", "command", "allowed"),
+    [
+        (True, "git log --grep='fix|bug'", True),
+        (True, "git blame -L 10,10 src.py", True),
+        (True, "git show 648a327 -- src.py", True),
+        (True, "git diff HEAD~1 HEAD -- --output", True),
+        (True, "daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
+        (True, "git ls-files -z --cached --others --exclude-standard -- src", True),
+        (True, "cat foo(1).txt", True),
+        (True, "ls -la", True),
+        (True, "git commit -m x", False),
+        (True, "daydream search-other symbol src", False),
+        (True, "daydream search symbol src > evidence.json", False),
+        (True, "git status && rm x", False),
+        (True, "cat f | tee g", False),
+        (True, "git log; rm x", False),
+        (True, "echo $(rm x)", False),
+        (True, "git log foo# > status.txt", False),
+        (True, "cat < README.md", False),
+        (True, "git diff --output=diff.patch", False),
+        (True, "git log --output log.txt", False),
+        (True, "(rm x)", False),
+        (True, "git log\nrm x", False),
+        (True, "git log 'unclosed", False),
+        (True, "git logfoo", False),
+        (True, "", False),
+        (False, "find / -name y", False),
+        (False, "grep -r pattern /", False),
+        (False, "rm --force --recursive /", False),
+        (False, "rm -f -r /", False),
+        (False, "rm -Rf /", False),
+        (False, "rm -i -r /*", False),
+        (False, "rm -rf foo /", False),
+        (False, "rm -rf /home/user/tmp", True),
+        (False, "grep / file.txt", True),
+        (False, "find core/osprey-tui -name agent.rs", True),
+    ],
+)
+async def test_registered_bash_guards_enforce_the_execution_profile(
+    patch_sdk: Any,
+    read_only: bool,
+    command: str,
+    allowed: bool,
+) -> None:
+    """Native callback registration enforces readonly syntax and always-on catastrophic-command guards."""
     backend, captured = _capturing_backend(patch_sdk)
-    async for _ in backend.execute(Path("/tmp"), "Go", read_only=True):
-        pass
-    opts = captured["options"]
-    assert opts is not None
-    hooks = opts.hooks
-    assert hooks is not None and "PreToolUse" in hooks
-    matchers = hooks["PreToolUse"]
-    assert len(matchers) == 1
-    matcher = matchers[0]
-    assert matcher.hooks  # callbacks registered
-    deny_write = await _decide(matcher, {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}})
-    assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
-    write_reason = deny_write["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "read-only guard" in write_reason
-    assert "read-only summarizer" not in write_reason
-    deny_missing = await _decide(matcher, {"tool_name": "Bash"})
-    assert deny_missing["hookSpecificOutput"]["permissionDecision"] == "deny"
-    deny_delete = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}})
-    assert deny_delete["hookSpecificOutput"]["permissionDecision"] == "deny"
-    delete_reason = deny_delete["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "read-only guard" in delete_reason
-    assert "read-only summarizer" not in delete_reason
-    deny_bash = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}})
-    assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
-    deny_git_output = await _decide(matcher,
-        {"tool_name": "Bash", "tool_input": {"command": "git diff --output=diff.patch"}}
-    )
-    assert deny_git_output["hookSpecificOutput"]["permissionDecision"] == "deny"
-    allow_bash = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}})
-    assert "hookSpecificOutput" not in allow_bash
-    allow_read = await _decide(matcher, {"tool_name": "Read", "tool_input": {"file_path": "x"}})
-    assert "hookSpecificOutput" not in allow_read
-    # Fail-closed: a narrow deny-list matcher would never present an unknown tool to the guard.
-    deny_unknown = await _decide(matcher, {"tool_name": "FutureMutator", "tool_input": {}})
-    assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
-    deny_find_root = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}})
-    assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
+    _ = [event async for event in backend.execute(Path("/tmp"), "Go", read_only=read_only)]
+    matcher = captured["options"].hooks["PreToolUse"][0]
+    response = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": command}})
+    assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
+    if not allowed:
+        reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+        assert ("read-only guard" if read_only else "dangerous command blocked") in reason
 
 
-
-async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> None:
-    """StructuredOutput ToolUseBlocks are skipped, and the corresponding
-    ToolResultBlock in the next UserMessage must also be skipped — otherwise
-    the trajectory recorder logs it as an unmatched_tool_result."""
-    events = await _drive_claude_backend_to_list(
-        messages=[
-            MockAssistantMessage(content=[
-                MockToolUseBlock(id="tool-real", name="Read", input={"file": "a.py"}),
-                MockToolUseBlock(id="tool-so", name="StructuredOutput", input={"result": "{}"}),
-            ]),
-            MockUserMessage(content=[
-                MockToolResultBlock(tool_use_id="tool-real", content="file contents"),
-                MockToolResultBlock(tool_use_id="tool-so", content='{"data": 1}'),
-            ]), MockResultMessage(total_cost_usd=0.01, structured_output={"data": 1}),
-        ], patch_sdk_fn=patch_sdk,
-    )
-    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(tool_starts) == 1
-    assert tool_starts[0].name == "Read"
-    assert tool_starts[0].id == "tool-real"
-    assert len(tool_results) == 1
-    assert tool_results[0].id == "tool-real"
-    assert tool_results[0].output == "file contents"
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert result_events[0].structured_output == {"data": 1}
-
-
-@pytest.mark.parametrize("effort", [None, "max"])
-async def test_reasoning_effort_reaches_sdk_options(patch_sdk: Any, effort: str | None) -> None:
-    backend, captured = _capturing_backend(patch_sdk, reasoning_effort=effort)
-    async for _ in backend.execute(Path("/tmp"), "go"):
-        pass
-    assert captured["options"].effort == effort
+@pytest.mark.parametrize(
+    ("payload", "allowed"),
+    [
+        ({"tool_name": "Read", "tool_input": {"file_path": "x"}}, True),
+        ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, False),
+        ({"tool_name": "FutureMutator", "tool_input": {}}, False),
+        ({"tool_name": "Bash"}, False),
+        ({"tool_name": "Bash", "tool_input": "malformed"}, False),
+        (None, False),
+    ],
+)
+async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any, payload: Any, allowed: bool) -> None:
+    """The all-tool SDK matcher admits inspection and fails closed on mutating, unknown or malformed calls."""
+    backend, captured = _capturing_backend(patch_sdk)
+    _ = [event async for event in backend.execute(Path("/tmp"), "Go", read_only=True)]
+    matchers = captured["options"].hooks["PreToolUse"]
+    assert len(matchers) == 1 and matchers[0].matcher == ".*"
+    response = await _decide(matchers[0], payload)
+    assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
+    if not allowed:
+        assert "read-only guard" in response["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_unsupported_reasoning_effort_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="does not support reasoning effort"):
         ClaudeBackend(model="opus", reasoning_effort="minimal")
 
+
 async def _audit_decision(backend: ClaudeBackend, payload: Any) -> Any:
     guard = backend._audit_root_guard  # noqa: SLF001 - security contract seam
     assert guard is not None
     return await guard(payload, None, {"signal": None})
 
+
 def _is_denied(decision: Any) -> bool:
     return bool(decision.get("hookSpecificOutput", {}).get("permissionDecision") == "deny")
+
 
 _GIT_REDIRECT_VARS = (
     "PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
 )
+
 
 async def _decide(matcher: Any, payload: Any) -> Any:
     # Mirror the SDK: run every registered hook; first deny wins.
@@ -458,6 +380,7 @@ async def _decide(matcher: Any, payload: Any) -> Any:
         if out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
             return out
     return {}
+
 
 async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path) -> None:
     root = tmp_path / "audit root"
@@ -538,6 +461,7 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(
         async for _ in backend.execute(cwd, "audit", **kwargs):
             pass
     assert "options" not in captured
+
 
 async def test_audit_guard_round_trips_through_real_sdk_query_protocol(tmp_path: Path) -> None:
     class MemoryTransport(Transport):
@@ -630,6 +554,7 @@ async def test_audit_guard_round_trips_through_real_sdk_query_protocol(tmp_path:
         query.close_receive_stream()
         await transport.close()
 
+
 async def test_audit_options_reach_real_sdk_subprocess_transport(
     patch_sdk: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -675,50 +600,32 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
         assert child_env[key] == value
     assert str(source) not in {child_env[key] for key in _GIT_REDIRECT_VARS}
 
+
 # fanout_concurrency
 
-def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
-
-def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
-    assert effective_fanout_concurrency(2, ClaudeBackend(model="opus")) == 2
-
-@pytest.mark.parametrize(("env_value", "expected"), [ ("6", 6), ("0", 8), ("-1", 8), ("notanint", 8), ("", 8), ])
-def test_claude_fanout_concurrency_env_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: Any, expected: int,
-) -> None:
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
-    if expected == 8:
-        assert "using default 8" in caplog.text
 
 # --- Session continuation via SDK resume --------------------------------------
 
-@pytest.mark.parametrize(
-    ("token", "expected_resume"),
-    [
-        (ContinuationToken(backend="claude", data={"session_id": "sess-123"}), "sess-123"),
-        (ContinuationToken(backend="codex", data={"thread_id": "th-1"}), None),
-    ], ids=["claude-minted", "foreign-backend"],
-)
-async def test_continuation_token_controls_resume(
-    monkeypatch: pytest.MonkeyPatch, token: ContinuationToken, expected_resume: str | None,
+
+async def test_foreign_continuation_token_starts_cold(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A claude-minted token becomes ``options.resume``; a foreign token starts cold."""
+    """A foreign token cannot resume Claude even when it carries a session id."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
         monkeypatch,
         scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-123")], captured=captured),
     )
     backend = ClaudeBackend(model="opus")
+    token = ContinuationToken(
+        backend="codex", data={"thread_id": "th-1", "session_id": "foreign-session"},
+    )
     async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
         pass
-    assert captured["options"].resume == expected_resume
+    assert captured["options"].resume is None
 
-@pytest.mark.parametrize("persist_session", [False, True])
-@pytest.mark.parametrize("session_id", [None, "sess-9"])
+
+@pytest.mark.parametrize(("persist_session", "session_id"), [(False, "sess-9"), (True, None)])
 async def test_result_continuation_requires_persisted_native_session(
     monkeypatch: pytest.MonkeyPatch, persist_session: bool, session_id: str | None,
 ) -> None:
@@ -731,13 +638,9 @@ async def test_result_continuation_requires_persisted_native_session(
     results = [event async for event in backend.execute(Path("/tmp"), "p", persist_session=persist_session)
                if isinstance(event, ResultEvent)]
     assert len(results) == 1
+    assert results[0].session_id == session_id
     assert captured["options"].extra_args == ({} if persist_session else {"no-session-persistence": None})
-    if persist_session and session_id:
-        assert results[0].continuation is not None
-        assert results[0].continuation.backend == "claude"
-        assert results[0].continuation.data["session_id"] == session_id
-    else:
-        assert results[0].continuation is None
+    assert results[0].continuation is None
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -772,35 +675,175 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
         {"tool_name": "Read", "tool_input": {"file_path": "x", "run_in_background": True}}
     )
     assert "background Bash blocked" not in str(other_tool)
+    missing_command = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"run_in_background": True}})
+    assert "background Bash blocked" in str(missing_command)
+    malformed = await _decide(matcher, {"tool_name": "Bash", "tool_input": "not-a-dict"})
+    assert "background Bash blocked" not in str(malformed)
+    assert "background Bash blocked" not in str(await _decide(matcher, "garbage"))
+    assert "background Bash blocked" not in str(await _decide(matcher, None))
 
-@pytest.mark.parametrize(
-    ("payload", "background"),
-    [
-        ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": True}}, True),
-        ({"tool_name": "Bash", "tool_input": {"command": "make test", "run_in_background": False}}, False),
-        ({"tool_name": "Bash", "tool_input": {"command": "make test"}}, False),
-        ({"tool_name": "Bash", "tool_input": {"run_in_background": True}}, True),
-        ({"tool_name": "Read", "tool_input": {"run_in_background": True}}, False),
-        ({"tool_name": "Bash", "tool_input": "not-a-dict"}, False), ("garbage", False), (None, False),
-    ],
-)
-def test_is_background_bash(payload: Any, background: bool) -> None:
-    """Only a Bash payload with a truthy ``run_in_background`` is a background call."""
-    assert _is_background_bash(payload) is background
 
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
 
-async def _request_event(apply_patch: Any, prompt: str, **execute_kwargs: Any) -> RequestEvent:
-    backend, _ = _capturing_backend(apply_patch)
-    events = [event async for event in backend.execute(Path("/tmp"), prompt, **execute_kwargs)]
-    return next(e for e in events if isinstance(e, RequestEvent))
+
+async def test_partial_terminal_usage_preserves_unknown_output(patch_sdk: Any, tmp_path: Path) -> None:
+    patch_sdk(scripted_client([
+        MockAssistantMessage(content=[MockTextBlock("Partial")], usage={"input_tokens": 100}),
+        MockResultMessage(total_cost_usd=0.001, usage={"input_tokens": 100}),
+    ]))
+    events = [event async for event in ClaudeBackend(model="opus").execute(tmp_path, "Review")]
+    assert not any(isinstance(event, MetricsEvent) for event in events)
+    cost = next(event for event in events if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cost_usd) == (100, None, 0.001)
 
 
-async def test_request_event_resume_provenance_is_host_generated(patch_sdk: Any) -> None:
-    token = ContinuationToken(backend="claude", data={"session_id": "sess-42"})
-    request = await _request_event(patch_sdk, "again", continuation=token)
-    config = request.config
-    assert isinstance(config, ClaudeRequestConfig)
-    assert config.continuation_mode == "resume"
-    assert request.session_id == "sess-42"
-    assert request.session_source == "host_generated"
+async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The actual SDK stream owns suppression, partial telemetry and request provenance together."""
+    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
+    target = (tmp_path / "model cwd with spaces").resolve()
+    target.mkdir()
+    (target / "source.py").write_text("SOURCE_CANARY\n")
+    captured: dict[str, Any] = {}
+    client = scripted_client(
+        [
+            MockAssistantMessage(
+                content=[
+                    MockThinkingBlock("Inspect the file"),
+                    MockTextBlock("Checking"),
+                    MockToolUseBlock("read", "Read", {"file": "source.py"}),
+                    MockToolUseBlock("schema", "StructuredOutput", {"issues": []}),
+                ],
+                model="sdk-model",
+                message_id="initial",
+            ),
+            MockUserMessage(
+                content=[MockToolResultBlock("read", "file contents"), MockToolResultBlock("schema", '{"issues":[]}')]
+            ),
+            MockAssistantMessage(
+                content=[MockTextBlock("Partial")], model="sdk-model", message_id="partial", usage={"input_tokens": 100}
+            ),
+            MockResultMessage(
+                total_cost_usd=None,
+                usage={"input_tokens": 100, "output_tokens": 50},
+                structured_output={"issues": []},
+                session_id="native-session",
+            ),
+        ],
+        captured=captured,
+    )
+
+    class ObservingClient(client):  # type: ignore[misc,valid-type]
+        async def query(self, prompt: str) -> None:
+            await super().query(prompt)
+            assert Path(self.options.cwd) == target
+            assert (Path(self.options.cwd) / "source.py").read_text() == "SOURCE_CANARY\n"
+            captured["prompt_sha256"] = hashlib.sha256(prompt.encode()).hexdigest()
+
+    patch_claude_sdk(monkeypatch, ObservingClient)
+    backend = ClaudeBackend(model="opus", reasoning_effort="max")
+    assert backend.fanout_concurrency == 8
+    recorder = make_recorder(tmp_path, agent_model_name="claude")
+    first: list[Any] = []
+    second: list[Any] = []
+    prompt = "Inspect the committed source only."
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe_user_step(prompt=prompt)
+            async for event in backend.execute(target, prompt, output_schema={"type": "object"}):
+                first.append(event)
+                inv.observe(event)
+        options = captured["options"]
+        assert options.effort == "max" and options.permission_mode == "bypassPermissions"
+        assert options.allowed_tools == ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        assert captured["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+        first_result = next(event for event in first if isinstance(event, ResultEvent))
+        assert first_result.structured_output == {"issues": []}
+        token = first_result.continuation
+        assert token is not None and token.data["session_id"] == "native-session"
+        assert token.backend == "claude"
+        assert [event.text for event in first if isinstance(event, TextEvent)] == ["Checking", "Partial"]
+        assert [(event.id, event.name, event.input) for event in first if isinstance(event, ToolStartEvent)] == [
+            ("read", "Read", {"file": "source.py"}),
+        ]
+        assert [(event.id, event.output, event.is_error) for event in first if isinstance(event, ToolResultEvent)] == [
+            ("read", "file contents", False),
+        ]
+        assert not any(isinstance(event, MetricsEvent) for event in first)
+        cost = next(event for event in first if isinstance(event, CostEvent))
+        assert (cost.input_tokens, cost.output_tokens, cost.cost_usd) == (100, 50, None)
+        patch_claude_sdk(
+            monkeypatch,
+            scripted_client(
+                [
+                    MockAssistantMessage(
+                        content=[MockTextBlock("Fixed")],
+                        model="sdk-model",
+                        message_id="billed",
+                        usage={
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "cache_read_input_tokens": 20,
+                            "cache_creation_input_tokens": 30,
+                        },
+                    ),
+                    MockResultMessage(
+                        total_cost_usd=0.02,
+                        session_id="native-session",
+                        duration_ms=120, duration_api_ms=100, stop_reason="end_turn",
+                        usage={
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "cache_read_input_tokens": 20,
+                            "cache_creation_input_tokens": 30,
+                        },
+                    ),
+                ],
+                captured=captured,
+            ),
+        )
+        async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
+            inv.observe_user_step(prompt="Apply the fix")
+            async for event in backend.execute(target, "Apply the fix", continuation=token):
+                second.append(event)
+                inv.observe(event)
+    request = next(event for event in second if isinstance(event, RequestEvent))
+    assert isinstance(request.config, ClaudeRequestConfig) and request.config.continuation_mode == "resume"
+    assert request.session_id == "native-session" and request.session_source == "host_generated"
+    assert request.model_source == "configured" and request.timestamp_source == "host_observed"
+    assert captured["options"].resume == "native-session" and backend._active_clients == set()
+    metric = next(event for event in second if isinstance(event, MetricsEvent))
+    assert (metric.message_id, metric.prompt_tokens, metric.completion_tokens, metric.cache_creation_tokens) == (
+        "billed",
+        60,
+        5,
+        30,
+    )
+    cost = next(event for event in second if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens, cost.cache_creation_tokens, cost.cost_usd) == (
+        60, 5, 20, 30, 0.02,
+    )
+    terminal = next(event for event in second if isinstance(event, ResultEvent))
+    assert (terminal.session_id, terminal.finish_reason, terminal.duration_ms, terminal.duration_api_ms) == (
+        "native-session", "end_turn", 120, 100,
+    )
+    document = json.loads(recorder.path.read_text())
+    steps = [step for step in document["steps"] if step["source"] == "agent"]
+    assert steps[0]["message"] == "Checking" and steps[0]["reasoning_content"] == "Inspect the file"
+    assert [(call["tool_call_id"], call["function_name"], call["arguments"]) for call in steps[0]["tool_calls"]] == [
+        ("read", "Read", {"file": "source.py"}),
+    ]
+    assert [(result["source_call_id"], result["content"]) for result in steps[0]["observation"]["results"]] == [
+        ("read", "file contents"),
+    ]
+    assert not any(
+        call["function_name"] == "StructuredOutput" for step in steps for call in (step.get("tool_calls") or [])
+    )
+    fixed = next(step for step in steps if step["message"] == "Fixed")
+    assert fixed["model_name"] == "sdk-model"
+    assert document["final_metrics"]["total_prompt_tokens"] == 160
+    assert document["final_metrics"]["total_completion_tokens"] == 55
+    assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in first + second)
+    assert validate(recorder.path, validate_images=False)

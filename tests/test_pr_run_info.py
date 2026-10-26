@@ -78,16 +78,19 @@ async def test_live_provider_renders_parent_and_real_retained_complete_sibling(t
     async with open_artifact_session(work_context(repo, run_id="run-info"), session_id=session_id, owner=owner,
     ) as artifacts:
         route = artifacts.register_trajectory_output(None)
+        assert route.run_dir == artifacts.daydream_dir / "runs" / session_id
+        assert route.full.frozen_path == route.run_dir / "trajectory.json"
+        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
         assert route.full.write_path is not None
         recorder = _recorder(repo, session_id)
         recorder.path = route.full.write_path
         recorder.artifact_run_dir = route.run_dir
         child = _trajectory(session_id, "child", phase="fix")
-        artifacts.write_trajectory_document(route,
-            TrajectoryDocumentSnapshot(
-                "child", route.run_dir / "trajectories" / "child.json", child.model_dump_json().encode(),
-            ), "complete",
+        sibling = TrajectoryDocumentSnapshot(
+            "child", route.run_dir / "trajectories" / "child.json", child.model_dump_json().encode(),
         )
+        artifacts.write_trajectory_document(route, sibling, "complete")
+        assert artifacts.snapshot_completed_sibling_trajectories(session_id=session_id) == (sibling,)
         result = render_live_run_info(LiveRunInfoSource(recorder=recorder, artifacts=artifacts))
 
     assert result.diagnostic is None

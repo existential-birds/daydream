@@ -163,6 +163,9 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     assert {"/scope", "/steps", "/done_criteria"} <= pointers
     assert "/markdown" not in pointers
     assert "Make the change." not in diagnostics
+    assert backend.plan_writer_calls == 2
+    report = improve_artifact(improve_monorepo_target, "report.md").read_text(encoding="utf-8")
+    assert "Plans written: 0" in report
 
 @pytest.mark.anyio
 async def test_plan_writer_prompt_exception_blocks_only_that_plan(

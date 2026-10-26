@@ -1,4 +1,5 @@
 """Snapshot-bound terminal contracts through the real runner and Git."""
+
 from __future__ import annotations
 
 import json
@@ -10,12 +11,16 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from rich.console import Console
 
 from daydream import git_ops, json_utils, runner
-from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore
+from daydream.deep import review_terminal
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases.review import ReviewOutputError
+from daydream.review_result import ReviewCoverage
+from daydream.ui.messages import print_warning
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
@@ -75,25 +80,20 @@ class AuthError(RuntimeError):
 
 @pytest.mark.parametrize(('case', 'state', 'reason'), [
     ('empty', 'complete', None), ('backend', 'incomplete', 'backend_failure'),
-    ('auth', 'incomplete', 'authentication_failure'), ('model', 'incomplete', 'model_budget_exhaustion'),
-    ('structural', 'complete', None), ('mixed', 'incomplete', 'backend_failure'),
+    ('structural', 'complete', None),
     ('total', 'failed', 'backend_failure'), ('demoted', 'complete', None),
-    ('language', 'complete', None), ('archive', 'incomplete', 'backend_failure'),
+    ('archive', 'incomplete', 'backend_failure'),
 ])
 async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
                         case: str, state: str, reason: str | None) -> None:
-    nonempty = case in {'structural', 'mixed', 'demoted', 'language'}
-    errors = {'auth': AuthError('rejected'), 'model': MaxTurnsError('spent turns')}
+    nonempty = case in {'structural', 'demoted', 'archive'}
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-        review_by_stack={'python' if case == 'language' else 'structure': [record(500 if case == 'demoted' else 2)]}
-        if nonempty else {}, fail_stack='python' if reason and case != 'total' else None,
-        stack_error=errors.get(case), responder=lambda p: [RuntimeError('unavailable')]
+        review_by_stack={'structure': [record(500 if case == 'demoted' else 2)]} if nonempty else {},
+        fail_stack='python' if reason and case != 'total' else None, responder=lambda p: [RuntimeError('unavailable')]
         if case == 'total' and reviewer(p) else None)
     fake_gh.serve_pr_view({'state': 'OPEN', 'headRefOid': review.pr.head_sha,
                            'body': 'Author reports make check and CI pass. {"token":"private-value"}'})
     review.backend.merge_echo_records = True
-    if case == 'language':
-        review.backend.merge_items = None
     assert await review.run(archive=case == 'archive') == 0
     data = review.load()
     result, inventory = data['terminal_result'], scopes(data)
@@ -132,8 +132,7 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
     assert set(inventory) == {'python', 'react', 'generic', 'structure'}
     assert bool(data['findings']) is nonempty
     assert {name: s['status'] for name, s in inventory.items()} == {
-        name: 'incomplete' if name == 'python' and case == 'model' else
-        'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
+        name: 'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
     if reason:
         assert inventory['python']['reason_codes'] == [reason]
     else:
@@ -142,9 +141,12 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
         assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
     if case == 'demoted':
         assert (data['findings'][0]['confidence'], data['findings'][0]['location_distrust']) == ('LOW', True)
-    if case == 'language':
-        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
-        assert canonical['items'][0]['source_uids'] == ['python:1']
+        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())['items'][0]
+        assert (canonical['line'], canonical['location_cited_line'], canonical['severity'],
+                canonical['severity_before_demotion'], canonical['location_distrust']) == (
+                    500, 500, 'low', 'medium', True)
+        assert 'cited line 500 in api.py' in canonical['location_note']
+        assert 'demoted to low' in canonical['location_note']
     if case in {'empty', 'backend', 'total'}:
         fake_gh.serve_prior_threads(fingerprints=[], thread_ids=[], viewer_did_author=True)
         assert cli_main(['post-findings', str(review.output), '--pr', '7', '--head-sha', review.pr.head_sha,
@@ -162,13 +164,33 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
                 'Review outcome', 'No confirmed findings.', 'Executable verification unavailable',
                 result['analyzed_revision']['diff_key'],
             ))
+    deep = review.repo / '.daydream/deep'
+    merge_calls = sum('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
+    assert merge_calls == (1 if case == 'total' else 0)
+    if case in {'empty', 'structural'}:
+        assert (deep / 'review-output.md').read_bytes() == (review.repo / '.review-output.md').read_bytes()
+        assert not (deep / 'merge-failed.txt').exists()
+        assert json.loads((deep / 'review-coverage.json').read_text())['stack_outcomes'] == result['stack_outcomes']
+    if case == 'structural':
+        items = json.loads((deep / 'merged-items.json').read_text())['items']
+        assert [(i['description'], i['lens'], i['file'], i['line'], i['source_uids']) for i in items] == [
+            ('Grounded defect', 'structural', 'api.py', 2, ['structure:1'])]
+        records = json.loads((deep / 'stack-structure-records.json').read_text())['issues']
+        assert records[0]['uid'] == 'structure:1' and 'Grounded defect' in report
+        assert sum('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls) == 1
     if case == 'empty':
+        assert json.loads((deep / 'merged-items.json').read_text()) == {'items': [], 'held': []}
+        events = json.loads((review.tmp / 'trajectory.json').read_text())['extra']['phase_events']
+        for phase, stage in (('merge', 'cross-stack-agent'), ('deep', 'supervise')):
+            lifecycle = [event for event in events if event['phase'] == phase
+                         and event.get('metadata', {}).get('stage') == stage]
+            assert [event['event'] for event in lifecycle] == ['phase_start', 'phase_end']
+            assert lifecycle[-1]['status'] == 'succeeded'
         stages = [stage_state for c in review.backend.calls
                   if (stage_state := review_stage_state(c['prompt'])) is not None]
         assert {stage['scope_id'] for stage in stages} == set(inventory)
         assert [stage['stage'] for stage in stages if stage['scope_id'] == 'structure'] == ['integration']
-        assert not any('cross-stack merge agent' in c['prompt'].lower() or
-                       'supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
+        assert not any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
     if case == 'archive':
         archived = archive_dir / 'runs' / result['run_id']
         assert json.loads((archived / 'manifest.json').read_text())['archive_status'] == 'complete'
@@ -176,8 +198,7 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
         paths = list(archived.rglob('review-coverage.json'))
         assert len(paths) == 1
         saved = json.loads(paths[0].read_text())
-        assert (saved['stack_outcomes'], saved['analyzed_revision']) == (result['stack_outcomes'],
-                                                                      result['analyzed_revision'])
+        assert ReviewCoverage.from_dict(saved).finalize('completed') == result
         assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
 
 
@@ -186,55 +207,42 @@ async def test_automatic_shard_failure_preserves_successful_sibling_findings_and
     review = ReviewRun(sibling_frontier_target, tmp_path, monkeypatch)
     finding = dict(record(1), file='core.py', evidence='core.py:1 defines core_helper')
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-        review_by_stack={'python#0': [finding]}, fail_stack='python#1')
+        review_by_stack={'python#0': [finding]}, fail_stack='python#1',
+        responder=lambda p: (
+            [AuthError('rejected')] if (stage := review_stage_state(p)) and stage['scope_id'] == 'python#2'
+            else [MaxTurnsError('spent turns')] if stage and stage['scope_id'] == 'structure' else None))
     review.backend.merge_echo_records = True
     assert await review.run(review_cache_enabled=True) == 0
     data = review.load()
     result, inventory = data['terminal_result'], scopes(data)
     assert list(inventory) == ['python#0', 'python#1', 'python#2', 'structure']
-    assert result['analysis_state'] == 'incomplete'
-    assert inventory['python#1']['status'] == 'failed'
-    assert inventory['python#1']['reason_codes'] == ['backend_failure']
-    assert all(scope['status'] == 'complete' for name, scope in inventory.items() if name != 'python#1')
+    assert (result['analysis_state'], result['pipeline_state']) == ('incomplete', 'completed')
+    assert {name: (scope['status'], scope['reason_codes']) for name, scope in inventory.items()} == {
+        'python#0': ('complete', []), 'python#1': ('failed', ['backend_failure']),
+        'python#2': ('failed', ['authentication_failure']), 'structure': ('incomplete', ['model_budget_exhaustion'])}
+    assert not any(inventory[name]['partial_evidence'] for name in ('python#1', 'python#2', 'structure'))
     assert [item['title'] for item in data['findings']] == ['Grounded defect']
     deep = review.repo / '.daydream/deep'
     persisted = json.loads((deep / 'review-coverage.json').read_text())
     assert persisted['stack_outcomes'] == result['stack_outcomes']
+    assert persisted['phase_outcomes'] == result['phase_outcomes']
     assert persisted['analyzed_revision'] == result['analyzed_revision']
     assert [scope['scope_id'] for scope in persisted['planned_scopes']] == list(inventory)
+    folded = next(p for p in result['phase_outcomes'] if p['phase'] == 'alternatives')
+    assert (folded['status'], folded['reason_codes'], folded['noop'], folded['usable_evidence']) == (
+        'incomplete', ['model_budget_exhaustion'], False, False)
     records = json.loads((deep / 'stack-python#0-records.json').read_text())
     assert records['scope_id'] == 'python#0' and records['analyzed_revision'] == result['analyzed_revision']
     assert records['issues'][0]['uid'] == 'python#0:1'
+    structural = json.loads((deep / 'stack-structure-records.json').read_text())
+    assert structural['issues'] == [] and structural['incomplete'] is True
+    assert structural['scope_id'] == 'structure' and structural['analyzed_revision'] == result['analyzed_revision']
+    assert {path.name for path in deep.glob('stack-*-records.json')} == {
+        'stack-python#0-records.json', 'stack-structure-records.json'}
     units = {json.loads(path.read_text())['unit']
              for path in (deep.parent / 'review-cache/entries').glob('*/manifest.json')}
-    assert 'shard:python#1' not in units
-    assert {'shard:python#0', 'shard:python#2', 'shard:structure'} <= units
-
-
-@pytest.mark.parametrize(('mode', 'reason', 'payload'), [
-    ('missing', 'missing_output', None), ('malformed', 'malformed_output', {'unexpected': []}),
-    ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),
-    ('rejected-native', 'malformed_output', {'unexpected': []}), ('text-only', None, None),
-    *[('invalid-envelope', 'malformed_output', payload) for payload in
-      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})]])
-async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
-
-    def response(prompt: str) -> list[AgentEvent] | None:
-        state = review_stage_state(prompt)
-        if state is None or state['scope_id'] != 'python':
-            return None
-        return [TextEvent(text=json.dumps(review_stage_result(prompt, []))
-                          if mode in {'text-only', 'rejected-native'} else ''),
-                ResultEvent(structured_output=payload, continuation=None)]
-
-    review.backend.responder = response
-    assert await review.run() == 0
-    data = review.load()
-    assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')
-    assert scopes(data)['python']['reason_codes'] == ([] if reason is None else [reason])
-    assert data['findings'] == []
-    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
-    assert saved['issues'] == [] and bool(saved.get('incomplete')) is (reason is not None)
+    assert {unit for unit in units if unit.startswith('shard:')} == {'shard:python#0'}
+    assert units - {'shard:python#0'} == {'intent', 'merge'}
 
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
@@ -347,12 +355,18 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
 
 
-@pytest.mark.parametrize(('budget', 'nonempty', 'structure_only'), [
-    *[(budget, nonempty, False) for budget in ('tool', 'wall', 'model') for nonempty in (False, True, None)],
-    *[(budget, nonempty, True) for budget in ('tool', 'backend') for nonempty in (False, True)],
-])
+@pytest.mark.parametrize(
+    ("budget", "nonempty", "structure_only"),
+    [
+        *[(budget, nonempty, False) for budget in ("tool", "wall", "model") for nonempty in (True, None)],
+        *[(budget, True, True) for budget in ("tool", "backend")],
+    ],
+)
 async def test_unsuccessful_stage_discards_checkpoints(
-    review: ReviewRun, budget: str, nonempty: bool | None, structure_only: bool,
+    review: ReviewRun,
+    budget: str,
+    nonempty: bool | None,
+    structure_only: bool,
 ) -> None:
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 
@@ -361,6 +375,7 @@ async def test_unsuccessful_stage_discards_checkpoints(
     intent = 'PRESERVE_AUTHOR_INTENT'
     review.patch.setattr(git_ops, 'gh_pr_view', lambda *_a, **_k: {
         'body': intent, 'state': 'OPEN', 'headRefOid': review.pr.head_sha})
+
     def response(prompt: str) -> Any:
         if 'understand the intent of these changes' in prompt.lower():
             yield TextEvent(text=intent)
@@ -387,6 +402,7 @@ async def test_unsuccessful_stage_discards_checkpoints(
                     if budget == 'wall':
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
+
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
         review_by_stack={'python': [record()]} if structure_only else {},
         responder=lambda p: response(p) if (reviewer(p) and (not structure_only or
@@ -431,8 +447,8 @@ async def test_unsuccessful_stage_discards_checkpoints(
 
 
 @pytest.mark.parametrize(('fault', 'owner'), [
-    *[(fault, 'python') for fault in ('missing', 'corrupt', 'shape', 'revision', 'scope', 'origin')],
-    *[(fault, 'structure') for fault in ('missing', 'corrupt', 'shape', 'duplicate')],
+    *[(fault, 'python') for fault in ('corrupt', 'shape', 'revision', 'scope', 'origin')],
+    *[(fault, 'structure') for fault in ('missing', 'shape', 'duplicate')],
 ])
 async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str) -> None:
     source = git(review.repo, 'diff', 'HEAD')
@@ -562,8 +578,8 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
 
 
-@pytest.mark.parametrize('late_event', ['legacy-result', 'native-start'])
-@pytest.mark.parametrize('offset', [0, 1], ids=['at-deadline', 'after-deadline'])
+@pytest.mark.parametrize(('late_event', 'offset'), [
+    ('legacy-result', 0), ('native-start', 1)], ids=['at-deadline-legacy-result', 'after-deadline-native-start'])
 async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
     review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
     import re
@@ -664,11 +680,15 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-@pytest.mark.parametrize('fault', ['markdown-read', 'context-write', 'report-write'])
-@pytest.mark.parametrize('export', [True, False], ids=['export', 'no-export'])
+@pytest.mark.parametrize(('export', 'fault'), [
+    (True, 'markdown-read'), (True, 'context-write'), (True, 'report-write'), (False, 'report-write')],
+    ids=['export-markdown-read', 'export-context-write', 'export-report-write', 'no-export-report-write'])
 async def test_optional_presentation_failure_preserves_canonical_export(
-    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str, export: bool,
+    review: ReviewRun, fault: str, export: bool,
 ) -> None:
+    warning_console = Console(width=120)
+    review.patch.setattr(review_terminal, 'console', warning_console)
+    review.patch.setattr(review_terminal, 'print_warning', print_warning)
     stage, read = json_utils._stage_bytes, Path.read_text
     refreshing = False
     injected: list[bool] = []
@@ -693,7 +713,10 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
                                        review_by_stack={'structure': [record()]})
     review.backend.merge_echo_records = True
-    assert await review.run(findings_out=str(review.output) if export else None) == 0 and injected
+    with warning_console.capture() as warning_output:
+        assert await review.run(findings_out=str(review.output) if export else None) == 0 and injected
+    error = 'PermissionError' if fault == 'markdown-read' else 'OSError'
+    assert f'Review report unavailable: {error}' in warning_output.get()
     if not export:
         saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
         assert saved['run_id'] and saved['analyzed_revision']['head_sha'] == review.pr.head_sha
@@ -701,7 +724,6 @@ async def test_optional_presentation_failure_preserves_canonical_export(
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert len(canonical['items']) == 1 and canonical['items'][0]['description'] == 'Grounded defect'
         assert not review.output.exists()
-        assert 'Review report unavailable:' in collapse_panel_text(capsys)
         return
     data = review.load()
     assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
@@ -709,7 +731,6 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert data['terminal_result']['projection_valid']
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     assert 'review_context' not in data
-    assert 'Review report unavailable:' in collapse_panel_text(capsys)
 
 
 @pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])

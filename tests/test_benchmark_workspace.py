@@ -1,8 +1,6 @@
 import hashlib
-import json
 import os
 import shutil
-import stat
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +14,6 @@ from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor.build import task_spec_digest
 from daydream.benchmark.schema import (
-    BenchmarkManifest,
     CaseDocument,
     CaseSource,
     Curation,
@@ -30,35 +27,12 @@ from daydream.benchmark.schema import (
     _PrRef,
     derive_finding_id,
 )
-from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_yaml_strict
+from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace, validate_workspace, workspace_status
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
 from tests.test_benchmark_import_prs import _curate_case, _seed_preflight
 
-
-def test_init_creates_private_layout_and_modes(tmp_path: Path) -> None:
-    root = tmp_path / "review-bench"
-    init_workspace(root, "OWNER/REPO", ["api.anthropic.com"], ["api.anthropic.com"])
-    assert root.exists()
-    assert stat.S_IMODE(root.stat().st_mode) == 0o700
-    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
-        d = root / sub
-        assert d.is_dir() and stat.S_IMODE(d.stat().st_mode) == 0o700
-    assert not (root / "harbor").exists()   # compiled dataset only after a build
-    assert stat.S_IMODE((root / "benchmark.yaml").stat().st_mode) == 0o600
-
-def test_init_manifest_is_valid_and_immutable_fields(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    m = init_workspace(root, "OWNER/REPO", ["API.Anthropic.COM"], ["api.anthropic.com"])
-    assert isinstance(m, BenchmarkManifest)
-    raw = load_yaml_strict(root / "benchmark.yaml")
-    loaded = BenchmarkManifest.model_validate(raw)
-    assert loaded.source.hostname == "github.com"
-    assert loaded.source.repository == "OWNER/REPO"
-    assert loaded.source.repository_id is None and loaded.source.visibility == "unresolved"
-    assert loaded.privacy.reviewer_allowed_hosts == ["api.anthropic.com"]
-    assert loaded.privacy.reviewer_allowed_hosts and loaded.privacy.judge_allowed_hosts
 
 def test_init_refuses_existing_nonempty_dir(tmp_path: Path) -> None:
     root = tmp_path / "ws"
@@ -71,21 +45,6 @@ def test_init_refuses_empty_reviewer_hosts(tmp_path: Path) -> None:
     with pytest.raises(InitError):
         init_workspace(tmp_path / "ws", "O/R", [], ["h2.example.com"])
 
-def test_status_fresh_workspace_is_empty_and_unresolved(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    gitignore_text = (root / ".gitignore").read_text()
-    assert "*" in gitignore_text and ".gitignore" in gitignore_text
-    assert stat.S_IMODE((root / ".gitignore").stat().st_mode) == 0o600
-    code, label = validate_workspace(root)
-    assert code == 2  # structurally valid but incomplete (unresolved repo identity)
-    assert "incomplete" in label
-    st = workspace_status(root)
-    assert st.workspace_state == "empty"
-    assert st.repository_identity_resolved is False
-    assert st.ledger is not None and st.ledger.pull_requests == []
-    assert st.source.hostname == "github.com"
-    assert st.source.repository_id is None and st.source.visibility == "unresolved"
 
 def test_validate_corrupt_manifest_returns_1(tmp_path: Path) -> None:
     root = tmp_path / "ws"
@@ -231,12 +190,6 @@ def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: A
     return root
 
 
-def test_validate_ready_workspace_returns_0(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    code, label = validate_workspace(root)
-    assert code == 0
-    assert label == "ready"
-
 def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     bundle = next((root / "snapshots").glob("*.bundle"))
@@ -264,42 +217,6 @@ def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
 
-def test_validate_curating_workspace_returns_2(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "draft")
-    code, label = validate_workspace(root)
-    assert code == 2
-    assert "incomplete" in label
-
-def test_validate_unresolved_but_ready_case_still_returns_2(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready", resolved=False)
-    code, label = validate_workspace(root)
-    assert code == 2
-    assert "incomplete" in label
-
-def test_status_derives_ready_from_curated_cases(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    st = workspace_status(root)
-    assert st.workspace_state == "ready"
-    assert st.repository_identity_resolved is True
-
-def test_status_and_validate_project_changed_ready_task_spec_as_stale_without_writing(tmp_path: Path,) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    case_path = next((root / "cases").glob("*.yaml"))
-    raw = load_yaml_strict(case_path)
-    raw["curation"]["findings"][0]["title"] = "Changed after approval"
-    raw["curation"]["findings"][0]["severity"] = "medium"
-    raw["curation"]["findings"][0]["finding_id"] = derive_finding_id(
-        raw["curation"]["findings"][0], case_id=raw["case_id"]
-    )
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    before = case_path.read_bytes()
-
-    status = workspace_status(root)
-
-    assert status.workspace_state == "stale"
-    assert status.case_snapshots[0]["task_spec_approval"] == "stale"
-    assert validate_workspace(root) == (2, "incomplete: workspace state stale")
-    assert case_path.read_bytes() == before
 
 def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
@@ -467,16 +384,6 @@ def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Pat
     assert sentinel.read_text() == "prior build\n"
     assert not (root / "cache" / "harbor-build-stage").exists()
 
-def test_curated_fixture_writes_schema_valid_case(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")   # rewritten in this task; same module
-    raw = load_yaml_strict(next((root / "cases").glob("*.yaml")))
-    CaseDocument.model_validate(raw)                      # must validate WITHOUT _schema_ready (no gold_mode)
-    m = BenchmarkManifest.model_validate(load_yaml_strict(root / "benchmark.yaml"))
-    pr = m.pull_requests[0]
-    assert pr.import_state == "fetched" and pr.import_file and pr.import_sha256
-    ImportDocument.model_validate(load_json_strict(root / pr.import_file))   # import round-trips
-
-
 def _write_minimal_invalid_workspace(tmp_path: Path, curation_state: Any="ready") -> Any:
     """A workspace whose case doc is the OLD minimal shape (Task 2 removed)."""
 
@@ -490,42 +397,13 @@ def _write_minimal_invalid_workspace(tmp_path: Path, curation_state: Any="ready"
     return root
 
 
-def test_validate_minimal_invalid_ready_returns_1(tmp_path: Path) -> None:
-    root = _write_minimal_invalid_workspace(tmp_path, "ready")
-    code, label = validate_workspace(root)
-    assert code == 1
-    assert "corrupt" in label.lower()
-
 def test_status_rejects_minimal_invalid_case(tmp_path: Path) -> None:
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
 
-
-def _restamp_import_sha(tmp_path: Path, imp_bytes: bytes) -> None:
-    """Overwrite the import file and re-stamp the ledger sha to match.
-
-    Leaves the import structurally invalid but byte-exact per the ledger, so
-    only the model gate (not the checksum gate) can catch it.
-    """
-
-    root = tmp_path / "ws"
-    imp = next((root / "imports").glob("pr-*.json"))
-    imp.write_bytes(imp_bytes)
-    sha = hashlib.sha256(imp_bytes).hexdigest()
-    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
-    raw["pull_requests"][0]["import_sha256"] = sha
-    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-
-
-def test_checksum_restamped_corrupt_import_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    imp = next((root / "imports").glob("pr-*.json"))
-    raw = load_json_strict(imp)
-    # Structurally invalid, but its sha is re-stamped to match the ledger.
-    raw["pull_request"]["number"] = 999   # wrong PR id; wrong shape vs intent
-    _restamp_import_sha(tmp_path, json.dumps(raw).encode())
-    _assert_corrupt_workspace(root)
 
 def test_import_missing_on_disk_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")

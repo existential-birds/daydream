@@ -86,7 +86,7 @@ _OUTCOME_PROPERTIES = {'status': {'enum': ['complete', 'incomplete', 'failed', '
                        'reason_codes': _REASONS}
 TARGET_DECISIONS_MAX_ITEMS = 512
 TARGET_DECISIONS_MAX_BYTES = 256 * 1024
-RUN_TARGET_DECISIONS_MAX_BYTES = 256 * 1024
+RUN_TARGET_DECISIONS_MAX_BYTES = 8 * 1024 * 1024
 _TARGET_DECISIONS_SCHEMA = {'type': 'array', 'maxItems': TARGET_DECISIONS_MAX_ITEMS, 'items': strict_object({
     'target_id': _TEXT, 'status': {'enum': ['reviewed', 'not_reviewed']},
     'reason': {'type': 'string', 'maxLength': TARGET_DECISIONS_MAX_BYTES},
@@ -252,6 +252,12 @@ def _published_target_decisions_size(decisions: list[dict[str, Any]]) -> int:
     return len(json.dumps(envelope, indent=2, ensure_ascii=False).encode('utf-8')) - before
 
 
+def published_attribution_bytes(terminal: Mapping[str, Any]) -> int:
+    """Exact contribution of retained target fields to the published findings envelope."""
+    return sum(_published_target_decisions_size(scope['target_decisions'])
+               for scope in terminal.get('stack_outcomes', []) if 'target_decisions' in scope)
+
+
 def preserved_target_decisions(value: Any) -> list[dict[str, Any]]:
     """Copy and redact reasons without rewriting validated source identities."""
     validate_target_decisions(value)
@@ -288,6 +294,8 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
         _validate_outcome(outcome)
         if 'target_decisions' in outcome:
             validate_target_decisions(outcome['target_decisions'], analyzed_revision=data['analyzed_revision'])
+    if published_attribution_bytes(data) > RUN_TARGET_DECISIONS_MAX_BYTES:
+        raise ValueError('run source attribution exceeds retained byte limit')
     for phase in phases.values():
         _validate_outcome(phase, phase=True)
     for field, statuses in [('completed_stacks', {'complete'}), ('failed_stacks', {'failed'}),

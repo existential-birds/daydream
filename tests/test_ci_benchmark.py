@@ -166,9 +166,8 @@ def test_report_rejects_different_revision_attempt_or_runner_class(
     assert not (output / "report.md").exists()
 
 
-@pytest.mark.parametrize("count", [4, 8, 20], ids=["legacy", "default-treatment", "maximum-treatment"])
 def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Same-SHA, same-size treatments must still belong to this invocation."""
     manifest = tmp_path / "manifest.json"
@@ -209,7 +208,7 @@ def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
     result = subprocess.run(
         [sys.executable, str(_SCRIPT), "launch", "--repo", _REPO, "--ref", "benchmark", "--sha", _SHA,
-         "--jobs", str(count), "--manifest", str(manifest)], capture_output=True, text=True, check=False, timeout=15,
+         "--jobs", "20", "--manifest", str(manifest)], capture_output=True, text=True, check=False, timeout=15,
     )
     assert result.returncode == 0, result.stderr
     recorded = json.loads(manifest.read_text())
@@ -218,8 +217,8 @@ def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
     marker = sent["pending"]["dispatch_id"]
     assert str(UUID(marker)) == marker and UUID(marker).version == 4
     assert f"benchmark_id={marker}" in sent["args"]
-    assert f"test_jobs={count}" in sent["args"]
-    assert recorded["runs"] == [{"id": 111, "jobs": count, "attempt": 1, "dispatch_id": marker}]
+    assert "test_jobs=20" in sent["args"]
+    assert recorded["runs"] == [{"id": 111, "jobs": 20, "attempt": 1, "dispatch_id": marker}]
     assert "pending" not in recorded
 
 

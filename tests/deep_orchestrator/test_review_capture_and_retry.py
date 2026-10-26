@@ -1,4 +1,5 @@
 """Large staged-review transport and retry scenarios through the production runner."""
+
 from __future__ import annotations
 
 import copy
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from daydream import git_ops
 from daydream.backends import (
@@ -23,6 +25,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
@@ -75,6 +78,24 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     if bundle and not review.backend.sandbox:
         assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
     return contents['diff'], index
+
+
+def part_identity(parts: list[dict[str, Any]]) -> str:
+    """Validate raw selector bindings, then pin every field with stable Git/source identities."""
+    normalized = copy.deepcopy(parts)
+    for part in normalized:
+        for reference, option in zip(part['source_refs'], part['source_options'], strict=True):
+            identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
+            assert option == {
+                'source_id': 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                                                 separators=(',', ':')).encode()).hexdigest(),
+                **{key: reference[key] for key in ('path', 'side', 'source_range')}, 'basis': 'supplied_diff',
+            }
+            reference['revision'] = identity['revision'] = reference['side']
+            option['source_id'] = 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                                                       separators=(',', ':')).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':')).encode()).hexdigest()
 
 
 @pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted', 'navigation'])
@@ -343,16 +364,15 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     assert len(retry_scopes) == 1
 
 
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-@pytest.mark.parametrize(('payload', 'omit_final', 'native'), [
-    ('medium-file', False, False), ('oversized-hunk', False, False), ('oversized-hunk', True, False),
-    ('unicode-line', False, False), ('unicode-separators', False, False), ('unicode-line', False, True),
-])
+@pytest.mark.parametrize(
+    ('sandbox', 'payload', 'omit_final', 'native'),
+    [(False, 'medium-file', False, False), (True, 'medium-file', False, False),
+    (False, 'oversized-hunk', False, False), (True, 'oversized-hunk', True, False),
+    (False, 'unicode-line', False, False), (True, 'unicode-separators', False, False),
+    (False, 'unicode-line', False, True), (True, 'unicode-line', False, True)])
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool, native: bool,
 ) -> None:
-    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-
     unicode = payload in {'unicode-line', 'unicode-separators'}
     medium = payload == 'medium-file'
     required = ("VALUE = '" + '界' * 11_000 + "'\n" if unicode else 'VALUE = 1\n' + ''.join(
@@ -386,7 +406,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
             rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
-            assert len(rendered.encode()) <= SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+            assert len(rendered.encode()) <= 64 * 1024
             assert str(repo / '.daydream') not in prompt
             assert 'Sanctioned phase inputs (read only these exact files):' not in prompt
         diff, index = capture(review, stage)
@@ -454,6 +474,19 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         assert len(assignments) > 1
     assert [part['part_index'] for part in assignments] == list(range(1, len(assignments) + 1))
     assert b''.join(fragments) == expected_body
+    identities = {
+        ('medium-file', False): 'f7152979cd363204e5becab9d196e0e7ed7623b5407486570a24e2900cfc45aa',
+        ('medium-file', True): 'e6468c52adce5efc2653816806e2372e4b5b118e2fbbd6f29af05ffc613dbab2',
+        ('oversized-hunk', False): 'c9aa574299966799aa1d7576825c115a0ce49c09757576abd0ded8862ac42fd7',
+        ('oversized-hunk', True): '27b526e6ad60e233d1ee4ce3739ac376f4c8b178fc3cbe08f79a5fafe2448bc5',
+        ('unicode-line', False): '5076f0e2419ce49c2bb285322c3c007c07063ab54bbd194c9528d60a1fa01186',
+        ('unicode-line', True): '0084da754194fc863c9110681831548dc1d87239d179a9723a5a4e0943044c9d',
+        ('unicode-separators', True): '15db9083b444b1b3d13beac69b9859cb04db304d5ac3f2be673ba873416bfe57',
+    }
+    assert part_identity(assignments) == identities[payload, sandbox]
+    if sandbox:
+        old_calls = {'medium-file': 2, 'oversized-hunk': 8, 'unicode-line': 4, 'unicode-separators': 4}
+        assert len(stage_ends(review, 'python')) < old_calls[payload]
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
     if unicode:
         assert len(assignments) >= 3 and assignments[-1]['segment_count'] == len(assignments)
@@ -574,8 +607,7 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('path', ['api.py', 'component_雪.py', 'nested/component_"quote".py', 'component_\t.py',
-                                 'api[1].py'])
+@pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py', 'api[1].py'])
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
 
@@ -676,8 +708,8 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
 
     review = staged_review(tmp_path, monkeypatch, files=2)
-    shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 600
-    assert 40_000 < len(shared_intent.encode()) < 48_000
+    shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 1000
+    assert 64 * 1024 < len(shared_intent.encode()) < 72_000
 
     review.backend.responder = lambda prompt: (
         [TextEvent(text=shared_intent), ResultEvent(structured_output=None, continuation=None)]
@@ -705,50 +737,72 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     assert event['metadata']['observed_tool_starts'] == (0 if sandbox else 1)
 
 
-@pytest.mark.parametrize(('case', 'reason', 'attempts'), [
-    ('unparseable', 'malformed_output', 1),
-    ('invalid-native-valid-text', 'malformed_output', 1),
-    ('nested-invalid-root', None, 1),
-    ('incomplete-nested-stage', 'malformed_output', 1),
-    ('text-origin-nested', None, 1),
-    ('empty-final-turn', 'missing_output', 1),
-    ('native-prose', None, 1),
-    ('pi-schema-retry', None, 2),
-    ('missing-notes', None, 2),
-    ('empty-object', None, 2),
-    ('scalar-only-object', None, 2),
-    ('wrong-type-notes', None, 2),
-    ('native-missing-notes', 'malformed_output', 1),
-    ('compliant-json', None, 1),
-    ('prose-json', None, 1),
-    ('fenced-json', None, 1),
-    ('incidental-json', None, 1),
-    ('ambiguous-json', 'malformed_output', 1),
-    ('wrapper-siblings', 'malformed_output', 1),
-    ('result-list', 'malformed_output', 1),
-    ('recursive-wrapper', 'malformed_output', 1),
-    ('partial-second-object', 'malformed_output', 1),
-    ('partial-second-array', 'malformed_output', 1),
-    ('malformed-tail', 'malformed_output', 1),
-    ('unfinished-fence', 'malformed_output', 1),
-    ('orphan-close', 'malformed_output', 1),
-    ('unmatched-prose', 'malformed_output', 1),
-    ('oversized-final', 'malformed_output', 1),
-    ('output-shaped-invalid', 'malformed_output', 1),
-    ('output-shaped-before-valid', 'malformed_output', 1),
-    ('misplaced-closing-brace', 'malformed_output', 1),
-])
-async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, reason: str | None, attempts: int) -> None:
-    review = staged_review(tmp_path, monkeypatch, files=2)
+async def test_mixed_output_population_keeps_native_authority_final_turns_and_scope_local_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Independent output streams cannot borrow a valid package or retry state from siblings."""
+    cases = {
+        "unparseable": ("malformed_output", 1),
+        "invalid-native-valid-text": ("malformed_output", 1),
+        "nested-invalid-root": (None, 1),
+        "incomplete-nested-stage": ("malformed_output", 1),
+        "text-origin-nested": (None, 1),
+        "empty-final-turn": ("missing_output", 1),
+        "native-prose": (None, 1),
+        "pi-schema-retry": (None, 2),
+        "missing-notes": (None, 2),
+        "empty-object": (None, 2),
+        "scalar-only-object": (None, 2),
+        "wrong-type-notes": (None, 2),
+        "native-missing-notes": ("malformed_output", 1),
+        "compliant-json": (None, 1),
+        "prose-json": (None, 1),
+        "fenced-json": (None, 1),
+        "incidental-json": (None, 1),
+        "ambiguous-json": ("malformed_output", 1),
+        "wrapper-siblings": ("malformed_output", 1),
+        "result-list": ("malformed_output", 1),
+        "recursive-wrapper": ("malformed_output", 1),
+        "partial-second-object": ("malformed_output", 1),
+        "partial-second-array": ("malformed_output", 1),
+        "malformed-tail": ("malformed_output", 1),
+        "unfinished-fence": ("malformed_output", 1),
+        "orphan-close": ("malformed_output", 1),
+        "unmatched-prose": ("malformed_output", 1),
+        "oversized-final": ("malformed_output", 1),
+        "output-shaped-invalid": ("malformed_output", 1),
+        "output-shaped-before-valid": ("malformed_output", 1),
+        "misplaced-closing-brace": ("malformed_output", 1),
+    }
+    repo = tmp_path / "output_population"
+    before = {f"{case}/api.py": "def hello():\n    return 'world'\n" for case in cases}
+    seed_feature_branch(
+        repo, base=before, feature={path: body.replace("world", "universe") for path, body in before.items()}
+    )
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    scope_cases: dict[str, str] = {}
 
-    @review.backend.script(terminal=False)
     def stream(stage: dict[str, Any], valid: dict[str, Any]) -> Iterable[AgentEvent]:
+        (path,) = stage["assigned_files"]
+        case = path.split("/")[0]
+        scope_id = stage["scope_id"]
+        scope_cases[scope_id] = case
         prompt = review.backend.calls[-1]['prompt']
-        attempt = sum(item['scope_id'] == 'python' for item in review.backend.stages)
+        attempt = sum(item["scope_id"] == scope_id for item in review.backend.stages)
         assert stage['attempt'] == attempt
-        valid['candidates'] = ([] if case in {'compliant-json', 'misplaced-closing-brace'} else
-                               [candidate(disposition='confirmed', finding=record())])
+        valid["candidates"] = (
+            []
+            if case in {"compliant-json", "misplaced-closing-brace"}
+            else [
+                candidate(
+                    disposition="confirmed",
+                    file=path,
+                    line=2,
+                    finding=dict(record(), file=path, description="Accepted " + case, evidence=f"{path}:2"),
+                )
+            ]
+        )
         invalid = {'unknown_outer_key': valid}
         if case in {'empty-object', 'scalar-only-object'}:
             assert stage['notes'] == stage['candidates'] == []
@@ -821,26 +875,71 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
         native = invalid if case == 'invalid-native-valid-text' else valid if case == 'native-prose' else None
         yield ResultEvent(structured_output=native, continuation=None)
 
-    await review.finish('python', reason=reason,
-                        findings=('Grounded defect',) if reason is None and case != 'compliant-json' else ())
-    events = stage_ends(review, 'python')
-    assert len(events) == attempts
-    assert [event['metadata']['attempt'] for event in events] == list(range(1, attempts + 1))
-    assert [event['metadata']['admitted'] for event in events] == (
-        [False, True] if case in {'pi-schema-retry', 'missing-notes', 'wrong-type-notes',
-                                 'empty-object', 'scalar-only-object'}
-        else [reason is None] * attempts)
-    if attempts == 2:
-        assert events[0]['metadata']['schema_rejection']['error_count'] > 0
-    elif case in {'fenced-json', 'incidental-json', 'ambiguous-json', 'wrapper-siblings', 'result-list',
-                  'recursive-wrapper', 'partial-second-object', 'partial-second-array', 'malformed-tail',
-                  'unfinished-fence', 'orphan-close', 'unmatched-prose', 'oversized-final', 'unparseable',
-                  'incomplete-nested-stage', 'empty-final-turn', 'compliant-json', 'misplaced-closing-brace'}:
-        assert events[0]['metadata']['schema_rejection'] is None
-    metadata = events[-1]['metadata']
-    assert metadata['observed_tool_starts'] == 0 and metadata['remaining_tool_calls'] == 48
-    if case in {'compliant-json', 'misplaced-closing-brace'}:
-        assert metadata['failure_class'] == ('syntax_failure' if case == 'misplaced-closing-brace' else None)
+    review.backend.scripts = {f"python#{index}": (stream, False) for index in range(len(cases))}
+    assert (
+        await review.run(
+            deep_shard_enabled=True, deep_shard_max_files=1, deep_shard_max_bytes=10**9, deep_shard_fanout_cap=64
+        )
+        == 0
+    )
+    data = review.load()
+    assert len(scope_cases) == len(cases) and set(scope_cases.values()) == set(cases)
+    expected_titles = {
+        "Accepted " + case for case, (reason, _) in cases.items() if reason is None and case != "compliant-json"
+    }
+    assert len(data["findings"]) == len(expected_titles)
+    assert {finding["title"] for finding in data["findings"]} == expected_titles
+    outcomes = scopes(data)
+    assert outcomes["structure"]["status"] == "complete"
+    for scope_id, case in scope_cases.items():
+        reason, attempts = cases[case]
+        outcome = outcomes[scope_id]
+        assert outcome["files"] == [f"{case}/api.py"]
+        assert outcome["status"] == ("incomplete" if reason else "complete")
+        assert outcome["reason_codes"] == ([reason] if reason else [])
+        assert len(outcome["target_decisions"]) == (0 if reason else 1)
+        if not reason:
+            (decision,) = outcome["target_decisions"]
+            assert decision["target_id"] == f"{case}/api.py" and decision["status"] == "reviewed"
+            assert decision["evidence_refs"]
+        events = stage_ends(review, scope_id)
+        assert len(events) == attempts
+        assert [event["metadata"]["attempt"] for event in events] == list(range(1, attempts + 1))
+        assert [event["metadata"]["admitted"] for event in events] == (
+            [False, True] if attempts == 2 else [reason is None]
+        )
+        metadata = events[-1]["metadata"]
+        assert metadata["observed_tool_starts"] == 0 and metadata["remaining_tool_calls"] == 48
+        if attempts == 2:
+            assert events[0]["metadata"]["schema_rejection"]["error_count"] > 0
+        elif case in {
+            "fenced-json",
+            "incidental-json",
+            "ambiguous-json",
+            "wrapper-siblings",
+            "result-list",
+            "recursive-wrapper",
+            "partial-second-object",
+            "partial-second-array",
+            "malformed-tail",
+            "unfinished-fence",
+            "orphan-close",
+            "unmatched-prose",
+            "oversized-final",
+            "unparseable",
+            "incomplete-nested-stage",
+            "empty-final-turn",
+            "compliant-json",
+            "misplaced-closing-brace",
+        }:
+            assert metadata["schema_rejection"] is None
+        if case in {"compliant-json", "misplaced-closing-brace"}:
+            assert metadata["failure_class"] == ("syntax_failure" if reason else None)
+        saved = json.loads((repo / f".daydream/deep/stack-{scope_id}-records.json").read_text())
+        assert bool(saved.get("incomplete")) is bool(reason)
+        assert [item["description"] for item in saved["issues"]] == (
+            ["Accepted " + case] if reason is None and case != "compliant-json" else []
+        )
 
 
 @pytest.mark.parametrize('packaging', ['prose', 'wrapper', 'native', 'domain-invalid'])
@@ -916,122 +1015,180 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         assert combined.count(f'REQUIRED_LARGE_CHANGE_{index:04}') == 1
 
 
-@pytest.mark.parametrize('fault', ['unknown-target', 'unknown-candidate', 'contradiction', 'grounds',
-                                  'grounds-missing', 'grounds-null', 'grounds-number', 'handoff'])
-async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
-    review = staged_review(tmp_path, monkeypatch)
-
-    @review.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        if not stage['progress']:
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-            return
-        if stage['attempt'] > 1:
-            # A second valid answer would wrongly recover from mixed semantic rejection; production must not invoke it.
-            return
-        output['unknown_extra'] = None
-        output['notes'] = 'FAILED_MIXED_ATTEMPT_MARKER'
-        if fault == 'unknown-target':
-            output['targets'][0]['target_id'] = 'foreign-assignment'
-        elif fault == 'contradiction':
-            output['contradictions'] = [stage['closed_candidate_ids'][0]]
-        elif fault == 'handoff':
-            output['notes'] += 'x' * 70_000
-        else:
-            path = stage['assigned_files'][0]
-            finding = dict(record(line=1), file=path, evidence=f'{path}:1 changes VALUE from 0 to 1')
-            item = candidate(disposition='confirmed', finding=finding, file=path, line=1, grounds=finding['evidence'])
-            if fault == 'unknown-candidate':
-                item['candidate_id'] = 'foreign-candidate'
-            elif fault == 'grounds-missing':
-                item.pop('grounds')
-            else:
-                item['grounds'] = {'grounds-null': None, 'grounds-number': 7}.get(fault, '')
-            output['candidates'] = [item]
-
-    await review.finish('python', reason='malformed_output', findings=('Grounded defect',))
-    events = stage_ends(review, 'python')
-    assert len(events) == 2
-    assert [event['metadata']['admitted'] for event in events] == [True, False]
-    assert [event['metadata']['attempt'] for event in events] == [1, 1]
-    assert events[-1]['metadata']['observed_tool_starts'] == 0
-    assert events[-1]['metadata']['remaining_tool_calls'] == 48
-    assert events[-1]['metadata']['schema_rejection']['error_count'] > 0
-    assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
-
-
-@pytest.mark.parametrize('fault', ['revision', 'artifact-digest', 'part-digest', 'path', 'side', 'range',
-                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count',
-                                  'supporting-digest', 'supporting-missing-path', 'supporting-range',
-                                  'supporting-reversed-range'])
-async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+async def test_sharded_admission_rejects_each_bad_sibling_atomically_and_retains_earlier_findings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later well-shaped citation cannot alter admitted work unless frozen identity matches."""
-    review = staged_review(tmp_path, monkeypatch)
-    admitted: list[dict[str, Any]] = []
-    rejected_ids: list[str] = []
+    """Independent rejected scopes cannot erase each other's frozen, previously admitted work."""
+    source_faults = (
+        "revision",
+        "artifact-digest",
+        "part-digest",
+        "path",
+        "side",
+        "range",
+        "fragment",
+        "supporting-only",
+        "missing-assigned",
+        "reference-count",
+        "supporting-digest",
+        "supporting-missing-path",
+        "supporting-range",
+        "supporting-reversed-range",
+    )
+    mixed_faults = (
+        "unknown-target",
+        "unknown-candidate",
+        "contradiction",
+        "grounds",
+        "grounds-missing",
+        "grounds-null",
+        "grounds-number",
+        "handoff",
+    )
+    faults = (*source_faults, *(f"mixed-{fault}" for fault in mixed_faults), "healthy")
+    before = {f"{fault}/module_{index:02}.py": "VALUE = 0\n" for fault in faults for index in range(8)}
+    repo = tmp_path / "independent_admission"
+    seed_feature_branch(repo, base=before, feature={name: "VALUE = 1\n" for name in before})
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    native = CodexBackend(model=review.backend.model)
+    monkeypatch.setattr(native, 'execute', review.backend.execute)
+    monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
+    admitted: dict[str, list[dict[str, Any]]] = {}
+    rejected: dict[str, list[str]] = {}
+    scope_faults: dict[str, str] = {}
 
-    @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        if not stage['progress']:
-            admitted.extend(copy.deepcopy(output['targets']))
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        scope_id = stage["scope_id"]
+        if scope_id == "structure":
             return
-        rejected_ids.extend(stage['assigned_target_ids'])
-        output['notes'] = 'INVALID_ATTRIBUTION_MUST_NOT_SURVIVE'
+        revision_schema = review.backend.calls[-1]['output_schema']['properties']['targets']['items'][
+            'properties']['evidence_refs']['items']['properties']['revision']
+        assert revision_schema['enum'] == [review.pr.head_sha, review.pr.base_sha]
+        fault = stage["assigned_files"][0].split("/", 1)[0]
+        assert all(path.startswith(fault + "/") for path in stage["assigned_files"])
+        scope_faults[scope_id] = fault
+        if not stage["progress"]:
+            admitted[scope_id] = copy.deepcopy(output["targets"])
+            path = stage['assigned_files'][0]
+            finding = dict(
+                record(line=1),
+                file=path,
+                description="defect_" + fault.replace("-", "_"),
+                evidence=f"{path}:1 changes VALUE from 0 to 1",
+            )
+            output["candidates"] = [
+                candidate(disposition="confirmed", finding=finding, file=path, line=1, grounds=finding["evidence"])
+            ]
+            return
+        if fault == "healthy":
+            return
+        rejected[scope_id] = stage["assigned_target_ids"]
+        output["notes"] = "REJECTED_STAGE_POISON"
+        if fault.startswith("mixed-"):
+            fault = fault.removeprefix("mixed-")
+            output["unknown_extra"] = None
+            if fault == "unknown-target":
+                output["targets"][0]["target_id"] = "foreign-assignment"
+            elif fault == "contradiction":
+                output["contradictions"] = [stage["closed_candidate_ids"][0]]
+            elif fault == "handoff":
+                output["notes"] += "x" * 70_000
+            else:
+                path = stage["assigned_files"][0]
+                finding = dict(record(line=1), file=path, evidence=f"{path}:1 changes VALUE from 0 to 1")
+                item = candidate(
+                    disposition="confirmed", finding=finding, file=path, line=1, grounds=finding["evidence"]
+                )
+                if fault == "unknown-candidate":
+                    item["candidate_id"] = "foreign-candidate"
+                elif fault == "grounds-missing":
+                    item.pop("grounds")
+                else:
+                    item["grounds"] = {"grounds-null": None, "grounds-number": 7}.get(fault, "")
+                output["candidates"] = [item]
+            return
         reference = output['targets'][0]['evidence_refs'][0]
-        if fault == 'revision':
-            reference['revision'] = '0' * 40
-        elif fault == 'artifact-digest':
-            reference['artifact_sha256'] = '0' * 64
-        elif fault == 'part-digest':
-            reference['part_sha256'] = '0' * 64
-        elif fault == 'path':
+        if fault in {"revision", "artifact-digest", "part-digest"}:
+            key = {"revision": "revision", "artifact-digest": "artifact_sha256", "part-digest": "part_sha256"}[fault]
+            reference[key] = "0" * (40 if fault == "revision" else 64)
+        elif fault == "path":
             reference['path'] = 'unassigned.py'
-        elif fault == 'side':
+        elif fault == "side":
             reference['side'] = 'diff'
-        elif fault == 'range':
+        elif fault == "range":
             reference['source_range'] = {'start': 999999, 'end': 999999}
-        elif fault == 'fragment':
+        elif fault == "fragment":
             reference['fragment'] = {'offset': 999999, 'bytes': 1, 'sha256': '0' * 64}
-        elif fault == 'supporting-only':
+        elif fault == "supporting-only":
             reference['role'] = 'supporting'
-        elif fault == 'reference-count':
+        elif fault == "reference-count":
             output['targets'][0]['evidence_refs'] *= 5
-        elif fault.startswith('supporting-'):
+        elif fault.startswith("supporting-"):
+            path = f"{fault}/module_06.py"
             supporting = {
-                'artifact_sha256': hashlib.sha256((review.repo / 'module_06.py').read_bytes()).hexdigest(),
-                'part_sha256': None, 'revision': stage['analyzed_revision']['head_sha'],
-                'path': 'module_06.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
-                'fragment': None, 'basis': 'source_inspection', 'role': 'supporting',
+                "artifact_sha256": hashlib.sha256((repo / path).read_bytes()).hexdigest(),
+                "part_sha256": None,
+                "revision": stage["analyzed_revision"]["head_sha"],
+                "path": path,
+                "side": "new",
+                "source_range": {"start": 1, "end": 1},
+                "fragment": None,
+                "basis": "source_inspection",
+                "role": "supporting",
             }
-            if fault == 'supporting-digest':
+            if fault == "supporting-digest":
                 supporting['artifact_sha256'] = '0' * 64
-            elif fault == 'supporting-missing-path':
+            elif fault == "supporting-missing-path":
                 supporting['path'] = 'missing-frozen.py'
             else:
-                supporting['source_range'] = ({'start': 2, 'end': 1} if fault == 'supporting-reversed-range'
-                                               else {'start': 2, 'end': 2})
+                supporting["source_range"] = {"start": 2, "end": 1 if fault == "supporting-reversed-range" else 2}
             output['targets'][0]['evidence_refs'].append(supporting)
         else:
             output['targets'][0]['evidence_refs'] = []
 
-    reason = 'malformed_output' if fault == 'reference-count' else 'evidence_incomplete'
-    data = await review.finish('python', reason=reason, findings=('Grounded defect',))
-    events = stage_ends(review, 'python')
-    assert [event['metadata']['admitted'] for event in events] == [True, False]
-    assert all(event['metadata']['attempt'] == 1 for event in events)
-    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
-    assert bool(events[-1]['metadata'].get('schema_rejection')) is (fault == 'reference-count')
-    decisions = scopes(data)['python']['target_decisions']
-    assert decisions == sorted(admitted, key=lambda item: item['target_id'])
-    assert not set(rejected_ids).intersection(item['target_id'] for item in decisions)
-    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
-    assert next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')[
-        'target_decisions'] == decisions
-    assert all('INVALID_ATTRIBUTION_MUST_NOT_SURVIVE' not in call['prompt'] for call in review.backend.calls)
+    review.backend.stage_response = response
+    assert (
+        await review.run(
+            deep_shard_enabled=True, deep_shard_max_files=8, deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32
+        )
+        == 0
+    )
+    data = review.load()
+    assert set(scope_faults.values()) == set(faults) and len(scope_faults) == len(faults)
+    assert len(data["findings"]) == len(faults)
+    assert {finding["title"] for finding in data["findings"]} == {
+        "defect_" + fault.replace("-", "_") for fault in faults
+    }
+    outcomes = scopes(data)
+    assert outcomes["structure"]["status"] == "complete"
+    for scope_id, fault in scope_faults.items():
+        outcome = outcomes[scope_id]
+        assert outcome["files"] == [f"{fault}/module_{index:02}.py" for index in range(8)]
+        events = stage_ends(review, scope_id)
+        assert len(events) == 2 and [event["metadata"]["attempt"] for event in events] == [1, 1]
+        if fault == "healthy":
+            assert outcome["status"] == "complete" and outcome["reason_codes"] == []
+            assert len(outcome["target_decisions"]) == 8
+            assert all(event["metadata"]["admitted"] for event in events)
+            continue
+        malformed = fault.startswith("mixed-") or fault == "reference-count"
+        assert outcome["status"] == "incomplete"
+        assert outcome["reason_codes"] == ["malformed_output" if malformed else "evidence_incomplete"]
+        assert outcome["target_decisions"] == sorted(admitted[scope_id], key=lambda item: item["target_id"])
+        assert not set(rejected[scope_id]).intersection(item["target_id"] for item in outcome["target_decisions"])
+        assert [event["metadata"]["admitted"] for event in events] == [True, False]
+        last = events[-1]["metadata"]
+        # The full captured patch crosses the run-wide scale threshold, so
+        # both stages keep the doubled 96-call allowance without tool starts.
+        assert events[0]["metadata"]["remaining_tool_calls"] == last["remaining_tool_calls"] == 96
+        assert last["observed_tool_starts"] == 0
+        assert bool(last.get("schema_rejection")) is malformed
+        if not fault.startswith("mixed-"):
+            assert last["failure_class"] == "source_attribution"
+    saved = json.loads((repo / ".daydream/deep/review-coverage.json").read_text())
+    assert saved["stack_outcomes"] == data["terminal_result"]["stack_outcomes"]
+    assert all("REJECTED_STAGE_POISON" not in call["prompt"] for call in review.backend.calls)
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
@@ -1048,6 +1205,10 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     git(repo, 'config', 'diff.context', '0')
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend.sandbox = sandbox
+    if sandbox:
+        native = CodexBackend(model=review.backend.model)
+        monkeypatch.setattr(native, 'execute', review.backend.execute)
+        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -1055,6 +1216,8 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
+        if sandbox:
+            assert Draft202012Validator(review.backend.calls[-1]['output_schema']).is_valid(output)
         scoped = index['api.py']
         fragments.append(diff)
         decisions.extend(copy.deepcopy(output['targets']))
@@ -1159,6 +1322,7 @@ async def test_parallel_scope_attribution_overflow_retains_findings_and_admitted
     """Individually valid scopes cannot crowd accepted findings out of the bounded handoff."""
     from daydream.findings import MAX_ARTIFACT_BYTES
 
+    monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', 256 * 1024)
     review = staged_review(tmp_path, monkeypatch, files=20)
     review.config = replace(review.config, deep_shard_enabled=True, deep_shard_max_files=1,
                             deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32)

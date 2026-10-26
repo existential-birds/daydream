@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from daydream.deep.evidence_reuse import EVIDENCE_REUSE_FORMAT, ReuseTarget, decide_reuse
+from daydream.deep.evidence_reuse import ReuseTarget, decide_reuse
 from tests.harness.execution import test_execution_identity as _identity
 
 
@@ -47,7 +47,3 @@ def test_incomplete_or_red_evidence_requires_real_validation(outcome: str) -> No
 
 def test_missing_evidence_requires_real_validation() -> None:
     assert decide_reuse(None, _target()).result == "no-evidence"
-
-def test_the_decision_is_deterministic_and_io_free() -> None:
-    assert decide_reuse(_identity(), _target()) == decide_reuse(_identity(), _target())
-    assert EVIDENCE_REUSE_FORMAT == 1

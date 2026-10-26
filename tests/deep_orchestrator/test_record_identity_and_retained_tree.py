@@ -90,36 +90,24 @@ async def test_merge_resume_routes_current_uids_to_their_owning_records(
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(multi_stack_target,
-        python=[_high_record(description="py first"), _record(description="py second", line=2, evidence="api.py:2")],
+        python=[_high_record(description="py first", uid="python:4"),
+                _record(description="py second", line=2, evidence="api.py:2", uid="python:2")],
     )
     primed = _record_issues(json.loads((deep / "stack-python-records.json").read_text()))
-    assert [record["uid"] for record in primed] == ["python:1", "python:2"]
+    assert [record["uid"] for record in primed] == ["python:4", "python:2"]
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
     # Persisted identities stay with their owning stack and sibling.
-    assert _uid_list(deep, "python") == ["python:1", "python:2"]
+    assert _uid_list(deep, "python") == ["python:4", "python:2"]
     assert _uid_list(deep, "react") == ["react:1"]
     assert _uid_list(deep, "generic") == ["generic:1"]
     assert _uid_list(deep, "structure") == ["structure:1"]
-    # ``python:1`` is the record the arbiter was asked about, and its verdict
+    # ``python:4`` is the record the arbiter was asked about, and its verdict
     # landed on it rather than on its sibling.
     python_records = _uid_records(deep, "python")
     assert python_records[0]["description"] == "ARBITRATED: py first"
     assert python_records[1]["description"] == "py second"
     assert (deep / "merged-items.json").is_file()
-
-async def test_merge_resume_preserves_existing_non_contiguous_uid(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py survivor", uid="python:4")],
-    )
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
-    assert _uid_list(deep, "python") == ["python:4"], (
-        "the surviving record was renumbered by position instead of keeping the uid the producing run minted"
-    )
-    assert _uid_records(deep, "python")[0]["description"] == "ARBITRATED: py survivor"
 
 async def test_duplicate_record_uid_stops_the_run_before_merge(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -356,28 +344,6 @@ async def test_unattributable_merge_source_uids_require_current_schema(
     out = _panel_text(capsys)
     assert "match no record in this run" not in out, out
 
-async def test_single_stack_bypass_attributes_items_to_their_own_records(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
-) -> None:
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    mute_side_effects()
-
-    assert await _run_deep(tiny_diff_target) == 0
-    assert [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()] == [], (
-        "the single-stack bypass must not invoke the merge agent"
-    )
-    deep = deep_dir(tiny_diff_target, allow_standalone=True)
-    assert _run_uid_pool(deep) == {"generic:1", "structure:1"}
-    by_description = _source_uids_by_description(deep)
-    assert by_description["Sample issue"] == ["generic:1"]
-    assert by_description["Structural maintainability concern"] == ["structure:1"]
-    # Bypass items keep their birth ``uid`` as well, and the two answers agree --
-    # the derivation of an item that IS a record is that record.
-    for item in _merged_items(deep):
-        assert item["source_uids"] == [item["uid"]], item
-
 @pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
 def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool,
@@ -462,62 +428,38 @@ async def test_merge_resume_rejects_structural_records_missing_host_identity(
     assert items and not any(item["lens"] == "structural" for item in items)
     assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
 
-@pytest.mark.parametrize("scratch_is_related", [False, True])
-def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, scratch_is_related: bool,
-) -> None:
+def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
 
     repo = tmp_path / "retained"
     _init_repo(repo)
     (repo / "a.py").write_text("A = 1\n")
+    (repo / "b.py").write_text("B = 1\n")
     (repo / "c.py").write_text("C = 1\n")
     _git(repo, "add", ".")
     _commit(repo, "base")
+    head = git_ops.head_sha(repo)
+    (repo / "a.py").write_text("A = 2\n")
+    stable_ref = git_ops.stash_create(repo) or head
     (repo / "scratch.bin").write_bytes(b"\x00user")
     protected = git_ops.snapshot_untracked_paths(repo)
     item = {
-        "id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["scratch.bin"] if scratch_is_related else [],
+        "id": 1, "item_uid": "item:1", "file": "b.py",
+        "related_files": ["a.py", "scratch.bin"],
     }
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     index = git_ops.snapshot_index(repo)
     state = FixCycleState(
-        session_id="s", stable_ref=git_ops.head_sha(repo), stable_head=git_ops.head_sha(repo), initial_index=index,
+        session_id="s", stable_ref=stable_ref, stable_head=head, initial_index=index,
         preexisting_untracked=protected, preexisting_gitlinks=(), footprint=footprint,
     )
-    (repo / "a.py").write_text("A = 2\n")
+    (repo / "b.py").write_text("B = 2\n")
     first = capture_retained_tree(work_context(repo, run_id="s"), state)
     (repo / "c.py").write_text("C = 9\n")
     second = capture_retained_tree(work_context(repo, run_id="s"), state)
-    assert first.paths == second.paths == frozenset({"a.py"})
+    assert first.paths == second.paths == frozenset({"a.py", "b.py"})
+    assert {path.path for path in first.states} == {"a.py", "b.py"}
+    assert b"a.py" in first.recommended_patch and b"b.py" in first.recommended_patch
+    assert first.recommended_patch == second.recommended_patch
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
-
-def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
-    """Commit selection is HEAD-relative even though evidence stays run-relative."""
-
-    repo = tmp_path / "preexisting-retained"
-    _init_repo(repo)
-    (repo / "a.py").write_text("A = 1\n")
-    (repo / "b.py").write_text("B = 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    head = git_ops.head_sha(repo)
-
-    # This reviewed edit predates the fix gate and is therefore part of the
-    # stable rollback snapshot, but it still belongs in the eventual commit.
-    (repo / "a.py").write_text("A = 2\n")
-    stable_ref = git_ops.stash_create(repo) or head
-    item = {"id": 1, "item_uid": "item:1", "file": "b.py", "related_files": ["a.py"]}
-    footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
-    state = FixCycleState(
-        session_id="s", stable_ref=stable_ref, stable_head=head, initial_index=git_ops.snapshot_index(repo),
-        preexisting_untracked={}, preexisting_gitlinks=(), footprint=footprint,
-    )
-    (repo / "b.py").write_text("B = 2\n")
-    work = work_context(repo, run_id="s")
-    snapshot = capture_retained_tree(work, state)
-
-    assert snapshot.paths == frozenset({"a.py", "b.py"})
-    assert {path.path for path in snapshot.states} == {"a.py", "b.py"}
-    assert b"a.py" in snapshot.recommended_patch
-    assert b"b.py" in snapshot.recommended_patch

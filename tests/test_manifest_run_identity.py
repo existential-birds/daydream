@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import AsyncGenerator, Callable
+from contextlib import closing
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -156,6 +158,14 @@ async def test_runner_archives_identity_before_model_mutates_live_policy(
     assert len(roots) == 1
     assert roots[0]["extra"]["pr_number"] == 7
     assert roots[0]["extra"]["pr_repo"] == "Owner/Repo"
+    assert {key: roots[0]["extra"][key] for key in observed_profile} == observed_profile
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT profile_schema_version, profile_name, profile_source_kind, profile_digest FROM runs "
+            "WHERE session_id = ?", (manifest["session_id"],),
+        ).fetchone()
+        assert row is not None and dict(row) == observed_profile
     forks = [document for document in trajectories
              if document.get("trajectory_id") and document.get("trajectory_id") != manifest["session_id"]]
     assert len(forks) == 2

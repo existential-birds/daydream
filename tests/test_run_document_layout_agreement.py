@@ -10,7 +10,7 @@ from typing import Literal
 
 from daydream.archive import get_archive_dir
 from daydream.archive.bundle import _project_documents
-from daydream.eval.analyzer import collect_trajectory_paths
+from daydream.eval.analyzer import _latest_main_trajectory, collect_trajectory_paths
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -18,7 +18,6 @@ from daydream.trajectory import (
     snapshot_trajectories,
 )
 from tests.harness.trajectory import trajectory_payload
-from tests.test_artifact_visibility import _init_repo, _work, open_artifact_session
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 SIBLING = "deep-python.json"
@@ -52,6 +51,7 @@ def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     # 1. the analyzer, by run dir and by latest-run fallback
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(run_dir)} == canonical
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(daydream_dir)} == canonical
+    assert _latest_main_trajectory(daydream_dir) == run_dir / "trajectory.json"
     # 2. the producer's frozen projection agrees with the analyzer on the same names
     frozen = snapshot_trajectories(_snapshot(run_dir / "trajectory.json"))
     assert frozen["main"]["_source_file"] == "trajectory.json"
@@ -78,17 +78,3 @@ def test_the_partial_root_is_stripped_by_the_archive_and_ignored_by_readers(tmp_
     archive_run_dir.mkdir(parents=True, exist_ok=True)
     _project_documents(_snapshot(partial, status="partial"), archive_run_dir, session_id=SESSION)
     assert (archive_run_dir / "trajectory.json").read_bytes() == trajectory_payload(SESSION)
-
-async def test_the_artifact_route_reads_the_same_run_directory(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    _init_repo(source)
-    async with open_artifact_session(_work(source), session_id=SESSION) as session:
-        route = session.register_trajectory_output(None)
-        assert route.run_dir == session.daydream_dir / "runs" / SESSION
-        assert route.full.frozen_path == route.run_dir / "trajectory.json"
-        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
-        sibling = TrajectoryDocumentSnapshot(
-            "zed", route.run_dir / "trajectories" / "zed.json", trajectory_payload("zed")
-        )
-        session.write_trajectory_document(route, sibling, "complete")
-        assert session.snapshot_completed_sibling_trajectories(session_id=SESSION) == (sibling,)

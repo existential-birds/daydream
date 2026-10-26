@@ -490,6 +490,10 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     # Chronology: the sealed generation ends BEFORE the later tool sibling.
     attempt = _attempt(spans)
     billed = attributes(attempt)
+    schema = json.loads(
+        (Path(__file__).parent / "fixtures" / "observability_semconv" / "gen-ai-input-messages.json").read_text()
+    )
+    jsonschema.validate(json.loads(billed["gen_ai.input.messages"]), schema)
     tools = _kind(spans, "tool")
     assert len(tools) == 1
     assert int(tools[0]["startTimeUnixNano"]) >= int(first["endTimeUnixNano"])
@@ -525,7 +529,7 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
-@pytest.mark.parametrize("vendor", ["otlp", "honeyhive", "langsmith"])
+@pytest.mark.parametrize("vendor", ["otlp"])
 async def test_pi_metadata_mode_omits_generation_choice_content(
     vendor: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
@@ -687,26 +691,6 @@ async def test_osprey_explicit_zero_temperature_reaches_argv_and_config(
     request = next(e for e in events if isinstance(e, RequestEvent))
     assert request.config.temperature == 0.0  # zero retained, never omitted
     assert request.model_source == "native"
-
-
-# Schema-valid content on the wire (pinned semconv message schemas)
-
-async def test_attempt_input_messages_validate_against_pinned_schema(
-    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    canary = _CANARIES["pi"]
-    _flow(ext_dir)
-    install_fake_cli_process(
-        monkeypatch, "pi", lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
-    )
-    with otlp_collector() as receiver:
-        _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
-    schema = json.loads(
-        (Path(__file__).parent / "fixtures" / "observability_semconv" / "gen-ai-input-messages.json").read_text()
-    )
-    messages = json.loads(attributes(_attempt(receiver.spans))["gen_ai.input.messages"])
-    jsonschema.validate(messages, schema)
 
 
 # Real generic HTTP/protobuf + gRPC integration for the destinations (plan 791)

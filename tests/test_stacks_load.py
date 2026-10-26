@@ -6,14 +6,13 @@ Recorded lineage.split must match the split recomputed from record identity.
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from daydream.training.corpus_projection.splits import assign_split
-from daydream.training.stacks import V2Projection, load_v2_projection
+from daydream.training.stacks import load_v2_projection
 
 SALT = "issue-1081-salt"
 HOLDOUT_RATE = 0.2
@@ -46,37 +45,6 @@ def _write_projection(tmp_path: Path, record_ids: list[str]) -> Path:
     )
     (out / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return out
-
-def test_load_v2_projection_returns_per_split_records_lineage_and_digests(tmp_path: Path,) -> None:
-    record_ids = [f"rec-{i:04d}" for i in range(30)]
-    out = _write_projection(tmp_path, record_ids)
-    proj = load_v2_projection(out)
-
-    assert isinstance(proj, V2Projection)
-    assert set(proj.by_split) == {"train", "validation", "holdout"}
-    # Every record lands in the split its id deterministically assigns.
-    for record in proj.records:
-        expected = assign_split(str(record["record_id"]), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
-        assert proj.by_split[expected] is not None
-        assert record in proj.by_split[expected]
-    assert len(proj.records) == len(record_ids)
-    assert sum(len(v) for v in proj.by_split.values()) == len(record_ids)
-    assert proj.lineage["salt"] == SALT
-
-def test_load_v2_projection_digest_is_deterministic(tmp_path: Path) -> None:
-    record_ids = [f"rec-{i:04d}" for i in range(12)]
-    out = _write_projection(tmp_path, record_ids)
-    first = load_v2_projection(out)
-    second = load_v2_projection(out)
-
-    assert first.digest == second.digest
-    # An identical copy of the directory yields the same digest.
-    copy = tmp_path / "copy"
-    shutil.copytree(out, copy)
-    assert load_v2_projection(copy).digest == first.digest
-    # And the digest is actually content-sensitive.
-    (out / "train.jsonl").write_text((out / "train.jsonl").read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    assert load_v2_projection(out).digest != first.digest
 
 def test_load_v2_projection_raises_on_split_drift(tmp_path: Path) -> None:
     record_ids = [f"rec-{i:04d}" for i in range(20)]

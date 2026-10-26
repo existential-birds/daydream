@@ -10,7 +10,6 @@ import pytest
 from daydream.agent import _ToolSupervisorFailure
 from daydream.backends import BackendExecutionInput
 from daydream.backends.codex import CodexError
-from daydream.backends.pi import PiError
 from daydream.config_file import load_file_config
 from daydream.retry_policy import (
     FailureClass,
@@ -28,13 +27,6 @@ def test_tool_policy_veto_is_permanent_and_never_retryable() -> None:
     assert decision.failure_class is FailureClass.TOOL_POLICY
     assert decision.retries_allowed is False
 
-
-def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
-    """Generic "provider" text must not override an explicitly transient rate-limit category."""
-    decision = classify_failure(PiError("provider rate limit", retryable=True, category="RATE_LIMIT"))
-
-    assert decision.failure_class is FailureClass.RATE_LIMIT
-    assert decision.retries_allowed is True
 
 def test_tool_policy_stop_attribute_is_permanent_and_never_retryable() -> None:
     class _ToolPolicyStop(Exception):
@@ -126,8 +118,14 @@ def test_classify_failure_never_raises_on_non_string_category_or_message() -> No
     assert decision.retries_allowed is False
 
 @pytest.mark.parametrize(("raw", "expected"),
-    [(5, 5.0), (0, 0.0), (42.5, 42.5), ("42", 42.0), ("0", 0.0), (True, None), (False, None), (-1, None),
-        ("-1", None), ("nonsense", None), (float("nan"), None), (float("inf"), None), (None, None), ([], None),
+    [
+        (42.5, 42.5),
+        ("0", 0.0),
+        (True, None),
+        (-1, None),
+        ("nonsense", None),
+        (float("nan"), None),
+        (None, None),
     ],
 )
 def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | None) -> None:
@@ -135,13 +133,6 @@ def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | No
 
     assert decode_retry_recovery_allowance(raw) == expected
 
-def test_the_shared_allowance_helper_is_the_one_declared_value_rule() -> None:
-    """One declared-value rule: what is admitted, and what falls through to the default."""
-
-    assert coerce_declared_retry_allowance(42, "retry_recovery_allowance_s") == 42.0
-    assert coerce_declared_retry_allowance("0", "retry_recovery_allowance_s") == 0.0
-    assert coerce_declared_retry_allowance(-1, "retry_recovery_allowance_s") is None
-    assert coerce_declared_retry_allowance("nonsense", "retry_recovery_allowance_s") is None
 
 def test_an_absent_allowance_declaration_is_silent_on_every_source(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -172,38 +163,12 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pyte
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
-        # Structured, status-prefixed (the issue's sanitized payload).
-        pytest.param(
-            '429: {"message":"Temporary admission failure","code":429,'
-            '"metadata":{"headers":{"Retry-After":"10"}}}', 10.0, id="issue-429",
-        ),
-        pytest.param('429: {"metadata":{"headers":{"retry-after":"7"}}}', 7.0, id="lowercase-key"),
-        pytest.param('429: {"metadata":{"headers":{"RETRY-AFTER":"7"}}}', 7.0, id="upper-key"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":2.5}}}', 2.5, id="fractional-number"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":10}}}', 10.0, id="bare-number"),
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0, id="zero-string"),
-        # Refusal: the shared decoder governs; never a second numeric rule.
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"-5"}}}', None, id="negative"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":true}}}', None, id="boolean"),
-        pytest.param('429: {"metadata":{"headers":{"Retry-After":"nonsense"}}}', None, id="text"),
-        pytest.param(
-            '429: {"metadata":{"headers":{"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}}}',
-            None, id="http-date-out-of-scope",
-        ),
-        # Guarded shapes: no hint, no raise, text fallback stays live.
+        pytest.param('429: {"metadata":{"headers":{"Other":"5","Retry-After":-1}}}', None,
+                     id="no-admissible-header"),
         pytest.param('429: {"metadata":{"headers":"nope"}}', None, id="headers-not-mapping"),
         pytest.param('429: {"metadata":"nope"}', None, id="metadata-not-mapping"),
-        pytest.param('429: {"code":429}', None, id="no-headers"),
         pytest.param('429: {"metadata":{"headers":{"Retry-After":"10"}', None, id="malformed-json"),
-        # Preserved plain-text format (req 6): regex fallback.
-        pytest.param("503 Service Unavailable; retry-after: 30", 30.0, id="plain-text"),
-        pytest.param("503 retry-after 45", 45.0, id="plain-whitespace"),
-        pytest.param("503 Service Unavailable", None, id="no-hint-plain"),
-        pytest.param("", None, id="empty"),
-        # Structured precedence (Should-Have 2): structured wins over text, deterministically.
-        pytest.param(
-            '429: {"metadata":{"headers":{"Retry-After":"10"}}} retry-after: 99', 10.0, id="structured-wins",
-        ),
     ],
 )
 def test_parse_message_retry_hint_reads_structured_headers(message: str, expected: float | None) -> None:

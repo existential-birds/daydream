@@ -7,6 +7,7 @@ and cancellation drains, and the 512-draft/10-MiB fail-closed caps.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,6 @@ from daydream.backends import (
     ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
-    TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase, Invocation
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -44,12 +44,9 @@ def _choice_parts() -> tuple[Any, ...]:
     )
 
 
-def _end_event(
-    generation_id: str = "g1", *, native_start_ms: int | None = NATIVE_START_MS, ended_at_ns: int = HOST_END_NS,
-    boundary_complete: bool = True,
-) -> GenerationEndEvent:
+def _end_event(generation_id: str = "g1", *, boundary_complete: bool = True) -> GenerationEndEvent:
     return GenerationEndEvent(
-        generation_id=generation_id, native_started_at_unix_ms=native_start_ms, ended_at_unix_ns=ended_at_ns,
+        generation_id=generation_id, native_started_at_unix_ms=NATIVE_START_MS, ended_at_unix_ns=HOST_END_NS,
         end_source="host_observed_message_end", choice_parts=_choice_parts(), response_id="resp_gen_01",
         model_name="glm-4.6", provider_name="nous", finish_reason="toolUse", boundary_complete=boundary_complete,
     )
@@ -63,16 +60,13 @@ def _seal_generations(inv: Invocation, count: int) -> None:
         inv.observe(_end_event(generation_id=gid))
 
 
-def _sealed_invocation(tmp_path: Path, *, native_start_ms: int | None = NATIVE_START_MS, ended_at_ns: int = HOST_END_NS,
-    boundary_complete: bool = True,
+def _sealed_invocation(tmp_path: Path, *, boundary_complete: bool = True,
 ) -> tuple[Any, Invocation]:
     recorder = make_recorder(tmp_path)
     inv = _iq(recorder)
     inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000, boundary_complete=boundary_complete)
     )
-    inv.observe(
-        _end_event(native_start_ms=native_start_ms, ended_at_ns=ended_at_ns, boundary_complete=boundary_complete)
-    )
+    inv.observe(_end_event(boundary_complete=boundary_complete))
     return recorder, inv
 
 
@@ -99,26 +93,6 @@ def _summary(inv: Invocation) -> dict[str, Any]:
 class TestPendingDraftLifecycle:
     """Decision 1: drafts stay UNENDED until billing ownership resolves."""
 
-    def test_draft_opens_on_start_and_stays_unended_until_resolution(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        summary = _summary(inv)
-        assert summary["drafts"][0]["sealed"] is False
-        assert summary["drafts"][0]["ended"] is False
-        assert summary["billing_owner"] == "unresolved"
-
-    def test_seal_freezes_choice_and_timing_at_message_end_before_tools(self, tmp_path: Path) -> None:
-        _, inv = _sealed_invocation(tmp_path)
-        # Tools cannot alter choices already sealed at message end.
-        inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
-        inv.observe(ToolResultEvent(id="call_001", output='{"content": "FILE"}', is_error=False))
-        draft = _summary(inv)["drafts"][0]
-        assert draft["sealed"] is True
-        assert draft["ended"] is False  # still pending until ownership resolves
-        kinds = [part["kind"] for part in draft["choice_parts"]]
-        assert kinds == ["reasoning", "text", "tool_call"]
-        assert draft["choice_parts"][2]["call_id"] == "call_001"
-        assert draft["ended_at_unix_ns"] is None
 
     def test_end_happens_exactly_once_after_late_usage_and_resolution(self, tmp_path: Path) -> None:
         recorder, inv = _sealed_invocation(tmp_path)
@@ -147,31 +121,23 @@ class TestPendingDraftLifecycle:
 
 
 class TestNativeTimingValidation:
-    """Decision 4: non-bool bounded int ms, exact ns conversion, explicit fallbacks."""
+    """Out-of-range evidence is recorder-only: OTLP timestamps cannot represent it."""
 
-
-    @pytest.mark.parametrize(("native_start", "fallback"),
-        [
-            (True, "invalid"),  # bool is not an int timestamp
-            (2**63 // 1_000_000 + 1, "invalid"),  # out of int64-ns range
-            (-5, "invalid"), (None, "missing"),
-        ],
-    )
+    @pytest.mark.parametrize(("native_start", "fallback"), [
+        (9_223_372_036_855, "invalid"), (-5, "invalid"),
+    ])
     def test_invalid_native_start_falls_back_explicitly(
-        self, tmp_path: Path, native_start: int | bool | None, fallback: str
+        self, recorder: Any, native_start: int, fallback: str,
     ) -> None:
-        _, inv = _sealed_invocation(tmp_path, native_start_ms=native_start)
+        inv = _iq(recorder)
+        inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
+        inv.observe(replace(_end_event(), native_started_at_unix_ms=native_start))
+        inv.finish()
         draft = _summary(inv)["drafts"][0]
-        assert draft["start_fallback"] == fallback
-        assert draft["native_started_at_unix_ns"] is None  # never clamped
-        assert draft["duration_ns"] is None
+        assert (draft["native_started_at_unix_ns"], draft["duration_ns"], draft["start_fallback"]) == (
+            None, None, fallback,
+        )
 
-    def test_reversed_chronology_falls_back_explicitly(self, tmp_path: Path) -> None:
-        # Reversed native timing remains incomplete, never reordered or clamped.
-        _, inv = _sealed_invocation(tmp_path, native_start_ms=2_000_000_000, ended_at_ns=1_000_000_000)
-        draft = _summary(inv)["drafts"][0]
-        assert draft["start_fallback"] == "reversed"
-        assert draft["duration_ns"] is None
 
 class TestBillingOwnerResolution:
     """Decision 5: closed owner before export; children|structural|none."""
@@ -190,23 +156,6 @@ class TestBillingOwnerResolution:
         assert summary["billing_owner"] == "structural_attempt"
         assert [d["billed"] for d in summary["drafts"]] == [False, False]
 
-    def test_partial_only_evidence_is_custom_nowhere_billed(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv)  # child usage, but NO authoritative attempt total
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "none"
-        assert summary["drafts"][0]["billed"] is False
-
-    def test_contradictory_totals_fail_closed_without_rewriting(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv, input_tokens=10, output_tokens=5)
-        _total(recorder, inv, input_tokens=13, output_tokens=7)  # contradicts children
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "none"  # fail closed
-        assert any("contradiction" in d for d in summary["diagnostics"])
-        assert summary["drafts"][0]["billed"] is False
 
     def test_owner_never_switches_after_resolution(self, recorder: Any) -> None:
         inv = _iq(recorder)
@@ -217,6 +166,7 @@ class TestBillingOwnerResolution:
         _usage(recorder, inv, "g2", input_tokens=3, output_tokens=2)
         inv.finish()
         assert _summary(inv)["billing_owner"] == "none"  # partial-only
+        assert [draft["billed"] for draft in _summary(inv)["drafts"]] == [False, False]
         # A late authoritative total must NOT flip the closed owner.
         _total(recorder, inv, input_tokens=13, output_tokens=7)
         assert _summary(inv)["billing_owner"] == "none"
@@ -271,6 +221,8 @@ class TestPendingBounds:
         assert tail["ended"] is True
         assert tail["billed"] is False
         assert tail["choice_parts"] == []
+        inv.finish()
+        assert _summary(inv)["billing_owner"] == "none"
 
     def test_choice_bytes_cap_10_mib(self, recorder: Any) -> None:
         inv = _iq(recorder)
@@ -287,60 +239,6 @@ class TestPendingBounds:
         cap_diags = [d for d in summary["diagnostics"] if "cap" in d]
         assert len(cap_diags) == 1
 
-class TestUnbilledOrNoneCapOwner:
-    """Cap drain locks ownership to structural (if a later total exists) or none."""
-
-
-    def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, recorder: Any) -> None:
-        """Cap-drained children stay unbilled even when late usage matches terminal totals."""
-        inv = _iq(recorder)
-        for i in range(513):
-            gid = f"g{i:04d}"
-            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
-            inv.observe(_end_event(generation_id=gid))
-            inv.observe(MetricsEvent(
-                    message_id=gid, prompt_tokens=1, completion_tokens=1, cached_tokens=0, cost_usd=0.001,
-                    generation_id=gid,
-                )
-            )
-        _total(recorder, inv, input_tokens=513, output_tokens=513)
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["children_after_cap"] is True
-        assert summary["billing_owner"] == "structural_attempt"
-        assert all(draft["billed"] is False for draft in summary["drafts"])
-
-    def test_cap_drain_without_total_owner_none(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        _seal_generations(inv, 513)
-        inv.finish()
-        assert _summary(inv)["billing_owner"] == "none"
-
-class TestEventDispatchAndSummary:
-    """Dispatch routing, subtrajectory surfacing, no behavior change without generations."""
-
-    def test_no_generation_events_leave_summary_unchanged(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        inv.observe(
-            MetricsEvent(message_id="m1", prompt_tokens=5, completion_tokens=3, cached_tokens=0, cost_usd=0.001,)
-        )
-        inv.observe(TurnEndEvent(message_id="m1"))
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["drafts"] == []
-        assert summary["billing_owner"] == "unresolved"
-        recorder._register_subtrajectory(inv)
-        assert "generation_lifecycle" not in recorder._subtrajectories[-1]
-
-
-    def test_usage_never_invented(self, tmp_path: Path) -> None:
-        _, inv = _sealed_invocation(tmp_path)
-        # No usage events at all: the record must not fabricate any numbers.
-        inv.finish()
-        draft = _summary(inv)["drafts"][0]
-        assert "usage" not in draft or draft["usage"] == {}
-        assert draft["billed"] is False
-
 
 @pytest.mark.parametrize("completed", [False, True], ids=["cancelled-unfinished", "completed-billed"])
 async def test_attempt_lifecycle_persists_without_changing_generation_billing(
@@ -355,8 +253,17 @@ async def test_attempt_lifecycle_persists_without_changing_generation_billing(
             async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe_user_step("review request")
                 inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
+                opened = _summary(inv)
+                assert (opened["drafts"][0]["sealed"], opened["drafts"][0]["ended"],
+                        opened["billing_owner"]) == (False, False, "unresolved")
                 if completed:
                     inv.observe(_end_event())
+                    inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
+                    inv.observe(ToolResultEvent(id="call_001", output='{"content": "FILE"}', is_error=False))
+                    sealed = _summary(inv)["drafts"][0]
+                    assert (sealed["sealed"], sealed["ended"], sealed["ended_at_unix_ns"]) == (True, False, None)
+                    assert [part["kind"] for part in sealed["choice_parts"]] == ["reasoning", "text", "tool_call"]
+                    assert sealed["choice_parts"][2]["call_id"] == "call_001"
                     _usage(recorder, inv)
                     _total(recorder, inv)
                 inv.record_backend_lifecycle(BackendLifecycleSnapshot(

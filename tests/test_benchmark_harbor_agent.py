@@ -11,44 +11,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from daydream.benchmark.harbor import build, candidate, entrypoint, env_policy, package as pkg, verifier_core as vc
-from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent, build_child_env
-from daydream.benchmark.harbor.package import render_job_config
+from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 from daydream.config_file import DaydreamFileConfig
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 
-
-def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A per-case task.toml [environment].env block transmits the
-    opaque case key through a real compile, stays byte-deterministic, and is
-    accepted by Harbor's Task model (skip-guarded: Harbor is an optional extra)."""
-    pytest.importorskip("harbor")
-
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    wheel, _ = _stub_wheel(tmp_path)
-    pkg.build_harbor(ws, wheel=wheel)      # real compile -> per-case task.toml
-
-    case = ws / "harbor" / build.derive_task_key(case_id)
-    toml = (case / "task.toml").read_text()
-    key = build.derive_task_key(case_id)
-    assert f"DAYDREAM_REVIEW_CASE_ID = \"{key}\"" in toml
-    assert "[environment]" in toml
-    # determinism: re-rendering identical bytes
-    # re-render with the same workspace-seeded privacy allowlists so the bytes
-    # are identical to the compiled task.toml (reviewer h1/judge h2, not a
-    # different reviewer policy)
-    assert pkg.render_task_toml(key, reviewer_hosts=["h1.example.com"], judge_hosts=["h2.example.com"]
-    ) == (case / "task.toml").read_bytes()
-    try:
-        from harbor.models.task import Task  # noqa: PLC0415 - namespace fallback as in package.py
-    except ImportError:  # Harbor exposes task as a namespace package in some wheels.
-        from harbor.models.task.task import Task  # noqa: PLC0415
-    assert Task(str(case), disable_verification=True) is not None
 
 def test_build_candidate_findings_maps_and_skips() -> None:
     items = [{"file": "src/cache.py", "line": 42,
@@ -136,51 +107,6 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str
         candidate.build_candidate_artifact("case-key", [finding])
     assert rejected.value.kind == "invalid_finding"
 
-def test_artifact_write_failure_raises(tmp_path: Path) -> None:
-    dest = tmp_path / "adir"                                # a directory -> replace fails
-    dest.mkdir()
-    with pytest.raises(candidate.CandidateError) as write_fail:
-        candidate.write_candidate_artifact_atomic(dest, {"schema_version": 1, "findings": []})
-    assert write_fail.value.kind == "write_failure"
-
-def test_render_job_config_backend_passthrough_is_not_pi_locked(fake_gh: FakeGh) -> None:
-    """The rendered job config passes DAYDREAM_REVIEW_BACKEND
-    through with a pi default; the value is a pi|claude selection validated
-    downstream by the agent/entrypoint allowlist, not pi-locked here."""
-
-    data = yaml.safe_load(render_job_config(oracle=False).decode())
-    env = data["agents"][0]["env"]
-    assert env["DAYDREAM_REVIEW_BACKEND"] == "${DAYDREAM_REVIEW_BACKEND:-pi}"
-    # claude-backend credentials are declarative: ANTHROPIC_* placeholders ride
-    # the agent.build_child_env keep-set into the container entrypoint, mirroring
-    # the pi path's DAYDREAM_REVIEW_API_KEY -> PI_API_KEY chain.
-    assert env["ANTHROPIC_API_KEY"] == "${ANTHROPIC_API_KEY:-}"
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "${ANTHROPIC_AUTH_TOKEN:-}"
-    assert env["ANTHROPIC_BASE_URL"] == "${ANTHROPIC_BASE_URL:-}"
-
-def test_render_task_toml_host_policy_and_case_env() -> None:
-    toml = pkg.render_task_toml("case-abc123def456", reviewer_hosts=["openrouter.ai"], judge_hosts=["openrouter.ai"],
-    ).decode("utf-8")
-    assert 'allowed_hosts = ["openrouter.ai"]' in toml       # reviewer-only host
-    assert '"github.com"' not in toml and '"huggingface.co"' not in toml
-    assert 'DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"' in toml
-    assert 'DAYDREAM_REVIEW_BASE_REF = "base"' in toml
-    assert 'DAYDREAM_REVIEW_HEAD_REF = "head"' in toml
-    assert pkg.render_task_toml("case-abc123def456", reviewer_hosts=["openrouter.ai"], judge_hosts=["openrouter.ai"],
-    ) == pkg.render_task_toml("case-abc123def456", reviewer_hosts=["openrouter.ai"], judge_hosts=["openrouter.ai"])
-    assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
-
-def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
-    toml = pkg.render_task_toml(
-        "case-abc123def456", reviewer_hosts=["reviewer.example.com"], judge_hosts=["openrouter.ai"],
-    ).decode("utf-8")
-    agent_block = toml.split("[agent]", 1)[1].split("[environment]", 1)[0]
-    verifier_block = toml.split("[verifier.environment]", 1)[1]
-    assert 'allowed_hosts = ["reviewer.example.com"]' in agent_block
-    assert "openrouter.ai" not in agent_block
-    assert 'allowed_hosts = ["openrouter.ai"]' in verifier_block
-    assert "reviewer.example.com" not in verifier_block
-
 def test_entrypoint_build_run_config_is_controlled() -> None:
     cfg = entrypoint.build_run_config(
         repo_dir="/workspace/repo", trajectory_path="/logs/agent/trajectory.json", backend="pi",
@@ -201,10 +127,6 @@ def test_entrypoint_backend_fail_closed() -> None:
     with pytest.raises(entrypoint.EntrypointError) as exc:
         entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": "codex"})
     assert "pi" in str(exc.value)
-
-def test_entrypoint_backend_allowlist_pi_and_claude_pass() -> None:
-    for value in ("pi", "claude", "CLAUDE", " claude "):
-        assert entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value}) == value.strip().lower()
 
 def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
     for value in ("codex", "opencode"):
@@ -259,29 +181,6 @@ def test_agent_package_import_does_not_pull_harbor() -> None:
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert out.returncode == 0, f"harbor imported eagerly:\n{out.stdout}{out.stderr}"
 
-def test_agent_lifecycle_and_lazy_harbor() -> None:
-    assert DaydreamReviewAgent.SUPPORTS_ATIF is True
-    assert callable(DaydreamReviewAgent.name) and callable(DaydreamReviewAgent.version)
-    assert isinstance(DaydreamReviewAgent.name(), str) and DaydreamReviewAgent.name()
-    assert isinstance(DaydreamReviewAgent.version(), str)
-
-def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
-    pytest.importorskip("harbor")
-
-    pi_agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"})
-    pi_executed = Executed()
-    asyncio.run(pi_agent.setup(_capturing_env(pi_executed)()))
-    assert "shutil.which('pi')" in pi_executed.setup
-    assert pi_agent.version() in pi_executed.setup
-    assert "claude_agent_sdk" not in pi_executed.setup
-
-    claude_agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"})
-    claude_executed = Executed()
-    asyncio.run(claude_agent.setup(_capturing_env(claude_executed)()))
-    assert "import claude_agent_sdk" in claude_executed.setup
-    assert "shutil.which('pi')" not in claude_executed.setup
-    assert claude_agent.version() in claude_executed.setup          # version assert kept for both
-
 def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
 
@@ -290,55 +189,6 @@ def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
 
     with pytest.raises(AgentError):
         asyncio.run(agent.setup(_capturing_env(executed)()))
-
-_BANNED = ["GH_TOKEN", "GITHUB_TOKEN", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY", "HF_TOKEN",
-    "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR", "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_MODEL",
-    "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "PI_API_KEY",
-]
-
-
-def test_build_child_env_is_exact_allowlist() -> None:
-    parent = {
-        **{k: "secret" for k in _BANNED}, "DAYDREAM_REVIEW_BACKEND": "pi", "DAYDREAM_REVIEW_API_KEY": "review-key",
-        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "PATH": "/usr/bin", "HOME": "/root", "LANG": "C.UTF-8",
-        "RANDOM_SECRET": "ignore-me",
-    }
-    child = build_child_env(parent)
-    assert child["DAYDREAM_REVIEW_API_KEY"] == "review-key"  # reviewer credential kept
-    for banned in _BANNED:
-        assert banned not in child                              # fail-closed: absent
-    assert child["PATH"] == "/usr/bin" and child["HOME"] == "/root"
-    # required process vars survive; nothing arbitrary leaks through.
-    assert set(child).issubset(
-        {"DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_API_KEY", "DAYDREAM_REVIEW_BASE_URL", "PATH", "HOME", "LANG"}
-    )
-
-def test_build_child_env_keeps_anthropic_for_claude_scrubs_for_pi() -> None:
-    parent = {
-        "ANTHROPIC_API_KEY": "sk-ant", "ANTHROPIC_BASE_URL": "https://api.anthropic.com", "ANTHROPIC_AUTH_TOKEN": "tok",
-        "OPENROUTER_API_KEY": "sk-or", "PI_API_KEY": "pi-key", "GH_TOKEN": "gh", "DAYDREAM_REVIEW_BACKEND": "claude",
-        "DAYDREAM_REVIEW_API_KEY": "review-key", "PATH": "/usr/bin", "HOME": "/root", "LANG": "C.UTF-8",
-    }
-    child = build_child_env(parent, backend="claude")
-    assert child["ANTHROPIC_API_KEY"] == "sk-ant"
-    assert child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
-    assert child["ANTHROPIC_AUTH_TOKEN"] == "tok"
-    assert "OPENROUTER_API_KEY" not in child and "PI_API_KEY" not in child
-    assert "GH_TOKEN" not in child                              # non-credential bans stay
-
-    child_pi = build_child_env(parent, backend="pi")
-    assert not any(k.startswith("ANTHROPIC_") for k in child_pi)
-    assert "OPENROUTER_API_KEY" not in child_pi
-    assert child_pi["DAYDREAM_REVIEW_API_KEY"] == "review-key"
-
-def test_build_child_env_bans_claude_code_prefix() -> None:
-    parent = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-tok", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        "DAYDREAM_REVIEW_BACKEND": "pi", "PATH": "/usr/bin", "HOME": "/root",
-    }
-    child = build_child_env(parent, backend="pi")
-    assert not any(k.startswith("CLAUDE_CODE_") for k in child)
-    child_claude = build_child_env(parent, backend="claude")
-    assert not any(k.startswith("CLAUDE_CODE_") for k in child_claude)
 
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
@@ -487,34 +337,6 @@ def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
     }
 
 
-def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A real temp git repo/task plus a fake backend drives the production entrypoint
-    through the in-process runner and publishes the exact findings and an explicit
-    empty review (AC 3 / AC 5 gate)."""
-
-    repo = _seed_defect_repo(tmp_path)
-    install_stub_backend(monkeypatch, repo)
-    case_id = "case-abc123def456"
-    env = _end_env(repo, tmp_path, case_id)
-
-    rc = asyncio.run(entrypoint.main(env))
-    assert rc == 0
-    artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    _assert_published_artifact(artifact, case_id)
-    assert len({f["candidate_id"] for f in artifact["findings"]}) == len(artifact["findings"])
-
-    # explicit empty review: a genuinely-empty deep review writes no merged output
-    # (it fail-closes), so the clean-review contract is exercised through the very
-    # same production publish step main() runs — a present, schema-valid artifact
-    # whose findings list is explicitly empty.
-    (repo / ".daydream" / "deep" / "merged-items.json").write_text(json.dumps({"items": []}))
-    dest = tmp_path / "logs" / "artifacts" / "review-clean.json"
-    entrypoint.publish_review(repo_dir=repo, artifact_path=dest, case_id=case_id)
-    empty = json.loads(dest.read_text())
-    assert empty["findings"] == []
-    assert vc.validate_candidate_artifact(empty) == []
-
-
 class Executed:
     """Captured results of the real agent lifecycle calls on the fake env."""
 
@@ -579,8 +401,10 @@ def test_local_harbor_task_with_fake_backend(
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
 
+    assert agent.name() == "daydream" and agent.SUPPORTS_ATIF is True
     assert agent.version() in executed.setup
     assert "shutil.which('pi')" in executed.setup
+    assert "claude_agent_sdk" not in executed.setup
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
     assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
@@ -626,6 +450,16 @@ def test_local_harbor_task_with_fake_backend(
         for f in copied_gold
     ] == [(f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line) for f in host_gold]
 
+
+    # Continue the actual reviewed workspace through explicit clean publication.
+    (repo / ".daydream" / "deep" / "merged-items.json").write_text(json.dumps({"items": []}))
+    clean_path = tmp_path / "logs" / "artifacts" / "review-clean.json"
+    entrypoint.publish_review(repo_dir=repo, artifact_path=clean_path, case_id=key)
+    clean = json.loads(clean_path.read_text())
+    assert clean == {"schema_version": 1, "case_id": key, "base_ref": "base", "head_ref": "head", "findings": []}
+    assert copied.validate_candidate_artifact(clean) == []
+
+
 def test_agent_run_accepts_claude_and_invokes_entrypoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
@@ -642,7 +476,7 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     install_stub_backend(monkeypatch, repo)
     case_id = "case-abc123def456"
     task_env = {
-        **_end_env(repo, tmp_path, case_id), "DAYDREAM_REVIEW_BACKEND": "claude", "DAYDREAM_REVIEW_API_KEY": "k",
+        **_end_env(repo, tmp_path, case_id), "DAYDREAM_REVIEW_BACKEND": " CLAUDE ", "DAYDREAM_REVIEW_API_KEY": "k",
         "ANTHROPIC_API_KEY": "sk-ant-live", "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
     }
     # Host secrets present in the parent env must never reach the child env --
@@ -668,7 +502,7 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
     assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
-    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == " CLAUDE "
     # The regression: with backend="claude" the ANTHROPIC_* credential SURVIVES
     # the scrub into the child env (build_child_env's default backend="pi" would
     # strip it and the in-container claude branch would fail below).

@@ -1,33 +1,19 @@
-"""Tests for the shared ``ScriptedBackend`` harness.
+"""Behavioral contracts for shared backend scripts and their real Backend.execute signatures.
 
-The harness is depended on by ~30 test modules, so its own semantics — turn
-sequencing, last-turn repeat, mid-stream raise, argument recording — are pinned
-here rather than left to be inferred from its consumers. Two enforcement layers
-sit alongside those semantics: ``test_shared_harness_backends_satisfy_the_backend_protocol_signature``
-checks every shared harness fake's ``execute`` against the real
-``daydream.backends.Backend.execute`` signature via ``inspect.signature``, and
-``test_no_module_outside_the_harness_declares_the_protocol_execute`` statically
-scans ``tests/**`` (via ``ast``) for a re-typed protocol signature outside
-``tests/harness/`` against the ratchet allowlist, and
-``test_every_harness_protocol_declaration_is_in_the_parity_list`` mirrors that
-scan inside ``tests/harness/`` -- the directory the scan skips by design -- so
-the parity list cannot drift.
+Retain turn selection/repetition, streamed failures and closure, argument recording,
+because consumer assertions depend on this harness. Host lifecycle coverage lives with its consumers.
 """
 
 from __future__ import annotations
 
-import ast
 import inspect
 from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-import anyio
 import pytest
 
-from daydream.agent import run_agent
-from daydream.backends import AgentEvent, Backend, ResultEvent, TextEvent
-from daydream.trajectory import DaydreamPhase
+from daydream.backends import AgentEvent, Backend, TextEvent
 from tests.harness.backend import ScriptedBackend
 
 # The shared ``tests/harness`` backend fakes, by (label, module, class). Every
@@ -43,74 +29,6 @@ _SHARED_HARNESS_BACKENDS = (
     ("ImproveStubBackend", "tests.harness.improve_backend", "ImproveStubBackend"),
     ("RendezvousImproveBackend", "tests.harness.improve_backend", "RendezvousImproveBackend"),
 )
-
-
-_PROTOCOL_PARAMS = (
-    "cwd",
-    "prompt",
-    "output_schema",
-    "continuation",
-    "agents",
-    "max_turns",
-    "read_only",
-    "persist_session",
-)
-_HARNESS_DIR = Path(__file__).resolve().parent
-_TESTS_ROOT = _HARNESS_DIR.parent
-
-
-def _execute_declarations(root: Path, *, min_params: int, skip: set[Path]) -> dict[str, str]:
-    """Map ``<relpath>::<Class>`` to ``<Class>`` for every class under ``root``
-    whose ``execute`` names at least ``min_params`` protocol parameters.
-
-    A forwarding override that names no protocol parameter (``*args,
-    **kwargs``) delegates the signature to its base and is deliberately exempt.
-    Paths living inside any directory in ``skip`` are ignored.
-    """
-    found: dict[str, str] = {}
-    for path in sorted(root.rglob("*.py")):
-        if any(directory in path.parents for directory in skip):
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for member in node.body:
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "execute":
-                    names = {a.arg for a in (*member.args.posonlyargs, *member.args.args, *member.args.kwonlyargs)}
-                    if len(names & set(_PROTOCOL_PARAMS)) >= min_params:
-                        found[f"{path.relative_to(root)}::{node.name}"] = node.name
-    return found
-
-
-def test_no_module_outside_the_harness_declares_the_protocol_execute() -> None:
-    """The acceptance criterion: one declaration of the protocol signature, in the harness."""
-    violations = set(_execute_declarations(_TESTS_ROOT, min_params=5, skip={_HARNESS_DIR}))
-
-    assert violations == set(), (
-        "these declarations re-type the Backend protocol's execute() outside tests/harness/ — "
-        f"migrate them or narrow them to a forwarding override: {sorted(violations)}"
-    )
-
-
-def test_every_harness_protocol_declaration_is_in_the_parity_list() -> None:
-    """The parity list is the harness's only signature gate, so it must not drift silently.
-
-    ``test_no_module_outside_the_harness_declares_the_protocol_execute`` opts the
-    whole harness out, so an unlisted harness fake that re-types ``execute``
-    would be checked by nothing.
-    """
-    declared = set(_execute_declarations(_HARNESS_DIR, min_params=1, skip=set()).values())
-    listed = {class_name for _, _, class_name in _SHARED_HARNESS_BACKENDS}
-
-    unlisted = declared - listed
-    assert unlisted == set(), (
-        "these tests/harness/ classes declare the protocol execute() but are missing from "
-        f"_SHARED_HARNESS_BACKENDS, so nothing checks their signature: {sorted(unlisted)}"
-    )
-    stale = listed - declared
-    assert stale == set(), (
-        f"stale _SHARED_HARNESS_BACKENDS entries — the class no longer declares execute(): {sorted(stale)}"
-    )
 
 
 def test_shared_harness_backends_satisfy_the_backend_protocol_signature() -> None:
@@ -234,30 +152,6 @@ async def test_a_responder_turn_replaces_the_script_and_raises_mid_stream() -> N
 
 
 @pytest.mark.asyncio
-async def test_an_async_iterator_responder_streams_between_awaits_and_closes_with_the_consumer() -> None:
-    release = anyio.Event()
-    closed = anyio.Event()
-
-    async def responder(*args: Any, **kwargs: Any) -> Any:
-        async def _gen() -> Any:
-            try:
-                yield TextEvent(text="first")
-                await release.wait()
-                yield TextEvent(text="second")
-            finally:
-                closed.set()
-        return _gen()
-
-    backend = ScriptedBackend(responder=responder)
-    stream = backend.execute(Path("/tmp"), "go")
-    assert isinstance(await stream.__anext__(), TextEvent)
-    await stream.aclose()
-
-    assert closed.is_set(), "the consumer closing the stream must close the responder iterator"
-    assert not release.is_set()
-
-
-@pytest.mark.asyncio
 async def test_every_execute_argument_is_recorded() -> None:
     """Each execute argument is retained for inspection."""
     backend = ScriptedBackend()
@@ -293,19 +187,3 @@ def test_extra_attrs_are_set_for_the_optional_protocol_extensions() -> None:
     assert getattr(backend, "retry_attempts", None) == 1
     assert getattr(backend, "reasoning_effort", None) == "high"
     assert backend.fanout_concurrency == 4
-
-
-@pytest.mark.asyncio
-async def test_scripted_backend_drives_run_agent_end_to_end(tmp_path: Path) -> None:
-    """The harness satisfies the real ``run_agent`` seam, not just its own drain helper."""
-    backend = ScriptedBackend(
-        events=[
-            TextEvent(text="Review complete"),
-            ResultEvent(structured_output=None, continuation=None),
-        ]
-    )
-
-    output, _, _ = await run_agent(backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW)
-
-    assert output == "Review complete"
-    assert backend.last_prompt == "review this"

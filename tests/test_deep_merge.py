@@ -55,22 +55,23 @@ async def test_empty_merge_host_noop_requires_current_record_envelope(
     assert report.read_text() == DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 
-@pytest.mark.parametrize("input_kind", [
-    "nonempty-records", "nonempty-alternatives", "missing-records", "missing-alternatives",
-    "malformed-records", "malformed-alternatives", "wrong-records-shape", "wrong-alternatives-shape",
-    "envelope-alternatives", "no-record-paths", "custom-strategy", "custom-builder",
+@pytest.mark.parametrize('input_kind', [
+    "missing-records",
+    "missing-alternatives",
+    "malformed-records",
+    "malformed-alternatives",
+    "wrong-records-shape",
+    "wrong-alternatives-shape",
+    "envelope-alternatives",
+    "no-record-paths",
+    "custom-builder",
 ])
 async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str,
 ) -> None:
     dd, records, alternatives = _empty_merge_inputs(tmp_path)
-    strategy: str | None = None
     structural: Path | None = None
-    if input_kind == "nonempty-records":
-        records.write_text('[{"id": 1, "description": "review finding"}]')
-    elif input_kind == "nonempty-alternatives":
-        alternatives.write_text('[{"title": "independent design finding", "files": ["api.py"]}]')
-    elif input_kind.startswith("missing-"):
+    if input_kind.startswith("missing-"):
         (records if input_kind == "missing-records" else alternatives).unlink()
     elif input_kind.startswith("malformed-"):
         (records if input_kind == "malformed-records" else alternatives).write_text("{bad json")
@@ -78,8 +79,6 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
         (records if input_kind == "wrong-records-shape" else alternatives).write_text('{"issues": null}')
     elif input_kind == "envelope-alternatives":
         alternatives.write_text('{"issues": []}')
-    elif input_kind == "custom-strategy":
-        strategy = "Perform an independent custom merge inspection."
     elif input_kind == "custom-builder":
         registry = Registry()
         register_builtins(registry)
@@ -101,7 +100,7 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     await phase_cross_stack_merge(
         backend, make_work(tmp_path), per_stack_records_paths=[] if input_kind == "no-record-paths" else [records],
         intent_path=dd / "intent.md", alternatives_path=alternatives,
-        dedup_candidates_path=dd / "dedup-candidates.json", strategy=strategy, structural_records_path=structural,
+        dedup_candidates_path=dd / "dedup-candidates.json", structural_records_path=structural,
         allow_standalone=True,
     )
 

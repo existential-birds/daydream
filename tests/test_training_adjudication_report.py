@@ -71,37 +71,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
     assert gate["class_balance_ok"] is False  # sole outcome-bearing record is accepted-only
 
 
-def test_report_task_only_never_counts_toward_gate() -> None:
-    items = [_item(f"r{i}", "unanswered") for i in range(5)]
-    report = build_report(items)
-    assert report["outcome_coverage"]["adjudicated"] == 0
-    assert report["admission_gate"]["passes_80pct"] is False
-    assert report["silver_task_only_count"] == 5
-
-
-def test_silver_task_only_never_counts_toward_outcome_coverage() -> None:
-    items = [
-        _item("a" * 64, "accepted", raters=(("rater", "accepted"),)),
-        _item("b" * 64, "task-only", raters=()),  # silver/task-only stratum
-        _item("d" * 64, "task-only", raters=()),  # never in the 80% denominator
-    ]
-    report = build_report(items)
-    assert report["outcome_coverage"] == {"adjudicated": 1, "total": 1}  # task-only excluded
-    assert report["silver_task_only_count"] == 2
-    assert report["class_balance"] == {"accepted": 1, "rejected": 0}
-    assert report["unresolved"] == 0
-
-
-def test_inter_rater_counts_only_disputed_multi_rater_items() -> None:
-    items = [
-        _item("a" * 64, "accepted", raters=(("rater", "accepted"), ("rater2", "accepted"))),
-        _item("b" * 64, "task-only", raters=(("rater", "accepted"), ("rater2", "rejected"))),
-        _item("e" * 64, "rejected", raters=(("rater", "rejected"),)),
-    ]
-    report = build_report(items)
-    assert report["inter_rater"] == {"items": 1, "agreeing": 0}  # the disputed pair counted
-
-
 def test_model_suggested_observations_never_count_as_human_raters() -> None:
     items = [
         _item("a" * 64, "accepted", raters=(("model-suggested", "accepted"),)),

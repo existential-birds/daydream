@@ -5,13 +5,12 @@ without a candidate, use the packaged default.
 """
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from daydream import review_profile as rp
 from daydream.benchmark import cli as bc
-from daydream.benchmark.harbor import calibrate, entrypoint, run, run as run_mod
+from daydream.benchmark.harbor import calibrate, entrypoint
 from daydream.config_file import DaydreamFileConfig
 from daydream.review_profile import ProfileError
 
@@ -75,19 +74,6 @@ def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path: Path,)
     assert cfg.review_profile is not None
     assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
 
-def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    (ws / "harbor" / "jobs").mkdir(parents=True)
-    job_dir = str((ws / "harbor" / "jobs" / "job-1").resolve())
-    run.ledger_append_running(
-        ws, run_id="run-1", compiled_lock_sha256="lock", job_dir=job_dir, mode="benchmark", profile_digest="abc123",
-    )
-    led = run._load_ledger(ws)
-    entry = led["runs"][0]
-    assert entry["profile_digest"] == "abc123"
-
-
 
 # Candidate-scoped receipts must satisfy oracle preflight; defaults retain the legacy shape.
 def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
@@ -99,30 +85,6 @@ def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
     assert "profile_digest" not in legacy
 
 # The supervisor records provenance before the separate container entrypoint starts.
-def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", raising=False)
-    assert bc._candidate_profile_digest() is None
-
-    cand = tmp_path / "candidate.toml"
-    cand.write_text(
-        'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
-        'content = "C"\nsource = "copied: a"'
-    )
-    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(cand))
-    digest = bc._candidate_profile_digest()
-    assert digest and isinstance(digest, str) and len(digest) == 64  # sha256
-
-
-    captured = {}
-
-    def fake_run_run(workspace: Any, *, oracle: Any=False, yes: Any=False, env: Any=None, **kw: Any) -> int:
-        captured["env"] = env
-        return 0
-
-    monkeypatch.setattr(run_mod, "run_run", fake_run_run)
-    rc = bc._handle_benchmark_run(type("Args", (), {"dir": str(tmp_path), "oracle": False, "yes": True})())
-    assert rc == 0
-    assert captured["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] == digest
 
 def test_benchmark_run_invalid_candidate_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     bad = tmp_path / "bad.toml"

@@ -149,24 +149,6 @@ def _decide(
 
 # --- Sequence eligibility ---------------------------------------------------
 
-def test_cross_module_rule_fires_on_a_real_import_edge(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "def run(x):\n    return x + 1\n",
-        "core/util.py": "def util(x):\n    return x\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-
-    assert eligibility.code_files == ["api/handler.py", "core/engine.py", "core/util.py"]
-    assert eligibility.modules == {"api/handler.py": "api", "core/engine.py": "core", "core/util.py": "core"}
-    assert eligibility.cross_module_edges == 1
-    assert eligibility.sequence.eligible
-    assert eligibility.sequence.rule == "cross-module"
-    assert "2 modules" in eligibility.sequence.reason
-    assert eligibility.eligible_kinds() == ["sequence"]
-
 def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> None:
     """Two services and no import edge still qualify: HTTP boundaries have no edge."""
     repo = tmp_path / "repo"
@@ -191,6 +173,7 @@ def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> Non
     assert eligibility.modules == {"services/a/main.py": "services/a", "services/b/main.py": "services/b"}
     assert eligibility.sequence.rule == "cross-service"
     assert "2 services (a, b)" in eligibility.sequence.reason
+    assert eligibility.eligible_kinds() == ["sequence"]
 
 def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -222,33 +205,31 @@ def test_lowered_thresholds_admit_a_two_file_cross_module_change(tmp_path: Path)
     assert lowered.sequence.rule == "cross-module"
     assert lowered.cross_module_edges == 1
 
-def test_root_level_file_module_is_dot(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {"main.py": "def main():\n    return 1\n", "api/a.py": "def a():\n    return 1\n"}
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-    assert eligibility.modules == {"main.py": ".", "api/a.py": "api"}
 
 def test_tests_and_docs_are_not_code_files(tmp_path: Path) -> None:
-    """Markdown lands in the generic bucket and test paths are excluded outright."""
+    """One real changed inventory isolates every test-name rule from production lookalikes."""
+    test_paths = (
+        "tests/test_runner.py", "upper/TESTS/helper.py", "src/__tests__/widget.tsx", "app/spec/models/user.py",
+        "app/specs/models/user.py", "pkg/test/fixture.go", "test_runner.py", "runner_test.go", "src/tests.py",
+        "src/test.py", "src/WidgetTest.py", "src/WidgetTests.py", "src/widget.test.ts", "src/widget.spec.ts",
+        "deep/nesting/tests/a/b/c.py",
+    )
+    code_paths = (
+        "main.py", "daydream/runner.py", "src/widget.tsx", "src/latest.py", "src/contest.py",
+        "src/protest_handler.go", "testing/harness.py", "src/testable.py",
+    )
+    head = {path: "package fixture\n" if path.endswith(".go") else
+            "export const value = 1;\n" if path.endswith((".ts", ".tsx")) else "VALUE = 1\n"
+            for path in (*test_paths, *code_paths)}
+    head["README.md"] = "# documentation\n"
     repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "def handle():\n    return 1\n",
-        "tests/test_handler.py": "def test_handle():\n    assert True\n",
-        "api/__tests__/helper.py": "def helper():\n    return 1\n",
-        "api/handler.spec.ts": "it('x', () => {});\n",
-        "README.md": "# docs\n",
-    }
     changed, ranges = _diff_repo(repo, {}, head)
     eligibility = _decide(repo, changed, ranges)
-    assert eligibility.code_files == ["api/handler.py"]
+    assert eligibility.code_files == sorted(code_paths)
+    assert eligibility.modules["main.py"] == "."
+    assert not set(test_paths).intersection(eligibility.modules)
+    assert "README.md" not in eligibility.modules
 
-def test_generic_docs_do_not_contribute_code_files(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {"docs/guide.md": "# guide\n"})
-    stacks = detect_stacks(sorted(changed))
-    assert "docs/guide.md" in {path for stack in stacks for path in stack.files}
-    assert _decide(repo, changed, ranges).code_files == []
 
 def test_sharded_stack_names_classify_like_unsharded_ones(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -256,40 +237,43 @@ def test_sharded_stack_names_classify_like_unsharded_ones(tmp_path: Path) -> Non
     sharded = [StackAssignment(stack_name="python#2", files=["api/a.py"])]
     assert _decide(repo, changed, ranges, stacks=sharded).code_files == ["api/a.py"]
 
-def test_cross_module_edges_are_counted_per_direction(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/a.py": "from core.b import b\n\n\ndef a():\n    return b()\n",
-        "core/b.py": "from api.a import a\n\n\ndef b():\n    return a\n",
-        "core/c.py": "def c():\n    return 3\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    assert _decide(repo, changed, ranges).cross_module_edges == 2
-
 
 # --- Flowchart eligibility and branch counting ------------------------------
 
-@pytest.mark.parametrize(
-    "path,source,name,branch_points",
-    [
-        pytest.param("api/sample.py", PYTHON_SOURCE, "outer", 4, id="python"),
-        pytest.param("api/sample.ts", TYPESCRIPT_SOURCE, "handle", 5, id="typescript"),
-        pytest.param("api/sample.go", GO_SOURCE, "Handle", 5, id="go"),
-        pytest.param("api/sample.rs", RUST_SOURCE, "handle", 6, id="rust"),
-    ],
-)
-def test_branch_points_are_counted_per_language(
-    tmp_path: Path, path: str, source: str, name: str, branch_points: int
-) -> None:
+def test_multilingual_function_inventory_preserves_inner_ownership_thresholds_and_tie_order(tmp_path: Path) -> None:
+    """One native sweep sorts real language siblings without counting nested branches twice."""
+    two_branches = "def {name}(a, b):\n    if a:\n        return 1\n    if b:\n        return 2\n    return 3\n"
+    head = {
+        "python/sample.py": PYTHON_SOURCE,
+        "python/ties.py": two_branches.format(name="first") + "\n\n" + two_branches.format(name="second"),
+        "python/plain.py": (
+            "def cheap():\n    return 1\n\n\ndef weak(value):\n    if value:\n        return 1\n    return 2\n"
+        ),
+        "typescript/sample.ts": TYPESCRIPT_SOURCE,
+        "go/sample.go": GO_SOURCE,
+        "rust/sample.rs": RUST_SOURCE,
+    }
     repo = tmp_path / "repo"
-    changed, ranges = _diff_repo(repo, {}, {path: source})
-    eligibility = _decide(repo, changed, ranges)
-
-    top = eligibility.candidate_roots[0]
-    assert (top.file, top.name, top.branch_points) == (path, name, branch_points)
-    assert eligibility.flowchart.eligible
-    assert eligibility.flowchart.rule == "branch-points"
-    assert f"most: {branch_points} in {name}" in eligibility.flowchart.reason
+    changed, ranges = _diff_repo(repo, {}, head)
+    eligibility = _decide(repo, changed, ranges, thresholds=DiagramThresholds(min_branch_points=2))
+    assert [(root.file, root.name, root.line, root.branch_points) for root in eligibility.function_branch_counts] == [
+        ("rust/sample.rs", "handle", 1, 6), ("go/sample.go", "Handle", 3, 5),
+        ("typescript/sample.ts", "handle", 1, 5), ("python/sample.py", "outer", 1, 4),
+        ("python/sample.py", "inner", 10, 3), ("python/ties.py", "first", 1, 2),
+        ("python/ties.py", "second", 9, 2), ("python/plain.py", "weak", 5, 1),
+    ]
+    assert [(root.name, root.end_line) for root in eligibility.function_branch_counts
+            if root.file == "python/sample.py"] == [("outer", 18), ("inner", 17)]
+    # The native sweep retains zero-branch definitions; persisted diagnostics omit
+    # zero but retain the one-branch sibling below the two-branch candidate floor.
+    assert [(root.name, root.branch_points) for root in
+            count_function_branch_points(repo, "python/plain.py", ranges["python/plain.py"])] == [
+        ("cheap", 0), ("weak", 1),
+    ]
+    assert eligibility.candidate_roots == eligibility.function_branch_counts[:-1]
+    assert eligibility.code_files == sorted(head)
+    assert eligibility.flowchart.rule == "branch-points" and eligibility.flowchart.eligible
+    assert "most: 6 in handle" in eligibility.flowchart.reason
     assert eligibility.eligible_kinds() == ["flowchart"]
 
 def test_unsupported_language_contributes_no_branch_points(tmp_path: Path) -> None:
@@ -298,15 +282,6 @@ def test_unsupported_language_contributes_no_branch_points(tmp_path: Path) -> No
     (repo / "api/sample.rb").write_text("def handle(a)\n  if a\n    1\n  end\nend\n")
     assert count_function_branch_points(repo, "api/sample.rb", [(1, 5)]) == []
 
-def test_branch_points_belong_to_the_innermost_function(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    (repo / "api").mkdir(parents=True)
-    (repo / "api/sample.py").write_text(PYTHON_SOURCE)
-
-    roots = count_function_branch_points(repo, "api/sample.py", [(1, 18)])
-    assert [(root.name, root.line, root.end_line, root.branch_points) for root in roots] == [
-        ("outer", 1, 18, 4), ("inner", 10, 17, 3),
-    ]
 
 def test_only_branch_points_inside_a_changed_hunk_are_counted(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -333,31 +308,7 @@ def test_no_hunks_means_no_changed_functions(tmp_path: Path) -> None:
 def test_missing_file_contributes_no_branch_points(tmp_path: Path) -> None:
     assert count_function_branch_points(tmp_path, "api/gone.py", [(1, 10)]) == []
 
-def test_candidate_roots_are_ordered_by_branch_points_then_file_then_line(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    two_branches = "def {name}(a, b):\n    if a:\n        return 1\n    if b:\n        return 2\n    return 3\n"
-    head = {
-        "api/b.py": PYTHON_SOURCE,
-        "api/a.py": two_branches.format(name="first") + "\n\n" + two_branches.format(name="second"),
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges, thresholds=DiagramThresholds(min_branch_points=2))
 
-    assert [(root.file, root.name, root.branch_points) for root in eligibility.candidate_roots] == [
-        ("api/b.py", "outer", 4), ("api/b.py", "inner", 3), ("api/a.py", "first", 2), ("api/a.py", "second", 2),
-    ]
-    assert eligibility.function_branch_counts == eligibility.candidate_roots
-
-def test_functions_below_the_branch_threshold_are_reported_but_not_candidates(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    head = {"api/a.py": "def a(x):\n    if x:\n        return 1\n    return 2\n"}
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-
-    assert [(root.name, root.branch_points) for root in eligibility.function_branch_counts] == [("a", 1)]
-    assert eligibility.candidate_roots == []
-    assert not eligibility.flowchart.eligible
-    assert "No changed function has >= 3 changed branch points" in eligibility.flowchart.reason
 
 def test_raised_branch_threshold_disables_the_flowchart(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -501,16 +452,25 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "def run(x):\n    return x\n",
+        "core/engine.py": "from api.handler import handle\n\n\ndef run(x):\n    return x\n",
         "core/util.py": PYTHON_SOURCE,
     }
     changed, ranges = _diff_repo(repo, {}, head)
-    payload: dict[str, Any] = _decide(repo, changed, ranges).to_dict()
+    eligibility = _decide(repo, changed, ranges)
+    assert isinstance(eligibility.candidate_roots[0], CandidateRoot)
+    payload: dict[str, Any] = eligibility.to_dict()
 
     assert set(payload) == {
         "code_files", "modules", "services", "cross_module_edges", "function_branch_counts", "candidate_roots",
         "sequence", "flowchart", "thresholds", "force",
     }
+    assert payload["code_files"] == ["api/handler.py", "core/engine.py", "core/util.py"]
+    assert payload["modules"] == {"api/handler.py": "api", "core/engine.py": "core", "core/util.py": "core"}
+    assert payload["cross_module_edges"] == 2
+    assert payload["sequence"]["eligible"] is True
+    assert payload["sequence"]["rule"] == "cross-module"
+    assert "2 modules" in payload["sequence"]["reason"]
+    assert eligibility.eligible_kinds() == ["sequence", "flowchart"]
     assert set(payload["sequence"]) == {"eligible", "rule", "reason"}
     assert payload["thresholds"] == {"min_code_files": 3, "min_modules": 2, "min_branch_points": 3}
     assert payload["candidate_roots"][0] == {
@@ -519,10 +479,6 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
     assert payload["force"] == "auto"
     assert json.loads(json.dumps(payload)) == payload
 
-def test_candidate_root_and_thresholds_are_re_exported() -> None:
-    root = CandidateRoot(file="a.py", name="f", line=1, end_line=9, branch_points=3)
-    assert (root.file, root.branch_points) == ("a.py", 3)
-    assert DiagramThresholds() == DiagramThresholds(min_code_files=3, min_modules=2, min_branch_points=3)
 
 
 # --- Service ownership --------------------------------------------------------

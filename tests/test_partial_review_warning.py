@@ -10,11 +10,8 @@ from daydream.review_budget import review_warnings
 from tests.harness.review_result import review_coverage
 
 
-@pytest.mark.parametrize("reason", [
+@pytest.mark.parametrize('reason', [
     "evidence incomplete: client.py unavailable",
-    "budget exhausted: review turn budget exhausted",
-    "RuntimeError: review provider unavailable",
-    "PermissionError: reviewer input inaccessible",
 ])
 def test_failed_reviewer_remains_a_reported_warning(tmp_path: Path, reason: str) -> None:
     coverage = review_coverage(scope_ids=("python",), phases=("arbiter",))

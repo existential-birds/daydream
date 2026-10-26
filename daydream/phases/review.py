@@ -634,7 +634,6 @@ async def phase_per_stack_reviews(
                             structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
                                 stage_inputs=input_factory.prepare,
                                 canonicalize_sources=input_factory.canonicalize_source_selectors,
-                                wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
                                 read_only=read_only,
                                 run_context=run_context,
                             )

@@ -11,22 +11,6 @@ def _raw_item(**overrides: object) -> dict[str, object]:
     item.update(overrides)
     return item
 
-def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
-    """Every item receives a durable item_uid beside its reassigned display ordinal,
-    including records arriving with duplicate or missing IDs.
-    """
-    raw = [_raw_item(id=1, description="x"),
-           _raw_item(id=1, description="y", lens="structural"),
-           {k: v for k, v in _raw_item(description="z").items() if k != "id"}]
-
-    out = normalize_items(raw)
-
-    assert [item["id"] for item in out] == [1, 2, 3]
-    uids = [item["item_uid"] for item in out]
-    assert all(isinstance(uid, str) and uid for uid in uids), uids
-    assert len(set(uids)) == len(uids), uids
-    # The inputs are never mutated: the durable handle lands on the fresh dicts.
-    assert all("item_uid" not in item for item in raw), raw
 
 def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
     """Changing the dense display ordinal preserves the existing durable item_uid."""
@@ -36,6 +20,8 @@ def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
     out = normalize_items(raw)
 
     assert [item["id"] for item in out] == [1, 2]
+    assert [item["id"] for item in raw] == [42, 42]
+    assert "item_uid" not in raw[1], "normalization must copy rather than stamp the provider payload"
     assert out[0]["item_uid"] == "item:9", "a minted handle was reassigned"
     assert out[1]["item_uid"] not in ("", None) and out[1]["item_uid"] != "item:9", out
 

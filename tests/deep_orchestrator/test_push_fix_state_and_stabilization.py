@@ -217,8 +217,8 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
     assert backend.read_only_calls == [True]
     assert outcomes["item:a"]["path"] == "b.py"
 
-@pytest.mark.parametrize("prior_verdict", [None, "resolved", "unresolved", "wrong_target"])
-@pytest.mark.parametrize("final_verdict", ["unresolved", "wrong_target", "regressed"])
+@pytest.mark.parametrize(('prior_verdict', 'final_verdict'), [(None, 'unresolved'), ('resolved', 'wrong_target'),
+    ('unresolved', 'wrong_target'), ('wrong_target', 'regressed')])
 async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_verdict: str | None, final_verdict: str,
 ) -> None:
@@ -245,7 +245,9 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", _actionable)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _no_test)
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (evidence,)),)
+    test_result = TestAndHealResult(True, 0, True, False, (evidence,))
+    assert test_result.repairs == ()
+    result = await finalize_retained_tree_after_test(ctx, test_result)
 
     if prior_verdict in {"unresolved", "wrong_target"} and final_verdict != "regressed":
         assert result is None

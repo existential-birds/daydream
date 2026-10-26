@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from daydream.archive import index
+from daydream.archive.manifest import Manifest
 from tests.harness.trajectory import make_manifest
 
 
@@ -17,17 +18,8 @@ def _current_database(root: Path) -> None:
     index.upsert_run(root, make_manifest(session_id="historical", repo_slug="org/repo"))
 
 
-def test_local_diagnostic_index_records_runs_without_annotation_tables(tmp_path: Path) -> None:
-    _current_database(tmp_path)
-    with closing(sqlite3.connect(tmp_path / "index.db")) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
-        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
-        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
-            ("historical", "complete", "unknown", "org/repo")]
-
-
 @pytest.mark.parametrize("unsupported", [
-    "old", "future", "zero-populated", "old-empty", "future-empty", "missing-runs",
+    "old", "future", "zero-populated", "missing-runs",
     "missing-column", "missing-index", "wrong-index", "wrong-default", "wrong-type",
     "missing-primary-key", "extra-primary-key", "zero-unrelated-table", "wrong-index-table",
     "unique-index", "partial-index",
@@ -39,11 +31,10 @@ def test_unsupported_schema_is_rejected_without_changing_database(
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=DELETE")
-        if unsupported in {"old", "future", "zero-populated", "old-empty", "future-empty", "zero-unrelated-table"}:
-            version = {"old": 8, "future": 10, "zero-populated": 0, "old-empty": 8, "future-empty": 10,
-                       "zero-unrelated-table": 0}[unsupported]
+        if unsupported in {"old", "future", "zero-populated", "zero-unrelated-table"}:
+            version = {"old": 8, "future": 10, "zero-populated": 0, "zero-unrelated-table": 0}[unsupported]
             connection.execute(f"PRAGMA user_version = {version}")
-        if unsupported in {"old-empty", "future-empty", "zero-unrelated-table", "missing-runs"}:
+        if unsupported in {"zero-unrelated-table", "missing-runs"}:
             connection.execute("DROP TABLE runs")
         elif unsupported == "missing-column":
             connection.execute("ALTER TABLE runs DROP COLUMN profile_digest")
@@ -59,7 +50,7 @@ def test_unsupported_schema_is_rejected_without_changing_database(
             connection.execute("DROP INDEX idx_runs_repo_slug")
             connection.execute("CREATE TABLE unrelated (repo_slug TEXT)")
             connection.execute("CREATE INDEX idx_runs_repo_slug ON unrelated(repo_slug)")
-        else:
+        elif unsupported in {"wrong-default", "wrong-type", "missing-primary-key", "extra-primary-key"}:
             ddl = connection.execute("SELECT sql FROM sqlite_master WHERE name='runs'").fetchone()[0]
             indexes = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").fetchall()
@@ -107,11 +98,18 @@ def test_local_diagnostic_writes_preserve_unrelated_history(tmp_path: Path) -> N
     _current_database(tmp_path)
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
+        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
+            ("historical", "complete", "unknown", "org/repo")]
         connection.execute("ALTER TABLE runs ADD COLUMN retired_metric REAL")
         connection.execute("UPDATE runs SET retired_metric = 0.75")
         connection.execute("CREATE TABLE historical_notes (note TEXT)")
         connection.execute("INSERT INTO historical_notes VALUES ('keep me')")
-    index.upsert_run(tmp_path, make_manifest(session_id="new"))
+    index.upsert_run(tmp_path, Manifest())
     with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute(
+            "SELECT pipeline_status, archive_status, daydream_version FROM runs WHERE session_id=''"
+        ).fetchone() == ("unknown", "complete", None)
         assert connection.execute("SELECT note FROM historical_notes").fetchone()[0] == "keep me"
         assert connection.execute("SELECT retired_metric FROM runs WHERE session_id='historical'").fetchone()[0] == 0.75

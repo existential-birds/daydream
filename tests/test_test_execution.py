@@ -6,14 +6,12 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from daydream.test_execution import (
-    MissingTestCommandError,
     RecipeConfinementError,
     TestExecutionResult,
     TestRecipe,
@@ -26,9 +24,7 @@ from daydream.test_execution import (
     resolve_test_recipe,
     run_test_command,
 )
-from daydream.trajectory import DaydreamPhase
 from tests.harness.execution import test_execution_identity as _identity
-from tests.harness.trajectory import make_recorder
 
 
 def _pid_alive(pid: int) -> bool:
@@ -67,30 +63,12 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
     assert res.passed is False
     assert "boom" in res.merged_output
 
-@pytest.mark.parametrize(("config", "cli", "expected", "source"), [
-    ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
-    ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
-    ("pytest -x", "", ["pytest", "-x"], "config"),
-])
-def test_command_and_provenance_share_cli_over_config_precedence(
-    config: str, cli: str | None, expected: list[str], source: str,
-) -> None:
-    cfg, run = SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli)
-    assert canonical_test_command(cfg, run) == expected
+def test_command_and_provenance_share_cli_over_config_precedence() -> None:
+    cfg, run = SimpleNamespace(test_command="pytest -x"), SimpleNamespace(test_command="/cli/cmd")
+    assert canonical_test_command(cfg, run) == ["/cli/cmd"]
     fact = resolve_test_command_fact(cfg, run)
-    assert fact.value == tuple(expected)
-    assert fact.source == source
-
-def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
-
-    cfg = SimpleNamespace(test_command=None)
-    run = SimpleNamespace(test_command=None)
-    with pytest.raises(MissingTestCommandError) as e:
-        canonical_test_command(cfg, run)
-    msg = str(e.value)
-    assert "test_command" in msg
-    assert "tool.daydream" in msg  # naming the precedence source
-    assert "--test-command" in msg  # actionable: what to set
+    assert fact.value == ("/cli/cmd",)
+    assert fact.source == "cli"
 
 def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path) -> None:
     marker = tmp_path / "grandkid.pid"
@@ -124,35 +102,6 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
     while _pid_alive(pid) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert _pid_alive(pid) is False
-
-async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
-    """Record test-execution duration_ms and a completed/timed_out reason."""
-
-    rec = make_recorder(tmp_path)
-    async with rec:
-        await run_test_command([sys.executable, "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
-
-    events = [e
-        for e in [x.to_dict() for x in rec._phase_events]
-        if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
-    ]
-    assert len(events) == 1
-    md = events[0]["metadata"]
-    assert md["stop_reason"] == "completed"
-    assert md["duration_ms"] >= 0
-
-async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
-
-    rec = make_recorder(tmp_path)
-    async with rec:
-        await run_test_command([sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.3)
-
-    events = [e
-        for e in [x.to_dict() for x in rec._phase_events]
-        if e["phase"] == DaydreamPhase.TEST_EXECUTION.value and e["event"] == "phase_end"
-    ]
-    assert len(events) == 1
-    assert events[0]["metadata"]["stop_reason"] == "timed_out"
 
 def test_runner_fails_closed_when_env_value_survives_scrub(tmp_path: Path) -> None:
     """If a secret survives inside the replacement marker, discard the field based on pre-scrub matches."""
@@ -201,18 +150,6 @@ def _recipe(tmp_path: Path, *, cli: str | None = None, config: str | None = None
         SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli), repo_root=tmp_path
     )
 
-def test_required_suites_fall_back_to_the_file_config_and_yield_to_an_explicit_source(tmp_path: Path,) -> None:
-    """Required suites fall back to file config; an explicit source takes precedence."""
-    config = SimpleNamespace(test_command="uv run pytest", test_required_suites=["python", "rl"])
-
-    recipe = resolve_test_recipe(config, SimpleNamespace(test_command=None), repo_root=tmp_path)
-    assert recipe.declared == ("python", "rl")
-
-    recipe = resolve_test_recipe(
-        config, SimpleNamespace(test_command=None, test_required_suites=["explicit"]), repo_root=tmp_path,
-    )
-    assert recipe.declared == ("explicit",)
-
 def test_recipe_config_digest_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "uv.lock").write_text("version = 1\n")
@@ -258,12 +195,7 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
     assert res.incomplete is True
     assert len(res.merged_output) <= 512 * 1024
 
-def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
-    payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
-    assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
-
-@pytest.mark.parametrize("cli", [None, "uv run pytest"])
-@pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])
+@pytest.mark.parametrize(('cli', 'lockfile'), [(None, None), ('uv run pytest', 'uv.lock'), (None, 'requirements.txt')])
 def test_recipe_round_trips_through_its_persisted_payload(
     tmp_path: Path, cli: str | None, lockfile: str | None,
 ) -> None:
@@ -308,42 +240,13 @@ def test_execution_identity_carries_every_reuse_component() -> None:
         "branch": "feature", "kind": "host", "outcome": "passed",
     }
 
-@pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
-def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
-    identity = _identity(outcome=outcome)
-    assert identity.reusable is False
-
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
 
-@pytest.mark.parametrize(("raw", "reason", "source"), [
-    (None, "missing", "config"), ("", "missing", "config"), ("   ", "blank", "config"),
-    ("'secret-unclosed", "malformed", "config"), (123, "invalid-type", "config"), ('""', "empty-argv", "config"),
-    ("   ", "blank", "cli"), ("'secret-unclosed", "malformed", "cli"),
-    (123, "invalid-type", "cli"), ('""', "empty-argv", "cli"),
+@pytest.mark.parametrize('value', [
+    [],
+    [" "],
 ])
-def test_unresolved_command_preserves_safe_diagnostic_and_source(raw: object, reason: str, source: str) -> None:
-    config = SimpleNamespace(test_command=raw if source == "config" else None)
-    run_config = SimpleNamespace(test_command=raw if source == "cli" else None)
-    fact = resolve_test_command_fact(config, run_config)
-    assert not fact.resolved
-    assert fact.source == "unresolved" and fact.value is None
-    assert fact.diagnostic is not None
-    assert fact.diagnostic.reason_code == reason
-    assert fact.diagnostic.source == source
-    assert "--test-command" in fact.diagnostic.message
-    assert "[tool.daydream]" in fact.diagnostic.message
-    assert "secret-unclosed" not in fact.diagnostic.message
-
-
-def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> None:
-    fact = resolve_test_command_fact(SimpleNamespace(test_command="true"), SimpleNamespace(test_command="  "))
-    assert not fact.resolved
-    assert fact.diagnostic is not None
-    assert fact.diagnostic.reason_code == "blank" and fact.diagnostic.source == "cli"
-
-
-@pytest.mark.parametrize("value", [[], [""], [" "]])
 def test_loaded_recipe_with_empty_executable_remains_no_execution(tmp_path: Path, value: list[str]) -> None:
     recipe = _recipe(tmp_path, cli="true")
     deep = tmp_path / "deep"

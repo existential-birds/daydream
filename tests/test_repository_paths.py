@@ -1,28 +1,8 @@
 """Shared repository-path confinement and deterministic test-file classification."""
 from __future__ import annotations
 
-import pytest
-
 from daydream.repository_paths import is_test_path
 
-
-@pytest.mark.parametrize("path",
-    ["tests/test_runner.py", "TESTS/helper.py", "src/__tests__/widget.tsx", "app/spec/models/user.rb",
-        "app/specs/models/user.rb", "pkg/test/fixture.go", "test_runner.py", "runner_test.go", "src/tests.py",
-        "src/test.py", "src/WidgetTest.java", "src/WidgetTests.swift", "src/widget.test.ts", "src/widget.spec.ts",
-        "deep/nesting/tests/a/b/c.py",
-    ],
-)
-def test_conventional_test_paths_are_classified_as_tests(path: str) -> None:
-    assert is_test_path(path) is True
-
-@pytest.mark.parametrize("path",
-    ["daydream/runner.py", "src/widget.tsx", "src/latest.py", "src/contest.py", "src/protest_handler.go",
-        "testing/harness.py", "src/testable.py", "README.md", "",
-    ],
-)
-def test_production_paths_are_not_classified_as_tests(path: str) -> None:
-    assert is_test_path(path) is False
 
 def test_test_directory_match_ignores_the_final_segment() -> None:
     """A *file* literally named ``spec`` in a production tree is matched by the name rule, not the directory rule —

@@ -15,4 +15,10 @@
 {"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_7", "command": "/bin/zsh -lc 'unbalanced", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
 {"type": "item.started", "item": {"type": "command_execution", "id": "cmd_8", "command": "/bin/zsh -lc make test", "status": "running"}}
 {"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_8", "command": "/bin/zsh -lc make test", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_9", "command": "/bin/zsh -lc \"cmd\" extra_arg", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_9", "command": "/bin/zsh -lc \"cmd\" extra_arg", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_10", "command": "/bin/zsh -lc", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_10", "command": "/bin/zsh -lc", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
+{"type": "item.started", "item": {"type": "command_execution", "id": "cmd_11", "command": "/bin/zsh -lc echo 'hello world'", "status": "running"}}
+{"type": "item.completed", "item": {"type": "command_execution", "id": "cmd_11", "command": "/bin/zsh -lc echo 'hello world'", "status": "completed", "exit_code": 0, "aggregated_output": "ok"}}
 {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}

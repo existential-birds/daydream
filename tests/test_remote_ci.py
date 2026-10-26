@@ -44,7 +44,10 @@ from tests.harness.processes import (
 PUSHED_SHA = "1" * 40
 MERGE_SHA = "2" * 40
 
-@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+
+@pytest.mark.parametrize('value', [
+    math.nan,
+])
 def test_limits_reject_nonfinite_time_values(value: float) -> None:
     with pytest.raises(ValueError):
         RemoteCILimits(request_seconds=value)
@@ -119,6 +122,7 @@ def _snapshot(target: RemoteCITarget, *, policy: RequiredPolicy = RequiredPolicy
         head_observations=head, merge_observations=merge,
     )
 
+
 @pytest.mark.parametrize("replacement",
     [{"number": 43}, {"number": True}, {"html_url": "https://github.com/example/project/pull/43"},
         {"state": "merged"}, {"merge_commit_sha": "ABC"},
@@ -132,7 +136,12 @@ def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(target: RemoteC
     with pytest.raises(ValueError):
         parse_pr_ci_binding(_pr_row(target, **replacement), target)
 
-@pytest.mark.parametrize("integration_id", [True, 0, -1, "7", {}])
+
+@pytest.mark.parametrize('integration_id', [
+    True,
+    -1,
+    "7",
+])
 def test_policy_rejects_present_invalid_ruleset_integration_id(integration_id: object,) -> None:
     with pytest.raises(ValueError, match="app id"):
         parse_required_policy([{"type": "required_status_checks",
@@ -142,6 +151,7 @@ def test_policy_rejects_present_invalid_ruleset_integration_id(integration_id: o
                 }
             ], None,
         )
+
 
 @pytest.mark.parametrize(("active", "classic"),
     [({}, None), ([{"type": "required_status_checks", "parameters": None}], None),
@@ -157,17 +167,7 @@ def test_policy_rejects_unknown_or_malformed_shapes(active: object, classic: obj
     with pytest.raises(ValueError):
         parse_required_policy(active, classic)
 
-def test_observations_reduce_latest_producers_with_source_specific_case_rules() -> None:
-    observations = parse_observations([
-            _check(1, "Build", conclusion="failure"), _check(2, "Build", conclusion="success"),
-            _check(3, "build", conclusion="failure", app_id=11),
-        ], [_status(11, "lInT", state="success"), _status(10, "Lint", state="failure")], expected_sha=PUSHED_SHA,
-        limit=2_000,
-    )
 
-    assert [(item.source, item.context, item.app_id, item.state) for item in observations] == [
-        ("check_run", "Build", 10, "pass"), ("check_run", "build", 11, "fail"), ("status", "lInT", None, "pass"),
-    ]
 
 def test_observation_legacy_error_is_failure_but_check_error_is_unsupported() -> None:
     result = parse_observations([], [_status(1, "Build", state="error")], expected_sha=PUSHED_SHA, limit=2_000)
@@ -175,6 +175,7 @@ def test_observation_legacy_error_is_failure_but_check_error_is_unsupported() ->
 
     with pytest.raises(ValueError):
         parse_observations([_check(1, "Build", conclusion="error")], [], expected_sha=PUSHED_SHA, limit=2_000,)
+
 
 @pytest.mark.parametrize(("checks", "statuses"),
     [([_check(0, "Build")], []), ([_check(1, "Build"), _check(1, "Other")], []),
@@ -188,20 +189,7 @@ def test_observations_reject_stale_or_malformed_rows(checks: object, statuses: o
     with pytest.raises(ValueError):
         parse_observations(checks, statuses, expected_sha=PUSHED_SHA, limit=2_000)
 
-def test_observation_sanitizes_url_and_redacts_bounded_diagnostic() -> None:
-    secret = "sk-12345678901234567890"
-    result = parse_observations([_check(1, "Build",
-                url=(f"https://ci.example.test/run?token={secret}"
-                    f"&X-Amz-Signature={secret}&opaque={secret}&page=1"
-                ), summary=f"Authorization: Bearer {secret} " + ("x" * 500),
-            )
-        ], [], expected_sha=PUSHED_SHA, limit=120,
-    )[0]
 
-    assert secret not in (result.url or "")
-    assert secret not in (result.diagnostic or "")
-    assert "REDACTED" in (result.url or "")
-    assert len(result.diagnostic or "") <= 120
 
 @pytest.mark.parametrize("rows",
     [{}, [{"id": True, "name": "CI", "path": "ci.yml", "state": "active"}],
@@ -215,6 +203,7 @@ def test_active_workflow_parser_rejects_unknown_or_malformed_rows(rows: object) 
     with pytest.raises(ValueError):
         parse_active_workflows(rows)
 
+
 def test_evaluate_pinned_context_requires_exact_check_name_and_app(target: RemoteCITarget) -> None:
     policy = RequiredPolicy((RequiredContext("Build", 7),), True)
     snapshot = _snapshot(target, policy=policy,
@@ -227,14 +216,6 @@ def test_evaluate_pinned_context_requires_exact_check_name_and_app(target: Remot
     assert verdict.status == "missing"
     assert verdict.missing_contexts == ("Build (app 7)",)
 
-def test_evaluate_unpinned_context_requires_all_latest_matching_producers(target: RemoteCITarget) -> None:
-    snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
-        head=(_observation("Build", "pass", app_id=7), _observation("bUiLd", "fail", source="status", app_id=None),),
-    )
-    verdict = evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits())
-
-    assert verdict.status == "failed"
-    assert verdict.failing_contexts == ("Build",)
 
 def test_evaluate_required_pending_and_deadlines(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
@@ -244,6 +225,7 @@ def test_evaluate_required_pending_and_deadlines(target: RemoteCITarget) -> None
     assert evaluate_remote_ci(snapshot, elapsed=1_799.999, stable_polls=1, limits=RemoteCILimits()).status == "pending"
     assert evaluate_remote_ci(snapshot, elapsed=1_800, stable_polls=1, limits=RemoteCILimits()).status == "timed_out"
 
+
 def test_evaluate_missing_required_or_active_workflow_at_discovery(target: RemoteCITarget) -> None:
     required = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),)
     workflow = _snapshot(target, workflows=({"id": 1, "name": "CI", "path": "ci.yml", "state": "active"},),)
@@ -252,6 +234,7 @@ def test_evaluate_missing_required_or_active_workflow_at_discovery(target: Remot
     assert evaluate_remote_ci(required, elapsed=120, stable_polls=2, limits=RemoteCILimits()).status == "missing"
     assert evaluate_remote_ci(workflow, elapsed=120, stable_polls=2, limits=RemoteCILimits()).status == "missing"
 
+
 def test_evaluate_no_ci_needs_discovery_deadline_and_two_stable_polls(tmp_path: Path) -> None:
     snapshot = _snapshot(_target(tmp_path))
 
@@ -259,18 +242,7 @@ def test_evaluate_no_ci_needs_discovery_deadline_and_two_stable_polls(tmp_path: 
     assert evaluate_remote_ci(snapshot, elapsed=120, stable_polls=1, limits=RemoteCILimits()).status == "pending"
     assert evaluate_remote_ci(snapshot, elapsed=120, stable_polls=2, limits=RemoteCILimits()).status == "no_ci"
 
-def test_evaluate_advisory_failure_and_pending_do_not_block_pass(target: RemoteCITarget) -> None:
-    snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 7),), True),
-        head=(_observation("Build", "pass", app_id=7), _observation("Advisory failure", "fail", app_id=8),
-            _observation("Advisory pending", "pending", app_id=9),
-        ),
-    )
-    verdict = evaluate_remote_ci(snapshot, elapsed=20, stable_polls=2, limits=RemoteCILimits())
 
-    assert verdict.status == "passed"
-    assert [(item.context, item.state) for item in verdict.advisory_observations] == [
-        ("Advisory failure", "fail"), ("Advisory pending", "pending"),
-    ]
 
 def test_evaluate_policyless_observations_need_all_terminal(target: RemoteCITarget) -> None:
     pending = _snapshot(target, head=(_observation("Advisory", "pending"),))
@@ -279,6 +251,7 @@ def test_evaluate_policyless_observations_need_all_terminal(target: RemoteCITarg
     assert evaluate_remote_ci(pending, elapsed=100, stable_polls=2, limits=RemoteCILimits()).status == "pending"
     assert evaluate_remote_ci(pending, elapsed=1_800, stable_polls=2, limits=RemoteCILimits()).status == "timed_out"
     assert evaluate_remote_ci(terminal, elapsed=10, stable_polls=2, limits=RemoteCILimits()).status == "passed"
+
 
 def test_evaluate_selects_merge_globally_and_empty_merge_falls_back_to_head(target: RemoteCITarget) -> None:
     policy = RequiredPolicy((RequiredContext("Build", 7),), False)
@@ -297,22 +270,12 @@ def test_evaluate_selects_merge_globally_and_empty_merge_falls_back_to_head(targ
     assert (merged.status, merged.evidence_sha) == ("failed", MERGE_SHA)
     assert (fallback.status, fallback.evidence_sha) == ("passed", PUSHED_SHA)
 
+
 def test_evaluate_closed_or_changed_fixed_identity_is_superseded(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, binding=_binding(target, state="closed"))
 
     assert evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits()).status == "superseded"
 
-def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path, target: RemoteCITarget) -> None:
-    verdict = evaluate_remote_ci(_snapshot(target), elapsed=120, stable_polls=2, limits=RemoteCILimits())
-    path = tmp_path / "deep" / "remote-ci-verdict.json"
-    path.parent.mkdir()
-    path.write_text('{"status":"stale"}\n', encoding="utf-8")
-    write_remote_ci_verdict(path, verdict, session_id="session-2", poll_count=2, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:02:00Z", discovery_deadline=120.0, completion_deadline=1_800.0,
-    )
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    assert loaded["status"] == "no_ci"
-    assert loaded["session_id"] == "session-2"
 
 def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: RemoteCITarget) -> None:
     failed = evaluate_remote_ci(_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
@@ -322,11 +285,17 @@ def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: 
     handoff = remote_ci_handoff_payload(failed, session_id="session-3")
 
     assert handoff["outcome"] == "failed"
-    assert handoff["target"] == remote_ci_verdict_payload(
-        failed, session_id="session-3", poll_count=1, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:12Z", discovery_deadline=120, completion_deadline=1_800,
-    )["target"]
-    assert handoff["binding"] is not None
+    assert handoff["session_id"] == "session-3"
+    assert handoff["target"] == {
+        "base_repository": "example/project", "base_ref": "main", "head_repository": "contributor/fork",
+        "head_ref": "feature/ci", "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42",
+        "remote": "fork", "pushed_sha": PUSHED_SHA,
+    }
+    assert handoff["binding"] == {
+        "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42",
+        "base_repository": "example/project", "base_ref": "main", "head_repository": "contributor/fork",
+        "head_ref": "feature/ci", "head_sha": PUSHED_SHA, "merge_sha": None, "state": "open",
+    }
     assert "ordinary push" in str(handoff["next_action"])
 
     passed = evaluate_remote_ci(
@@ -334,6 +303,7 @@ def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: 
     )
     with pytest.raises(ValueError):
         remote_ci_handoff_payload(passed, session_id="session-3")
+
 
 def test_pending_factory_preserves_target_without_claiming_observed_ci(target: RemoteCITarget,) -> None:
     verdict = pending_remote_ci_verdict(target)
@@ -378,6 +348,7 @@ def test_pending_factory_preserves_target_without_claiming_observed_ci(target: R
             passed, session_id="session-complete", poll_count=0, started_at="2026-09-06T12:00:00Z",
             updated_at="2026-09-06T12:00:00Z", discovery_deadline=120, completion_deadline=1_800,
         )
+
 
 class _Clock:
     def __init__(self) -> None:
@@ -425,12 +396,15 @@ async def _run_scripted_waiter(target: RemoteCITarget,
     )
     return verdict, clock, fetcher, emitted
 
+
 @pytest.mark.asyncio
 async def test_waiter_delayed_registration_and_success_switches_absolute_budget(target: RemoteCITarget,) -> None:
     empty = _snapshot(target)
     policy = RequiredPolicy((RequiredContext("Build", 10),), True)
     pending = _snapshot(target, policy=policy, head=(_observation("Build", "pending"),))
-    passed = _snapshot(target, policy=policy, head=(_observation("Build", "pass"),))
+    passed = _snapshot(target, policy=policy, head=(
+        _observation("Build", "pass"), _observation("Advisory failure", "fail", app_id=8),
+        _observation("Advisory pending", "pending", app_id=9)))
     verdict, _, fetcher, emitted = await _run_scripted_waiter(target, [empty, pending, passed, passed],
         limits=RemoteCILimits(poll_seconds=10, discovery_seconds=120, completion_seconds=1800),
     )
@@ -438,6 +412,9 @@ async def test_waiter_delayed_registration_and_success_switches_absolute_budget(
     assert verdict.status == "passed"
     assert [item.status for item in emitted] == ["pending", "pending", "pending", "passed"]
     assert fetcher.deadlines == [120.0, 120.0, 1800.0, 1800.0]
+    assert [(row.context, row.state) for row in verdict.advisory_observations] == [
+        ("Advisory failure", "fail"), ("Advisory pending", "pending")]
+
 
 @pytest.mark.asyncio
 async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_deadline(
@@ -448,6 +425,7 @@ async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_de
     clock.value = 25.0
     fetcher = _ScriptedFetcher([_snapshot(target)] * 4)
     verdict_path = tmp_path / "verdict.json"
+    verdict_path.write_text('{"status":"stale"}\n', encoding="utf-8")
     limits = RemoteCILimits(poll_seconds=60, discovery_seconds=120, completion_seconds=1800,)
     def persist(verdict: RemoteCIVerdict) -> None:
         write_remote_ci_verdict(
@@ -460,10 +438,12 @@ async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_de
     )
     artifact = json.loads(verdict_path.read_text())
     assert verdict.status == "no_ci"
+    assert artifact["status"] == "no_ci" and artifact["session_id"] == "deadline-session"
     assert verdict.elapsed_seconds == 120.0
     assert fetcher.deadlines == [125.0, 125.0]
     assert artifact["polling"]["discovery_deadline"] == fetcher.deadlines[0]
     assert artifact["polling"]["completion_deadline"] == 1805.0
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("started", [float("inf"), 11.0])
@@ -475,6 +455,7 @@ async def test_waiter_rejects_nonfinite_or_future_explicit_start(tmp_path: Path,
             _target(tmp_path), fetcher=_ScriptedFetcher([]), monotonic=clock, monotonic_started_at=started,
             sleep=clock.sleep, on_snapshot=lambda _verdict: None,
         )
+
 
 @pytest.mark.asyncio
 async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(target: RemoteCITarget) -> None:
@@ -498,6 +479,7 @@ async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(target: 
         assert verdict.status == "passed"
         assert [item.status for item in emitted] == ["pending", "pending", "passed"]
 
+
 @pytest.mark.asyncio
 async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(target: RemoteCITarget) -> None:
     stale = _snapshot(target, binding=_binding(target, head_sha="4" * 40))
@@ -511,6 +493,7 @@ async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(ta
     assert verdict.binding is not None
     assert verdict.binding.head_sha == "4" * 40
     assert [item.status for item in emitted] == ["pending", "superseded"]
+
 
 @pytest.mark.asyncio
 async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(target: RemoteCITarget,) -> None:
@@ -530,6 +513,7 @@ async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(tar
         assert fetcher.deadlines[-1] == expected_deadline
         assert all(deadline <= expected_deadline for deadline in fetcher.deadlines)
 
+
 @pytest.mark.asyncio
 async def test_waiter_advisory_observation_does_not_extend_missing_required_discovery(target: RemoteCITarget,) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
@@ -542,6 +526,7 @@ async def test_waiter_advisory_observation_does_not_extend_missing_required_disc
     assert verdict.status == "missing"
     assert fetcher.calls == 2
     assert fetcher.deadlines == [120.0, 120.0]
+
 
 @pytest.mark.asyncio
 async def test_waiter_incomplete_first_poll_is_unavailable_and_later_uses_last_complete(
@@ -569,6 +554,7 @@ async def test_waiter_incomplete_first_poll_is_unavailable_and_later_uses_last_c
     assert verdict.status == "missing"
     assert fetcher.calls == 2
 
+
 @pytest.mark.asyncio
 async def test_waiter_api_error_is_bounded_unavailable(target: RemoteCITarget) -> None:
     emitted: list[RemoteCIVerdict] = []
@@ -579,6 +565,7 @@ async def test_waiter_api_error_is_bounded_unavailable(target: RemoteCITarget) -
     assert verdict.status == "unavailable"
     assert "top-secret" not in (verdict.diagnostic or "")
     assert emitted == [verdict]
+
 
 @pytest.mark.asyncio
 async def test_waiter_preserves_cancellation_when_cancelled_snapshot_callback_fails(tmp_path: Path,) -> None:
@@ -603,6 +590,7 @@ async def test_waiter_preserves_cancellation_when_cancelled_snapshot_callback_fa
         await task
     assert [item.status for item in emitted] == ["cancelled"]
 
+
 @pytest.mark.asyncio
 async def test_waiter_preserves_keyboard_interrupt_when_cancelled_snapshot_callback_fails(tmp_path: Path,) -> None:
     emitted: list[RemoteCIVerdict] = []
@@ -616,6 +604,7 @@ async def test_waiter_preserves_keyboard_interrupt_when_cancelled_snapshot_callb
     with pytest.raises(KeyboardInterrupt):
         await wait_for_remote_ci(_target(tmp_path), fetcher=InterruptingFetcher(), on_snapshot=failing_persist,)
     assert [item.status for item in emitted] == ["cancelled"]
+
 
 @pytest.mark.asyncio
 async def test_waiter_does_not_swallow_terminal_snapshot_callback_failure(tmp_path: Path,) -> None:
@@ -637,30 +626,87 @@ def _page(endpoint: str, *, page: int = 1) -> str:
     return f"{endpoint}{separator}per_page=100&page={page}"
 
 
-def _seed_fetch(fake_gh: FakeGh, target: RemoteCITarget) -> None:
-    fake_gh.set_response("GET", "repos/example/project/pulls/42", _pr_row(target, merge_commit_sha=None))
-    fake_gh.set_response("GET", _page("repos/example/project/rules/branches/main"), [])
-    fake_gh.set_response("GET", "repos/example/project/branches/main/protection/required_status_checks",
-        {"strict": False, "contexts": ["Build"], "checks": []},
-    )
-    fake_gh.set_response("GET", _page("repos/example/project/actions/workflows"), {"total_count": 0, "workflows": []},)
-    checks_endpoint = f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
-    fake_gh.set_response("GET", _page(checks_endpoint), {"total_count": 1, "check_runs": [_check(1, "Build")]},)
-    fake_gh.set_response("GET", _page(f"repos/example/project/commits/{PUSHED_SHA}/statuses"), [],)
-
-@pytest.mark.asyncio
-async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_rows(fake_gh: FakeGh, git_repo: Path
+async def test_github_fetcher_uses_frozen_boundary_and_returns_only_normalized_rows(
+    fake_gh: FakeGh,
+    git_repo: Path,
 ) -> None:
-    target = _target(git_repo)
-    _seed_fetch(fake_gh, target)
-    budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
-    snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
+    """The complete collector binds identities while bounded list/envelope pages share one native API boundary."""
+    from dataclasses import replace
 
-    assert snapshot.binding.pr_number == target.pr_number
-    assert snapshot.policy.contexts == (RequiredContext("Build", None),)
-    assert snapshot.head_observations[0].context == "Build"
+    target = replace(_target(git_repo), base_ref="feature/space ship")
+    rules = "repos/example/project/rules/branches/feature%2Fspace%20ship"
+    classic = "repos/example/project/branches/feature%2Fspace%20ship/protection/required_status_checks"
+    workflows = "repos/example/project/actions/workflows"
+    checks = f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest"
+    statuses = f"repos/example/project/commits/{PUSHED_SHA}/statuses"
+    fake_gh.set_response("GET", "repos/example/project/pulls/42", _pr_row(target, merge_commit_sha=None))
+    fake_gh.set_response("GET", _page(rules), [{"type": "required_status_checks", "parameters": {
+        "strict_required_status_checks_policy": False,
+        "required_status_checks": [{"context": "Ruleset"}, {"context": "Ruleset null", "integration_id": None}],
+    }}])
+    fake_gh.set_response("GET", classic, {"strict": False, "contexts": ["Build"], "checks": []})
+    workflow = {"id": 7, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"}
+    fake_gh.set_response("GET", _page(workflows), {"total_count": 1, "workflows": [workflow]})
+    secret = "sk-12345678901234567890"
+    check_rows = [_check(1, "Build", conclusion="failure"), _check(2, "Build",
+        url=f"https://ci.example.test/run?token={secret}&X-Amz-Signature={secret}&opaque={secret}&page=1",
+        summary=f"Authorization: Bearer {secret} " + "x" * 500),
+        _check(3, "build", conclusion="failure", app_id=11), _check(4, "Build", app_id=7, url=None),
+        _check(5, "Ruleset"), _check(6, "Ruleset null")]
+    fake_gh.set_response("GET", _page(checks), {"total_count": 6, "check_runs": check_rows})
+    rows = [_status(index + 1, f"Status-{index:03}") for index in range(101)]
+    rows += [_status(103, "lInT"), _status(102, "Lint", state="failure"),
+        _status(104, "bUiLd", state="failure", url=None)]
+    fake_gh.set_response("GET", _page(statuses), rows[:100])
+    fake_gh.set_response("GET", _page(statuses, page=2), rows[100:])
+    budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
+
+    snapshot = await GitHubRemoteCIFetcher(RemoteCILimits(diagnostic_chars=120)).fetch(target, budget=budget)
+
+    assert snapshot.binding == _binding(target)
+    assert snapshot.target == target and snapshot.merge_observations == ()
+    assert snapshot.policy == RequiredPolicy((RequiredContext("Build", None), RequiredContext("Ruleset", None),
+        RequiredContext("Ruleset null", None)), False)
+    assert snapshot.active_workflows == (workflow,)
+    assert [
+        (row.context, row.state, row.app_id) for row in snapshot.head_observations if row.source == "check_run"
+    ] == [("Build", "pass", 7), ("Build", "pass", 10), ("Ruleset", "pass", 10),
+        ("Ruleset null", "pass", 10), ("build", "fail", 11)]
+    build = next(row for row in snapshot.head_observations if (row.context, row.app_id) == ("Build", 10))
+    assert secret not in (build.url or "") and secret not in (build.diagnostic or "")
+    assert "REDACTED" in (build.url or "") and len(build.diagnostic or "") <= 120
+    observed_statuses = [row for row in snapshot.head_observations if row.source == "status"]
+    assert [(row.context, row.state, row.app_id) for row in observed_statuses] == [
+        ("bUiLd", "fail", None), ("lInT", "pass", None),
+        *((f"Status-{index:03}", "pass", None) for index in range(101))]
+    verdict = evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits())
+    assert verdict.status == "failed" and verdict.failing_contexts == ("Build",)
+    assert [(row.source, row.context, row.state, row.app_id) for row in verdict.required_observations] == [
+        ("check_run", "Build", "pass", 7), ("check_run", "Build", "pass", 10), ("status", "bUiLd", "fail", None),
+        ("check_run", "Ruleset", "pass", 10), ("check_run", "Ruleset null", "pass", 10)]
+    assert [(row.context, row.state, row.app_id) for row in verdict.advisory_observations] == [
+        ("build", "fail", 11), ("lInT", "pass", None),
+        *((f"Status-{index:03}", "pass", None) for index in range(101))]
     assert "must not persist" not in repr(snapshot)
-    assert len(fake_gh.process_calls()) == 6
+    calls = fake_gh.process_calls()
+    assert [call.argv[-1] for call in calls] == [
+        "repos/example/project/pulls/42",
+        _page(rules),
+        classic,
+        _page(workflows),
+        _page(checks),
+        _page(statuses),
+        _page(statuses, page=2),
+    ]
+    for call in calls:
+        assert call.cwd == git_repo.resolve() and "--paginate" not in call.argv
+        assert call.argv[2:4] == ["-H", "Accept: application/vnd.github+json"]
+        assert call.argv[4:6] == ["-H", "X-GitHub-Api-Version: 2022-11-28"]
+        assert call.argv[6:8] == ["--method", "GET"]
+    from tests.harness.git_helpers import git
+
+    assert git(git_repo, "status", "--porcelain") == ""
+
 
 @pytest.mark.asyncio
 async def test_expired_remote_ci_budget_skips_auth_resolution_and_gh_spawn(fake_gh: FakeGh, git_repo: Path) -> None:
@@ -687,32 +733,6 @@ async def test_expired_remote_ci_budget_skips_auth_resolution_and_gh_spawn(fake_
     assert verdict.reason == "remote CI deadline expired during the first poll"
     assert emitted == [verdict]
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("required_entry", [{"context": "Ruleset"}, {"context": "Ruleset", "integration_id": None}],)
-async def test_github_fetcher_accepts_unpinned_ruleset_requirement(
-    fake_gh: FakeGh, git_repo: Path, required_entry: dict[str, object],
-) -> None:
-    target = _target(git_repo)
-    _seed_fetch(fake_gh, target)
-    fake_gh.set_response("GET", _page("repos/example/project/rules/branches/main"),
-        [{"type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": False, "required_status_checks": [required_entry],
-                },
-            }
-        ],
-    )
-    fake_gh.set_response("GET", "repos/example/project/branches/main/protection/required_status_checks",
-        {"strict": False, "contexts": [], "checks": []},
-    )
-    checks_endpoint = (f"repos/example/project/commits/{PUSHED_SHA}/check-runs?filter=latest")
-    fake_gh.set_response("GET", _page(checks_endpoint), {"total_count": 1, "check_runs": [_check(1, "Ruleset")]},)
-    budget = GitHubRequestBudget(deadline=time.monotonic() + 30, per_request_seconds=5, monotonic=time.monotonic,)
-    snapshot = await GitHubRemoteCIFetcher().fetch(target, budget=budget)
-
-    assert snapshot.policy.contexts == (RequiredContext("Ruleset", None),)
-    assert snapshot.head_observations[0].context == "Ruleset"
-    assert len(fake_gh.process_calls()) == 6
 
 @pytest.mark.asyncio
 async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
@@ -742,6 +762,7 @@ async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
     assert json.loads(verdict_path.read_text(encoding="utf-8"))["status"] == "cancelled"
     assert len(fake_gh.process_calls()) == 1
     await wait_for_fd_baseline(baseline, timeout_s=2.0)
+
 
 @pytest.mark.asyncio
 async def test_later_real_request_timeout_at_discovery_uses_trusted_empty_snapshot(

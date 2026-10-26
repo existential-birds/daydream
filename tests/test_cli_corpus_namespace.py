@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.dataset import LocalRecordStore
+from daydream.dataset import LocalRecordStore, SnapshotRecords
+from daydream.training.record_evidence import latest_annotation
 from tests.harness.dataset import observation, run_record
 from tests.harness.record_projection import seed_projection_store
 from tests.harness.scripts import cli_main
@@ -18,7 +19,9 @@ def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -
     assert "checkpoint" not in output
 
 
-@pytest.mark.parametrize("verb", ["publish-state", "resume-state", "publish-final", "download-final"])
+@pytest.mark.parametrize('verb', [
+    "publish-final",
+])
 def test_retired_annotation_commands_rejected_without_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str,
 ) -> None:
@@ -37,19 +40,42 @@ def test_retired_hydration_command_rejected(tmp_path: Path, monkeypatch: pytest.
     assert set(tmp_path.rglob("*")) == before
 
 
-def test_run_label_appends_human_history_and_refuses_ambiguous_prefix(tmp_path: Path) -> None:
+def test_run_label_appends_human_history_and_refuses_ambiguous_prefix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record("run-first"))
     store.commit_run(run_record("run-second"))
     assert cli_main(["corpus", "label", "run-", "--store", str(store.root), "--outcome", "accepted"]) == 1
     assert store.read_records()["observations"] == ()
-    assert cli_main(["corpus", "label", "run-first", "--store", str(store.root),
-                     "--outcome", "accepted", "--author", "alice"]) == 0
-    assert cli_main(["corpus", "label", "run-first", "--store", str(store.root),
-                     "--outcome", "unknown", "--author", "alice"]) == 0
-    history = store.read_records()["observations"]
-    assert {r["payload"]["label"] for r in history} == {"accepted", "unknown"}
-    assert all(r["role"] == "rater" and r["run_id"] == "run-first" for r in history)
+    store.append_observation(observation("automated", run_id="run-first", item_uid=None, role="automatic",
+        payload={"type": "run-label", "label": "rejected"}))
+    args = ["corpus", "label", "run-first", "--store", str(store.root), "--author", "alice"]
+    assert cli_main([*args, "--outcome", "accepted"]) == 0
+    assert "rejected" in capsys.readouterr().out
+    assert cli_main([*args, "--outcome", "unknown"]) == 0
+    assert "accepted" in capsys.readouterr().out
+    store.append_observation(observation("later-automated", run_id="run-first", item_uid=None, role="automatic",
+        observed_at="2100-01-01T00:00:00Z", payload={"type": "run-label", "label": "accepted"}))
+    current = store.read_records()
+    resolved = latest_annotation(SnapshotRecords({}, current["runs"], current["observations"],
+                                                  current["observations"]), "run-first")
+    assert resolved is not None and resolved["labels"] == [] and resolved["human_labeler"] == "alice"
+    history = current["observations"]
+    assert len(history) == 4
+    assert {(r["role"], r["run_id"], r["author"], r["payload"]["label"]) for r in history
+            if r["role"] != "automatic"} == {
+        ("rater", "run-first", "alice", "accepted"), ("rater", "run-first", "alice", "unknown")}
+    assert cli_main([
+        "corpus", "label", "run-second", "--store", str(store.root), "--author", "bob", "--outcome", "contested",
+    ]) == 0
+    assert "No prior label for run-second." in capsys.readouterr().out
+    updated_history = store.read_records()["observations"]
+    assert len(updated_history) == 5
+    assert [(r["role"], r["run_id"], r["author"], r["payload"]["label"], r["semantic_evidence"]["outcome"])
+            for r in updated_history if r["run_id"] == "run-second"] == [
+        ("rater", "run-second", "bob", "contested", "contested")]
+    assert tuple(r for r in updated_history if r["run_id"] == "run-first") == history
 
 
 def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

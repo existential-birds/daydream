@@ -1,7 +1,4 @@
-"""Shared service ownership and explicit service_roots override contracts.
-
-Improve discovery behavior is covered separately in test_improve_services.py.
-"""
+"""Shared service discovery, ownership, and explicit service_roots contracts."""
 
 from __future__ import annotations
 
@@ -31,6 +28,9 @@ def monorepo(tmp_path: Path) -> Path:
         root = tmp_path / "apps" / service
         root.mkdir(parents=True)
         (root / "pyproject.toml").write_text(f"[project]\nname='{service}'\n")
+    docs = tmp_path / "apps/docs-only"
+    docs.mkdir()
+    (docs / "README.md").write_text("# docs\n")
     edge = tmp_path / "edge" / "gateway"
     edge.mkdir(parents=True)
     (edge / "go.mod").write_text("module gateway\n")
@@ -39,18 +39,16 @@ def monorepo(tmp_path: Path) -> Path:
 def test_explicit_service_roots_replace_the_improve_config_list(monorepo: Path) -> None:
     """#1113: the diagram flow's own ``service_roots`` wins over the improve
     list, so a repo can scope diagram participants differently from audits."""
+    inferred = enumerate_services(monorepo, DaydreamFileConfig())
+    assert [(service.root.as_posix(), service.source) for service in inferred] == [
+        ("apps/billing", "heuristic:conventional-root"), ("apps/catalog", "heuristic:conventional-root"),
+    ]
     cfg = DaydreamFileConfig(improve_service_roots=["apps/*"])
     services = enumerate_services(monorepo, cfg, service_roots=["edge/*"])
     assert [service.root.as_posix() for service in services] == ["edge/gateway"]
     assert [service.source for service in services] == ["config"]
 
 
-
-def test_explicit_roots_short_circuit_layout_inference(monorepo: Path) -> None:
-    """Declared roots are authoritative: the conventional ``apps/*`` services
-    are not appended to an explicit ``edge/*`` request."""
-    services = enumerate_services(monorepo, DaydreamFileConfig(), service_roots=["edge/*"])
-    assert [service.root.as_posix() for service in services] == ["edge/gateway"]
 
 def test_explicit_roots_with_no_match_yield_no_services(monorepo: Path) -> None:
     services = enumerate_services(monorepo, DaydreamFileConfig(), service_roots=["nope/*"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,13 @@ import pytest
 from rich.console import Console
 
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep.prompts import (
+    CONFIG_FLOW_TRACE_INSTRUCTION,
+    CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
+    TRUST_MODEL_INSTRUCTION,
+    VERIFICATION_PROTOCOL_INSTRUCTION,
+)
+from daydream.exploration import ExplorationContext
 from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 from daydream.git_ops import GitError
@@ -19,6 +27,10 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_RULE,
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
 )
+from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
+from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
+from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION, ResolvedProfile, build_default_profile
+from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
 from daydream.runner import run
 from daydream.ui.summary import print_preflight_notice
@@ -29,6 +41,7 @@ from tests.deep_orchestrator.support import (
     _silence_gate_noise,
 )
 from tests.harness.git_helpers import seed_base_support_files, seed_feature_branch
+from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
@@ -114,6 +127,21 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     )
     assert python_prompt is not None
     assert react_prompt is not None
+    structural_prompts = [p for p in prompts if "you are the structural reviewer" in p.lower()]
+    assert structural_prompts
+    assert all(REPOSITORY_SEARCH_GUIDANCE in prompt for prompt in [*per_stack_prompts, *structural_prompts])
+    for prompt in structural_prompts:
+        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION in prompt
+        assert TRUST_MODEL_INSTRUCTION in prompt
+        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt
+    for prompt in per_stack_prompts:
+        assert VERIFICATION_PROTOCOL_INSTRUCTION in prompt
+        assert "Config/env flow trace (apply only to changed fields in this assignment" in prompt
+        assert "config struct -> driver config -> request construction" in prompt
+        assert "Flag silent drops" in prompt and "Flag double-resolves" in prompt
+        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt
+        assert TRUST_MODEL_INSTRUCTION in prompt
+        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt
     # The scope instruction's file-list line (right after the "Assigned files:" marker)
     # must not embed React files in the Python stack prompt.
     python_scope_files_line = python_prompt.split("Assigned files:")[1].split("\n", 1)[0]
@@ -152,16 +180,15 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     # One records file per per-stack review, plus the structural meta-stack.
     assert len(records_files) >= len(per_stack_prompts)
 
-
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
     text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert "## Issues" in text
     assert "## Cross-Stack Issues" in text
+    assert "## Structural Review" in text
     # Numbering continues: 1., 2. in ## Issues then 3. in ## Cross-Stack Issues.
     assert "3." in text.split("## Cross-Stack Issues", 1)[1]
     cross_section = text.split("## Cross-Stack Issues", 1)[1]
     assert "[cross-stack]" in cross_section
-
 
     # Persist the changed-line authority after the exact patch it describes.
     idx_path = multi_stack_target / ".daydream" / "hunk-index.json"
@@ -172,7 +199,6 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     idx = load_hunk_index(multi_stack_target / ".daydream")
     assert idx, "hunk index must reflect the run's changed files"
     assert "api.py" in idx or "README.md" in idx
-
 
     # Merge inputs retain deterministic record ordering.
     merge_prompts = [c["prompt"] for c in calls if "cross-stack merge agent" in c["prompt"].lower()]
@@ -196,11 +222,164 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert record_paths, "no record paths found in merge prompt"
     assert record_paths == sorted(record_paths), f"records not in sorted order: {record_paths}"
 
-
     # Generated evidence remains resumable while the source diff is unchanged.
     resumed_calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
     assert any("cross-stack merge agent" in c["prompt"].lower() for c in resumed_calls)
+
+
+async def test_default_backend_notice_survives_phase_override(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run's default-backend notice must remain truthful with a review override."""
+    _silence(monkeypatch)
+    _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_info",
+        lambda *args, **kwargs: captured.append(str(args[1]) if len(args) > 1 else kwargs.get("msg", "")),
+    )
+    assert (
+        await run(
+            RunConfig(
+                target=str(multi_stack_target),
+                cleanup=False,
+                exploration_context=ExplorationContext(),
+                backend="claude",
+                review_backend="codex",
+            )
+        )
+        == 0
+    )
+    assert "Default backend: claude" in captured
+
+
+async def test_rust_generic_and_structure_receive_distinct_wire_contracts(
+    rust_wire_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delivered prompts keep wire rules scoped while a two-file diff fans out."""
+    _silence(monkeypatch)
+    calls = _install_model_capturing_stubs(monkeypatch, rust_wire_target)
+    assert (
+        await run(
+            RunConfig(
+                target=str(rust_wire_target),
+                cleanup=False,
+                exploration_context=ExplorationContext(),
+                shallow_fanout_threshold=0,
+            )
+        )
+        == 0
+    )
+    prompts = [call["prompt"] for call in calls]
+    rust = [p for p in prompts if "You are reviewing the rust stack" in p]
+    generic = [p for p in prompts if "You are reviewing the generic-fallback stack" in p]
+    structural = [p for p in prompts if "you are the structural reviewer" in p.lower()]
+    assert rust and generic and structural
+    for prompt in rust:
+        assert WIRE_CONTRACT_RUST_INSTRUCTION in prompt
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in prompt
+    for prompt in generic:
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION in prompt
+        assert WIRE_CONTRACT_RUST_INSTRUCTION not in prompt
+    for prompt in structural:
+        assert WIRE_CONTRACT_RUST_INSTRUCTION not in prompt
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in prompt
+
+
+async def test_custom_structural_policy_folds_design_across_a_real_per_stack_resume(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom structural judgment still receives default design duty on cold and resumed review."""
+    _silence(monkeypatch)
+    profile = build_default_profile()
+    strategies = dict(profile.strategies)
+    for kind in ("per_stack", "structural", "generic_fallback"):
+        key = f"discovery.{kind}"
+        strategies[key] = replace(strategies[key], content=f"CUSTOM {kind.upper()} POLICY")
+    resolved = ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, review_profile=resolved) == 0
+    prompts = [call["prompt"] for call in backend.calls]
+    deep = multi_stack_target / ".daydream/deep"
+    assert json.loads((deep / "alternatives.json").read_text()) == []
+    assert not any("evaluate the implementation" in prompt.lower() for prompt in prompts)
+    cold = next(prompt for prompt in prompts if "you are the structural reviewer" in prompt.lower())
+    assert "CUSTOM STRUCTURAL POLICY" in cold and FOLDED_ALTERNATIVES_INSTRUCTION in cold
+    assert "confirmed intent" in cold and "canonical implementation" in cold
+    assert all(
+        any(f"CUSTOM {kind.upper()} POLICY" in prompt and REPOSITORY_SEARCH_GUIDANCE in prompt for prompt in prompts)
+        for kind in ("per_stack", "structural", "generic_fallback")
+    )
+    assert saved_coverage(deep).phases["alternatives"] == {
+        "phase": "alternatives",
+        "status": "complete",
+        "reason_codes": [],
+        "noop": True,
+        "usable_evidence": False,
+    }
+    backend.calls.clear()
+    assert await _run_deep(multi_stack_target, start_at="per-stack", review_profile=resolved) == 0
+    prompts = [call["prompt"] for call in backend.calls]
+    assert json.loads((deep / "alternatives.json").read_text()) == []
+    reviews = [prompt for prompt in prompts if review_stage_state(prompt) is not None]
+    assert reviews and not any("evaluate the implementation" in prompt.lower() for prompt in prompts)
+    structural = next(prompt for prompt in reviews if "you are the structural reviewer" in prompt.lower())
+    assert "CUSTOM STRUCTURAL POLICY" in structural and FOLDED_ALTERNATIVES_INSTRUCTION in structural
+    assert all(
+        any(f"CUSTOM {kind.upper()} POLICY" in prompt and REPOSITORY_SEARCH_GUIDANCE in prompt for prompt in reviews)
+        for kind in ("per_stack", "structural", "generic_fallback")
+    )
+
+
+async def test_custom_structural_builder_runs_independent_design_and_resume_reuses_its_findings(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: Any,
+) -> None:
+    """A custom builder's saved design findings reach resumed review without another model pass."""
+    ext_dir.write_module(
+        "from daydream.deep.prompts import build_structural_prompt\n"
+        'def structural(**kw): return "CUSTOM STRUCTURAL BUILDER\\n" + build_structural_prompt(**kw)\n'
+        "structural.review_input_bundle = True\n"
+        'def register(registry): registry.override_prompt("structural", structural)\n',
+        api_version=8,
+    )
+    _silence(monkeypatch)
+    profile = build_default_profile()
+    strategies = dict(profile.strategies)
+    strategies["discovery.structural"] = replace(strategies["discovery.structural"],
+                                                content="CUSTOM INDEPENDENT STRUCTURAL JUDGMENT")
+    resolved = ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, review_profile=resolved) == 0
+    prompts = [call["prompt"] for call in backend.calls]
+    deep = multi_stack_target / ".daydream/deep"
+    alternatives = (deep / "alternatives.json").read_bytes()
+    assert json.loads(alternatives)[0]["title"] == "Inconsistent greeting wording"
+    assert sum("evaluate the implementation" in prompt.lower() for prompt in prompts) == 1
+    structural = next(prompt for prompt in prompts if "CUSTOM STRUCTURAL BUILDER" in prompt)
+    assert "CUSTOM INDEPENDENT STRUCTURAL JUDGMENT" in structural
+    assert FOLDED_ALTERNATIVES_INSTRUCTION not in structural
+    backend.calls.clear()
+    assert await _run_deep(multi_stack_target, start_at="per-stack", review_profile=resolved) == 0
+    prompts = [call["prompt"] for call in backend.calls]
+    assert (deep / "alternatives.json").read_bytes() == alternatives
+    assert not any("evaluate the implementation" in prompt.lower() for prompt in prompts)
+    reviews = [prompt for prompt in prompts if review_stage_state(prompt) is not None]
+    assert reviews
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+
+    assert all(
+        json.loads(supporting_contents(prompt)["alternatives"]) == json.loads(alternatives) for prompt in reviews
+    )
+    assert all(
+        FOLDED_ALTERNATIVES_INSTRUCTION not in prompt for prompt in reviews if "CUSTOM STRUCTURAL BUILDER" in prompt
+    )
+
 
 async def test_pr_body_reaches_intent_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -216,6 +395,7 @@ async def test_pr_body_reaches_intent_prompt(
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
     _assert_authoritative_rule_gated(stub, expect_present=True)
+
 
 async def test_no_pr_body_degrades_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -236,6 +416,7 @@ async def test_no_pr_body_degrades_cleanly(
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
     _assert_authoritative_rule_gated(stub, expect_present=False)
+
 
 async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -258,6 +439,7 @@ async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
     assert any("authentication required" in warning for warning in warnings)
     _assert_authoritative_rule_gated(stub, expect_present=False)
 
+
 async def test_whitespace_only_pr_body_is_not_authoritative(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -274,6 +456,7 @@ async def test_whitespace_only_pr_body_is_not_authoritative(
     assert "pull request description" not in intent.lower()
     assert AUTHORITATIVE_INTENT_RULE not in intent
     _assert_authoritative_rule_gated(stub, expect_present=False)
+
 
 async def test_non_interactive_intent_prompt_carries_pr_body(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -295,6 +478,7 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
     assert current_run_context() is None
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
+
 
 async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_only(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -327,6 +511,7 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
         f"{len(non_read_only)} of {len(intent_calls)} intent calls were not read-only (call indices: {non_read_only})"
     )
 
+
 @pytest.mark.asyncio
 async def test_non_open_pr_state_suppresses_pr_body(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -349,6 +534,7 @@ async def test_non_open_pr_state_suppresses_pr_body(
             f"PR section header must be absent when state={state!r}"
         )
 
+
 async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-28: Y/n prompt after merge decides whether to apply fixes."""
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -363,6 +549,7 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
     assert any("fix" in msg.lower() or "apply" in msg.lower() for msg in asked)
+
 
 async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -390,8 +577,8 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
     )
     assert _fix_prompts(stub), "phase_fix never ran -> --yes did not auto-apply"
 
-@pytest.mark.parametrize("scope_issue_filing", [False, True])
-@pytest.mark.parametrize("primary", ["api.py", "./api.py"])
+
+@pytest.mark.parametrize(('scope_issue_filing', 'primary'), [(False, 'api.py'), (True, './api.py')])
 async def test_fix_gate_authorizes_canonical_finding_paths(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute, scope_issue_filing: bool, primary: str,
@@ -417,6 +604,7 @@ async def test_fix_gate_authorizes_canonical_finding_paths(
     assert any("notes.txt" in prompt for prompt in fix_prompts)
     assert any("api.py" in prompt for prompt in fix_prompts), "in-scope finding was not fixed"
     assert issues == []
+
 
 async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_diff(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -452,6 +640,7 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     fix_prompts = _fix_prompts(stub)
     assert any("notes.txt" in prompt for prompt in fix_prompts)
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
+
 
 @pytest.mark.parametrize(("shape", "custom_builder", "expected_count"), [
     ("normal", False, 7), ("normal", True, 8), ("no-arbiter", False, 7),
@@ -563,6 +752,7 @@ async def test_preflight_notice(
         assert {current for current, _, _ in progress_calls} == {1, 2, 3, 4, 5}
         assert all(total == 5 for _, total, _ in progress_calls)
 
+
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-34: --start-at per-stack re-runs ALL per-stack reviews (after priming TTT artifacts)."""
     _silence(monkeypatch)
@@ -577,6 +767,7 @@ async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch
     assert len(per_stack_calls) >= 2
 
     assert "STALE CONTENT" not in old.read_text()
+
 
 async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--start-at merge loads stack-*-records.json and does NOT re-parse reviews."""
@@ -603,6 +794,7 @@ async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, mon
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
+
 
 @pytest.mark.parametrize("empty", [False, True])
 async def test_review_and_resume_ignore_obsolete_sweep_outputs(

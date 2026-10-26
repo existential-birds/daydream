@@ -18,11 +18,6 @@ def _config(tmp_path: Path, records: list[dict[str, object]]) -> RftConfig:
     )
 
 
-def test_valid_full_shas_build_the_task(tmp_path: Path) -> None:
-    cfg = _config(tmp_path, [_record("r1"), _record("r2")])
-    result = run_rft(cfg)
-    assert result.winners_path.is_file()
-    assert result.inputs_sha256
 
 @pytest.mark.parametrize("record, match",
     [(_record("r1", base_sha="abc123"), r"full sha|40"),

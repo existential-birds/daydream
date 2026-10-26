@@ -51,11 +51,24 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
     assert (error.category if error else None) == category
     assert snapshot is not None and snapshot.process_returncode == (7 if mode == "nonzero_exit" else 0)
     assert snapshot.stdout_eof_s is not None and snapshot.expiry_stage is None
-    assert len([row for row in seen if isinstance(row, MetricsEvent)]) == expected_metrics
-    assert len([row for row in seen if isinstance(row, CostEvent)]) == expected_metrics
+    assert snapshot.terminal_received_s is not None and snapshot.cleanup_expired is False
+    assert snapshot.teardown_started_s is not None and snapshot.teardown_completed_s is not None
+    assert [(row.prompt_tokens, row.completion_tokens) for row in seen if isinstance(row, MetricsEvent)] == (
+        [(10, 5)] * expected_metrics
+    )
+    assert [(row.input_tokens, row.output_tokens) for row in seen if isinstance(row, CostEvent)] == (
+        [(10, 5)] * expected_metrics
+    )
     assert len([row for row in seen if isinstance(row, ResultEvent)]) == (1 if category is None else 0)
+    assert any(isinstance(row, TextEvent) and "Synthetic lifecycle response" in row.text for row in seen)
+    if mode == "unfinished_next_turn":
+        assert error is not None and error.retryable is False
+    elif mode == "nonzero_exit":
+        assert "return code 7" in str(error)
     if mode == "completed_next_turn":
         assert any(isinstance(row, TextEvent) and row.text == "Latest public turn" for row in seen)
+    for observation in fixture.observations():
+        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
 
 
 async def test_default_tail_permits_supported_native_shutdown_after_public_completion(
@@ -145,34 +158,21 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
 
 
-@pytest.mark.parametrize("mode", ["healthy", "nonzero_exit", "preterminal_silence"])
 async def test_codex_process_outcomes_require_completion_and_zero_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Silence and a completed crashing process cannot become successful outcomes."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode=mode)
+    """A real silent child cannot turn its initial commentary into a completed result."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="preterminal_silence")
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "1")
     seen: list[AgentEvent] = []
-    error: Exception | None = None
     async with asyncio.timeout(3):
-        try:
+        with pytest.raises(StreamStalledError) as failure:
             async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
                 seen.append(event)
-        except (CodexError, StreamStalledError) as exc:
-            error = exc
-    results = [event for event in seen if isinstance(event, ResultEvent)]
-    metrics = [event for event in seen if isinstance(event, MetricsEvent)]
-    if mode == "healthy":
-        assert error is None and len(results) == 1 and len(metrics) == 1
-    elif mode == "nonzero_exit":
-        assert isinstance(error, CodexError) and error.category == "PROCESS_EXIT"
-        assert "return code 7" in str(error)
-        assert not results and len(metrics) == 1
-    else:
-        assert isinstance(error, StreamStalledError) and error.retryable is True
-        assert not results and not metrics
-        assert any(isinstance(event, TextEvent) and "initial commentary" in event.text for event in seen)
+    assert failure.value.cli == "codex" and failure.value.timeout_s == 1.0 and failure.value.retryable is True
+    assert not any(isinstance(event, (ResultEvent, MetricsEvent)) for event in seen)
+    assert any(isinstance(event, TextEvent) and "initial commentary" in event.text for event in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
 
@@ -287,39 +287,5 @@ async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_e
     agent_steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
     assert any("Synthetic lifecycle response" in step.get("message", "") for step in agent_steps)
     assert any(step.get("metrics", {}).get("prompt_tokens") == 10 for step in agent_steps)
-    for observation in fixture.observations():
-        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
-
-
-async def test_codex_incomplete_latest_turn_cannot_reuse_prior_completion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Zero exit cannot complete a reopened public turn using an earlier turn's result."""
-    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="unfinished_next_turn")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    lifecycle = BackendLifecycleCollector(attempt=1, started_at=asyncio.get_running_loop().time(),
-                                          wall_allowance_s=None, deadline=None)
-    token = lifecycle.bind()
-    seen: list[AgentEvent] = []
-    try:
-        async with asyncio.timeout(3):
-            with pytest.raises(CodexError) as failure:
-                async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
-                    seen.append(event)
-    finally:
-        await lifecycle.stop_sampling()
-        snapshot = lifecycle.finalize()
-        lifecycle.reset(token)
-    assert failure.value.category == "TRANSPORT" and failure.value.retryable is False
-    assert not any(isinstance(event, ResultEvent) for event in seen)
-    assert any(isinstance(event, TextEvent) and "Synthetic lifecycle response" in event.text for event in seen)
-    metrics = [event for event in seen if isinstance(event, MetricsEvent)]
-    costs = [event for event in seen if isinstance(event, CostEvent)]
-    assert len(metrics) == 1 and metrics[0].prompt_tokens == 10 and metrics[0].completion_tokens == 5
-    assert len(costs) == 1 and costs[0].input_tokens == 10 and costs[0].output_tokens == 5
-    assert snapshot is not None and snapshot.process_returncode == 0
-    assert snapshot.terminal_received_s is not None and snapshot.stdout_eof_s is not None
-    assert snapshot.expiry_stage is None and snapshot.cleanup_expired is False
-    assert snapshot.teardown_started_s is not None and snapshot.teardown_completed_s is not None
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)

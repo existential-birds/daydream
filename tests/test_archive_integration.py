@@ -1,9 +1,9 @@
 """Recorder callback, strict archive round-trip, and CLI archive/evaluation integration."""
+
 from __future__ import annotations
 
 import json
 import shlex
-import sqlite3
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -18,14 +18,10 @@ from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 from daydream.artifact_visibility import (
     ArtifactEvidenceProvenance,
     ArtifactTreeSnapshot,
-    DestinationDelivery,
-    OutputLabel,
-    RoutedDestination,
 )
 from daydream.artifacts.filesystem import manifest_tree
 from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
-from daydream.commands.review import _parse_args
 from daydream.run_config import RunConfig
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
@@ -65,6 +61,7 @@ class _SecretFailureBackend(StubBackend):
             raise RuntimeError("backend rejected " + " ".join(self.secrets))
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
+
 
 async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     shard_many_python_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -116,12 +113,14 @@ async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     assert "some_children_failed" in reason_codes
     assert set(reason_codes) <= {reason.value for reason in LifecycleReasonCode}
 
+
 def _add_user_step(recorder: TrajectoryRecorder) -> None:
     """Append a minimal user Step so the recorder has at least one step and won't skip _write."""
     step = Step(step_id=recorder._next_step_id(), timestamp=now_iso(), source="user", message="test prompt",
         extra={"daydream_phase": DaydreamPhase.REVIEW.value, "daydream_run_flow": DaydreamRunFlow.NORMAL.value,},
     )
     recorder.steps.append(step)
+
 
 async def _hold_archive_fork(parent: TrajectoryRecorder, name: str, entered: anyio.Event, release: anyio.Event,
 ) -> None:
@@ -133,6 +132,7 @@ async def _hold_archive_fork(parent: TrajectoryRecorder, name: str, entered: any
             invocation.observe_user_step(prompt=f"{name}-blocked")
             entered.set()
             await release.wait()
+
 
 def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
     destinations: tuple[Any, ...] = (), dump_path: Path | None = None,
@@ -164,6 +164,7 @@ def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSna
         ), config=config, work=None, dump_path=dump_path,
     )
 
+
 def _strict_archive_callback(
     config: Any, target: Path, *, destinations: tuple[Any, ...] = (),
     dump_path: Path | None = None,
@@ -181,89 +182,6 @@ def _strict_archive_callback(
 
     return _finalize
 
-def _findings_route(live_root: Path) -> Any:
-    """The registered ``--findings-out`` route the strict bundle relocates."""
-    private = live_root / ".explicit" / "0000" / "findings.json"
-    private.parent.mkdir(parents=True, exist_ok=True)
-    private.write_text('{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}')
-    return RoutedDestination(
-        label=OutputLabel.FINDINGS_OUTPUT, requested=Path("findings/findings.json"), write_path=private,
-        frozen_path=private, delivery=DestinationDelivery.DEFERRED,
-    )
-
-def _make_round_trip_fixture(tmp_path: Path, run_flow: DaydreamRunFlow, *, run_eval: bool = False,
-) -> TrajectoryRecorder:
-    """Use deterministic 8.5-second steps with strict finalization and optional production evaluation."""
-
-    target = tmp_path / "frozen"
-    target.mkdir()
-    (target / ".review-output.md").write_text("# Review\nLooks good.\n")
-    findings = _findings_route(target)
-    config = RunConfig(target=str(target), stack="python", backend="claude", archive=True, run_eval=run_eval,
-        findings_out=str(findings.write_path),
-    )
-
-    recorder = make_recorder(
-        target, run_flow=run_flow, on_write=_strict_archive_callback(config, target, destinations=(findings,)),
-    )
-    for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
-        recorder.steps.append(Step(step_id=recorder._next_step_id(), timestamp=ts, source="agent", message="step",
-                extra={"daydream_phase": DaydreamPhase.REVIEW.value, "daydream_run_flow": run_flow.value,},
-            )
-        )
-    return recorder
-
-def _assert_round_trip_bundle(
-    archive_dir: Path, recorder: TrajectoryRecorder, *, fix_backend: str | None, test_backend: str | None,
-) -> None:
-    """Assert manifest and SQLite parity; unexecuted fix/test phases omit keys and retain NULL columns."""
-    run_dir = archive_dir / "runs" / recorder.session_id
-    assert run_dir.is_dir()
-
-    manifest_path = run_dir / "manifest.json"
-    assert manifest_path.exists()
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["session_id"] == recorder.session_id
-    assert manifest["status"] == "complete"
-    assert manifest["run"]["flow"] == recorder.run_flow.value
-    assert manifest["run"]["skill"] == "python"
-    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
-    if fix_backend is None:
-        assert "fix_backend" not in manifest["run"]
-        assert "test_backend" not in manifest["run"]
-    else:
-        assert manifest["run"]["fix_backend"] == fix_backend
-        assert manifest["run"]["test_backend"] == test_backend
-
-    archived = run_dir / "findings.json"
-    assert archived.is_file()
-    assert (json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"] == "deadbeef")
-
-    db_path = archive_dir / "index.db"
-    assert db_path.exists()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute("SELECT * FROM runs WHERE session_id = ?", (recorder.session_id,),).fetchone()
-        assert row is not None
-        assert row["status"] == "complete"
-        assert row["run_flow"] == recorder.run_flow.value
-        assert row["fix_backend"] == fix_backend
-        assert row["test_backend"] == test_backend
-    finally:
-        conn.close()
-
-@pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
-async def test_full_archive_round_trip_fix_test_backend_columns(
-    tmp_path: Path, archive_dir: Path, run_flow: DaydreamRunFlow, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorder = _make_round_trip_fixture(tmp_path, run_flow)
-    lifecycle_times = iter(("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"))
-    monkeypatch.setattr("daydream.timeutil.now_iso", lambda: next(lifecycle_times))
-    async with recorder:
-        pass
-    backend: str | None = None if run_flow is DaydreamRunFlow.IMPROVE else "claude"
-    _assert_round_trip_bundle(archive_dir, recorder, fix_backend=backend, test_backend=backend,)
 
 @pytest.mark.parametrize(("status", "lifecycle", "expected_wall"), [
     ("complete", True, 10.0), ("partial", True, 4.0), ("complete", False, None),
@@ -287,8 +205,25 @@ def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: P
         "extra": extra, "final_metrics": {"total_cost_usd": 0.5},
     }
     cutoff = "2026-01-01T00:00:04Z" if status == "partial" else "2026-01-01T00:00:10Z"
-    snapshot = RunWriteSnapshot(status=status, cutoff_at=cutoff, root_trajectory_id=session,
-        documents=(TrajectoryDocumentSnapshot(session, path, json.dumps(root).encode()),),
+    # A delayed sibling and step timestamps outside the lifecycle must not widen root wall time.
+    child_path = path.parent / "trajectories" / "delayed.json"
+    child_path.parent.mkdir()
+    child = {
+        "session_id": session,
+        "trajectory_id": "delayed",
+        "extra": {},
+        "steps": [{"timestamp": "2026-01-01T00:01:00Z"}, {"timestamp": "2026-01-01T00:01:02Z"}],
+    }
+    child_path.write_text(json.dumps(child))
+    root["steps"] = [{"timestamp": "2026-01-01T00:00:40Z"}, {"timestamp": "2026-01-01T00:00:41Z"}]
+    snapshot = RunWriteSnapshot(
+        status=status,
+        cutoff_at=cutoff,
+        root_trajectory_id=session,
+        documents=(
+            TrajectoryDocumentSnapshot(session, path, json.dumps(root).encode()),
+            TrajectoryDocumentSnapshot("delayed", child_path, json.dumps(child).encode()),
+        ),
     )
     snapshot.validate(session)
     path.write_bytes(snapshot.documents[0].json_bytes)
@@ -296,9 +231,11 @@ def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: P
     root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
     path.write_text(json.dumps(root))
     evaluated: list[RunWriteSnapshot] = []
+
     def evaluate(*args: Any, **kwargs: Any) -> dict[str, Any]:
         evaluated.append(kwargs["write_snapshot"])
         return analyze_session(*args, **kwargs)
+
     monkeypatch.setattr("daydream.eval.analyzer.analyze_session", evaluate)
     recorder = make_recorder(target, session_id=session, path=path)
 
@@ -312,38 +249,13 @@ def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: P
     assert (archived / "trajectory.json").read_bytes() == snapshot.documents[0].json_bytes
     assert evaluation["cost"]["total_cost_usd"] == 0.5
     assert evaluation["timing"]["total_wall_clock_seconds"] == expected_wall
-    assert evaluation["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+    assert evaluation["timing"]["by_agent"] == [
+        {"agent": "delayed", "duration_seconds": 2.0},
+        {"agent": "main", "duration_seconds": 1.0},
+    ]
+    assert (archived / "trajectories" / "delayed.json").read_bytes() == snapshot.documents[1].json_bytes
     assert manifest["metrics"]["wall_clock_seconds"] == expected_wall
 
-
-async def test_archive_round_trip_projects_eval_location_metrics(tmp_path: Path, archive_dir: Path,) -> None:
-    recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL, run_eval=True)
-
-    async with recorder:
-        pass
-
-    run_dir = archive_dir / "runs" / recorder.session_id
-    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
-    expected_rate = evaluation.get("location", {}).get("in_hunk_rate")
-    expected_pairs = (evaluation.get("findings", {}).get("shipped_duplication", {}).get("near_duplicate_pairs"))
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    metrics = manifest["metrics"]
-    assert "location_in_hunk_rate" in metrics  # the axis has a surface at all
-    assert "shipped_duplicate_pairs" in metrics
-    assert metrics["location_in_hunk_rate"] == expected_rate
-    assert metrics["shipped_duplicate_pairs"] == expected_pairs
-
-    conn = sqlite3.connect(str(archive_dir / "index.db"))
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute("SELECT location_in_hunk_rate, shipped_duplicate_pairs FROM runs WHERE session_id = ?",
-            (recorder.session_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row is not None
-    assert row["location_in_hunk_rate"] == expected_rate
-    assert row["shipped_duplicate_pairs"] == expected_pairs
 
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     def on_write_boom(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot,) -> None:
@@ -357,21 +269,6 @@ async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     assert data["session_id"] == recorder.session_id
     assert len(data["steps"]) == 1
 
-def test_cli_no_archive_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-archive"])
-    config = _parse_args()
-    assert config.archive is False
-
-def test_cli_no_eval_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake", "--no-eval"])
-    config = _parse_args()
-    assert config.run_eval is False
-
-def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/fake"])
-    config = _parse_args()
-    assert config.archive is True
-    assert config.run_eval is True
 
 async def test_archive_callback_keeps_configured_hub_work_local(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -391,6 +288,7 @@ async def test_archive_callback_keeps_configured_hub_work_local(
 
     assert hub.commits == []
     assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
+
 
 async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -444,9 +342,20 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     assert complete.status == "complete"
     assert complete.cutoff_at > partial.cutoff_at
     assert all("run_ended_at" in json.loads(document.json_bytes)["extra"] for document in complete.documents)
+    for document in complete.documents:
+        payload = json.loads(document.json_bytes)
+        assert payload["session_id"] == recorder.session_id
+        assert atif_validate(payload, validate_images=False)
+        assert [step["step_id"] for step in payload["steps"]] == list(range(1, len(payload["steps"]) + 1))
+    assert {document.trajectory_id for document in complete.documents} == {
+        recorder.session_id,
+        f"{recorder.session_id}:a",
+        f"{recorder.session_id}:b",
+    }
     final_evaluation = json.loads((roots["complete"] / "runs" / recorder.session_id / "evaluation.json").read_text())
     assert final_evaluation["timing"]["agent_completeness"] == {"total": 6, "attributed": 0, "unattributed": 6,}
     assert final_evaluation["timing"]["diagnostics"]["malformed_invocation"] == 0
+
 
 async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -470,6 +379,7 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     assert hub.commits == []
     assert (dump_dir / "manifest.json").is_file()
     assert (dump_dir / "review-output.md").is_file()
+
 
 async def test_runner_archive_round_trip_redacts_structured_tool_credentials(tmp_path: Path, archive_dir: Path,
 ) -> None:

@@ -1,6 +1,7 @@
 """Tests for prior-finding inventory, partition, and stale resolution in `daydream/reconcile.py`."""
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,8 +15,6 @@ from daydream.reconcile import (
     minimize_comment,
     partition,
 )
-
-# --- Canned gh_api responses for fetch_prior_findings ----------------------
 
 
 def _thread(thread_id: str, *, comment_node_id: str, database_id: int, body: str, author: str | None = None,
@@ -33,102 +32,84 @@ def _thread(thread_id: str, *, comment_node_id: str, database_id: int, body: str
 def _page(nodes: list[dict[str, Any]], *, next_cursor: str | None = None) -> dict[str, Any]:
     """A reviewThreads GraphQL page; ``next_cursor`` set means another page follows."""
     return {"data": {"repository": {"pullRequest": {"reviewThreads": {
-                        "pageInfo": {"hasNextPage": next_cursor is not None, "endCursor": next_cursor}, "nodes": nodes,
-                    }
-                }
-            }
-        }
+        "pageInfo": {"hasNextPage": next_cursor is not None, "endCursor": next_cursor}, "nodes": nodes,
+    }}}}}
+
+
+def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Trust and partition the complete fetched population, including human-controlled marker text."""
+    a, b, c, d, e, forged_thread, forged_review = (letter * 64 for letter in "abcdef0")
+    resolved = _thread("RT_RESOLVED", comment_node_id="C_RESOLVED", database_id=3,
+                       body=finding_marker(c), viewer_did_author=True)
+    resolved["isResolved"] = True
+    minimized = _thread("RT_MINIMIZED", comment_node_id="C_MINIMIZED", database_id=4,
+                        body=finding_marker(d), author="daydream")
+    minimized["comments"]["nodes"][0]["isMinimized"] = True
+    api = Mock(side_effect=[
+        _page([
+            _thread("RT_VIEWER", comment_node_id="C_VIEWER", database_id=1,
+                    body=finding_marker(a), author="viewer-alias", viewer_did_author=True),
+            _thread("RT_FORGED", comment_node_id="C_FORGED", database_id=6,
+                    body=finding_marker(forged_thread), author="evil-attacker"),
+            resolved,
+            _thread("RT_PLAIN", comment_node_id="C_PLAIN", database_id=8,
+                    body="a bot comment without a finding marker", viewer_did_author=True),
+        ], next_cursor="CURSOR_1"),
+        _page([
+            _thread("RT_BOT", comment_node_id="C_BOT", database_id=2,
+                    body=finding_marker(b), author="DAYDREAM[bot]"),
+            minimized,
+            _thread("RT_DUPLICATE", comment_node_id="C_DUPLICATE", database_id=9,
+                    body=finding_marker(a), viewer_did_author=True),
+        ]),
+        [
+            {"id": 901, "node_id": "BODY", "body": finding_marker(e), "user": {"login": "daydream[bot]"}},
+            {"id": 902, "node_id": "FORGED", "body": finding_marker(forged_review),
+             "user": {"login": "evil-attacker"}},
+            {"id": 903, "node_id": "BODY_DUPLICATE", "body": finding_marker(a), "user": {"login": "daydream"}},
+        ],
+    ])
+    monkeypatch.setattr(git_ops, "gh_api", api)
+
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
+
+    assert prior == {
+        a: PriorFinding(a, "RT_VIEWER", False, "C_VIEWER"),
+        c: PriorFinding(c, "RT_RESOLVED", True, "C_RESOLVED"),
+        b: PriorFinding(b, "RT_BOT", False, "C_BOT"),
+        d: PriorFinding(d, "RT_MINIMIZED", True, "C_MINIMIZED"),
+        e: PriorFinding(e, None, False, "BODY"),
     }
+    assert list(prior) == [a, c, b, d, e]
+    plan = partition(current=[a, c, "9" * 64], prior=prior)
+    assert plan.new == ["9" * 64] and plan.matched == {a, c}
+    assert plan.stale == [PriorFinding(b, "RT_BOT", False, "C_BOT")]
+    first, second, reviews = api.call_args_list
+    assert first.args == second.args == (tmp_path, "graphql")
+    assert [call.kwargs["input_data"]["variables"] for call in (first, second)] == [
+        {"owner": "o", "name": "r", "number": 7, "cursor": None},
+        {"owner": "o", "name": "r", "number": 7, "cursor": "CURSOR_1"},
+    ]
+    assert all(call.kwargs["method"] == "POST" and call.kwargs["idempotent"] for call in (first, second))
+    assert reviews.args == (tmp_path, "repos/o/r/pulls/7/reviews")
+    assert reviews.kwargs["paginate"] is True and reviews.kwargs["idempotent"] is True
 
 
-_GRAPHQL_PAGE_1: dict[str, Any] = _page(
-    [_thread("RT_0", comment_node_id="PRRC_0", database_id=100, body="a human comment with no marker")],
-    next_cursor="CURSOR_1",
-)
-
-_GRAPHQL_PAGE_2: dict[str, Any] = _page([_thread("RT_1", comment_node_id="PRRC_1", database_id=101,
-             body="Race in cache\n\n" + finding_marker("a" * 64),
-             viewer_did_author=True)],
-)
-
-_REST_REVIEWS: list[dict[str, Any]] = [{"id": 900, "node_id": "PRR_900", "body": "review summary, no marker"},
-    {"id": 901, "node_id": "PRR_901", "body": "File-level note\n\n" + finding_marker("b" * 64),
-     "user": {"login": "daydream-bot"}},
-]
-
-
-def _fake_gh(threads: list[dict[str, Any]], reviews: list[dict[str, Any]], *, pages: list[dict[str, Any]] | None = None,
-) -> Any:
-    """Canned gh_api: GraphQL thread page(s) + one REST reviews page.
-
-    ``pages`` supplies successive GraphQL responses for pagination; otherwise
-    every GraphQL call returns one page containing ``threads``.
-    """
-    def _api(repo: Any, endpoint: str, **kwargs: Any) -> Any:
-        if endpoint == "graphql":
-            if pages is None:
-                return _page(threads)
-            return pages.pop(0) if pages else _page([])
-        if endpoint.endswith("/pulls/7/reviews"):
-            return reviews
-        raise AssertionError(f"unexpected gh_api endpoint: {endpoint}")
-    return _api
-
-
-# --- Tests ------------------------------------------------------------------
-
-def test_partition_new_matched_stale_and_respects_human_resolution() -> None:
-    prior = {"f1": PriorFinding("f1", thread_id="T1", is_resolved=False),
-        "f2": PriorFinding("f2", thread_id="T2", is_resolved=False),
-        "f3": PriorFinding("f3", thread_id="T3", is_resolved=True),
-        "f4": PriorFinding("f4", thread_id=None, is_resolved=False),  # body-only
+def test_unresolved_bot_inventory_accepts_only_viewer_proof(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    viewer, forged = "a" * 64, "b" * 64
+    api = Mock(side_effect=[_page([
+        _thread("RT_VIEWER", comment_node_id="C_VIEWER", database_id=1,
+                body=finding_marker(viewer), viewer_did_author=True),
+        _thread("RT_FORGED", comment_node_id="C_FORGED", database_id=2,
+                body=finding_marker(forged), author="daydream[bot]"),
+    ]), [{"node_id": "REST_FORGED", "body": finding_marker(forged), "user": {"login": "daydream[bot]"}}]])
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    assert fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None) == {
+        viewer: PriorFinding(viewer, "RT_VIEWER", False, "C_VIEWER"),
     }
-    plan = partition(current=["f1", "f3", "f9"], prior=prior)
-    assert plan.new == ["f9"]                       # never posted -> post
-    assert [p.fingerprint for p in plan.stale] == ["f2"]  # unresolved inline, gone -> resolve
-    assert plan.matched == {"f1", "f3"}             # f3 resolved by a human: stays closed
-    # body-only f4 is stale but has no thread; it must NOT appear in plan.stale
-
-def test_fetch_prior_findings_parses_markers_across_pages(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([], _REST_REVIEWS, pages=[_GRAPHQL_PAGE_1, _GRAPHQL_PAGE_2]))
-    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream-bot")
-    assert prior["a" * 64].thread_id == "RT_1" and prior["b" * 64].thread_id is None
-
-def test_fetch_prior_findings_ignores_marker_from_non_bot_author(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    # A thread whose comment carries the marker but is authored by a human.
-    fp = "a" * 64
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([_thread("RT_1", comment_node_id="PRRC_1", database_id=101,
-                body=finding_marker(fp), author="evil-attacker"),  # no viewerDidAuthor
-    ], []))
-    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
-    assert prior == {}   # forged marker ignored -> not trusted
-
-def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    fp = "b" * 64
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([], [
-        {"id": 9, "node_id": "PRR_9", "body": finding_marker(fp), "user": {"login": "evil-attacker"}},
-    ]))
-    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
-    assert prior == {}
-
-def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    fp = "c" * 64
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([
-        _thread("RT_2", comment_node_id="PRRC_2", database_id=102, body=finding_marker(fp), author="daydream[bot]"),
-    ], []))
-    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
-    assert fp in prior and prior[fp].thread_id == "RT_2"
-
-def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    fp = "d" * 64
-    monkeypatch.setattr(git_ops, "gh_api", _fake_gh([
-        _thread("RT_3", comment_node_id="PRRC_3", database_id=103, body=finding_marker(fp), viewer_did_author=True),
-    ], []))
-    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None)  # misconfigured
-    assert fp in prior   # viewerDidAuthor still proves authorship
+    assert api.call_count == 2
 
 
 # --- Prior diagram comments (issue #1113) ------------------------------------

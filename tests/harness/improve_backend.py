@@ -38,7 +38,6 @@ from daydream.backends import (
     AgentEvent,
     ResultEvent,
     TextEvent,
-    ToolResultEvent,
     ToolStartEvent,
 )
 from daydream.backends._subprocess import StreamStalledError
@@ -257,15 +256,13 @@ class ImproveStubBackend:
     model = "mock-model"
 
     def __init__(
-        self, target: Path, *, n_findings: int | None = None, attempt_write: bool = False, fanout_concurrency: int = 4,
+        self, target: Path, *, n_findings: int | None = None, fanout_concurrency: int = 4,
     ) -> None:
         self._target = target
         self.audit_root_isolation: str | None = None
         self.audit_root: Path | None = None
         self.audit_outward_symlinks: frozenset[Path] = frozenset()
         self._n_findings = n_findings
-        self._attempt_write = attempt_write
-        self._write_attempted = False
         self.reasoning_effort: str | None = None
         self.fanout_concurrency = fanout_concurrency
         # Instant retries in-test: run_agent reads these off the backend, so a
@@ -299,7 +296,6 @@ class ImproveStubBackend:
         self.plan_stall_attempts = 0
         self.plan_rate_limit_always = False
         self.plan_stop_condition_path: str | None = None
-        self.plan_no_test_exemplars = False
         self.group_scoped_findings = False
         self.findings_per_category: int | None = None
         self.fail_vet_titles: set[str] = set()
@@ -371,19 +367,6 @@ class ImproveStubBackend:
             cwd, prompt, marker, output_schema=output_schema, agents=agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session,
         )
-        if self._attempt_write and not self._write_attempted:
-            self._write_attempted = True
-            write_path = self._target / "agent-write-attempt.txt"
-            yield ToolStartEvent(id="improve-write-attempt", name="Write",
-                input={"file_path": str(write_path), "content": "must not be written"},
-            )
-            if read_only:
-                yield ToolResultEvent(
-                    id="improve-write-attempt", output="denied by read-only backend profile", is_error=True,
-                )
-            else:
-                write_path.write_text("must not be written")
-                yield ToolResultEvent(id="improve-write-attempt", output="written", is_error=False,)
         if category in self.fail_categories:
             raise RuntimeError(f"{category} audit failed")
         if marker == "repo-scan":
@@ -530,9 +513,6 @@ class ImproveStubBackend:
                 plan["why_this_matters"]["problem"] = ("Callers keep sending secret: hunter2realvalue in "
                     "production traffic today."
                 )
-            if self.plan_no_test_exemplars:
-                # The only honest answer in a repository with no test files.
-                plan["test_plan"]["exemplars"] = []
             if self.plan_stop_condition_path is not None:
                 plan["false_assumption"]["related_paths"].append(self.plan_stop_condition_path)
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
@@ -946,11 +926,11 @@ _ImproveBackendT = TypeVar("_ImproveBackendT", bound=ImproveStubBackend)
 
 
 def install_improve_stub(
-    monkeypatch: pytest.MonkeyPatch, target: Path, *, n_findings: int | None = None, attempt_write: bool = False,
+    monkeypatch: pytest.MonkeyPatch, target: Path, *, n_findings: int | None = None,
     fanout_concurrency: int = 4,
 ) -> ImproveStubBackend:
     stub = ImproveStubBackend(
-        target, n_findings=n_findings, attempt_write=attempt_write, fanout_concurrency=fanout_concurrency,
+        target, n_findings=n_findings, fanout_concurrency=fanout_concurrency,
     )
     return install_capable_improve_backend(monkeypatch, stub)
 

@@ -77,12 +77,6 @@ def _denied_observability(*a: Any, **k: Any) -> Any:
     """Injected failing observability resolver: the pre-config failure case."""
     raise RuntimeError("observability boom")
 
-def test_cli_main_clean_deep_run_exits_0(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _silence_all(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    assert _cli_main_exit(monkeypatch, str(multi_stack_target)) == 0
-
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -93,6 +87,13 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
 
     _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+
+    def forbidden_input(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("non-TTY run must not prompt")
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", forbidden_input)
 
     git(multi_stack_target, "remote", "add", "origin", f"https://github.com/acme/{multi_stack_target.name}.git")
     trajectory_path = tmp_path / "trajectory.json"
@@ -102,6 +103,7 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     data = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert data["extra"]["pr_repo"] == f"acme/{multi_stack_target.name}"
     assert data["extra"]["pr_repo"] != f"acme/{Path.cwd().name}"
+    assert (multi_stack_target / ".review-output.md").exists()
 
 def test_cli_main_wrong_branch_exits_1(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _silence_all(monkeypatch)
@@ -144,20 +146,6 @@ def test_cli_main_rejects_workspace_copy_traversal(repo_with_origin: Path, monke
     wt_root = repo_with_origin / ".daydream" / "worktrees"
     assert not wt_root.exists() or not any(wt_root.iterdir())
 
-def test_non_tty_auto_enables_non_interactive(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _silence_all(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # piped stdin
-    monkeypatch.delenv("CI", raising=False)
-    def forbidden_input(*args: Any, **kwargs: Any) -> str:
-        raise AssertionError("non-TTY run must not prompt")
-
-    monkeypatch.setattr("daydream.run_context._prompt_user", forbidden_input)
-
-    _cli_main_exit(monkeypatch, str(multi_stack_target))
-
-    assert (multi_stack_target / ".review-output.md").exists()
-
 def test_cli_main_prune_reanchor_removes_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo, _ = _repo(tmp_path)
@@ -168,9 +156,16 @@ def test_cli_main_prune_reanchor_removes_and_exits_0(tmp_path: Path, monkeypatch
     _silence_all(monkeypatch)
     monkeypatch.setattr("daydream.commands.improve.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
+    listed: list[str] = []
+    monkeypatch.setattr("daydream.commands.improve.print_info", lambda _console, name: listed.append(str(name)))
+    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
+    assert listed == ["run-abcd-reanchor"]
     assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abcd-reanchor", str(repo)) == 0
     assert not target.exists()
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+    listed.clear()
+    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
+    assert listed == []
 
 def test_cli_main_prune_reanchor_rejects_name_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
@@ -181,27 +176,6 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(tmp_path: Path, monkeypatc
     assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abc", str(repo)) == 1
     assert not any(p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*"))
     assert not (repo / ".daydream" / "worktrees" / "run-abc").exists()
-
-def test_cli_main_list_reanchor_lists_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-
-    repo, _ = _repo(tmp_path)
-    owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
-    target = operational_worktree_root(owner) / "run-abcd-reanchor"
-    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
-
-    _silence_all(monkeypatch)
-    listed: list[str] = []
-    monkeypatch.setattr("daydream.commands.improve.print_info", lambda _console, name: listed.append(str(name)),)
-    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
-    assert listed == ["run-abcd-reanchor"]
-
-def test_cli_main_list_reanchor_empty_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-
-    repo, _ = _repo(tmp_path)
-    _silence_all(monkeypatch)
-    monkeypatch.setattr("daydream.commands.improve.print_info", lambda *a, **k: None)
-    assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
-
 
 # Run the real CLI on the main thread for loop and signal behavior, with real Git, a Codex
 # executable fixture, and a probe extension. Child observations establish what reached the agent;
@@ -437,23 +411,6 @@ def test_cli_main_fatal_default_concise_no_traceback(
     assert "During handling" not in err
     assert "GitError" not in err
 
-def test_cli_main_verbose_prints_redacted_chain_on_stderr(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _silence_all(monkeypatch)
-    _install_chained_failure_backend(monkeypatch, multi_stack_target)
-
-    code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
-    out, err = capsys.readouterr()
-
-    assert code == 1
-    assert "failed to create disposable read-only checkout" in out + err
-    assert "CodexError" in err and "failed to create disposable read-only checkout" in err
-    assert "GitError" in err and "isolation probe failure" in err
-    assert "directly caused by the following exception" in err
-    assert err.index("CodexError") < err.index("GitError")
-    assert "isolation probe failure" not in out
-
 def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -471,7 +428,12 @@ def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
         assert sentinel not in stream
         assert "\x1b" not in stream and "\r" not in stream
     assert "[REDACTED" in err
-    assert "CodexError" in err
+    assert "failed to create disposable read-only checkout" in out + err
+    assert "CodexError" in err and "failed to create disposable read-only checkout" in err
+    assert "GitError" in err and "isolation probe failure" in err
+    assert "directly caused by the following exception" in err
+    assert err.index("CodexError") < err.index("GitError")
+    assert "isolation probe failure" not in out
 
 def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

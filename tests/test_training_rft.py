@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from daydream.training.reward import REWARD_VERSION
 from daydream.training.rft import RftConfig, run_rft
 
 
@@ -37,23 +38,26 @@ def frozen_rft_inputs(tmp_path: Path) -> Path:
 
 
 def test_winners_byte_identical_on_rerun(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    cfg_a = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a")
-    cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b")
-    w1 = run_rft(cfg_a)
-    w2 = run_rft(cfg_b)
+    """One frozen RFT run owns threshold admission, provenance and deterministic winner output."""
+    cfg_a = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a",
+                      model_id="test-model", min_breakdown={"composite": 0.6, "correctness_per_finding": 0.5})
+    cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b",
+                      model_id="test-model", min_breakdown={"composite": 0.6, "correctness_per_finding": 0.5})
+    w1, w2 = run_rft(cfg_a), run_rft(cfg_b)
     assert w1.winners_path.read_bytes() == w2.winners_path.read_bytes()
-    assert w1.records, "expected at least one winner from a well-formed corpus"
+    assert w1.records and w1.inputs_sha256
+    payload = json.loads(w1.winners_path.read_text())
+    header = payload["header"]
+    assert header["seed"] == 11 and header["rubric_version"] == "2026.08.29-1"
+    assert header["model_id"] == "test-model" and header["inputs_sha256"] == w1.inputs_sha256
+    assert header["temperature"] == "0.000000"
+    assert header["min_breakdown"] == {"composite": "0.600000", "correctness_per_finding": "0.500000"}
+    assert [w["record_id"] for w in payload["winners"]] == sorted(w["record_id"] for w in payload["winners"])
+    for winner in w1.records:
+        assert winner.breakdown.composite is not None and winner.breakdown.composite >= 0.6
+        correctness = winner.breakdown.correctness_per_finding
+        assert correctness and sum(correctness) / len(correctness) >= 0.5
 
-def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    cfg = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "c",
-        min_breakdown={"composite": 0.6, "correctness_per_finding": 0.5},
-    )
-    winners = run_rft(cfg)
-    assert winners.records
-    for w in winners.records:
-        assert w.breakdown.composite is not None  # every winner went through score_trajectory's breakdown
-        assert w.breakdown.correctness_per_finding
-        assert sum(w.breakdown.correctness_per_finding) / len(w.breakdown.correctness_per_finding) >= 0.5
 
 def test_shipped_threshold_example_replays_current_reward(frozen_rft_inputs: Path, tmp_path: Path,) -> None:
     example = Path(__file__).resolve().parents[1] / "rl/train/rft.toml"
@@ -93,17 +97,6 @@ def test_missing_identity_fails_closed_naming_the_record(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="broken"):
         run_rft(RftConfig(inputs=path, seed=11, rubric_version="v", output_dir=tmp_path / "e"))
 
-def test_winners_header_stamps_provenance(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    result = run_rft(RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
-                               output_dir=tmp_path / "f", model_id="test-model"))
-    payload = json.loads(result.winners_path.read_text())
-    header = payload["header"]
-    assert header["seed"] == 11
-    assert header["rubric_version"] == "2026.08.29-1"
-    assert header["model_id"] == "test-model"
-    assert header["inputs_sha256"]
-    ids = [w["record_id"] for w in payload["winners"]]
-    assert ids == sorted(ids)
 
 def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     """Varying the sampled finding subset must vary the breakdown while identical samples remain
@@ -114,10 +107,18 @@ def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
             {"id": "r-vary-f2", "text": "ungrounded guess B", "grounded": False, "verdict": "contradicts"},
         ],
     )
-    path = _write_corpus(tmp_path, [rec])
+    path = _write_corpus(tmp_path, [rec,
+        _record("r-gold", length=4000, findings=[{"verdict": "consistent"}, {"verdict": "uncertain"}]),
+        _record("r-invalid-format", findings=[], verifier_verdicts=None, format_valid=False, length=50),
+        _record("r-missing-credit", findings=[], verifier_verdicts=None, length=None)])
     out_a = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a"))
     out_b = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b"))
     assert out_a.winners_path.read_bytes() == out_b.winners_path.read_bytes()
+    assert {winner.record_id for winner in out_a.records} == {"r-vary", "r-gold", "r-invalid-format"}
+    full = {winner.record_id: winner.breakdown for winner in out_a.records if winner.candidate_index == 0}
+    assert full["r-gold"].correctness_per_finding == [1.0, 0.5]
+    assert full["r-gold"].composite == 0.7 and full["r-gold"].reward_version == REWARD_VERSION
+    assert full["r-invalid-format"].composite == 0.0 and full["r-invalid-format"].format_valid is False
     breakpoints = {(w.candidate_index, w.breakdown.composite, tuple(w.breakdown.correctness_per_finding or []))
-                   for w in out_a.records}
+                   for w in out_a.records if w.record_id == "r-vary"}
     assert len(breakpoints) > 1

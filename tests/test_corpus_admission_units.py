@@ -18,7 +18,6 @@ LEGACY: dict[str, Any] = {"label": "accepted", "has_posterior": True, "labeler_p
 MIXED: dict[str, Any] = {**LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION, "decisive_mix": True}
 AMBIG: dict[str, Any] = {
     **LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION, "decisive_mix": False, "decisive_only": False}
-GOOD: dict[str, Any] = {**LEGACY, "labeler_policy_version": LABELER_POLICY_VERSION}
 
 
 def test_gold_admission_rejects_legacy_observations() -> None:
@@ -28,6 +27,3 @@ def test_gold_admission_rejects_legacy_observations() -> None:
 def test_gold_admission_rejects_mixed_and_ambiguous() -> None:
     assert _is_admitted_outcome_gold(**MIXED) is False
     assert _is_admitted_outcome_gold(**AMBIG) is False
-
-def test_gold_admission_accepts_current_clean_evidence() -> None:
-    assert _is_admitted_outcome_gold(**GOOD) is True

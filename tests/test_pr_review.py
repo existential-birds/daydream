@@ -25,7 +25,6 @@ from daydream.pr_review import (
     extract_anchors,
     parse_finding_markers,
     resolve_review_renderers,
-    snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
 from daydream.review_reporting import render_github_review_context
@@ -36,6 +35,7 @@ from daydream.reviews.rendering import (
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import _write_findings_for_parsed
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
@@ -63,7 +63,6 @@ def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],)
     return fake_submit
 
 
-
 def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
 
     def boom(finding: Any, ctx: Any) -> str:
@@ -88,6 +87,7 @@ _RUN_INFO = pr_comment_renderer.render_run_info_block([_FIXTURE])
 # `classify` is stubbed (see _stub_post): the stubbed classifier never reads them.
 _POST_ISSUE = ParsedIssue(path="a.py", line=1, title="t", body="b")
 _NO_ISSUES = pr_review.ClassifiedIssues()
+
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRInfo) -> None:
 
@@ -143,44 +143,6 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
 
 
 
-def test_no_marker_without_fingerprint() -> None:
-    assert (parse_finding_markers(format_comment_body(
-                ParsedIssue(path="a.py", line=3, title="T", body="B"), "inline", renderers=BUILTIN_RENDERERS
-            )
-        )
-        == []
-    )
-
-
-def test_extract_anchors_prefers_long_tokens() -> None:
-    anchors = extract_anchors("Null check\nThe function `compute_total` dereferences `items` in handleRequest")
-    # Backtick tokens should appear; longest first.
-    assert "compute_total" in anchors
-    assert "handleRequest" in anchors
-    assert anchors == sorted(anchors, key=len, reverse=True)
-
-
-
-
-def test_snap_to_hunk_within_tolerance_snaps_to_boundary() -> None:
-    hunks = [(90, 105)]
-    assert snap_to_hunk(89, hunks) == 90
-    assert snap_to_hunk(87, hunks) == 90
-    assert snap_to_hunk(108, hunks) == 105
-
-def test_snap_to_hunk_beyond_tolerance_returns_none() -> None:
-    hunks = [(90, 105)]
-    assert snap_to_hunk(86, hunks) is None
-    assert snap_to_hunk(109, hunks) is None
-
-def test_snap_to_hunk_between_two_hunks() -> None:
-    hunks = [(80, 98), (106, 120)]
-    assert snap_to_hunk(105, hunks) == 106
-    assert snap_to_hunk(100, hunks) == 98
-    assert snap_to_hunk(102, hunks) is None
-
-def test_snap_to_hunk_empty_hunks() -> None:
-    assert snap_to_hunk(10, []) is None
 
 
 @pytest.fixture
@@ -188,90 +150,10 @@ def pr() -> PRInfo:
     return sample_pr()
 
 
-def _assert_hunks_resolve(_td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
-) -> int | None:
-    assert hunks is not None, "classify called resolve_line without the file's hunks"
-    return issue.line
-
-
 def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
     raise AssertionError("gh fallback invoked")
 
 
-def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRInfo) -> None:
-    issues = [ParsedIssue(path="a.py", line=10, title="t1", body="anchor_one"),
-        ParsedIssue(path="b.py", line=99, title="t2", body="anchor_two"),
-        ParsedIssue(path="c.py", line=None, title="t3", body="xstack", is_cross_stack=True),
-    ]
-
-    def fake_hunks(_td: Path, _base: str, _head: str, path: str, *, pr_number: int | None = None, **_kwargs: Any,
-    ) -> list[tuple[int, int]]:
-        if path == "a.py":
-            return [(8, 12)]  # 10 is inside
-        if path == "b.py":
-            return [(1, 5)]  # 99 is outside
-        return []
-
-    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
-    monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
-    monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
-
-    result = classify(Path("."), pr, issues)
-    assert len(result.inline) == 1
-    assert result.inline[0].path == "a.py"
-    assert result.inline[0].line == 10
-    assert result.inline[0].side == "RIGHT"
-    assert len(result.inline_issues) == 1
-    assert result.inline_issues[0].path == "a.py"
-    body_paths = [i.path for i in result.body_only]
-    assert set(body_paths) == {"b.py", "c.py"}
-
-def test_classify_snaps_tolerance_line_to_hunk_boundary(monkeypatch: pytest.MonkeyPatch, pr: PRInfo) -> None:
-    issues = [ParsedIssue(path="conftest.py", line=89, title="t1", body="anchor_one"),
-        ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
-    ]
-
-    def fake_hunks(_td: Path, _base: str, _head: str, path: str, *, pr_number: int | None = None, **_kwargs: Any,
-    ) -> list[tuple[int, int]]:
-        if path == "conftest.py":
-            return [(90, 105)]  # 89 is 1 below start
-        if path == "scripts/modernize-app.py":
-            return [(80, 98), (106, 120)]  # 105 is 1 before second hunk
-        return []
-
-    monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
-    monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
-    monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
-
-    result = classify(Path("."), pr, issues)
-    assert len(result.inline) == 2
-    assert result.inline[0].path == "conftest.py"
-    assert result.inline[0].line == 90
-    assert result.inline[1].path == "scripts/modernize-app.py"
-    assert result.inline[1].line == 106
-
-
-
-def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
-    """Link the fork commit while retaining the base repository as the POST target."""
-    fork_pr = replace(pr, head_repo="forky/widgets")
-    payload = payload_for(
-        fork_pr, pr_review.ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
-    )
-    body = payload["body"]
-    assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
-    assert "https://github.com/acme/widgets/commit/head123" not in body
-
-
-def test_warning_retains_distinct_diagnostics_for_a_shared_scope_and_phase() -> None:
-    coverage = review_coverage(scope_ids=('merge',), phases=('merge',))
-    coverage.record_scope('merge', 'failed', reasons=('backend_failure',))
-    coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
-    warnings = ('merge: synthesis transport failed', 'merge: reviewer backend failed',
-                'merge: additional evidence unavailable', 'merge: synthesis transport failed')
-    rendered = render_github_review_context(coverage.finalize('failed'), review_warnings=warnings)
-    for warning in set(warnings):
-        assert rendered.count(warning) == 1
 
 
 @pytest.mark.parametrize("with_terminal_result", [False, True])
@@ -280,9 +162,13 @@ def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result:
     warnings = tuple(f"stack-{index:02}: <unsafe> & reviewer timed out" for index in range(12))
     summary = None
     if with_terminal_result:
-        coverage = review_coverage(scope_ids=(), phases=('merge',))
+        coverage = review_coverage(scope_ids=('structural',), phases=('structural', 'merge'))
+        coverage.record_scope('structural', 'failed', reasons=('backend_failure',))
+        coverage.record_phase('structural', 'failed', reasons=('synthesis_failure',))
         coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
-        warnings += ("Transport evidence unavailable.",)
+        warnings = ('structural: synthesis transport failed', 'structural: reviewer backend failed',
+                    'structural: additional evidence unavailable', 'structural: synthesis transport failed',
+                    *warnings, "Transport evidence unavailable.")
         summary = render_github_review_context(coverage.finalize("failed"), review_warnings=warnings)
     body = build_payload_for_event(
         pr, pr_review.ClassifiedIssues(), event=pr_review.ReviewEvent.COMMENT,
@@ -290,26 +176,15 @@ def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result:
         review_warnings=warnings, review_summary=summary,
     ).body
 
-    assert body.count("reviewer timed out") == (7 if with_terminal_result else 8)
-    assert f"{6 if with_terminal_result else 4} additional" in body
+    if with_terminal_result:
+        for warning in warnings[:3]:
+            assert body.count(warning) == 1
+    assert body.count("reviewer timed out") == (4 if with_terminal_result else 8)
+    assert f"{9 if with_terminal_result else 4} additional" in body
     assert "&lt;unsafe&gt; &amp;" in body
     assert ('merge: synthesis failure' in body) is with_terminal_result
     assert "stack-11:" not in body
     assert "Transport evidence unavailable." not in body
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any], str, str]:
@@ -328,14 +203,18 @@ def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any],
 
 def test_find_open_pr_captures_head_repo_for_fork_pr(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """Capture fork identity for commit links while posting to the base repository."""
-    row, _, _ = _local_pr_row(git_repo, head_owner="forky")
-    row["headRepository"] = {"name": "widgets", "nameWithOwner": "forky/widgets"}
+    row, _, head = _local_pr_row(git_repo, head_owner="forky")
+    row["headRepository"] = {"name": "Widgets", "nameWithOwner": "FORKY/widgets"}
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("acme", "widgets"),)
     info = pr_review.find_open_pr(git_repo)
     assert info is not None
     assert (info.owner, info.repo) == ("acme", "widgets")
-    assert info.head_repo == "forky/widgets"
+    assert info.head_repo == "FORKY/widgets"
+    body = payload_for(info, pr_review.ClassifiedIssues(), run_info="test run info",
+                       renderers=BUILTIN_RENDERERS)["body"]
+    assert (f"- **Reviewed commit:** [`{head[:7]}`](https://github.com/FORKY/widgets/commit/{head})") in body
+    assert f"https://github.com/acme/widgets/commit/{head}" not in body
     assert info.head_ref == "feature"
 
 
@@ -352,8 +231,7 @@ def test_find_pr_by_number_raises_when_slug_unresolved(monkeypatch: pytest.Monke
         pr_review.find_pr_by_number(git_repo, 7)
 
 
-@pytest.mark.parametrize("lookup", ["branch", "number"])
-@pytest.mark.parametrize("include_empty_slug", [False, True])
+@pytest.mark.parametrize(("lookup", "include_empty_slug"), [("branch", False), ("number", True)])
 def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path, tmp_path: Path, lookup: str, include_empty_slug: bool,
 ) -> None:
@@ -391,19 +269,10 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
         )
     assert not output.exists()
 
-@pytest.mark.parametrize("value", [None, False, 7, " ", "fork/r/extra", "fork/", "/r"])
-def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
-    row = {"headRepository": {"name": "r", "nameWithOwner": value}, "headRepositoryOwner": {"login": "fork"}}
-    with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
 
-@pytest.mark.parametrize("component", ["name", "login"])
-@pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
-def test_head_slug_fallback_rejects_invalid_components(component: str, value: Any) -> None:
-    row = {"headRepository": {"name": "r", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "fork"}}
-    row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
-    with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+
+
+
 
 @pytest.mark.parametrize("slug", ["other/r", "fork/other"])
 def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
@@ -415,26 +284,41 @@ def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     assert "private-value" not in str(error.value)
     assert slug not in str(error.value)
 
-def test_head_slug_allows_case_differences() -> None:
-    assert pr_review._head_repo_slug_from_row({"headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
-        "headRepositoryOwner": {"login": "fork"},
-    }) == "FORK/widgets"
+
+
 
 @pytest.mark.parametrize(("field", "value"),
-    [("number", True), ("number", 0), ("headRefOid", "HEAD"), ("headRefOid", "deadbeef"), ("headRefName", ""),
-        ("headRefName", 7), ("headRefName", "feature~1"), ("baseRefName", ""), ("baseRefName", "main~1"), ("url", ""),
-        ("url", 7), ("headRepository", "fork/r"), ("headRepository", {"nameWithOwner": "fork/r/extra"}),
-        ("headRepository", {}), ("headRepository", {"nameWithOwner": 7, "name": "r"}), ("headRepositoryOwner", {}),
-        ("headRepositoryOwner", {"login": 7}), ("headRepositoryOwner", {"login": ""}), ("headRepositoryOwner", "fork"),
+    [
+        ("number", True),
+        ("number", 0),
+        ("headRefOid", "HEAD"),
+        ("headRefName", ""),
+        ("headRefName", "feature~1"),
+        ("baseRefName", ""),
+        ("baseRefName", "main~1"),
+        ("url", ""),
+        ("headRepository", "fork/r"),
+        ("headRepository", {"nameWithOwner": "fork/r/extra", "name": "r"}),
+        ("headRepository", {}),
+        ("headRepository", {"nameWithOwner": 7, "name": "r"}),
+        ("headRepository", {"nameWithOwner": "", "name": None}),
+        ("headRepository", {"nameWithOwner": "", "name": ""}),
+        ("headRepository", {"nameWithOwner": "", "name": " "}),
+        ("headRepository", {"nameWithOwner": "", "name": "a/b"}),
+        ("headRepositoryOwner", {"login": ""}),
+        ("headRepositoryOwner", "fork"),
     ],
 )
-def test_pr_info_rejects_malformed_row_fields(monkeypatch: pytest.MonkeyPatch, git_repo: Path, field: str, value: Any,
+def test_pr_info_rejects_malformed_row_fields(git_repo: Path, fake_gh: FakeGh, field: str, value: Any,
 ) -> None:
     row, _, _ = _local_pr_row(git_repo)
     row[field] = value
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
+    fake_gh.serve_pr_view(row)
+    fake_gh.set_response("repo-view", value="o/r")
     with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
-        pr_review._pr_info_from_row(git_repo, row)
+        pr_review.find_pr_by_number(git_repo, 7)
+    assert len(fake_gh.command_calls("pr view")) == 1
+
 
 @pytest.mark.parametrize("missing_field", ["headRepository", "headRepositoryOwner"])
 def test_pr_info_rejects_missing_requested_head_metadata(
@@ -446,6 +330,7 @@ def test_pr_info_rejects_missing_requested_head_metadata(
     with pytest.raises(GitError, match="invalid PR row"):
         pr_review._pr_info_from_row(git_repo, row)
 
+
 def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypatch: pytest.MonkeyPatch, git_repo: Path,
 ) -> None:
     row, _, _ = _local_pr_row(git_repo)
@@ -454,6 +339,7 @@ def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypa
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row"):
         pr_review._pr_info_from_row(git_repo, row)
+
 
 @pytest.mark.parametrize("head_owner", [None, {"login": "former-owner"}])
 def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.MonkeyPatch, git_repo: Path, head_owner: Any,
@@ -465,6 +351,7 @@ def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.Monkey
 
     assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
 
+
 def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     def fail_branch(_repo: Path) -> str | None:
         raise GitError("cannot read current branch")
@@ -472,6 +359,7 @@ def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.Monk
     monkeypatch.setattr(git_ops, "current_branch", fail_branch)
     with pytest.raises(GitError, match="cannot read current branch"):
         pr_review.find_open_pr(git_repo)
+
 
 @pytest.mark.parametrize("lookup", ["branch", "number"])
 def test_fork_pr_uses_upstream_base_for_both_lookup_paths(monkeypatch: pytest.MonkeyPatch, git_repo: Path, lookup: str
@@ -488,6 +376,7 @@ def test_fork_pr_uses_upstream_base_for_both_lookup_paths(monkeypatch: pytest.Mo
     assert info is not None
     assert info.base_sha == base
     assert info.head_repo == "forky/r"
+
 
 def test_pr_base_remote_matching_is_credential_safe(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     row, base, _ = _local_pr_row(git_repo)
@@ -540,8 +429,6 @@ def _post_kwargs(answer: str | None = "yes", **overrides: Any) -> dict[str, Any]
             "renderers": BUILTIN_RENDERERS, "run_info": _RUN_INFO, **overrides}
 
 
-
-
 @pytest.mark.asyncio
 async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
 ) -> None:
@@ -554,9 +441,6 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
     status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs(approve_on_clean=True))
     assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
     assert status == pr_review.PostStatus.POSTED
-
-
-
 
 
 @pytest.mark.asyncio
@@ -586,7 +470,6 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     assert 'No confirmed findings' in captured['plan'].review_summary
 
 
-
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
     file_path = repo / path
@@ -596,19 +479,57 @@ def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     _git(repo, "commit", "-m", message)
     return _git(repo, "rev-parse", "HEAD")
 
-def test_resolve_line_verifies_hint(git_repo: Path) -> None:
-    """Real-git path: show pulls the file at HEAD and the anchor verifies the hint."""
-    text = "\n".join(f"line_{i} extra" for i in range(1, 21)) + "\n"
-    sha = _commit_file(git_repo, "x.py", text, "add x.py")
-    issue = ParsedIssue(path="x.py", line=10, title="t", body="`line_10`")
-    assert pr_review.resolve_line(git_repo, sha, issue) == 10
 
-def test_resolve_line_full_search_when_hint_bad(git_repo: Path) -> None:
-    """Hint points to line 2, but the anchor is at line 15 -- full-file search wins."""
-    text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
-    sha = _commit_file(git_repo, "x.py", text, "add x.py")
-    issue = ParsedIssue(path="x.py", line=2, title="t", body="`row_15`")
-    assert pr_review.resolve_line(git_repo, sha, issue) == 15
+def test_classify_places_findings_against_real_changed_ranges(git_repo: Path) -> None:
+    """A two-hunk diff owns tolerance, nearest-boundary, anchor search and non-inline placement."""
+    lines = [f"row_{index}" for index in range(1, 41)]
+    lines[1], lines[3] = "row_2 marker_token", "row_4 outside_only_token"
+    _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "base source")
+    _commit_file(git_repo, "cache.yaml", _CACHE_YAML_BASE, "base cache policy")
+    base = _commit_file(git_repo, "stable.py", "stable_marker\n", "unchanged source")
+    lines[9] = "row_10 changed"
+    lines[23] = "row_24 changed marker_token"
+    _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "two changed ranges")
+    head = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_HEAD, "cut prod ttl")
+    issues = [
+        ParsedIssue(path="x.py", line=10, title="in hunk", body="prose has no anchor"),
+        ParsedIssue(path="x.py", line=4, title="before within tolerance", body="`row_4`"),
+        ParsedIssue(path="x.py", line=15, title="nearest earlier hunk", body="`row_15`"),
+        ParsedIssue(path="x.py", line=20, title="nearest later hunk", body="`row_20`"),
+        ParsedIssue(path="x.py", line=30, title="after within tolerance", body="`row_30`"),
+        ParsedIssue(path="x.py", line=2, title="bad hint", body="`row_24`"),
+        ParsedIssue(path="x.py", line=3, title="before outside tolerance", body="`row_3`"),
+        ParsedIssue(path="x.py", line=17, title="between outside tolerance", body="`row_17`"),
+        ParsedIssue(path="x.py", line=31, title="after outside tolerance", body="`row_31`"),
+        ParsedIssue(path="stable.py", line=1, title="unchanged", body="`stable_marker`"),
+        ParsedIssue(path="cross-stack", line=None, title="cross stack", body="context", is_cross_stack=True),
+        ParsedIssue(path="x.py", line=None, title="duplicate anchor", body="`marker_token`"),
+        ParsedIssue(path="x.py", line=None, title="outside-only anchor", body="`outside_only_token`"),
+        replace(_PROSE_HEAVY_ISSUE),
+        replace(_PROSE_HEAVY_ISSUE, line=None, title="Expiration collapses from an hour to a minute without hint"),
+    ]
+    result = classify(git_repo, _pr_for(base, head), issues)
+    assert [comment.line for comment in result.inline] == [10, 7, 13, 21, 27, 24, 24, 7, 15, 15]
+    assert [comment.path for comment in result.inline] == ["x.py"] * 8 + ["cache.yaml"] * 2
+    assert all(comment.side == "RIGHT" for comment in result.inline)
+    assert [issue.title for issue in result.inline_issues[-4:]] == [
+        "duplicate anchor", "outside-only anchor", "Expiration collapses from an hour to a minute",
+        "Expiration collapses from an hour to a minute without hint",
+    ]
+    assert all("**Placement:**" not in comment.body for comment in result.inline[-2:])
+    assert [issue.title for issue in result.file_level] == [
+        "before outside tolerance",
+        "between outside tolerance",
+        "after outside tolerance",
+    ]
+    assert [issue.title for issue in result.body_only] == ["unchanged", "cross stack"]
+    assert "posted on line 24; reviewer cited line 2" in result.inline[5].body
+    assert "<!-- daydream-finding:" not in result.inline[0].body
+    note = "**Placement:** posted on line 7; reviewer cited line 4."
+    assert note in issues[1].body and note in result.inline[1].body
+    classify(git_repo, _pr_for(base, head), issues)
+    assert issues[1].body.count("**Placement:**") == 1
+
 
 def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
     sha = _git(git_repo, "rev-parse", "HEAD")
@@ -621,14 +542,14 @@ def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
 
 # The finding from the issue's reproduction: a prose-heavy rationale whose one
 # code identifier (`ttl`) is short enough that longest-first ranking cuts it.
-_PROSE_HEAVY_ISSUE = ParsedIssue(path="cache.yaml", line=12, title="Expiration collapses from an hour to a minute",
+_PROSE_HEAVY_ISSUE = ParsedIssue(path="cache.yaml", line=15, title="Expiration collapses from an hour to a minute",
     body=("The new override sets `ttl` far below every other environment, so cached "
         "entries become unavailable almost immediately and the downstream service "
         "absorbs the additional request volume."
     ),
 )
 
-# `prod:`'s TTL drops from an hour to a minute on line 12; every other block
+# `prod:`'s TTL drops from an hour to a minute on line 15; every other block
 # keeps 3600, so the anchor token `ttl` occurs on four lines and the only
 # prose-matching token (`Expiration`) sits on line 1, outside the hunk.
 _CACHE_YAML_BASE = (
@@ -641,7 +562,7 @@ _CACHE_YAML_BASE = (
     "\n"
     "worker:\n"
     "  ttl: 3600\n"
-    "\n"
+    "\n\n\n\n"  # Earlier ttl hits stay outside prod's three-line diff context.
     "prod:\n"
     "  ttl: 3600\n"
 )
@@ -654,13 +575,8 @@ def _pr_for(base_sha: str, head_sha: str) -> PRInfo:
         repo="widgets", url="https://github.com/acme/widgets/pull/7",
     )
 
-def test_extract_anchors_prefer_quoted_keeps_short_backticked_identifier() -> None:
-    """Quoted-first ranking keeps a 3-char identifier that prose would crowd out."""
-    text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
-    assert extract_anchors(text, prefer_quoted=True)[0] == "ttl"
-    # Bare words still rank longest-first behind the quoted tokens.
-    bare = extract_anchors(text, prefer_quoted=True)[1:]
-    assert bare == sorted(bare, key=len, reverse=True)
+
+
 
 def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> None:
     """Default anchor ordering determines fingerprints and must remain stable.
@@ -674,68 +590,16 @@ def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> Non
     ]
     assert "ttl" not in anchors
 
-def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Path) -> None:
-    text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
-    sha = _commit_file(git_repo, "x.py", text, "add x.py")
-    issue = ParsedIssue(path="x.py", line=10, title="Latency regression", body="prose only")
-    # No anchor from the title/body occurs anywhere in the file.
-    assert pr_review.resolve_line(git_repo, sha, issue) is None
-    assert pr_review.resolve_line(git_repo, sha, issue, [(8, 12)]) == 10
 
-def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: Path) -> None:
-    lines = [f"row_{i}" for i in range(1, 21)]
-    lines[1] = "marker_token  # pre-existing, unchanged"
-    lines[17] = "marker_token  # the changed line"
-    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
-    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
-    # Without hunks the first hit (line 2) wins, as before.
-    assert pr_review.resolve_line(git_repo, sha, issue) == 2
-    # With hunks, the in-hunk hit (line 18) wins over the earlier out-of-hunk one.
-    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 18
 
-def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(git_repo: Path,) -> None:
-    lines = [f"row_{i}" for i in range(1, 21)]
-    lines[1] = "marker_token  # pre-existing, unchanged"
-    sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
-    issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
-    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 2
 
-def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> None:
-    """A valid line-12 citation survives prose-only anchors in a real Git diff.
 
-    Searching those anchors would relocate it to line 1, outside snap tolerance,
-    incorrectly converting an inline finding into a body-only finding."""
-    base = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_BASE, "add cache.yaml")
-    head = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_HEAD, "cut prod ttl")
-    issue = replace(_PROSE_HEAVY_ISSUE)
 
-    result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c.line for c in result.inline] == [12], (f"in-hunk citation was not posted on its own line; "
-        f"file_level={[i.path for i in result.file_level]} "
-        f"body_only={[i.path for i in result.body_only]}"
-    )
-    assert result.inline[0].path == "cache.yaml"
-    assert not result.file_level
-    assert not result.body_only
-    assert "**Placement:**" not in result.inline[0].body
 
-def test_classify_annotates_relocated_line(git_repo: Path) -> None:
-    lines = [f"row_{i}" for i in range(1, 31)]
-    lines[14] = "settle_window = 5  # cited here"
-    base = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
-    lines[19] = "row_20_changed"
-    head = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "change row 20")
-    issue = ParsedIssue(path="x.py", line=15, title="t", body="`settle_window` is too small")
 
-    result = classify(git_repo, _pr_for(base, head), [issue])
 
-    assert [c.line for c in result.inline] == [17]
-    note = "**Placement:** posted on line 17; reviewer cited line 15."
-    assert note in issue.body, "the relocation was not recorded on the finding"
-    assert note in result.inline[0].body, "the posted comment does not show the relocation"
-    classify(git_repo, _pr_for(base, head), [issue])
-    assert issue.body.count("**Placement:**") == 1
+
 
 def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """Reject absent head paths before reading hunks or invoking gh fallback."""
@@ -780,10 +644,12 @@ def test_file_hunks_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.M
     # and must NOT leak into x.py's result.
     assert hunks == [(10, 14)]
 
+
 def test_file_hunks_no_fallback_without_pr_number(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
     hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py")
     assert hunks == []
+
 
 def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """After real Git fails, a GitError from gh degrades to an empty hunk list."""
@@ -796,22 +662,13 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.Mon
     assert hunks == []
 
 
-
-
-
-
-
-
-
-
-
-
 def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
     def minimize(_target: Path, node_id: str, **_kwargs: Any) -> bool:
         calls.append(("minimize", node_id))
         return True
 
     return minimize
+
 
 def test_diagram_replacement_post_failure_keeps_prior_comment(
     pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -838,7 +695,6 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
     assert calls == [("post", None)]
 
 
-
 def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> None:
     """Custom renderers own ctx.diagrams; the host cannot restore blocks they omit."""
 
@@ -863,8 +719,6 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
         )["body"]
         assert (blocks in body) is expect_present
     assert seen == [blocks, blocks]
-
-
 
 
 def test_initial_pr_lookup_preserves_base_tip_separately_from_merge_base(
@@ -898,17 +752,28 @@ def test_base_tip_api_read_rejects_advanced_pr(
     assert calls == [f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"]
 
 
-@pytest.mark.parametrize("path", ["é.py", "spaced name.py", 'quoted"name.py'])
-def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path, path: str) -> None:
+def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path) -> None:
     from tests.harness.git_helpers import git
     base = git_ops.head_sha(git_repo)
-    (git_repo / path).write_text("defect = True\n")
-    git(git_repo, "add", path)
-    git(git_repo, "commit", "-m", "add quoted path")
+    paths = [" leading and trailing ", "line\nbreak", "café.py", "é.py", "spaced name.py", 'quoted"name.py']
+    for path in paths:
+        (git_repo / path).write_text("defect = True\n")
+    git(git_repo, "add", *paths)
+    git(git_repo, "commit", "-m", "add unusual paths")
     head = git_ops.head_sha(git_repo)
     pr = PRInfo(7, head, base, "main", "feature", "o", "r", "https://github.com/o/r/pull/7")
     diff = git_ops.diff_paths(git_repo, base, head, ["."])
-    issue = ParsedIssue(path=path, line=1, title="Defect", body="defect")
-    placed = classify(git_repo, pr, [issue], snapshot_diff=diff)
-    assert [(finding.path, finding.line) for finding in placed.inline] == [(path, 1)]
-    assert placed.body_only == []
+    placed = classify(git_repo, pr, [
+        ParsedIssue(path=" leading and trailing ", line=1, title="Whitespace path", body="defect"),
+        ParsedIssue(path="line\nbreak", line=1, title="Newline path", body="defect"),
+        ParsedIssue(path="café.py", line=1, title="Unicode basename", body="defect"),
+        ParsedIssue(path="é.py", line=1, title="Unicode path", body="defect"),
+        ParsedIssue(path="spaced name.py", line=1, title="Internal space", body="defect"),
+        ParsedIssue(path='quoted"name.py', line=1, title="Quoted path", body="defect"),
+    ], snapshot_diff=diff)
+    assert [(finding.path, finding.line) for finding in placed.inline] == [
+        (" leading and trailing ", 1), ("line\nbreak", 1), ("café.py", 1), ("é.py", 1),
+        ("spaced name.py", 1), ('quoted"name.py', 1),
+    ]
+    assert placed.file_level == placed.body_only == []
+    assert git_ops.diff_name_only_strict(git_repo, head, head) == []

@@ -35,14 +35,16 @@ def _selected(records: list[dict[str, object]], scopes: list[str], **options: ob
     return select_arbiter_targets(records, **options)  # type: ignore[arg-type]
 
 
-def test_missing_severity_only_selectable_via_contested() -> None:
-    # Missing severity cannot select a record or diverge when both values are absent.
-    bare = {"id": 1, "description": "d", "file": "x.py", "line": 1}
-    assert _selected([dict(bare), dict(bare)], ["python", "react"]) == []
-
-def test_missing_scope_uid_raises() -> None:
-    with pytest.raises(ValueError, match="scope UIDs"):
-        select_arbiter_targets([_rec("a.py", 1, "high")])
+def test_arbiter_membership_retains_file_boundaries_and_missing_severity() -> None:
+    """One population retains empty severity, file isolation, and whole-file agreement."""
+    bare = {"id": 1, "description": "d", "file": "missing.py", "line": 1}
+    records = [dict(bare), dict(bare),
+        _rec("line.py", 88, "medium"), _rec("other.py", 0, "low"),
+        _rec("whole.py", 0, "medium"), _rec("whole.py", 0, "high"),
+        _rec("agree.py", 88, "medium"), _rec("agree.py", 0, "medium"),
+    ]
+    sources = ["python", "react", "python", "structure", "python", "structure", "python", "structure"]
+    assert _selected(records, sources, contested_only=[3, 5, 7]) == [4, 5]
 
 
 # Suppression selects borderline severity/confidence outside arbiter exclusions.
@@ -52,24 +54,6 @@ def test_suppression_rejects_unknown_confidence_class() -> None:
     records = [_rec_conf("a.py", 1, "low", "LOW")]
     with pytest.raises(ValueError):
         select_suppression_targets(records, confidence_classes=("LOW", "GUESSED"))
-
-def test_whole_file_record_does_not_reach_across_files() -> None:
-    """The widening is per-file: a whole-file finding contests only its own file."""
-    records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/other.py", 0, "low")]
-    sources = ["python", "structure"]
-    assert _selected(records, sources, contested_only=[1]) == []
-
-def test_two_whole_file_records_contest_each_other() -> None:
-    """Whole-file records can contest one another without any line-anchored finding."""
-    records = [_rec("svc/loader.py", 0, "medium"), _rec("svc/loader.py", 0, "high")]
-    sources = ["python", "structure"]
-    assert _selected(records, sources, contested_only=[1]) == [0, 1]
-
-def test_whole_file_record_agreeing_on_severity_is_not_contested() -> None:
-    """The widening changes grouping only; divergent severity is still required."""
-    records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/loader.py", 0, "medium")]
-    sources = ["python", "structure"]
-    assert _selected(records, sources, contested_only=[1]) == []
 
 # Stack identity comes solely from the host UID; fixture labels cannot change it.
 # Bare names and stack-<name>-records.json paths can identify the same stack.

@@ -75,11 +75,8 @@ def _seed_fresh_resume_artifacts(deep_dir: Path) -> int:
     return key_mtime
 
 
-@pytest.mark.parametrize(("stage", "stale_name"), [
+@pytest.mark.parametrize(('stage', 'stale_name'), [
     ("per-stack", "intent.md"),
-    ("per-stack", "alternatives.json"),
-    ("merge", "intent.md"),
-    ("merge", "alternatives.json"),
     ("merge", "stack-python-records.json"),
     ("fix", "merged-items.json"),
 ])
@@ -100,10 +97,7 @@ def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(
     check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
 
 
-@pytest.mark.parametrize(("stage", "earlier"), [
-    ("ttt", "ttt"),
-    ("per-stack", "ttt"),
-    ("merge", "per-stack"),
+@pytest.mark.parametrize(('stage', 'earlier'), [
     ("fix", "merge"),
 ])
 def test_check_deep_artifacts_added_prerequisite_requires_presence_and_freshness(

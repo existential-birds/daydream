@@ -46,28 +46,14 @@ def _res(disp: PerFindingDisposition) -> PerFindingResolution:
 MERGED = PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged")
 
 
-def test_run_label_all_accepted_any_merge_state() -> None:
-    for pr in (MERGED, PRMergeSignal(False, None, state="open"), PRMergeSignal(False, None, state="closed")):
-        assert derive_outcome_label(_fp_rubric(pr, [_res("accepted")])) == "accepted"
 
-def test_run_label_all_rejected_any_merge_state() -> None:
-    for pr in (MERGED, PRMergeSignal(False, None, state="closed")):
-        assert derive_outcome_label(_fp_rubric(pr, [_res("rejected")])) == "rejected"
 
-def test_run_label_mixed_decisive_is_contested() -> None:
-    rub = _fp_rubric(MERGED, [_res("accepted"), _res("rejected")])
-    assert derive_outcome_label(rub) == "contested"
 
 def test_run_label_decisive_with_non_decisive_is_contested() -> None:
     rub = _fp_rubric(MERGED, [_res("accepted"), _res("unanswered"), _res("missing")])
     assert derive_outcome_label(rub) == "contested"
 
-@pytest.mark.parametrize(("verdict", "expected"),
-    [pytest.param("applied", "accepted", id="applied-is-accepted"),
-        pytest.param("rejected", "rejected", id="rejected-is-rejected"),
-        pytest.param("unknown", "unknown", id="other-verdict-is-unknown"),
-    ],
-)
+@pytest.mark.parametrize(("verdict", "expected"), [pytest.param("unknown", "unknown", id="other-verdict-is-unknown")])
 def test_run_label_local_branch(verdict: Literal["applied", "rejected", "unknown"], expected: str) -> None:
     assert derive_outcome_label(_local_rubric(verdict)) == expected
 

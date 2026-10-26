@@ -12,7 +12,7 @@ from typing import Any
 
 from daydream import agent, clock
 from daydream.backends import Backend
-from daydream.backends.codex import codex_lifecycle_diagnostic
+from daydream.backends.codex import CodexBackend, codex_lifecycle_diagnostic
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
@@ -20,7 +20,12 @@ from daydream.deep.sharding import file_change_bytes
 from daydream.host_tools import _MAX_RESULT_BYTES, HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
-from daydream.phases.schemas import review_stage_admission_schema, review_stage_schema, review_stage_submission_schema
+from daydream.phases.schemas import (
+    review_stage_admission_schema,
+    review_stage_generation_schema,
+    review_stage_schema,
+    review_stage_submission_schema,
+)
 from daydream.prompt_budget import (
     PreparedSanctionedInputs,
     SanctionedInputTransport,
@@ -345,7 +350,8 @@ class ReviewInvestigation:
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             native_admission = isinstance(backend, PiBackend)
             submission_schema = (review_stage_submission_schema(review_stage_admission_schema(schema))
-                                 if native_admission else schema)
+                                 if native_admission else review_stage_generation_schema(schema, self.revision)
+                                 if isinstance(backend, CodexBackend) else schema)
             if native_admission:
                 state['source_attribution'] = 'host_selectors'
                 state['source_options'] = {target: source_options(refs)

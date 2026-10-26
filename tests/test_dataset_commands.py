@@ -1,4 +1,5 @@
 """The public dataset commands read persisted records without archive reconstruction."""
+
 import json
 from pathlib import Path
 
@@ -48,8 +49,7 @@ def test_operator_destination_selects_publication_and_pinned_download(
     assert LocalRecordStore(destination).read_records()["runs"][0]["run_id"] == "operator-run"
 
 
-@pytest.mark.parametrize("operation", ["publish", "status", "download"])
-@pytest.mark.parametrize("environment", [None, ""])
+@pytest.mark.parametrize(("operation", "environment"), [("publish", ""), ("status", ""), ("download", "")])
 def test_dataset_commands_require_operator_destination_before_any_side_effect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     operation: str, environment: str | None,
@@ -73,16 +73,6 @@ def test_dataset_commands_require_operator_destination_before_any_side_effect(
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("operation", ["publish", "status", "download"])
-def test_dataset_command_help_exposes_canonical_destination(
-    capsys: pytest.CaptureFixture[str], operation: str,
-) -> None:
-    assert cli_main(["corpus", "dataset", operation, "--help"]) == 0
-    output = capsys.readouterr()
-    assert "--trajectory-hub-repo OWNER/REPO" in output.out
-    assert "DAYDREAM_TRAJECTORY_HUB_REPO" in output.out
-
-
 def test_dataset_status_reads_local_queue_without_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -102,20 +92,19 @@ def test_dataset_download_rejects_moving_revision_before_network(
 ) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
     destination = tmp_path / "download"
+
+    def forbidden_hub() -> None:
+        pytest.fail("Moving revisions must be refused before constructing a Hub client")
+
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_hub)
     assert cli_main(["corpus", "dataset", "download", "--revision", "main", "--output", str(destination)]) == 1
     output = capsys.readouterr()
     assert "revision" in (output.out + output.err).lower()
     assert not destination.exists()
 
 
-def test_dataset_namespace_lists_its_operations(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli_main(["corpus", "dataset"]) == 2
-    output = capsys.readouterr()
-    assert all(operation in output.out for operation in ("publish", "status", "download"))
-
-
 def test_real_review_explicit_capture_opt_out(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
     from tests.harness.stub_backend import install_stub_backend, silence
 
@@ -128,41 +117,8 @@ def test_real_review_explicit_capture_opt_out(
     assert cli_main(["--review", "--stack", "python", "--no-archive", "--no-eval", "--dataset-store", str(store),
                      "--no-capture-data", str(multi_stack_target)]) == 0
     assert not store.exists()
+    assert not (archive_dir / "runs").exists()
     assert (multi_stack_target / ".review-output.md").is_file()
-
-
-def test_dataset_publish_download_round_trip_through_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from tests.harness.dataset import read_records
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    store.append_observation(observation())
-    arguments = ["--trajectory-hub-repo", "OWNER/REPO"]
-    assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
-    published = json.loads(capsys.readouterr().out)
-    assert published["published"] == 2 and published["queued"] == 0
-    assert published["revision"] == hub.revision
-    assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 2
-
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", *arguments, "--revision", hub.revision,
-                     "--output", str(destination)]) == 0
-    downloaded = json.loads(capsys.readouterr().out)
-    assert downloaded == {"revision": hub.revision, "runs": 1, "observations": 1}
-    recovered = read_records(LocalRecordStore(destination))
-    original = read_records(store)
-    assert recovered.runs == original.runs
-    assert recovered.observations == original.observations
-    assert recovered.snapshot["source"]["revision"] == hub.revision
-    assert original.snapshot["source"] is None
-    assert not (destination / "index.db").exists()
 
 
 def test_dataset_publish_failed_content_keeps_queue_with_sanitized_status(

@@ -198,9 +198,10 @@ class StageInputFactory:
         return {'review-assignment': '\n\n'.join(f'### {label} (supporting)\n{text}'
                                                  for label, text in contents.items())}
 
-    def _remaining_bytes(self, contents: dict[str, str]) -> int:
+    def _remaining_bytes(self, contents: dict[str, str], *, dispatch: bool = False) -> int:
         contents = self._bundled(contents)
         cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is inputs.SanctionedInputTransport.EXACT_PATHS
+               else inputs.STAGED_REVIEW_INLINE_MAX_BYTES if dispatch
                else inputs.SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
         return cap - inputs.inline_section_emitted_bytes(
             [(label, len(text.encode())) for label, text in contents.items()])
@@ -306,7 +307,7 @@ class StageInputFactory:
     def _batches(self) -> list[list[dict[str, Any]]]:
         batches = _bounded_groups(self.parts,
             lambda parts: len({p.assignment['file'] for p in parts}) <= 4
-            and self._remaining_bytes(self._render(parts)) >= 0,
+            and self._remaining_bytes(self._render(parts), dispatch=True) >= 0,
             "required assignment exceeds the assignment allowance")
         return [[part.assignment for part in batch] for batch in batches]
 
@@ -395,7 +396,7 @@ class StageInputFactory:
                          for path in self.stack.files}
             contents = {"diff": "Whole-change interaction assignment. Use the inventory and targeted source reads.\n",
                         "hunk-index": _json(inventory), "input-binding": _json(self.binding)}
-            if self._remaining_bytes(contents) < 0:
+            if self._remaining_bytes(contents, dispatch=True) < 0:
                 contents['hunk-index'] = _json({"status": "partial", "file_count": len(inventory),
                                                "canonical_sha256": self.canonical[1].sha256})
                 statuses.append({"label": "hunk-index", "status": "partial"})
@@ -411,7 +412,7 @@ class StageInputFactory:
                 candidate = {**contents, label: part.diff, f'{label}-sources': descriptor}
                 if (self.transport is inputs.SanctionedInputTransport.EXACT_PATHS and len(candidate) <= 128
                         and sum(len(text.encode()) for text in candidate.values()) <= 1024 * 1024
-                        or self._remaining_bytes(candidate) >= 0):
+                        or self._remaining_bytes(candidate, dispatch=True) >= 0):
                     contents = candidate
                 else:
                     statuses.append({"label": label, "status": "unavailable"})
@@ -449,7 +450,7 @@ class StageInputFactory:
             [inputs.AdvisoryCandidate(label, path) for label, path in paths.items()]
             + [inputs.AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None]
             + [inputs.AdvisoryCandidate(label, path) for label, path in before_context.items()],
-            read_only=self.read_only)
+            read_only=self.read_only, staged_review=True)
         admitted = selection.selected_paths()
         if not paths.keys() <= admitted.keys():
             raise inputs.SanctionedInputUnavailable("required stage inputs exceed the transport allowance")
@@ -466,7 +467,7 @@ class StageInputFactory:
                 statuses.append({"label": label, "status": "unavailable"})
                 continue
             try:
-                captured = inputs._capture_input(label, path, self.transport, aggregate)
+                captured = inputs._capture_input(label, path, self.transport, aggregate, staged_review=True)
             except inputs.SanctionedInputUnavailable:
                 statuses.append({"label": label, "status": "unavailable"})
                 continue
@@ -476,7 +477,7 @@ class StageInputFactory:
         if deferred_paths:
             supporting = inputs.select_advisory_inputs(self.backend, self.work.repo,
                 [inputs.AdvisoryCandidate(label, path) for label, path in {**paths, **deferred_paths}.items()],
-                read_only=self.read_only).selected_paths()
+                read_only=self.read_only, staged_review=True).selected_paths()
             deferred_paths = {label: path for label, path in deferred_paths.items() if label in supporting}
             while deferred_paths:
                 catalog_entries = []
@@ -523,7 +524,8 @@ class StageInputFactory:
         paths.update(deferred_paths)
         paths.update(catalog_paths)
         hidden_labels = deferred_paths.keys() | catalog_paths.keys()
-        prepared = inputs.prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
+        prepared = inputs.prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only,
+            staged_review=True)
         prepared = replace(prepared, inputs=tuple(
             replace(item, prompt_visible=False) if item.label in hidden_labels else item for item in prepared.inputs))
         if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
@@ -18,11 +19,12 @@ from rich.text import Text
 import daydream.agent as agent_mod
 import daydream.ui.tools as ui_tools
 from daydream.agent import run_agent
-from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent, ThinkingEvent, ToolResultEvent, ToolStartEvent
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
 from daydream.run_context import InteractionPolicy, RunContext, resolve_run_context
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import (
+    NEON_THEME,
     AgentTextRenderer,
     format_verdict_join,
     print_verification_summary,
@@ -194,159 +196,6 @@ def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
     assert not console._live_stack
 
 
-def test_parse_background_task_id_from_launch_string() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
-    launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
-    reg.observe_result("c1", launch)
-    assert reg.resolve_label("Bash", "b0nsmwb99") == "Run tests"
-    assert reg.resolve_label("Bash", "unknown") is None
-
-    reg.create("c2", "TaskCreate", {"subject": "Find tool-call render code", "description": "d"})
-    create = (Path(__file__).parent / "fixtures/task_tools/taskcreate_result.txt").read_text()
-    reg.observe_result("c2", create)
-    assert reg.resolve_label("TaskCreate", "1") == "Find tool-call render code"
-
-
-def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
-
-    c = Console(file=StringIO(), record=True)
-    panel = reg.get(tool_use_id)
-    assert panel is not None
-    c.print(panel._render_panel())
-    return c.export_text()
-
-
-def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
-    out = _render_panel_text(reg, "c2")
-    assert "zzz999" in out and "block" not in out
-
-def test_taskcreate_header_shows_subject_and_body() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "details here"})
-    out = _render_panel_text(reg, "c1")
-    assert "Fix auth bug" in out and "details here" in out
-
-def test_taskupdate_resolves_subject_and_shows_status() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
-    reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
-    reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
-    out = _render_panel_text(reg, "c2")
-    assert "Fix auth bug" in out and "completed" in out
-
-def test_tasklist_header_omits_empty_id_suffix() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "TaskList", {})
-    out = _render_panel_text(reg, "c1")
-    assert "TaskList" in out
-    assert "(#)" not in out and "()" not in out
-
-def test_taskoutput_result_shows_output_snippet() -> None:
-
-
-    # Use normal mode to render the TaskOutput result body.
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
-    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
-    result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
-    c2_panel = reg.get("c2")
-    assert c2_panel is not None
-    c2_panel.set_result(result, is_error=False)
-    out = _render_panel_text(reg, "c2")
-    assert "done-with-bg-work" in out  # the <output> snippet surfaces
-    assert "<retrieval_status>" not in out  # tag plumbing is stripped
-
-def test_task_prompt_truncation_uses_named_limit() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
-    out = _render_panel_text(reg, "c1")
-    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in out
-    assert "l0" in out
-    assert "l39" not in out
-
-
-def _taskoutput_backend() -> Any:
-    """Build a backend stream containing a background task and its final output."""
-
-    return ScriptedBackend(events=[ToolStartEvent(id="c1", name="Bash",
-                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
-            ), ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False,),
-            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000},
-            ), ToolResultEvent(id="c2",
-                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
-                is_error=False,
-            ), ResultEvent(structured_output=None, continuation=None),
-        ], model="mock-model",
-    )
-
-async def test_run_agent_renders_taskoutput_with_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rec = Console(file=StringIO(), record=True, width=120)
-    monkeypatch.setattr(agent_mod, "console", rec)
-    backend = _taskoutput_backend()
-    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
-    out = rec.export_text()
-    assert "Run tests" in out and "a066168" in out
-    assert "done-with-bg-work" in out
-    assert "block=True" not in out and "timeout=120000" not in out
-
-async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None:
-
-
-    backend = _taskoutput_backend()
-    lines: list[Text] = []
-    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, progress_callback=lines.append,)
-    joined = "\n".join(line.plain for line in lines)
-    assert "Run tests" in joined  # resolved label surfaces in callback mode
-    assert "block" not in joined and "timeout" not in joined
-    assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
-
-async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path) -> None:
-    backend = ScriptedBackend(events=[TextEvent("B"), TextEvent("ash"), TextEvent(" is"), TextEvent(" blocked."),
-            ResultEvent(structured_output=None, continuation=None),
-        ], model="mock-model",
-    )
-    lines: list[Text] = []
-
-    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, progress_callback=lines.append,)
-
-    assert result == "Bash is blocked."
-    assert [line.plain for line in lines] == ["    Bash is blocked."]
-
-async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) -> None:
-    """The parallel-fix callback line names the edited file, never a stray flag.
-
-    Regression: the old blind ``next(iter(args.values()))`` surfaced a leading ``replace_all`` flag as ``"Edit
-    False"`` instead of the file being edited."""
-
-
-    backend = ScriptedBackend(events=[ToolStartEvent(id="e1", name="Edit",
-                input={"replace_all": False, "file_path": "/repo/daydream/git_ops.py", "old_string": "a",
-                    "new_string": "b",
-                },
-            ), ResultEvent(structured_output=None, continuation=None),
-        ], model="mock-model",
-    )
-    lines: list[Text] = []
-    await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, progress_callback=lines.append,)
-    joined = "\n".join(line.plain for line in lines)
-    assert "/repo/daydream/git_ops.py" in joined  # the meaningful primary arg
-    assert "Edit False" not in joined  # the stray-boolean dump is gone
-
-
 def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """The owner is the only capper of a command value (issue #1227).
 
@@ -362,28 +211,6 @@ def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatc
     generic_line = format_callback_progress("Grep", {"pattern": pattern}, None)
     assert pattern[: _BASH_COMMAND_MAX_CHARS] in generic_line.plain
     assert pattern not in generic_line.plain
-
-def test_format_callback_progress_redacts_only_bash_commands() -> None:
-    """Callback redaction is scoped to the Bash command, like the panel header.
-
-    Paths and grep patterns render raw on the panel header; the callback line must not rewrite the operator's own
-    /home/<user>/ paths into [REDACTED_USER] markers or chew grep patterns into [REDACTED_CREDENTIAL]."""
-
-    edit_line = format_callback_progress(
-        "Edit", {"file_path": "/home/user/work/daydream/git_ops.py", "old_string": "a", "new_string": "b"}, None,
-    )
-    assert "/home/user/work/daydream/git_ops.py" in edit_line.plain
-    assert "[REDACTED" not in edit_line.plain
-
-    grep_line = format_callback_progress(
-        "Grep", {"pattern": "the config: token=opaque-test-12345", "path": "/home/user/work"}, None
-    )
-    assert "opaque-test-12345" in grep_line.plain
-    assert "[REDACTED" not in grep_line.plain
-
-    bash_line = format_callback_progress("Bash", {"command": "the config: token=opaque-test-12345"}, None)
-    assert "opaque-test-12345" not in bash_line.plain
-    assert "[REDACTED" in bash_line.plain
 
 
 _BOUNDARY_PAD = 185  # 200-char cap: a token starting here straddles it (15 of 20 chars inside)
@@ -432,3 +259,157 @@ def test_render_segments_skips_span_contained_in_an_earlier_one() -> None:
     )
     assert rendered.plain == source
     assert [(span.start, span.end, str(span.style)) for span in rendered.spans] == [(0, 4, "bold"), (4, 8, "italic")]
+
+
+def _task_lifecycle_events() -> list[AgentEvent]:
+    """One background job and one tracked task move through their actual event lifecycle."""
+    return [
+        ToolStartEvent(id="launch", name="Bash", input={"command": "pytest", "run_in_background": True,
+                       "description": "Run tests"}),
+        ToolResultEvent(id="launch",
+                        output=(Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text(),
+                        is_error=False),
+        ToolStartEvent(id="create", name="TaskCreate",
+                       input={"subject": "Fix auth bug", "description": "details here"}),
+        ToolResultEvent(id="create", output="Task #1 created successfully: Fix auth bug", is_error=False),
+        ToolStartEvent(id="update", name="TaskUpdate", input={"taskId": "1", "status": "completed"}),
+        ToolResultEvent(id="update", output="Task updated", is_error=False),
+        ToolStartEvent(id="list", name="TaskList", input={}),
+        ToolResultEvent(id="list", output="Tracked task completed", is_error=False),
+        ToolStartEvent(id="known-output", name="TaskOutput", input={"task_id": "b0nsmwb99", "block": True,
+                       "timeout": 120000}),
+        ToolResultEvent(id="known-output", output=(Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt")
+                        .read_text(), is_error=False),
+        ToolStartEvent(id="unknown-output", name="TaskOutput", input={"task_id": "zzz999", "block": True,
+                       "timeout": 1}),
+        ToolResultEvent(id="unknown-output", output="Untracked task returned", is_error=False),
+        ToolStartEvent(id="audit", name="Task", input={"description": "bounded audit",
+                       "prompt": "\n".join(f"prompt-line-{i}" for i in range(40))}),
+        ToolResultEvent(id="audit", output="Audit finished", is_error=False),
+        ToolStartEvent(id="edit", name="Edit", input={"replace_all": False,
+                       "file_path": "/home/user/work/daydream/git_ops.py", "old_string": "a", "new_string": "b"}),
+        ToolResultEvent(id="edit", output="", is_error=False),
+        ToolStartEvent(id="grep", name="Grep", input={"pattern": "the config: token=literal-grep-pattern",
+                       "path": "/home/user/work"}),
+        ToolResultEvent(id="grep", output="", is_error=False),
+    ]
+
+
+async def test_normal_agent_transcript_preserves_overlapping_tools_tasks_and_thought_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native sibling tool events keep their results and labels through a single panel lifetime."""
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, no_color=False, width=120, theme=NEON_THEME)
+    monkeypatch.setattr(agent_mod, "console", console)
+    events = [
+        *[ThinkingEvent(text=f"thought {i} of the stream") for i in range(5)],
+        TextEvent(text="I'll search for Python files in the project."),
+        ToolStartEvent(id="cmd-1", name="shell", input={"command": "git diff -- file1.py"}),
+        ToolStartEvent(id="cmd-2", name="shell", input={"command": "git diff -- file2.py"}),
+        ToolStartEvent(id="cmd-3", name="shell", input={"command": "git diff -- file3.py"}),
+        ToolResultEvent(id="cmd-3", output="+added line in file3", is_error=False),
+        ToolResultEvent(id="cmd-1", output="+added line in file1", is_error=False),
+        ToolResultEvent(id="cmd-2", output="+added line in file2", is_error=False),
+        ToolStartEvent(id="glob-three", name="Glob", input={"pattern": "**/*.py", "path": "/project"}),
+        ToolResultEvent(id="glob-three", output="/project/src/main.py\n/project/src/utils/helper.py\n"
+                        "/project/tests/test_main.py", is_error=False),
+        ToolStartEvent(id="glob-one", name="Glob", input={"pattern": "*.py"}),
+        ToolResultEvent(id="glob-one", output="/project/main.py", is_error=False),
+        ToolStartEvent(id="glob-wide", name="Glob", input={"pattern": "**/*.py"}),
+        ToolResultEvent(id="glob-wide", output="\n".join(f"/project/src/module{i}.py" for i in range(25)),
+                        is_error=False),
+        *_task_lifecycle_events(), ResultEvent(structured_output=None, continuation=None),
+    ]
+    await run_agent(ScriptedBackend(events=events, model="mock-model"), tmp_path, "inspect and repair",
+                    phase=DaydreamPhase.REVIEW)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output.getvalue())
+    assert plain.count("Thinking") == 5
+    positions = [plain.index(f"thought {i} of the stream") for i in range(5)]
+    assert positions == sorted(positions)
+    assert "I'll search for Python files" in plain and "**/*.py" in plain
+    assert all(f"git diff -- file{i}.py" in plain and f"+added line in file{i}" in plain for i in (1, 2, 3))
+    assert all(value in plain for value in ("Found 3 files", "main.py", "helper.py", "test_main.py"))
+    assert "Found 1 file" in plain and "Found 1 files" not in plain
+    assert "Found 25 files" in plain and "and 5 more" in plain
+    assert "module19.py" in plain and "module20.py" not in plain
+    assert all(value in plain for value in
+               ("Run tests", "b0nsmwb99", "Fix auth bug", "completed", "details here", "zzz999"))
+    assert "done-with-bg-work" in plain and "<retrieval_status>" not in plain
+    assert "block=True" not in plain and "timeout=120000" not in plain and "TaskList (#)" not in plain
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in plain
+    assert "prompt-line-0" in plain and "prompt-line-39" not in plain
+    assert not console._live_stack
+
+
+async def test_quiet_agent_transcript_preserves_headers_redaction_and_error_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quiet delivery hides result bodies while its headers retain task identity and safe commands."""
+    output = StringIO()
+    console = Console(file=output, force_terminal=True, no_color=False, width=120, color_system="truecolor",
+                      theme=NEON_THEME)
+    monkeypatch.setattr(agent_mod, "console", console)
+    events = [
+        ToolStartEvent(id="read", name="Read", input={"file_path": "/project/main.py"}),
+        ToolResultEvent(id="read", output="def hello():\n    return 'world'", is_error=False),
+        ToolStartEvent(id="stat", name="Bash", input={"command": "git diff --stat"}),
+        ToolResultEvent(id="stat", output="", is_error=False),
+        ToolStartEvent(id="list-shell", name="Bash", input={"command": "ls -la /tmp"}),
+        ToolResultEvent(id="list-shell", output="", is_error=False),
+        ToolStartEvent(id="secret", name="Bash", input={"command": "DB_PASSWORD=hunter2 make db-up"}),
+        ToolResultEvent(id="secret", output="", is_error=False),
+        ToolStartEvent(id="cap", name="Bash", input={"command": "x" * 180 + " token=opaque-test-12345"}),
+        ToolResultEvent(id="cap", output="", is_error=False),
+        ToolStartEvent(id="empty", name="Bash", input={"command": "true"}),
+        ToolResultEvent(id="empty", output="", is_error=False),
+        ToolStartEvent(id="error", name="Bash", input={"command": "false"}),
+        ToolResultEvent(id="error", output="Command failed with exit code 1", is_error=True),
+        ToolStartEvent(id="skill", name="Skill", input={"skill": "review-python"}),
+        ToolResultEvent(id="skill", output="Launching skill: review-python", is_error=False),
+        *_task_lifecycle_events(), ResultEvent(structured_output=None, continuation=None),
+    ]
+    await run_agent(ScriptedBackend(events=events, model="mock-model"), tmp_path, "quiet inspection",
+                    phase=DaydreamPhase.REVIEW, run_context=RunContext(InteractionPolicy(quiet=True)))
+    raw = output.getvalue()
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+    assert all(value in plain for value in ("Read", "/project/main.py", "$ git diff --stat", "$ ls -la /tmp", "$ true",
+                                            "$ false", "Skill", "review-python"))
+    assert all(value not in plain for value in
+               ("hello", "world", "Command failed", "Launching skill:", "done-with-bg-work"))
+    assert not any(line.strip(" │") == "Output" for line in plain.splitlines())
+    assert "╭" in raw or "│" in raw
+    assert re.search(r"\x1b\[[0-9;]*38;2;255;85;85(?:;[0-9;]+)?m[╭│╰─]", raw)
+    assert "hunter2" not in plain and "$ DB_PASSWORD=[REDACTED_ENV_VAR] make db-up" in plain
+    assert "opaque" not in plain and 'token="[REDA' in plain and "[REDACTED_CREDENTIAL]" not in plain
+    assert all(value in plain for value in
+               ("Run tests", "b0nsmwb99", "Fix auth bug", "completed", "details here", "zzz999"))
+    assert "block=True" not in plain and "timeout=120000" not in plain
+    assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in plain
+    assert "prompt-line-0" in plain and "prompt-line-39" not in plain
+    assert not console._live_stack
+
+
+async def test_callback_agent_transcript_keeps_task_labels_edit_identity_and_coalesced_text(tmp_path: Path) -> None:
+    """The callback gets semantic task/file labels while only command values are redacted."""
+    events = [*_task_lifecycle_events(),
+        ToolStartEvent(id="command", name="Bash", input={"command": "the config: token=opaque-test-12345"}),
+        ToolResultEvent(id="command", output="", is_error=False),
+        TextEvent("B"), TextEvent("ash"), TextEvent(" is"), TextEvent(" blocked."),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    lines: list[Text] = []
+    result, _, _ = await run_agent(ScriptedBackend(events=events, model="mock-model"), tmp_path, "fix the tracked task",
+                                    phase=DaydreamPhase.FIX, progress_callback=lines.append)
+    assert result == "Bash is blocked."
+    plain = [line.plain for line in lines]
+    assert [line for line in plain if "Bash is blocked." in line] == ["    Bash is blocked."]
+    assert "    B" not in plain and "    ash" not in plain
+    tools = "\n".join(line for line in plain if "Bash is blocked." not in line)
+    assert "    🎠 TaskUpdate Fix auth bug (1)" in plain
+    assert "    🎠 TaskOutput Run tests (b0nsmwb99)" in plain
+    assert "    🎠 TaskOutput zzz999" in plain
+    assert "TaskOutput b0nsmwb99" not in tools and "block" not in tools and "timeout" not in tools
+    assert "/home/user/work/daydream/git_ops.py" in tools and "Edit False" not in tools
+    assert "the config: token=literal-grep-pattern" in tools and "[REDACTED_USER]" not in tools
+    assert "opaque-test-12345" not in tools and "[REDACTED" in tools

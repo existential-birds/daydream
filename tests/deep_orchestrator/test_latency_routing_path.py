@@ -99,6 +99,8 @@ async def _run_profile(
 
 def test_routing_record_merges_instead_of_clobbering(tmp_path: Path) -> None:
     dd = tmp_path / "deep"
+    assert read_routing_record(dd) == {}
+    assert analyze_routing(tmp_path) == {"profile": None, "decisions": {}}
     dd.mkdir()
     write_routing_record(dd, {"profile": {"selected": "balanced"}, "risk": {"floors": ["security_surface"]}})
     path = write_routing_record(dd, {"wonder": {"outcome": "run", "effort": "medium", "reason": "profile floor"}})
@@ -108,17 +110,6 @@ def test_routing_record_merges_instead_of_clobbering(tmp_path: Path) -> None:
     assert record["profile"]["selected"] == "balanced"
     assert record["risk"]["floors"] == ["security_surface"]
     assert record["wonder"]["reason"] == "profile floor"
-
-def test_absent_record_reads_as_an_empty_mapping(tmp_path: Path) -> None:
-    assert read_routing_record(tmp_path) == {}
-
-def test_evaluated_run_carries_its_latency_profile(tmp_path: Path) -> None:
-    """SH1: an archived run's profile is readable without opening its directory."""
-    dd = tmp_path / ".daydream"
-    (dd / "deep").mkdir(parents=True)
-    write_routing_record(dd / "deep", {"profile": {"selected": "forensic"}, "risk": {"floors": []}})
-    assert analyze_routing(dd)["profile"] == "forensic"
-    assert analyze_routing(tmp_path / "nothing-here") == {"profile": None, "decisions": {}}
 
 async def test_skipped_wonder_records_profile_signals_and_reason(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -137,7 +128,7 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """MH2 + A12: same artifacts, same effort values, same marker meaning."""
-    _, deep = await _run_profile(
+    stub, deep = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
         parse_severity="high", diagram="auto",
     )
@@ -155,6 +146,15 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
     assert record["arbiter"]["sharded"] is False
     assert [g["effort"] for g in record["arbiter"]["groups"]] == ["xhigh"]
     assert record["wonder"]["effort"] == "high"
+    assert analyze_routing(deep.parent)["profile"] == "forensic"
+
+    stub.calls.clear()
+    with anyio.fail_after(60):
+        assert await run(make_config(multi_stack_target, start_at="merge", latency_profile="forensic",
+            review_profile=independent_alternatives_profile(),
+        )) in (0, 1)
+    assert [c for c in stub.calls if "you are the arbiter" in c["prompt"].lower()] == []
+    assert (deep / "arbiter-input.json").exists()
 
 async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -170,21 +170,6 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
     record = read_routing_record(deep)
     assert record["arbiter"]["sharded"] is False
     assert [g["effort"] for g in record["arbiter"]["groups"]] == ["xhigh"]
-
-async def test_forensic_resume_from_the_whole_block_marker_runs_no_arbiter_call(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """The documented `--start-at merge` contract still trusts adjudication-complete.marker."""
-    stub, _ = await _run_profile(
-        monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
-        parse_severity="high",
-    )
-    base = dict(latency_profile="forensic", review_profile=independent_alternatives_profile())
-    stub.calls.clear()
-    with anyio.fail_after(60):
-        assert await run(make_config(multi_stack_target, start_at="merge", **base)) in (0, 1)
-    assert [c for c in stub.calls if "you are the arbiter" in c["prompt"].lower()] == []
-    assert (multi_stack_target / ".daydream" / "deep" / "arbiter-input.json").exists()
 
 async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_effort(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -207,10 +192,10 @@ async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_e
     assert "ARBITRATED" in json.dumps(_merged_items(deep))
     assert not (deep / "arbiter-input.json").exists()
 
-async def test_resumed_run_reruns_only_incomplete_groups(
+async def test_failed_group_fails_open_and_is_retried_on_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Re-entering arbitration after an interrupted fan-out reruns only the gap."""
+    """A raising group is recorded, blocks the marker, and reruns on resume."""
     stub, deep = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="balanced",
         parse_by_stack=_arbiter_stacks({"python": "high", "react": "high", "generic": "high"}),
@@ -220,40 +205,6 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     groups = first["arbiter"]["groups"]
     assert len(groups) > 1
     assert all(group["reused"] is False for group in groups)
-
-    # Simulate an interruption: the whole-block marker and one group's marker
-    # are gone, the other groups' verdict artifacts survive on disk.
-    rerun = groups[0]["group_id"]
-    (deep / "adjudication-complete.marker").unlink()
-    (deep / f"{rerun}-complete.marker").unlink()
-
-    stub.calls.clear()
-    resumed = make_config(
-        multi_stack_target, latency_profile="balanced", review_profile=independent_alternatives_profile(),
-        start_at="merge",
-    )
-    with anyio.fail_after(90):
-        assert await run(resumed) in (0, 1)
-
-    arbiter_calls = [call for call in stub.calls if "you are the arbiter" in call["prompt"].lower()]
-    assert len(arbiter_calls) == 1
-    assert f"{rerun}-input.json" in arbiter_calls[0]["prompt"]
-    assert (deep / "adjudication-complete.marker").exists()
-    resumed_groups = {group["group_id"]: group for group in read_routing_record(deep)["arbiter"]["groups"]}
-    assert resumed_groups[rerun]["reused"] is False
-    for group in groups:
-        if group["group_id"] != rerun:
-            assert resumed_groups[group["group_id"]]["reused"] is True
-
-async def test_failed_group_fails_open_and_is_retried_on_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """A raising group is recorded, blocks the marker, and reruns on resume."""
-    stub, deep = await _run_profile(
-        monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="balanced",
-        parse_by_stack=_arbiter_stacks({"python": "high", "react": "high", "generic": "high"}),
-    )
-    groups = read_routing_record(deep)["arbiter"]["groups"]
     failed = groups[0]["group_id"]
     (deep / "adjudication-complete.marker").unlink()
     (deep / f"{failed}-complete.marker").unlink()
@@ -287,6 +238,11 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     retried = read_routing_record(deep)["arbiter"]
     assert retried["failed_groups"] == []
     assert (deep / "adjudication-complete.marker").exists()
+    resumed_groups = {group["group_id"]: group for group in retried["groups"]}
+    assert resumed_groups[failed]["reused"] is False
+    for group in groups:
+        if group["group_id"] != failed:
+            assert resumed_groups[group["group_id"]]["reused"] is True
 
 
 async def test_resume_retains_confirmed_demoted_findings_without_second_suppression(

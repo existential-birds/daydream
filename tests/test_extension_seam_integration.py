@@ -253,51 +253,7 @@ async def test_fork_filter_controls_findings_artifact(
     assert KEEP_ME in artifact and KEEP_ME in canonical
     assert DROP_ME not in artifact and DROP_ME not in canonical
 
-async def test_fork_filter_controls_pr_post_payload(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
-    tmp_path: Path,
-) -> None:
-    """A load-items fork controls the canonical PR review payload."""
-    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    fake_gh.serve_open_pr(multi_stack_target)
 
-    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
-    # A finding reaches the PR either in the review payload or as its own
-    # file-level comment; the fork's filter must govern both surfaces.
-    posted = json.dumps(
-        [
-            call.payload
-            for call in (
-                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
-                *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
-            )
-        ]
-    )
-
-    assert rc == 0
-    assert fake_gh.pr_view_calls()
-    assert KEEP_ME in posted
-    assert DROP_ME not in posted
-
-async def test_fork_filter_controls_fix_prompts(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
-    tmp_path: Path,
-) -> None:
-    """A load-items fork controls the findings that reach the fix phase."""
-
-    backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
-    fake_gh.serve_open_pr(multi_stack_target)
-
-    _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
-
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
-    fix_prompts = "\n".join(_fix_prompts(backend))
-
-    assert rc == 0
-    assert KEEP_ME in fix_prompts
-    assert DROP_ME not in fix_prompts
 
 async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
@@ -343,6 +299,12 @@ async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     assert KEEP_ME in fix_prompts
     assert DROP_ME not in fix_prompts
 
+    posted = json.dumps([call.payload for call in (
+        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews"),
+        *fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments"),
+    )])
+    assert fake_gh.pr_view_calls() and KEEP_ME in posted and DROP_ME not in posted
+
 
 def _deferred_write_responder(target: Path) -> Callable[..., Any]:
     """Write only between yields, so a supervisor veto can close the stream first."""
@@ -378,11 +340,17 @@ async def test_fork_inserts_custom_phase_into_review_flow(
     backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
     install_backend(backend)
 
-    rc = await runner.run(make_config(tiny_diff_target, output_mode="review"))
+    rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
 
     idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
     assert idx, "custom phase never reached the backend"
     assert rc == 0
+    assert any(
+        "You are the structural reviewer" in prompt
+        and "Within this same boundary review, check design choices" in prompt
+        for prompt in backend.prompts
+    )
+    assert not any(ALTERNATIVES_MARKER in prompt for prompt in backend.prompts)
 
 async def test_fork_inserts_phase_before_summary_in_shallow(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
@@ -404,10 +372,11 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     )
     install_backend(backend)
 
-    rc = await runner.run(make_config(multi_stack_target, shallow=True, stack="python"))
+    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", stack="python"))
 
     assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
     assert rc == 0
+    assert backend.review_prompts, "shallow pipeline did not run a per-stack review"
 
 
 # Distinctive literal from ``build_alternative_review_prompt``'s body: present in
@@ -706,56 +675,6 @@ async def test_custom_phase_full_stack(
     assert rc == 0
     assert ro_prompts
     assert ("claude", "test-model-x") in created  # [tool.daydream.phases.ro_gate] honored
-
-async def test_flow_deep_routes_to_deep_helper(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Explicit deep flow reaches the intent backend and exits successfully."""
-
-    backend = _install_stub_backend(monkeypatch, multi_stack_target)
-    _silence(monkeypatch)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await runner.run(make_config(multi_stack_target, flow_name="deep"))
-
-    prompts = [call["prompt"] for call in backend.calls]
-    assert rc == 0
-    assert any("intent" in p.lower() for p in prompts)  # deep pipeline ran
-
-async def test_flow_review_routes_to_review_helper(
-    tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """--flow review reaches structural review with the default design lens."""
-    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
-    install_backend(backend)
-
-    rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
-
-    assert rc == 0
-    assert any(
-        "You are the structural reviewer" in prompt
-        and "Within this same boundary review, check design choices" in prompt
-        for prompt in backend.prompts
-    )
-    assert not any(ALTERNATIVES_MARKER in prompt for prompt in backend.prompts)
-
-async def test_flow_shallow_routes_to_shallow_helper(
-    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
-) -> None:
-    """Explicit shallow flow reaches parsing and exits successfully."""
-    backend = PhaseDispatchBackend(
-        parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
-    )
-    install_backend(backend)
-
-    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", stack="python"))
-
-    assert rc == 0
-    # Issue #745: the shallow (deep single-stack) flow's per-stack reviewer
-    # emits structured records directly -- no separate parse phase. The review
-    # fired when at least one per-stack review prompt reached the backend.
-    assert backend.review_prompts, "shallow pipeline did not run a per-stack review"
 
 def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A discovered extension finding renderer retains the host-injected footer."""

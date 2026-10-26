@@ -21,9 +21,7 @@ from daydream.tree_sitter_index import (
 from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
 from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_language, _diagram_def_query_for_language
 from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
-
-FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
+from tests.harness.git_helpers import commit as _commit, git as _git
 
 
 def _modified_diff(path: str) -> str:
@@ -50,136 +48,6 @@ def _materialize(tmp_path: Path, files: dict[str, str]) -> Path:
         target.write_text(content)
     return tmp_path
 
-def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path) -> None:
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "widget.py").write_text("x = 1\n")
-    (tmp_path / "app.py").write_text("import pkg.widget\n")
-    results = detect_affected_files(_modified_diff("app.py"), tmp_path)
-    assert results, "static resolution must produce rows"
-    assert all(f.provenance == "static" for f in results)
-
-def test_python_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "python_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "daydream_demo/__init__.py": "",
-            "daydream_demo/api.py": (
-                '"""API module."""\nfrom .models import User\n\ndef get_user():\n    return User()\n'
-            ),
-            "daydream_demo/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    paths_by_role = {(r.path, r.role) for r in results}
-    assert ("daydream_demo/api.py", "modified") in paths_by_role
-    assert ("daydream_demo/models.py", "modified") in paths_by_role
-    assert ("daydream_demo/models.py", "imports") in paths_by_role
-    assert len(results) >= 2
-
-
-_SHARED_FIXTURES: dict[str, str] = {
-    "package/__init__.py": "",
-    "package/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
-    "package/feature/__init__.py": "",
-}
-
-@pytest.mark.parametrize(
-    "api_rel, files, expected_import_path",
-    [
-        # `from ..models` in package/feature/api.py resolves to the parent package.
-        (
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/api.py": (
-                    '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
-                ),
-            }, "package/models.py",
-        ),
-        # `from ...models` in package/feature/nested/api.py resolves to the grandparent package.
-        (
-            "package/feature/nested/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/nested/__init__.py": "",
-                "package/feature/nested/api.py": (
-                    '"""API module."""\nfrom ...models import User\n\ndef get_user():\n    return User()\n'
-                ),
-            }, "package/models.py",
-        ),
-        # Capture the whole statement to resolve both __init__.py and the sibling module.
-        (
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/api.py": ('"""API module."""\nfrom . import something\n\nthing = something.thing\n'),
-                "package/feature/something.py": "",
-            }, {"package/feature/__init__.py", "package/feature/something.py"},
-        ),
-        # `from ....something import name` with 4+ dots ascends to the great-grandparent package.
-        (
-            "package/feature/nested/deep/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/feature/nested/__init__.py": "", "package/feature/nested/deep/__init__.py": "",
-                "package/something.py": '"""Ancestor sibling module."""\n\nthing = 1\n',
-                "package/feature/nested/deep/api.py": (
-                    '"""API module."""\nfrom ....something import thing\n\nthing\n'
-                ),
-            }, "package/something.py",
-        ),
-    ],
-)
-def test_python_multilevel_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str | set[str],
-) -> None:
-    repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo)
-    imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
-    if isinstance(expected_import_path, str):
-        assert imports_pairs == {(expected_import_path, "imports")}
-    else:
-        assert imports_pairs == {(p, "imports") for p in expected_import_path}
-
-@pytest.mark.parametrize(
-    "api_rel, files, expected_import_paths",
-    [
-        # Resolve the parent and services packages, excluding the importer's own package.
-        pytest.param(
-            "package/feature/api.py",
-            _SHARED_FIXTURES
-            | {
-                "package/services/__init__.py": "",
-                "package/feature/api.py": ('"""API module."""\nfrom .. import services\n'),
-            }, {"package/__init__.py", "package/services/__init__.py"}, id="parent-package-import",
-        ),
-    ],
-)
-def test_python_parent_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_paths: set[str],
-) -> None:
-    repo = _materialize(tmp_path, files)
-    results = detect_affected_files(_modified_diff(api_rel), repo)
-    imports_paths = {r.path for r in results if r.role == "imports"}
-    assert imports_paths == expected_import_paths
-
-def test_typescript_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "typescript_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "src/api.ts": (
-                '// API module\nimport { User } from "./models";\n\n'
-                "export function getUser(): User {\n  return new User();\n}\n"
-            ),
-            "src/models.ts": "// Models module\n\nexport class User {}\n",
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    assert any(r.path == "src/api.ts" and r.role == "modified" for r in results)
-    assert any(r.path == "src/models.ts" and r.role == "modified" for r in results)
-    assert ("src/models.ts", "imports") in {(r.path, r.role) for r in results}
 
 def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _materialize(
@@ -190,6 +58,7 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
             "models/user.go": "package models\n",
             "models/order.go": "package models\n",
             "helpers/format.go": "package helpers\n",
+            "lib/foo.rb": "class Foo\n  def bar; end\nend\n",
         },
     )
     real_rglob = Path.rglob
@@ -206,27 +75,7 @@ def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(Path, "rglob", one_go_traversal)
 
-    results = detect_affected_files(_modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go"), repo)
-    imports_paths = {r.path for r in results if r.role == "imports"}
-    assert imports_paths == {"models/user.go", "models/order.go", "helpers/format.go"}
-    assert {r.path for r in results if r.role == "modified"} == {"cmd/alpha.go", "cmd/beta.go"}
-
-def test_rust_impact_surface(tmp_path: Path) -> None:
-    diff_text = (FIXTURES / "rust_multifile.diff").read_text()
-    repo = _materialize(
-        tmp_path,
-        {
-            "src/api.rs": "// api module\nuse crate::models::User;\n\npub fn get_user() -> User {\n    User\n}\n",
-            "src/models.rs": "// models module\n\npub struct User;\n",
-        },
-    )
-    results = detect_affected_files(diff_text, repo)
-    assert any(r.path == "src/api.rs" and r.role == "modified" for r in results)
-    assert any(r.path == "src/models.rs" and r.role == "modified" for r in results)
-    assert ("src/models.rs", "imports") in {(r.path, r.role) for r in results}
-
-def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
-    diff_text = (
+    unsupported_diff = (
         "diff --git a/lib/foo.rb b/lib/foo.rb\n"
         "index 1111111..2222222 100644\n"
         "--- a/lib/foo.rb\n"
@@ -235,15 +84,7 @@ def test_unsupported_language_gets_modified_role(tmp_path: Path) -> None:
         " class Foo\n"
         "+  def bar; end\n"
     )
-    (tmp_path / "lib").mkdir()
-    (tmp_path / "lib" / "foo.rb").write_text("class Foo\n  def bar; end\nend\n")
-    results = detect_affected_files(diff_text, tmp_path)
-    assert len(results) == 1
-    assert results[0].path == "lib/foo.rb"
-    assert results[0].role == "modified"
-
-def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path) -> None:
-    diff_text = (
+    deleted_diff = (
         "diff --git a/gone.py b/gone.py\n"
         "deleted file mode 100644\n"
         "index 1111111..0000000\n"
@@ -252,58 +93,36 @@ def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path) -> None:
         "@@ -1,1 +0,0 @@\n"
         "-print('bye')\n"
     )
-    results = detect_affected_files(diff_text, tmp_path)
-    assert len(results) == 1
-    assert results[0].path == "gone.py"
-    assert results[0].role == "modified"
+    results = detect_affected_files(
+        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go") + unsupported_diff + deleted_diff, repo,
+    )
+    assert [(r.path, r.role) for r in results if r.path == "lib/foo.rb"] == [("lib/foo.rb", "modified")]
+    assert [(r.path, r.role) for r in results if r.path == "gone.py"] == [("gone.py", "modified")]
+    imports_paths = {r.path for r in results if r.role == "imports"}
+    assert imports_paths == {"models/user.go", "models/order.go", "helpers/format.go"}
+    assert {r.path for r in results if r.role == "modified"} == {
+        "cmd/alpha.go", "cmd/beta.go", "lib/foo.rb", "gone.py",
+    }
 
 
-def test_reverse_edge_finds_code_importer(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "pkg").mkdir()
-    (repo / "pkg" / "widget.py").write_text("x = 1\ny = 2\n")
-    (repo / "caller.py").write_text("from pkg.widget import W\n\nW()\n")
-    _git(repo, "add", "pkg/widget.py", "caller.py")
-    _commit(repo, "add widget + caller")
-
-    results = detect_affected_files(_modified_diff("pkg/widget.py"), repo)
-    assert "caller.py" in _importers(results)
-
-def test_reverse_edge_skips_generic_stem(tmp_path: Path) -> None:
-    # "app" is a generic stem: a bare grep would match unrelated prose/code.
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "app.py").write_text("x = 1\ny = 2\n")
-    (repo / "unrelated.py").write_text("# the app starts here\nrun_app()\n")
-    _git(repo, "add", "app.py", "unrelated.py")
-    _commit(repo, "add app + unrelated")
-
-    results = detect_affected_files(_modified_diff("app.py"), repo)
-    assert _importers(results) == set()
-
-def test_reverse_edge_excludes_non_code_files(tmp_path: Path) -> None:
-    # A markdown/doc file cannot import a code module; it must never be an importer.
-    repo = _make_repo_with_main(tmp_path)
-    (repo / "widget.py").write_text("x = 1\ny = 2\n")
-    (repo / "notes.md").write_text("The widget is documented here.\n")
-    (repo / "caller.py").write_text("import widget\n")
-    _git(repo, "add", "widget.py", "notes.md", "caller.py")
-    _commit(repo, "add code + docs")
-
-    importers = _importers(detect_affected_files(_modified_diff("widget.py"), repo))
-    assert "caller.py" in importers
-    assert "notes.md" not in importers
 
 def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One real lookup keeps independent nested, generic, defining and non-code paths."""
     repo = _make_repo_with_main(tmp_path)
-    for stem in ("widget", "gadget"):
-        (repo / f"{stem}.py").write_text("x = 1\ny = 2\n")
+    (repo / "pkg").mkdir()
+    (repo / "pkg/widget.py").write_text("x = 1\ny = 2\n")
+    (repo / "gadget.py").write_text("x = 1\ny = 2\n")
+    (repo / "caller.py").write_text("from pkg.widget import W\n\nW()\n")
+    (repo / "app.py").write_text("x = 1\ny = 2\nimport config\n")
+    (repo / "config.py").write_text("def load_config():\n    return {}\n")
+    (repo / "unrelated.py").write_text("# the app starts here\nrun_app()\n")
+    (repo / "notes.md").write_text("The widget is documented here.\n")
     overshoot = _MAX_IMPORTERS + 5
-    for stem in ("widget", "gadget"):
+    for stem, module in (("widget", "pkg.widget"), ("gadget", "gadget")):
         for i in range(overshoot):
-            (repo / f"{stem}_importer_{i}.py").write_text(f"import {stem}\n")
-    _git(repo, "add", "widget.py", "gadget.py",
-         *[f"{stem}_importer_{i}.py" for stem in ("widget", "gadget") for i in range(overshoot)])
-    _commit(repo, "many importers")
+            (repo / f"{stem}_importer_{i}.py").write_text(f"import {module}\n")
+    _git(repo, "add", ".")
+    _commit(repo, "mixed source and capped importers")
 
     real_grep_fixed = git_ops.grep_fixed_matches
     calls = 0
@@ -317,25 +136,23 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(git_ops, "grep_fixed_matches", one_batch)
 
-    results = detect_affected_files(_modified_diff("widget.py") + _modified_diff("gadget.py"), repo)
+    results = detect_affected_files(
+        _modified_diff("pkg/widget.py") + _modified_diff("gadget.py")
+        + _modified_diff("app.py") + _modified_diff("config.py"), repo,
+    )
     importers = _importers(results)
-    widget = {p for p in importers if p.startswith("widget_importer_")}
+    assert "caller.py" in importers
+    assert "app.py" in importers
+    assert "unrelated.py" not in importers
+    assert "notes.md" not in importers
+    widget = {p for p in importers if p == "caller.py" or p.startswith("widget_importer_")}
     gadget = {p for p in importers if p.startswith("gadget_importer_")}
-    assert len(widget) == _MAX_IMPORTERS
-    assert len(gadget) == _MAX_IMPORTERS
-    assert len(importers) == _MAX_IMPORTERS * 2
-    assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
-
-def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> None:
-    (tmp_path / "config.py").write_text("def load_config():\n    return {}\n")
-    (tmp_path / "app.py").write_text("import config\n")
-    diff = ("diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n" "@@ -1 +1,2 @@\n x\n+y\n")
-    _git(tmp_path, "init", "-q")
-    _configure_identity(tmp_path)
-    _git(tmp_path, "add", ".")
-    _commit(tmp_path, "init")
-    results = detect_affected_files(diff, tmp_path)
-    assert any(r.path == "app.py" and r.role == "imported_by" for r in results)
+    assert len(widget) == 40
+    assert len(gadget) == 40
+    assert len(importers) == 81
+    assert {r.path for r in results if r.role == "modified"} == {
+        "pkg/widget.py", "gadget.py", "app.py", "config.py",
+    }
 
 
 def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -546,7 +363,9 @@ fn f(a: bool, b: bool, v: Option<i32>, items: &[i32]) -> Result<i32, std::io::Er
         println!("{}", x);
     }
     let _s = fs::read_to_string("f")?;
-    if a {
+    if
+        let Some(x) = v
+    {
         process::exit(1);
     }
     if b {
@@ -584,10 +403,10 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("pkg/mod.py", "python"), ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
+        ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
         # .js is parsed by the TypeScript grammar, .jsx by the TSX grammar.
-        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"), ("cmd/main.go", "go"), ("src/lib.rs", "rust"),
-        ("README.md", None), ("Makefile", None),
+        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"),
+        ("README.md", None),
         ("src/a.PY", None),  # suffix matching is case-sensitive
     ],
 )
@@ -781,6 +600,9 @@ def test_branch_lines_python_flat_elif_chain_and_match_cases() -> None:
     assert branch_statement_lines("python", PYTHON_CF) == [
         6, 8, 12, 14, 16, 18, 20, 22, 25, 27, 29, 30, 31, 32, 34, 36, 38, 40
     ]
+    assert is_branch_line("python", PYTHON_CF, 24) is True
+    assert is_branch_line("python", PYTHON_CF, 1) is False
+    assert is_branch_line("python", PYTHON_CF, 42) is False
 
 def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
     # else_clause NESTS in TypeScript: the second `if` (4) lives inside the first
@@ -791,6 +613,8 @@ def test_branch_lines_typescript_nested_else_chain_and_nested_switch() -> None:
     assert branch_statement_lines("typescript", TYPESCRIPT_CF) == [
         2, 4, 9, 12, 15, 18, 21, 23, 25, 28, 29, 31, 33, 35, 39
     ]
+    assert is_branch_line("typescript", TYPESCRIPT_CF, 30) is True
+    assert is_branch_line("typescript", TYPESCRIPT_CF, 32) is True
 
 @pytest.mark.parametrize("grammar", ["tsx", "javascript"])
 def test_branch_lines_other_grammars_match_typescript_on_the_same_source(grammar: str) -> None:
@@ -809,19 +633,18 @@ def test_branch_lines_go_has_no_else_node_and_four_switch_kinds() -> None:
     # All four container kinds (20, 22 expression_switch, 31 type_switch, 35
     # select) are dropped in favour of their cases (21, 23, 25, 28, 32, 36).
     assert branch_statement_lines("go", GO_CF) == [10, 12, 17, 21, 23, 25, 28, 32, 36]
+    assert is_branch_line("go", GO_CF, 20) is True
+    assert is_branch_line("go", GO_CF, 22) is True
+    assert is_branch_line("go", GO_CF, 31) is True
+    assert is_branch_line("go", GO_CF, 35) is True
 
 def test_branch_lines_rust_nested_else_chain_and_match_arms() -> None:
     # Rust nests else_clause exactly like TypeScript (5, 7 are the two heads).
-    # 26 is an if_expression whose condition is a let_condition (both on that
-    # line); 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
+    # 26 keeps if/let on one line; a second pair at 30/31 exposes let_condition.
+    # 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
     # its match_arm lines (22, 23, 24).
-    assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 33]
-
-def test_branch_lines_rust_let_condition_on_its_own_line() -> None:
-    # Isolates let_condition from the if_expression head, which they normally
-    # share a line with.
-    source = b"fn g(v: Option<i32>) {\n    if\n        let Some(x) = v\n    {\n        1;\n    }\n}\n"
-    assert branch_statement_lines("rust", source) == [2, 3]
+    assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 31, 35]
+    assert is_branch_line("rust", RUST_CF, 21) is True
 
 def test_branch_lines_unknown_language_is_empty() -> None:
     assert branch_statement_lines("elixir", b"if x do\n  1\nend\n") == []
@@ -832,29 +655,6 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
     assert branch_statement_lines("python", b"def f(:\n    if x:\n        pass\n") == [2]
     assert branch_statement_lines("typescript", b"function f( {\n  if (a) {\n") == []
 
-
-@pytest.mark.parametrize(
-    ("language_id", "line"),
-    [
-        ("python", 24),  # match x:
-        ("typescript", 30),  # switch (t) {
-        ("typescript", 32),  # nested switch (q) {
-        ("go", 20),  # switch a {
-        ("go", 22),  # nested switch b {
-        ("go", 31),  # switch t := v.(type) {
-        ("go", 35),  # select {
-        ("rust", 21),  # match v {
-    ],
-)
-def test_is_branch_line_reports_switch_container_lines(language_id: str, line: int) -> None:
-    """Container lines count as branches even when the count query reports cases."""
-    source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
-    assert is_branch_line(language_id, source, line) is True
-    assert line not in branch_statement_lines(language_id, source)
-
-def test_is_branch_line_false_for_a_plain_statement() -> None:
-    assert is_branch_line("python", PYTHON_CF, 1) is False
-    assert is_branch_line("python", PYTHON_CF, 42) is False
 
 def test_is_branch_line_falls_back_to_keyword_regex() -> None:
     elixir = b"defmodule M do\n  if x do\n    1\n  end\nend\n"
@@ -989,12 +789,8 @@ def test_terminal_lines_go_return_os_exit_panic_and_log_fatal() -> None:
 
 def test_terminal_lines_rust_return_exit_abort_and_panic_macros() -> None:
     # 6/8 return, 10 std::process::exit, 22 panic!, 23 unreachable!, 24 todo!,
-    # 31 process::exit, 34 std::process::abort, 36 process::abort.
-    assert _terminal_lines("rust", RUST_CF) == [6, 8, 10, 22, 23, 24, 31, 34, 36]
-
-def test_terminal_lines_rust_ignores_non_panic_macros() -> None:
-    # macro_invocation alone is far too broad to be a terminal: `println!` (27)
-    # must not match, which is what makes the TERMINAL_MACRO_NAMES check load-bearing.
+    # 33 process::exit, 36 std::process::abort, 38 process::abort.
+    assert _terminal_lines("rust", RUST_CF) == [6, 8, 10, 22, 23, 24, 33, 36, 38]
     assert is_terminal_line("rust", RUST_CF, 27) is False
     assert "println" not in TERMINAL_MACRO_NAMES
     assert TERMINAL_MACRO_NAMES == frozenset({"panic", "unreachable", "todo", "unimplemented"})

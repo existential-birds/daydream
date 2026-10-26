@@ -14,56 +14,6 @@ from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import entrypoint, package as pkg, run as run_mod, verifier_core as vc
 
 
-def test_parse_reviewer_environment_maps_pi_without_mutating_parent(monkeypatch: pytest.MonkeyPatch,) -> None:
-    monkeypatch.setenv("PI_API_KEY", "ambient-pi-key")
-    parent = {
-        "PATH": "/usr/bin", "DAYDREAM_REVIEW_CASE_ID": "case-parser-pi", "DAYDREAM_REVIEW_REPO_DIR": "/review/repo",
-        "DAYDREAM_REVIEW_ARTIFACT_PATH": "/review/out.json",
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH": "/review/trajectory.json", "DAYDREAM_REVIEW_BASE_REF": "frozen-base",
-        "DAYDREAM_REVIEW_HEAD_REF": "frozen-head", "DAYDREAM_REVIEW_MODEL": "review-model",
-        "DAYDREAM_REVIEW_PROFILE_CANDIDATE": "/review/profile.toml", "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
-        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "ANTHROPIC_API_KEY": "stale-key",
-        "OPENROUTER_API_KEY": "stale-openrouter-key", "PI_API_KEY": "stale-pi-key", "PI_THINKING": "high",
-        "PI_CODING_AGENT_DIR": "/review/pi-agent", "PI_UNRELATED_CONTROL": "must-scrub", "ZAI_API_KEY": "stale-zai-key",
-        "NOUS_API_KEY": "stale-nous-key", "DAYDREAM_JUDGE_MODEL": "judge-model", "GH_TOKEN": "stale-gh-token",
-        "GITHUB_TOKEN": "stale-github-token", "GH_HOST": "github.example",
-        "DAYDREAM_APP_FUTURE_SECRET": "stale-app-secret",
-    }
-
-    parsed = entrypoint.parse_reviewer_environment(parent)
-    child = parsed.execution.backend.child_environment()
-
-    assert child["PI_PROVIDER"] == "openrouter"
-    assert child["PI_API_KEY"] == "sk-or-test"
-    assert child["PI_TELEMETRY"] == "0"
-    assert child["PI_THINKING"] == "high"
-    assert child["PI_CODING_AGENT_DIR"] == "/review/pi-agent"
-    assert parsed.execution.backend.pi_thinking == "high"
-    assert parsed.execution.backend.pi_agent_dir == Path("/review/pi-agent")
-    assert "PI_UNRELATED_CONTROL" not in child
-    assert "OPENROUTER_API_KEY" not in child
-    assert "ZAI_API_KEY" not in child and "NOUS_API_KEY" not in child
-    assert not any(key.startswith("ANTHROPIC_") for key in child)
-    assert not any(key.startswith("DAYDREAM_JUDGE_") for key in child)
-    assert "GH_TOKEN" not in child
-    github_environment = parsed.execution.github.auth.environment_for_request()
-    assert github_environment is not None
-    for forbidden in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "DAYDREAM_APP_FUTURE_SECRET",
-        "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ZAI_API_KEY", "NOUS_API_KEY",
-    ):
-        assert forbidden not in github_environment
-    assert parsed.repo_dir == Path("/review/repo")
-    assert parsed.artifact_path == Path("/review/out.json")
-    assert parsed.trajectory_path == Path("/review/trajectory.json")
-    assert (parsed.case_id, parsed.base_ref, parsed.head_ref) == ("case-parser-pi", "frozen-base", "frozen-head")
-    assert parsed.model == "review-model"
-    assert parsed.profile_candidate == "/review/profile.toml"
-    assert parent["PI_API_KEY"] == "stale-pi-key"
-    assert parent["PI_THINKING"] == "high"
-    assert parent["PI_CODING_AGENT_DIR"] == "/review/pi-agent"
-    assert parent["ANTHROPIC_API_KEY"] == "stale-key"
-    assert os.environ["PI_API_KEY"] == "ambient-pi-key"
-
 def test_parse_reviewer_environment_rejects_non_openrouter_endpoint() -> None:
     with pytest.raises(entrypoint.EntrypointError, match="openrouter.ai"):
         entrypoint.parse_reviewer_environment({
@@ -91,25 +41,21 @@ def test_parse_reviewer_environment_maps_claude_without_openrouter_requirement()
     assert not any(key.startswith("DAYDREAM_JUDGE_") for key in child)
     assert parent["PI_API_KEY"] == "stale-pi"
 
-@pytest.mark.parametrize("environment", [{"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "http://api.anthropic.com"},
+@pytest.mark.parametrize(("environment", "message"), [
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
+     "claude backend requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in the reviewer environment"),
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "DAYDREAM_REVIEW_CASE_ID": "case-parser-http", "ANTHROPIC_API_KEY": "sk-ant",
+      "ANTHROPIC_BASE_URL": "http://api.anthropic.com"}, "ANTHROPIC_BASE_URL must be an HTTPS endpoint"),
     # an empty userinfo (https://@host) is still embedded credentials, not absent
-    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
-     "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"},
-])
-def test_parse_reviewer_environment_rejects_invalid_claude_credentials(environment: dict[str, str],) -> None:
-    with pytest.raises(entrypoint.EntrypointError, match="ANTHROPIC"):
+    ({"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
+      "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"}, "ANTHROPIC_BASE_URL must be an HTTPS endpoint"),
+], ids=["environment0", "environment1", "environment2"])
+def test_parse_reviewer_environment_rejects_invalid_claude_credentials(
+    environment: dict[str, str], message: str,
+) -> None:
+    with pytest.raises(entrypoint.EntrypointError) as error:
         entrypoint.parse_reviewer_environment(environment)
-
-def test_parse_reviewer_environment_accepts_claude_proxy() -> None:
-    parsed = entrypoint.parse_reviewer_environment({
-        "DAYDREAM_REVIEW_BACKEND": "claude", "DAYDREAM_REVIEW_CASE_ID": "case-parser-proxy",
-        "ANTHROPIC_API_KEY": "sk-ant", "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
-    })
-    assert parsed.execution.backend.child_environment()["ANTHROPIC_BASE_URL"] == ("https://claude-proxy.internal/v1"
-    )
-
-
+    assert str(error.value) == message
 
 def test_host_reviewer_host_resolution_is_backend_aware() -> None:
     assert run_mod._reviewer_host_from_env({
@@ -199,12 +145,31 @@ def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: 
 
 def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the runner; exercise config construction and the real merged-items publisher.
+    monkeypatch.setenv("PI_API_KEY", "ambient-pi-key")
     (tmp_path / "a.py").write_text("x = 1\n")
+    profile = tmp_path / "profile.toml"
+    profile.write_text(
+        'schema_version = 1\nname = "candidate"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"'
+    )
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
+    parent = {
+        "PATH": "/usr/bin", "DAYDREAM_REVIEW_CASE_ID": "case-parser-pi", "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path),
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(tmp_path / "trajectory.json"), "DAYDREAM_REVIEW_BASE_REF": "frozen-base",
+        "DAYDREAM_REVIEW_HEAD_REF": "frozen-head", "DAYDREAM_REVIEW_MODEL": "review-model",
+        "DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(profile), "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "ANTHROPIC_API_KEY": "stale-key",
+        "OPENROUTER_API_KEY": "stale-openrouter-key", "PI_API_KEY": "stale-pi-key", "PI_THINKING": "high",
+        "PI_CODING_AGENT_DIR": "/review/pi-agent", "PI_UNRELATED_CONTROL": "must-scrub", "ZAI_API_KEY": "stale-zai-key",
+        "NOUS_API_KEY": "stale-nous-key", "DAYDREAM_JUDGE_MODEL": "judge-model", "GH_TOKEN": "stale-gh-token",
+        "GITHUB_TOKEN": "stale-github-token", "GH_HOST": "github.example",
+        "DAYDREAM_APP_FUTURE_SECRET": "stale-app-secret",
+    }
     seen: dict[str, Any] = {}
 
     async def _fake_run(config: Any, *, execution: Any) -> int:
         seen["config"] = config
+        seen["execution"] = execution
         merged = Path(config.target) / ".daydream" / "deep" / "merged-items.json"
         merged.parent.mkdir(parents=True)
         merged.write_text(json.dumps({"items": [{
@@ -217,13 +182,30 @@ def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr("daydream.runner.run", _fake_run)
 
-    rc = asyncio.run(entrypoint.main({
-        "DAYDREAM_REVIEW_CASE_ID": "case-python", "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
-        "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path), "DAYDREAM_REVIEW_BACKEND": "pi",
-        "DAYDREAM_REVIEW_API_KEY": "sk-or-test", "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
-    }))
+    rc = asyncio.run(entrypoint.main(parent))
     assert rc == 0
     config = seen["config"]
+    execution = seen["execution"]
+    child = execution.backend.child_environment()
+    assert child["PI_PROVIDER"] == "openrouter"
+    assert child["PI_API_KEY"] == "sk-or-test"
+    assert child["PI_TELEMETRY"] == "0"
+    assert child["PI_THINKING"] == "high"
+    assert child["PI_CODING_AGENT_DIR"] == "/review/pi-agent"
+    assert execution.backend.pi_thinking == "high"
+    assert execution.backend.pi_agent_dir == Path("/review/pi-agent")
+    assert "PI_UNRELATED_CONTROL" not in child
+    assert "OPENROUTER_API_KEY" not in child
+    assert "ZAI_API_KEY" not in child and "NOUS_API_KEY" not in child
+    assert not any(key.startswith("ANTHROPIC_") for key in child)
+    assert not any(key.startswith("DAYDREAM_JUDGE_") for key in child)
+    assert "GH_TOKEN" not in child
+    github_environment = execution.github.auth.environment_for_request()
+    assert github_environment is not None
+    for forbidden in ("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "DAYDREAM_APP_FUTURE_SECRET",
+        "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ZAI_API_KEY", "NOUS_API_KEY",
+    ):
+        assert forbidden not in github_environment
     assert config.target == str(tmp_path)
     assert config.backend == "pi"
     assert config.output_mode == "review"
@@ -231,13 +213,22 @@ def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.M
     assert config.archive is False
     assert config.run_eval is False
     assert config.file_config is not None
+    assert config.base == "frozen-base"
+    assert config.trajectory_path == tmp_path / "trajectory.json"
+    assert config.model == "review-model"
+    assert config.review_profile is not None and config.review_profile.source_path == profile
 
     loaded = json.loads(artifact.read_text())
-    assert loaded["case_id"] == "case-python"
-    assert loaded["base_ref"] == "base"
-    assert loaded["head_ref"] == "head"
+    assert loaded["case_id"] == "case-parser-pi"
+    assert loaded["base_ref"] == "frozen-base"
+    assert loaded["head_ref"] == "frozen-head"
     assert [finding["path"] for finding in loaded["findings"]] == ["a.py"]
     assert vc.validate_candidate_artifact(loaded)
+    assert parent["PI_API_KEY"] == "stale-pi-key"
+    assert parent["PI_THINKING"] == "high"
+    assert parent["PI_CODING_AGENT_DIR"] == "/review/pi-agent"
+    assert parent["ANTHROPIC_API_KEY"] == "stale-key"
+    assert os.environ["PI_API_KEY"] == "ambient-pi-key"
 
 def test_entrypoint_claude_backend_reaches_run_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("x = 1\n")
@@ -288,5 +279,6 @@ def test_entrypoint_env_has_no_skill_dirs(tmp_path: Path, monkeypatch: pytest.Mo
 
     loaded = json.loads(artifact.read_text())
     assert loaded["case_id"] == "case-noskill"
+    assert loaded["base_ref"] == "base" and loaded["head_ref"] == "head"
     assert loaded["findings"] == []
     assert vc.validate_candidate_artifact(loaded) == []

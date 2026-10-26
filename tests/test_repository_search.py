@@ -9,27 +9,28 @@ from pathlib import Path
 
 import pytest
 
-from daydream.commands.search import search_repository
+from daydream.commands.search import handle_search_command, search_repository
 from tests.harness.git_helpers import git
 
 
-def test_search_preserves_git_membership_and_requires_named_ignored_expansion(git_repo: Path) -> None:
-    # Owner: ordinary search inventory. An rg-only or tracked-only implementation
-    # respectively loses ignored/dotfile or untracked evidence; recursive grep adds noise.
+def test_search_preserves_git_membership_and_requires_named_ignored_expansion(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # One real Git population joins admitted paths and their literal bounded CLI match evidence.
     repo = git_repo
     contents = {
-        "src/nested/main.py": "needle source\n",
-        "src/untracked.py": "needle untracked\n",
-        ".rules/policy": "needle dotfile\n",
-        "deps/tracked.py": "needle tracked ignored\n",
-        "deps/package/generated.py": "needle deliberate dependency\n",
-        "services/api/src/[literal]\nfile.py": "needle nested root\n",
+        "src/nested/main.py": b"x" * 500 + b"needle" + b"y" * 500 + b"\n",
+        "src/untracked.py": b"needle" + b"y" * 500 + b"\n",
+        ".rules/policy": b"x" * 500 + b"needle\n",
+        "deps/tracked.py": b"needle tracked ignored\n",
+        "deps/package/generated.py": b"\xff" * 500 + b"needle" + b"y" * 500 + b"\n",
+        "services/api/src/[literal]\nfile.py": b"needle nested root\n",
     }
     (repo / ".gitignore").write_text("deps/\nbuild/\n")
-    for name, text in contents.items():
+    for name, content in contents.items():
         file = repo / name
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(text)
+        file.write_bytes(content)
     git(repo, "add", "src/nested", ".rules", "services")
     git(repo, "add", "-f", "deps/tracked.py")
     roots = ["src", ".rules", "deps", "services/api/src"]
@@ -38,19 +39,32 @@ def test_search_preserves_git_membership_and_requires_named_ignored_expansion(gi
     assert set(normal["visited_files"]) == expected
     assert {hit["path"] for hit in normal["matches"]} == expected
     assert normal["incomplete"] == [] and normal["skipped_files"] == 0
-    expanded = search_repository(repo, "needle", roots, expand=["deps/package"], reason="trace generated caller")
+    monkeypatch.chdir(repo)
+    assert handle_search_command(["needle", *roots, "--expand", "deps/package",
+        "--reason", "trace generated caller",
+    ]) == 0
+    expanded = json.loads(capsys.readouterr().out)
     assert {hit["path"] for hit in expanded["matches"]} == set(contents)
     assert expanded["expansion"] == {"paths": ["deps/package"], "reason": "trace generated caller"}
+    assert {hit["path"]: (hit["line"], hit["text"].startswith("..."), hit["text"].endswith("..."))
+            for hit in expanded["matches"]} == {
+        "src/nested/main.py": (1, True, True), "src/untracked.py": (1, False, True),
+        ".rules/policy": (1, True, False), "deps/package/generated.py": (1, True, True),
+        "deps/tracked.py": (1, False, False), "services/api/src/[literal]\nfile.py": (1, False, False),
+    }
+    for hit in expanded["matches"]:
+        text = hit["text"]
+        assert "needle" in text and len(text.encode("utf-8")) <= 240
+        if text.startswith("...") and text.endswith("..."):
+            before, after = text.split("needle")
+            assert len(before) > 3 and len(after) > 3
     with pytest.raises(ValueError, match="requires a concrete"):
         search_repository(repo, "needle", roots, expand=["deps/package"], reason=" ")
 
 
+
 @pytest.mark.parametrize(("prefix", "needle", "suffix", "omissions"), [
-    pytest.param(b"x" * 500, "needle", b"y" * 500, (True, True), id="middle"),
-    pytest.param(b"", "needle", b"y" * 500, (False, True), id="start"),
-    pytest.param(b"x" * 500, "needle", b"", (True, False), id="end"),
     pytest.param("é".encode() * 250, "針🔍", "🙂".encode() * 250, (True, True), id="utf8"),
-    pytest.param(b"\xff" * 500, "needle", b"y" * 500, (True, True), id="invalid-utf8"),
     pytest.param(b"x" * 500, "n" * 234, b"y" * 500, (True, True), id="full-budget-hit"),
     pytest.param(b"", "n" * 237, b"y" * 500, (False, True), id="full-budget-start"),
     pytest.param(b"x" * 500, "n" * 237, b"", (True, False), id="full-budget-end"),

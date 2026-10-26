@@ -169,7 +169,10 @@ async def test_synthesis_uses_reserved_time_after_discovery_deadline(tmp_path: P
         )
         assert result == (FINDINGS, None, None)
 
-async def test_retry_discards_failed_attempt_checkpoint_and_evidence(tmp_path: Path) -> None:
+async def test_retry_discards_failed_attempt_checkpoint_and_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock().install(monkeypatch)
     class RetryableError(RuntimeError):
         retryable = True
     backend = ScriptedBackend(script=[[ToolStartEvent(id="old", name="read", input={"path": "old.py"}),
@@ -182,9 +185,10 @@ async def test_retry_discards_failed_attempt_checkpoint_and_evidence(tmp_path: P
         retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
     )
     result = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-        review_limits=ReviewLimits(10, 2, 1), progress_callback=lambda _: None,
+        deadline=clock.monotonic() + 5, review_limits=ReviewLimits(10, 2, 1), progress_callback=lambda _: None,
     )
     assert result[0] == FINDINGS
+    assert "at most 3 seconds and 1 tool calls" in backend.prompts[0]
     assert "FAILED_ATTEMPT" not in backend.last_prompt
     assert "CURRENT_EVIDENCE" in backend.last_prompt
 
@@ -262,22 +266,15 @@ async def test_time_shorter_than_reserve_only_dispatches_finalization(tmp_path: 
     assert "FRESH_INVESTIGATION" not in backend.last_prompt
     assert "INVESTIGATION HAS ENDED" in backend.last_prompt
 
-async def test_displayed_allowance_is_clamped_to_absolute_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = FakeClock().install(monkeypatch)
-    backend = ScriptedBackend(events=[ResultEvent(structured_output={"findings": []}, continuation=None)])
-    await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-        deadline=clock.monotonic() + 5, review_limits=ReviewLimits(10, 2, 5), progress_callback=lambda _: None,
-    )
-    assert "at most 3 seconds and 5 tool calls" in backend.last_prompt
-
 def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations() -> None:
 
     evidence = ReviewEvidence(SCHEMA)
     for n in range(500):
         evidence.observe(ToolStartEvent(id=str(n), name="read", input={"path": "src.py"}))
-        evidence.observe(ToolResultEvent(id=str(n), output="FOUNDATIONAL_SOURCE", is_error=False))
+        evidence.observe(ToolResultEvent(id=str(n), output="FOUNDATIONAL_SOURCE", is_error=False,
+            exit_code=137, status="cancelled", cancelled=True, truncated=True))
     assert len(evidence.blocks) == 1
+    assert evidence.clipped is True
     for n in range(1000):
         evidence.observe(ToolStartEvent(id=str(n), name="search", input={"query": str(n)}))
         evidence.observe(ToolResultEvent(id=str(n), output="x" * 15000, is_error=True))
@@ -286,6 +283,11 @@ def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations()
     assert "FOUNDATIONAL_SOURCE" in prompt
     assert '"path": "src.py"' in prompt
     assert "error=False" in prompt and "error=True" in prompt
+    assert '"exit_code": 137' in prompt
+    assert '"status": "cancelled"' in prompt
+    assert '"cancelled": true' in prompt
+    assert '"truncated": true' in prompt
+    assert "clipped=True" in prompt
     assert "[tool output truncated]" in prompt
     assert "DIFF" in prompt
     assert "unread.py" not in prompt
@@ -349,20 +351,6 @@ async def test_finalization_control_is_invocation_local_with_shared_backend(tmp_
     assert backend.reasoning_effort == "high"
     assert sum(finalization for _, finalization in flags) == 1
     assert ("sibling", False) in flags
-
-def test_finalization_preserves_native_tool_failure_and_truncation_metadata() -> None:
-
-    evidence = ReviewEvidence(SCHEMA)
-    evidence.observe(ToolStartEvent(id="read", name="read", input={"path": "src.py"}))
-    evidence.observe(ToolResultEvent(id="read", output="short partial output", is_error=False,
-        exit_code=137, status="cancelled", cancelled=True, truncated=True,
-    ))
-    prompt = evidence.finalization_prompt(FinalizationContext(task="Review"))
-    assert '"exit_code": 137' in prompt
-    assert '"status": "cancelled"' in prompt
-    assert '"cancelled": true' in prompt
-    assert '"truncated": true' in prompt
-    assert "clipped=True" in prompt
 
 def test_explicit_capture_priority_retains_task_inputs_before_large_advisories(tmp_path: Path) -> None:
 

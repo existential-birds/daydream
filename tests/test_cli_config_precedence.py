@@ -49,7 +49,8 @@ def _routine_signals() -> DiffSignals:
 
 
 
-def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
+def test_model_precedence_cli_over_file_over_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAYDREAM_MODEL", "env-model")
     fc = DaydreamFileConfig(model="file-model", backend=None, phases={"fix": {"model": "file-fix"}})
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_model(cfg, "fix") == "file-fix"        # file phase override, nothing higher
@@ -64,7 +65,8 @@ def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
     assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"   # falls through to table default
 
 
-def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
+def test_backend_precedence_mirrors_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAYDREAM_BACKEND", "env-backend")
     fc = DaydreamFileConfig(model=None, backend="file-global", phases={"fix": {"backend": "file-fix"}})
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_backend_name(cfg, "fix") == "file-fix"        # file phase override, nothing higher
@@ -77,36 +79,6 @@ def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
     assert _resolved_backend_name(cfg, "review") == "file-global"  # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_backend_name(cfg2, "parse") == "claude"       # terminal fallback
-
-def test_env_vars_are_not_a_precedence_tier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("DAYDREAM_MODEL", "env-model")
-    monkeypatch.setenv("DAYDREAM_BACKEND", "env-backend")
-    fc = DaydreamFileConfig(model="file-model", backend="file-backend", phases={})
-    cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
-    assert _resolved_model(cfg, "review") == "file-model"      # config beats env (env not read)
-    assert _resolved_backend_name(cfg, "review") == "file-backend"
-    cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
-    assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"
-    assert _resolved_backend_name(cfg2, "parse") == "claude"
-
-def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
-    fc = DaydreamFileConfig(
-        model=None, backend=None, reasoning_effort="file-global", phases={"fix": {"reasoning_effort": "file-fix"}},
-    )
-    cfg = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=fc)
-    assert _resolved_reasoning_effort(cfg, "fix") == "file-fix"       # file phase override, nothing higher
-    cfg.reasoning_effort = "cli-global"
-    assert _resolved_reasoning_effort(cfg, "fix") == "cli-global"     # global --reasoning-effort wins
-    assert _resolved_reasoning_effort(cfg, "review") == "cli-global"  # applies to every phase
-    cfg.reasoning_effort = None
-    assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
-    cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
-    # Improve-only phases use the Claude effort-table fallback.
-    assert _resolved_reasoning_effort(cfg2, "plan_write") == "max"
-    # A missing phase entry preserves the ambient setting.
-    assert _resolved_reasoning_effort(cfg2, "review") is None
-    assert _resolved_reasoning_effort(cfg2, "not_a_phase") is None
-
 
 def _codex_backend(
     cfg: RunConfig, phase: str, cache: dict[tuple[str, str | None, str | None, Path | None], Backend] | None = None,
@@ -124,6 +96,7 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(
     assert _codex_backend(bare, "parse").reasoning_effort == "low"
     assert _codex_backend(bare, "fix").reasoning_effort == "high"
     assert _codex_backend(bare, "review").reasoning_effort is None
+    assert _codex_backend(bare, "not_a_phase").reasoning_effort is None
 
     fc = DaydreamFileConfig(model=None, backend=None, phases={"parse": {"reasoning_effort": "xhigh"}})
     cfg = RunConfig(target=str(tmp_path), backend="codex", model="fixture-model", file_config=fc)

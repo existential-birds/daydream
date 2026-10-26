@@ -18,6 +18,7 @@ from daydream.backends import AUDIT_ROOT_ISOLATION
 # on-disk diff pointer rather than embedding the diff.
 INLINE_DIFF_BUDGET_BYTES = 12_288
 SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
+STAGED_REVIEW_INLINE_MAX_BYTES = 64 * 1024
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
 SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 8_388_608
@@ -66,6 +67,7 @@ class PreparedSanctionedInputs:
     backend_identity: object
     cwd: Path
     read_only: bool
+    staged_review: bool = False
 
     def render(self) -> str:
         """Render deterministic path pointers or captured inline bytes."""
@@ -132,7 +134,8 @@ class PreparedSanctionedInputs:
                 blocks.append("[remaining sanctioned inputs omitted; coverage incomplete]")
                 break
             limit = min(remaining, 12000)
-            current = _capture_input(item.label, item.path, self.transport, aggregate, text_budget=limit)
+            current = _capture_input(item.label, item.path, self.transport, aggregate, text_budget=limit,
+                                     staged_review=self.staged_review)
             aggregate += current.size
             if replace(current, text=item.text, prompt_visible=item.prompt_visible,
                        inline_advisory=item.inline_advisory) != item:
@@ -163,7 +166,8 @@ class PreparedSanctionedInputs:
                 # The capture already streamed and hashed these exact bytes,
                 # so the re-read/re-hash is redundant — but the aggregate cap
                 # stays enforced exactly as a fresh capture would enforce it.
-                max_bytes, _, _ = _transport_allowance(self.transport, aggregate)
+                max_bytes, _, _ = _transport_allowance(self.transport, aggregate,
+                                                       staged_review=self.staged_review)
                 if item.size > max_bytes:
                     raise SanctionedInputUnavailable(
                         f"sanctioned input {item.label!r} exceeds remaining aggregate input budget"
@@ -173,6 +177,7 @@ class PreparedSanctionedInputs:
             current = _capture_input(
                 item.label, item.path, self.transport, aggregate, pointer_only=item.pointer_only,
                 text_budget=item.size if item.inline_advisory else None,
+                staged_review=self.staged_review,
             )
             if not item.pointer_only:
                 aggregate += current.size
@@ -245,10 +250,14 @@ def _unchanged_since_capture(item: PreparedSanctionedInput) -> bool:
     return identity == (item.device, item.inode, item.size, item.mtime_ns)
 
 
-def _transport_allowance(transport: SanctionedInputTransport, aggregate: int) -> tuple[int, bool, str]:
+def _transport_allowance(
+    transport: SanctionedInputTransport, aggregate: int, *,
+    staged_review: bool = False,
+) -> tuple[int, bool, str]:
     """Remaining per-item byte allowance under *transport* after *aggregate* bytes."""
     if transport is SanctionedInputTransport.INLINE:
-        return max(SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES - aggregate, 0), False, "byte budget"
+        cap = STAGED_REVIEW_INLINE_MAX_BYTES if staged_review else SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+        return max(cap - aggregate, 0), False, "byte budget"
     remaining = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES - aggregate
     aggregate_limit = remaining < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES
     return max(min(SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES, remaining), 0), aggregate_limit, "file byte limit"
@@ -257,13 +266,14 @@ def _transport_allowance(transport: SanctionedInputTransport, aggregate: int) ->
 def _capture_input(
     label: str, path: Path, transport: SanctionedInputTransport, aggregate: int, *,
     text_budget: int | None = None, pointer_only: bool = False,
+    staged_review: bool = False,
 ) -> PreparedSanctionedInput:
     """Capture one no-follow inode within the remaining transport allowance.
 
     Read at most allowance + 1 bytes; fstat before/after binds one immutable revision."""
     max_bytes, aggregate_limit, limit_name = (
         (SANCTIONED_DIFF_REFERENCE_MAX_BYTES, False, "durable diff resource limit")
-        if pointer_only else _transport_allowance(transport, aggregate)
+        if pointer_only else _transport_allowance(transport, aggregate, staged_review=staged_review)
     )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
@@ -369,6 +379,7 @@ def select_advisory_inputs(
     candidates: Sequence[AdvisoryCandidate],
     *,
     read_only: bool,
+    staged_review: bool = False,
 ) -> AdvisorySelection:
     """Admit candidates whole, in order, within the resolved transport’s allowance.
 
@@ -378,7 +389,8 @@ def select_advisory_inputs(
     transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
     inline = transport is SanctionedInputTransport.INLINE
     allowance_bytes = (
-        SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES if inline else SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
+        _transport_allowance(transport, 0, staged_review=staged_review)[0]
+        if inline else SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
     )
     admitted: list[AdvisoryCandidate] = []
     omitted: list[OmittedAdvisoryInput] = []
@@ -427,6 +439,7 @@ def prepare_sanctioned_inputs(
     inputs: Mapping[str, Path],
     *,
     read_only: bool,
+    staged_review: bool = False,
 ) -> PreparedSanctionedInputs:
     """Capture a closed logical-label mapping for one backend call."""
     canonical_cwd = _canonical_cwd(cwd)
@@ -439,7 +452,8 @@ def prepare_sanctioned_inputs(
         if not label or len(label) > 128 or any(ord(c) < 32 or ord(c) == 127 or c in '<>"' for c in label):
             raise SanctionedInputUnavailable("sanctioned input label is invalid")
         pointer_only = label == "diff" and uses_diff_reference(backend, canonical_cwd, read_only=read_only)
-        item = _capture_input(label, path, transport, aggregate, pointer_only=pointer_only)
+        item = _capture_input(label, path, transport, aggregate, pointer_only=pointer_only,
+                              staged_review=staged_review)
         if not pointer_only:
             aggregate += item.size
         prepared.append(item)
@@ -449,6 +463,7 @@ def prepare_sanctioned_inputs(
         backend_identity=backend,
         cwd=canonical_cwd,
         read_only=read_only,
+        staged_review=staged_review,
     )
 
 

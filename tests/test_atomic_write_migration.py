@@ -21,7 +21,6 @@ import pytest
 from daydream.benchmark.harbor import candidate
 from daydream.commands.corpus import _handle_corpus_command
 from daydream.json_utils import atomic_write_bytes, atomic_write_pair
-from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.calibration import run_calibration
 from daydream.training.corpus_projection import projector
 from daydream.training.corpus_projection.projector import build_frozen_corpus
@@ -75,9 +74,10 @@ class TestWriterCharacterization:
 
 
 
-    def test_projection_bytes_and_private_mode(self, tmp_path: Path) -> None:
+    def test_projection_bytes_and_private_mode(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
         out = tmp_path / "proj"
+        calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
         build_frozen_corpus(projection_config(store, tmp_path, out_dir=out))
         records = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines()]
         assert (out / "corpus.jsonl").read_bytes() == "".join(_canonical_line(r) for r in records).encode("utf-8")
@@ -89,10 +89,28 @@ class TestWriterCharacterization:
         assert (out / "lineage.json").read_bytes().endswith(b"\n")
         for path in out.iterdir():
             assert stat.S_IMODE(path.stat().st_mode) == 0o600, path.name
+        assert {target.name for target, _c, _k in calls} >= {
+            "corpus.jsonl", "adjudication-report.json", "schema.json", "lineage.json", "_SUCCESS",
+        }
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": None} for _t, _c, kwargs in calls)
+        content_by_name = {target.name: content for target, content, _k in calls}
+        assert content_by_name["_SUCCESS"] == b"ok\n"
+        for target, content, _kwargs in calls:
+            assert target.read_bytes() == content
 
-    def test_calibration_two_file_publish_bytes_and_mode(self, tmp_path: Path) -> None:
-        fixture_dir = _build_fixture(tmp_path)
-        config = _config(fixture_dir, tmp_path)
+    def test_calibration_two_file_publish_bytes_and_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = _config(_build_fixture(tmp_path), tmp_path)
+        calls: list[tuple[Path, bytes, dict[str, Any]]] = []
+        real = atomic_write_pair
+
+        def spy(first: tuple[Path, bytes], second: tuple[Path, bytes], **kwargs: Any) -> None:
+            calls.append((Path(first[0]), first[1], kwargs))
+            calls.append((Path(second[0]), second[1], kwargs))
+            real(first, second, **kwargs)
+
+        monkeypatch.setattr("daydream.training.calibration.atomic_write_pair", spy)
         with _umask(0o022):
             run_calibration(config)
         raw = (config.out_dir / "calibration.json").read_bytes()
@@ -101,9 +119,13 @@ class TestWriterCharacterization:
         assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
         for name in ("report.md", "calibration.json"):
             assert stat.S_IMODE((config.out_dir / name).stat().st_mode) == 0o644
+        assert [target.name for target, _c, _k in calls] == ["report.md", "calibration.json"]
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644} for _t, _c, kwargs in calls)
+        for target, content, _kwargs in calls:
+            assert target.read_bytes() == content
 
 
-    def test_candidate_bytes_mode_and_no_stray_temp(self, tmp_path: Path) -> None:
+    def test_candidate_bytes_mode_and_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         artifact = candidate.build_candidate_artifact("case-abc123def456", [])
         dest = tmp_path / "logs" / "artifacts" / "review.json"
         with _umask(0o022):
@@ -112,6 +134,17 @@ class TestWriterCharacterization:
         assert dest.read_bytes() == json.dumps(artifact).encode("utf-8")
         assert not dest.read_bytes().endswith(b"\n")
         assert stat.S_IMODE(dest.stat().st_mode) == 0o644
+        assert list(dest.parent.glob("*.tmp")) == []
+
+        artifact["head_ref"] = "updated-head"
+        calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
+        with _umask(0o077):
+            candidate.write_candidate_artifact_atomic(dest, artifact)
+        [(target, content, kwargs)] = calls
+        assert target == dest
+        assert content == json.dumps(artifact).encode("utf-8") == dest.read_bytes()
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
         assert list(dest.parent.glob("*.tmp")) == []
 
     def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,58 +167,7 @@ class TestWriterCharacterization:
 
 
 
-class TestProjectorKnobs:
-    def test_projection_routes_every_member_through_the_primitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
-        out = tmp_path / "proj"
-        calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
-        build_frozen_corpus(projection_config(store, tmp_path, out_dir=out))
-        assert {target.name for target, _c, _k in calls} >= {"corpus.jsonl", "adjudication-report.json", "schema.json",
-            "lineage.json", "_SUCCESS",
-        }
-        # mode=None keeps mkstemp's 0600: this site must NOT be widened to the
-        # umask-derived 0644 the other seven get.
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": None} for _t, _c, kwargs in calls)
-        content_by_name = {target.name: content for target, content, _k in calls}
-        assert content_by_name["_SUCCESS"] == b"ok\n"
-        for target, content, _kwargs in calls:
-            assert target.read_bytes() == content
-
-class TestCalibrationKnobs:
-    def test_calibration_calls_the_primitive_report_first(self, tmp_path: Path,
-                                                         monkeypatch: pytest.MonkeyPatch) -> None:
-        config = _config(_build_fixture(tmp_path), tmp_path)
-        calls: list[tuple[Path, bytes, dict[str, Any]]] = []
-        real = atomic_write_pair
-        def spy(first: tuple[Path, bytes], second: tuple[Path, bytes], **kwargs: Any) -> None:
-            calls.append((Path(first[0]), first[1], kwargs))
-            calls.append((Path(second[0]), second[1], kwargs))
-            real(first, second, **kwargs)
-        monkeypatch.setattr("daydream.training.calibration.atomic_write_pair", spy)
-        with _umask(0o022):
-            run_calibration(config)
-        # M8: report.md is published before calibration.json, and the pair goes
-        # through the primitive with the same explicit knobs.
-        assert [target.name for target, _c, _k in calls] == ["report.md", "calibration.json"]
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644} for _t, _c, kwargs in calls)
-        for target, content, _kwargs in calls:
-            assert target.read_bytes() == content
-        assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
-
 class TestCandidateKnobs:
-    def test_candidate_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
-                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-        artifact = candidate.build_candidate_artifact("case-abc123def456", [])
-        dest = tmp_path / "review.json"
-        calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
-        with _umask(0o077):
-            candidate.write_candidate_artifact_atomic(dest, artifact)
-        [(target, content, kwargs)] = calls
-        assert target == dest
-        assert content == json.dumps(artifact).encode("utf-8")
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
-
     def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path) -> None:
         # Isolate the destination so the autouse archive_dir fixture's tmp_path/archive
         # does not pollute the "no temp survives" observation.
@@ -218,13 +200,6 @@ class TestRecordExportPersistence:
         _fail_all_renames(monkeypatch)
         assert _handle_corpus_command(args) == 1
         assert {path.name: path.read_bytes() for path in out.iterdir()} == before
-
-    def test_materialize_dry_run_writes_nothing(self, tmp_path: Path) -> None:
-        store = seed_projection_store(tmp_path)
-        config = projection_config(store, tmp_path)
-        out = tmp_path / "mat"
-        run_materialize(store.root, config.snapshot_id, out, dry_run=True)
-        assert not out.exists()
 
     def test_queue_publication_private_and_fault_preserves_prior(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

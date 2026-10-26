@@ -26,6 +26,7 @@ from daydream.improve.command_contract import (
     valid_directory_scope_lexical,
     valid_repository_file_path,
     validate_applicability,
+    validate_recon_commands,
 )
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.run_config import RunConfig
@@ -36,11 +37,10 @@ from tests.harness.improve_backend import (
     improve_artifact,
     install_capable_improve_backend,
     install_improve_stub,
+    stub_recon_commands,
 )
 
 MakeConfig = Callable[..., RunConfig]
-
-
 
 
 LEGAL_FILENAMES = ["foo bar.py", "Café.md",
@@ -63,21 +63,60 @@ PATH_REJECTS = ["a/b/./c", "..", "a/../b", "/abs/path", "a//b", "$()", "${x}",
 ]
 
 
-PATH_SCHEMAS = [
-    pytest.param(REPOSITORY_FILE_PATH_SCHEMA, id="file"), pytest.param(DIRECTORY_SCOPE_SCHEMA, id="directory"),
-]
+def test_command_batch_admits_real_legal_paths_and_locates_independent_rejections(tmp_path: Path) -> None:
+    """One bad source/scope cannot discard valid siblings or hide another rejected record."""
+    template = stub_recon_commands(start_line=1)[0]
+    (tmp_path / "...workspace").mkdir()
+    template["working_directory"] = "...workspace"
+    commands = []
+    accepted_paths = PATH_ACCEPTS + MULTI_DOT_PATHS
+    for index, value in enumerate(accepted_paths):
+        source = tmp_path / value
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("uv run pytest\n")
+        commands.append(
+            {
+                **template,
+                "id": f"legal-{index}",
+                "evidence": {**template["evidence"], "source_path": value},
+                "applicability": {**template["applicability"], "scope": {"kind": "in-scope-paths", "paths": [value]}},
+            }
+        )
+    expected_rejections = set()
+    for index, value in enumerate(PATH_REJECTS):
+        position = len(commands)
+        # Separate records ensure neither schema failure masks the other field.
+        commands.extend(
+            [
+                {**template, "id": f"bad-evidence-{index}", "evidence": {**template["evidence"], "source_path": value}},
+                {
+                    **template,
+                    "id": f"bad-scope-{index}",
+                    "evidence": {**template["evidence"], "source_path": "src/main.rs"},
+                    "applicability": {
+                        **template["applicability"],
+                        "scope": {"kind": "in-scope-paths", "paths": [value]},
+                    },
+                },
+            ]
+        )
+        expected_rejections.update(
+            {
+                f"RECON_EVIDENCE_INVALID@/commands/{position}/evidence/source_path",
+                f"RECON_APPLICABILITY_INVALID@/commands/{position + 1}/applicability/scope/paths/0",
+            }
+        )
 
-@pytest.mark.parametrize("schema", PATH_SCHEMAS)
-@pytest.mark.parametrize("value", PATH_ACCEPTS)
-def test_path_schema_accepts(schema: dict[str, Any], value: str) -> None:
-    assert Draft202012Validator(schema).is_valid(value)
-    assert re.compile(schema["pattern"]).match(value)
+    admitted, rejected = validate_recon_commands({"commands": commands}, repo=tmp_path)
 
-@pytest.mark.parametrize("schema", PATH_SCHEMAS)
-@pytest.mark.parametrize("value", PATH_REJECTS)
-def test_path_schema_rejects(schema: dict[str, Any], value: str) -> None:
-    assert not Draft202012Validator(schema).is_valid(value)
-    assert not re.compile(schema["pattern"]).match(value)
+    assert [
+        (record["id"], record["evidence"]["source_path"], record["applicability"]["scope"]["paths"])
+        for record in admitted
+    ] == [(f"legal-{index}", path, [path.removeprefix("./")]) for index, path in enumerate(accepted_paths)]
+    assert {record["evidence"]["verbatim_excerpt"] for record in admitted} == {"uv run pytest"}
+    assert {record["working_directory"] for record in admitted} == {"...workspace"}
+    assert len(rejected) == len(expected_rejections) and set(rejected) == expected_rejections
+
 
 def test_file_path_empty_and_length_bounds() -> None:
     # empty always rejected
@@ -99,6 +138,7 @@ def test_file_path_empty_and_length_bounds() -> None:
     assert not valid_repository_file_path("é" * 2049)
     assert valid_directory_scope_lexical("é" * 2048)
     assert not valid_directory_scope_lexical("é" * 2049)
+
 
 def test_working_directory_accepts_cwd() -> None:
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(".")
@@ -122,6 +162,7 @@ def test_working_directory_accepts_cwd() -> None:
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
     assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
 
+
 def test_lexical_gates_reject_trailing_newline() -> None:
     """Trailing newline is rejected by the fullmatch gates, not the schema.
 
@@ -132,29 +173,6 @@ def test_lexical_gates_reject_trailing_newline() -> None:
         assert not valid_repository_file_path(value)
         assert not valid_directory_scope_lexical(value)
 
-@pytest.mark.parametrize("value", MULTI_DOT_PATHS)
-def test_multi_dot_paths_are_accepted_by_schemas_and_validators(value: str, tmp_path: Path) -> None:
-    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
-    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
-    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(value)
-    assert valid_repository_file_path(value)
-    assert valid_directory_scope_lexical(value)
-    assert path_is_confined(tmp_path, value)
-    assert path_is_confined(tmp_path, value, directory_scope=True)
-
-
-CONSISTENCY_ACCEPT = PATH_ACCEPTS + MULTI_DOT_PATHS
-CONSISTENCY_REJECT = PATH_REJECTS
-
-def test_schema_and_lexical_gate_agree_on_corpus() -> None:
-    """Schema-valid must equal runtime-accepted for every corpus path."""
-    file_validator = Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA)
-    for value in CONSISTENCY_ACCEPT:
-        assert file_validator.is_valid(value), f"schema should accept {value!r}"
-        assert valid_repository_file_path(value), f"lexical gate should accept {value!r}"
-    for value in CONSISTENCY_REJECT:
-        assert not file_validator.is_valid(value), f"schema should reject {value!r}"
-        assert not valid_repository_file_path(value), f"lexical gate should reject {value!r}"
 
 def test_validate_applicability_collapses_dot_slash_scope_spellings(tmp_path: Path,) -> None:
     """``./foo`` and ``foo`` are the same directory: string dedup must collapse them."""
@@ -178,19 +196,6 @@ def test_validate_applicability_collapses_dot_slash_scope_spellings(tmp_path: Pa
     assert canonicalize_directory_scope("./frontend") == "frontend"
     assert canonicalize_directory_scope("./frontend/") == "frontend"
 
-def test_legal_filenames_are_confined(tmp_path: Path) -> None:
-    """Legal filenames pass the confinement walk for real files; traversal never does."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "~").mkdir()  # corpus spelling ~/.bashrc nests through a ~ dir
-    for name in LEGAL_FILENAMES:
-        (repo / name).write_text("x")
-    for name in LEGAL_FILENAMES + ["./foo bar.py"]:
-        assert path_is_confined(repo, name), f"{name!r} must be confined"
-    # security carve-outs still rejected by the confinement gate too
-    assert not path_is_confined(repo, "../x")
-    assert not path_is_confined(repo, "/abs/path")
-    assert not path_is_confined(repo, "a/../b")
 
 def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -203,6 +208,7 @@ def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
     # default (allow_absolute=False) must still reject absolute — this is what
     # keeps evidence source_path / applicability scope paths unchanged.
     assert not path_is_confined(repo, abs_under)
+
 
 def test_path_is_confined_allow_absolute_symlinked_ancestor(tmp_path: Path,) -> None:
     """A symlinked ancestor of the repo must not reject the absolute spelling.
@@ -241,10 +247,12 @@ def test_canonicalize_working_directory_resolved_repo_spelling(tmp_path: Path) -
     # Resolved spelling matches only the repo.resolve() base.
     assert canonicalize_working_directory(link, f"{link.resolve()}/sub") == "sub"
 
+
 def test_canonicalize_working_directory_collapses_parent_traversal(tmp_path: Path) -> None:
     """A ``..``-containing absolute spelling of an in-repo directory yields the
     same key as its plain spelling (the issue #649 dedup miss)."""
     assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub/../sub") == "sub"
+
 
 @pytest.mark.anyio
 async def test_host_enumeration_dedups_absolute_model_wd(
@@ -317,6 +325,7 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     assert [command["id"] for command in recon["commands"]] == ["model-check"]
     assert recon["command_rejections"] == []
 
+
 def test_host_enumeration_does_not_dedup_different_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Discriminating: a genuinely different directory is NOT collapsed —
     normalization must not widen dedup to 'same command anywhere'."""
@@ -325,6 +334,7 @@ def test_host_enumeration_does_not_dedup_different_directory(monkeypatch: pytest
     model = [{"id": "m1", "command": "make check", "working_directory": f"{tmp_path}/other"}]
     count, _, _ = orch._host_enumerated_commands(tmp_path, [], [], model_commands=model)
     assert count == 1  # different directory stays a separate candidate
+
 
 def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(tmp_path: Path,) -> None:
     """The ancestor-skip must not enable a symlink escape from containment.
@@ -354,6 +364,7 @@ def _iter_schema_patterns(schema: Any) -> Iterator[str]:
     elif isinstance(schema, list):
         for item in schema:
             yield from _iter_schema_patterns(item)
+
 
 @pytest.mark.anyio
 async def test_improve_recon_schema_sent_to_backend_is_lookaround_free(

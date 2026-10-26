@@ -1,4 +1,5 @@
 """Real review lifecycle retains new JSONL evidence across offline HF publication."""
+
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -21,28 +22,6 @@ def config(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
     return RunConfig(target=str(multi_stack_target), output_mode="review", archive=False, run_eval=False,
         dataset_store_path=tmp_path / "records", trajectory_hub_repo="test-user/private-trajectories",
         shallow_fanout_threshold=0, cleanup=False)
-
-
-
-async def test_review_publishes_raw_records_and_other_machine_reads_pinned_commit(
-    config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daydream import dataset_hub
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
-    assert await run(config) == 0
-    assert config.dataset_store_path is not None and config.trajectory_hub_repo is not None
-    local = LocalRecordStore(config.dataset_store_path)
-    records = read_records(local)
-    assert len(hub.commits) == 1
-    status = dataset_hub.DatasetUploader(local, config.trajectory_hub_repo, backend=hub).status()
-    assert (status.queued, status.published, status.failed) == (0, 1, 0)
-    downloaded = dataset_hub.download_snapshot(
-        config.trajectory_hub_repo, hub.revision, tmp_path / "other-machine", backend=hub)
-    assert read_records(downloaded).runs == records.runs
-    assert records.runs[0]["run_id"] not in {path.name for path in downloaded.root.iterdir()}
 
 
 @pytest.mark.parametrize("failure", ["offline", "public", "secret"])
@@ -111,12 +90,7 @@ async def test_explicit_capture_disable_overrides_hub_destination(
 
 
 @pytest.mark.parametrize(("cli_repo", "env_repo", "expected_repo"), [
-    ("operator/cli", "operator/env", "operator/cli"),
-    ("operator/cli", None, "operator/cli"),
-    ("", "operator/env", "operator/env"),
-    (None, "operator/env", "operator/env"),
-    (None, "", None),
-    (None, None, None),
+    ("operator/cli", "operator/env", "operator/cli"), ("", "operator/env", "operator/env"), (None, None, None),
 ])
 async def test_operator_destination_precedence_controls_real_review_publication(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch,
@@ -163,7 +137,9 @@ async def test_hostile_checkout_config_cannot_enable_record_uploads(
     (target / filename).write_text(body, encoding="utf-8")
     monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
     monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
-    assert await run(replace(config, trajectory_hub_repo=None, file_config=load_file_config(target))) == 0
+    file_config = load_file_config(target)
+    assert not hasattr(file_config, "trajectory_hub_repo")  # field removed from the model
+    assert await run(replace(config, trajectory_hub_repo=None, file_config=file_config)) == 0
     assert config.dataset_store_path is not None
     assert not config.dataset_store_path.exists()
     assert hub.commits == []

@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import tomllib
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -153,13 +152,15 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True
     return ws, case_id, head_sha
 
 
-def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> str:
+def _seed_second_ready_case(
+    ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3, number: int = 102,
+) -> str:
     """Import a second PR (102, a different head) into *ws* and mark it ready.
 
     Returns the second case id.
     """
 
-    _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=102, lines=lines, ws=ws)
+    _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=number, lines=lines, ws=ws)
     candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     cu.accept_candidate(ws, case_id, candidate["source_id"])
     _mark_ready(ws, case_id, head_sha)
@@ -178,10 +179,6 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     raw["pull_request"]["body"] = body
     raw["pull_request"]["body_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
     storage.atomic_write_yaml(path, raw)
-
-
-def _compile(ws: Path) -> Any:
-    return build.compile_workspace(ws)
 
 
 def _truncation_marker_digest(text: str) -> str:
@@ -232,20 +229,6 @@ def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: p
 
     assert _seed_git(repo, "config", "--get", "user.email", env=_BUNDLE_ENV) == "call-time@example.com"
 
-def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
-    _, bundle_bytes = _seed_bare_bundle(tmp_path)
-    (tmp_path / "b.bundle").write_bytes(bundle_bytes)
-    heads = snapshot.bundle_heads(tmp_path / "b.bundle")
-    assert heads == {"refs/heads/base", "refs/heads/head"}
-
-def test_derive_task_key_is_opaque_and_deterministic() -> None:
-    case_id = "pr-000101-1a2b3c4d5e6f"
-    k = build.derive_task_key(case_id)
-    assert k.startswith("case-") and len(k) == len("case-") + 12
-    assert k == build.derive_task_key(case_id)          # deterministic
-    assert k != build.derive_task_key("pr-000101-1a2b3c4d5e60")  # distinct case -> distinct key
-    assert "pr-" not in k and case_id not in k          # reveals no authoring case id
-    assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
 
 def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     emoji = "😀"  # 4 UTF-8 bytes
@@ -303,17 +286,6 @@ def test_build_gold_list_rejects_partially_populated_location() -> None:
             "provenance": {"kind": "authored", "source_ids": []},
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
-@pytest.mark.parametrize(("present", "location"),
-    [(False, None), (True, None), (True, {}), (True, {"path": None}), (True, {"start_line": None, "end_line": None})],
-)
-def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: object) -> None:
-    finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None}
-    if present:
-        finding["location"] = location
-    [gold] = build.build_gold_list([finding], key="case-locationless")
-    [oracle] = build.build_oracle_artifact("case-locationless", [finding])["findings"]
-    for parsed in (gold, oracle):
-        assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
 
 @pytest.mark.parametrize(
     ("oracle", "count", "accepted"), [(False, 50, True), (False, 51, False), (True, 100, True), (True, 101, False)],
@@ -404,11 +376,38 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
         assert emitted[0]["title"] == "Cache race"
         assert emitted[0]["body"] == edited_body
 
-def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, head_sha = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
+def test_compile_population_preserves_finding_clean_and_excluded_cases(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, sr_module: Any,
+) -> None:
+    """Compile one heterogeneous workspace and score its real, unmodified gold/oracle bytes."""
+    ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101)
+    candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    cu.accept_candidate(ws, case_id, candidate["source_id"])
+    cu.add_findings(ws, case_id, findings=[
+        {"title": "Located high", "body": "Protect the first line", "severity": "high",
+         "location": {"path": "feature.py", "start_line": 1, "end_line": 1}},
+        {"title": "Unlocated concern", "body": "The review also has an unlocated concern", "severity": None},
+    ])
+    _mark_ready(ws, case_id, head_sha)
+    _, clean_id, clean_head = _import_case(tmp_path, fake_gh, number=102, ws=ws, with_candidate=False)
+    cu.attest_clean(ws, clean_id)
+    _mark_ready(ws, clean_id, clean_head)
+    excluded_id = _seed_second_ready_case(ws, tmp_path, fake_gh, number=103)
+    cu.exclude_case(ws, excluded_id, reason="duplicate_case")
+
+    def forbid_fetch(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("compiler must use frozen authoring inputs")
+
+    monkeypatch.setattr(gi, "fetch_and_normalize", forbid_fetch)
+    key, clean_key, excluded_key = map(build.derive_task_key, (case_id, clean_id, excluded_id))
     case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert case_doc["curation"]["gold_mode"] == "mixed"
     lock = build.compile_workspace(ws)
+    before = _harbor_tree_bytes(ws)
+    assert set(lock["cases"]) == {key, clean_key}
+    assert list(lock["cases"]) == sorted((key, clean_key))
+    assert all(re.fullmatch(r"case-[0-9a-f]{12}", value) for value in lock["cases"])
+    assert not (ws / "harbor" / excluded_key).exists()
 
     case = ws / "harbor" / key
     assert (case / "instruction.md").exists()
@@ -427,7 +426,10 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
                     for f in sorted(gold, key=lambda f: f["finding_id"])]
     oracle_content = [(f["title"], f["body"], f.get("severity"), f["path"], f["start_line"], f["end_line"])
                       for f in oracle["findings"]]
-    assert oracle_content == gold_content
+    assert sorted(oracle_content) == sorted(gold_content)
+    assert [f["title"] for f in oracle["findings"]] == [
+        f["title"] for f in sorted(case_doc["curation"]["findings"], key=lambda f: f["finding_id"])
+    ]
 
     # instruction.md = fixed assignment + bounded block; no gold-derived text
     instr = (case / "instruction.md").read_text()
@@ -469,13 +471,15 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
     assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
 
     manifest = load_benchmark_manifest(ws)
-    case_docs = {case_id: case_doc}
+    case_docs = {
+        row.case_id: storage.load_yaml_strict(ws / row.case_file) for row in manifest.cases
+    }
     assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
     # sensitivity: requested_base_sha must fold into the payload -- a digest that
     # dropped the field would stay byte-identical when only that value moves
     moved = dict(case_doc, snapshot=dict(case_doc["snapshot"]))
     moved["snapshot"]["requested_base_sha"] = "0" * 40
-    assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
+    assert build._authoring_input_digest({**case_docs, case_id: moved}, manifest) != lock["authoring_input_digest"]
 
     rels = {str(p.relative_to(ws / "harbor")) for p in (ws / "harbor").rglob("*") if p.is_file()}
     forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
@@ -512,13 +516,78 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
     assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
 
-    key = next(iter(lock["cases"]))
     toml = (ws / "harbor" / key / "task.toml").read_bytes()
     doc = tomllib.loads(toml.decode())
+    assert doc["environment"]["env"] == {
+        "DAYDREAM_REVIEW_CASE_ID": key, "DAYDREAM_REVIEW_BASE_REF": "base", "DAYDREAM_REVIEW_HEAD_REF": "head",
+    }
     assert doc["agent"]["allowed_hosts"] == ["h1.example.com"]
     assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
     assert "h1.example.com" not in doc["verifier"]["environment"]["allowed_hosts"]
     assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
+    assert snapshot.bundle_heads(case / "environment" / "repository.bundle") == {"refs/heads/base", "refs/heads/head"}
+    by_title = {finding["title"]: finding for finding in gold}
+    assert len(by_title) == 3
+    assert (
+        by_title["Located high"]["severity"], by_title["Located high"]["path"],
+        by_title["Located high"]["start_line"], by_title["Located high"]["end_line"],
+    ) == ("high", "feature.py", 1, 1)
+    unlocated = by_title["Unlocated concern"]
+    assert (unlocated["severity"], unlocated["path"], unlocated["start_line"], unlocated["end_line"]) == (None,) * 4
+    spec = (case / "Task.md").read_text()
+    assert all(label in spec for label in (
+        "Purpose", "Input and conditions", "Environment and access boundary", "Scoring contract",
+        "Accepted semantic alternatives", "Invalid-run rules", "Fairness analysis", "Leakage analysis",
+        "Historical source provenance",
+    ))
+    assert "unknown" in spec and "high" in spec and "reported" in spec
+    assert "severity, location, and content are graded" not in spec
+    assert "task_spec_approved_at" not in spec and "2026-" not in spec
+    assert not re.search(r"\b[0-9a-f]{40}\b|\bpr-\d{6}-[0-9a-f]{12}\b", spec)
+
+    clean_case = ws / "harbor" / clean_key
+    assert _load_json(clean_case / "tests/golden-review.json") == []
+    assert storage.load_json_strict(clean_case / "solution/golden-review.json")["findings"] == []
+    assert lock["cases"][clean_key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
+    class IdenticalTitles:
+        async def complete_json(self, *, user: str, system: str, max_tokens: int) -> dict[str, Any]:
+            gold_title, candidate_title = re.findall(r"^title: (.*)$", user, re.MULTILINE)
+            return {"match": gold_title == candidate_title, "confidence": 1.0, "reasoning": "fixture identity"}
+
+    out = tmp_path / "score"
+    reward = sr_module.run_verifier(
+        case / "tests/golden-review.json", case / "solution/golden-review.json", out,
+        client=IdenticalTitles(), env=judge_env(),
+    )
+    assert (reward.reward, reward.verifier_error, reward.tp, reward.fp, reward.fn) == (1.0, 0, 3, 0, 0)
+    scored = json.loads((out / "reward.json").read_bytes())
+    assert (scored["location_present"], scored["location_exact"], scored["location_miss"]) == (1, 2, 0)
+    assert (scored["severity_present"], scored["severity_exact"], scored["severity_credit"]) == (1, 1, 1.0)
+    clean_out = tmp_path / "clean-score"
+    clean_reward = sr_module.run_verifier(
+        clean_case / "tests/golden-review.json", clean_case / "solution/golden-review.json", clean_out,
+        client=MatchClient(), env=judge_env(),
+    )
+    assert (clean_reward.reward, clean_reward.clean_task, clean_reward.clean_pass) == (1.0, 1, 1)
+    canonical = (REPO / "daydream/benchmark/harbor/verifier_core.py").read_bytes()
+    assert (ws / "harbor/verifier_core.py").read_bytes() == canonical
+    rows = tmp_path / "rewards.jsonl"
+    rows.write_text((out / "reward.json").read_text().strip() + "\n"
+                    + (clean_out / "reward.json").read_text().strip() + "\n")
+    metric_out = tmp_path / "metric.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(ws / "harbor/metric.py"), "-i", str(rows), "-o", str(metric_out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    metrics = json.loads(metric_out.read_text())
+    assert (metrics["total_tp"], metrics["total_fp"], metrics["total_fn"], metrics["clean_accuracy"]) == (3, 0, 0, 1.0)
+
+    raw_manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    raw_manifest["cases"].reverse()
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw_manifest)
+    assert build.compile_workspace(ws) == lock
+    assert _harbor_tree_bytes(ws) == before
 
 
 def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -526,15 +595,6 @@ def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) 
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
 
-def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    lock = build.compile_workspace(ws)
-    case = ws / "harbor" / key
-    assert _load_json(case / "tests" / "golden-review.json") == []
-    assert storage.load_json_strict(case / "solution" / "golden-review.json")["findings"] == []
-    assert vc.validate_gold_set(_load_json(case / "tests" / "golden-review.json")) == []
-    assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
 
 def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # clean-attested draft
@@ -554,12 +614,17 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: P
 
 def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    body = "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
+    historical = (
+        "title: Handle pull/999 regressions\n"
+        "body: references o/r and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+    )
+    body = historical + "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
     _inject_body(ws, case_id, body)
     lock = compile_workspace(ws)
     key = next(iter(lock["cases"]))
     instr = (ws / "harbor" / key / "instruction.md").read_text()
     inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    assert historical in inner
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-7f3c" not in outside
     assert instr.count("</historical_pr_context>") == 1
@@ -606,15 +671,6 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
     digest = _truncation_marker_digest(instr)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # truthful attestation
 
-def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-
-    def boom(*a: Any, **k: Any) -> None:
-        raise AssertionError("compile must not fetch live PR text")
-
-    monkeypatch.setattr(gi, "fetch_and_normalize", boom)
-    lock = compile_workspace(ws)      # must succeed without any GitHub fetch
-    assert lock["cases"]
 
 def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -625,16 +681,6 @@ def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: Fake
     with pytest.raises((CompileError, WorkspaceCorrupt)):
         compile_workspace(ws)
 
-def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    lock1 = build.compile_workspace(ws)
-    tree1 = _harbor_tree_bytes(ws)
-    lock2 = build.compile_workspace(ws)
-    tree2 = _harbor_tree_bytes(ws)
-    assert tree1 == tree2                                        # byte-identical compiled tree
-    assert lock1 == lock2                                        # identical lock digest/content
-    lock_text = (ws / "harbor" / "benchmark.lock.json").read_text()
-    assert "created_at" not in lock_text and "timestamp" not in lock_text
 
 def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Anchor metadata never reaches the compiled tree or the lock digest:
@@ -691,25 +737,6 @@ def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path,
     tree_c = _harbor_tree_bytes(ws)
     assert lock_a == lock_c and tree_a == tree_c
 
-def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    _seed_second_ready_case(ws, tmp_path, fake_gh)
-    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
-    case_ids = [c["case_id"] for c in manifest["cases"]]
-    assert len(case_ids) == 2
-
-    lock_a = build.compile_workspace(ws)
-    tree_a = _harbor_tree_bytes(ws)
-
-    manifest["cases"] = manifest["cases"][::-1]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
-    build.compile_workspace(ws)
-    tree_b = _harbor_tree_bytes(ws)
-    assert tree_a == tree_b
-
-    dirs = sorted(p.name for p in (ws / "harbor").iterdir() if p.is_dir() and p.name.startswith("case-"))
-    assert dirs == sorted(build.derive_task_key(c) for c in case_ids)
-    assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
 
 def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -752,26 +779,11 @@ def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> Non
     assert "case-abcdef123456/README.md" in msg           # names the file
     assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
 
-def test_leakage_scan_permits_bounded_block_raw_text() -> None:
-    instr = (
-        "assignment text\n"
-        "<historical_pr_context>\n"
-        "title: Handle pull/999 regressions\n"
-        "body: references o/r and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
-        "</historical_pr_context>\n"
-    )
-    build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
-
 def test_leakage_scan_rejects_clean_readme() -> None:
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
     assert "clean_attested" in str(rejected.value)
 
-def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path) -> None:
-    _, bundle_bytes = _seed_bare_bundle(tmp_path)
-    bp = tmp_path / "b.bundle"
-    bp.write_bytes(bundle_bytes)
-    build.validate_bundle_inventory(bp)
 
 def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
     m, _ = _seed_bare_bundle(tmp_path)
@@ -852,88 +864,6 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
         build.compile_workspace(ws)
     assert case_id in str(rejected.value)
 
-def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, included_case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    excluded_case_id = _seed_second_ready_case(ws, tmp_path, fake_gh)
-    cu.exclude_case(ws, excluded_case_id, reason="duplicate_case")
-
-    lock = build.compile_workspace(ws)
-
-    included_key = build.derive_task_key(included_case_id)
-    excluded_key = build.derive_task_key(excluded_case_id)
-    assert set(lock["cases"]) == {included_key}
-    assert (ws / "harbor" / included_key).is_dir()
-    assert not (ws / "harbor" / excluded_key).exists()
-
-def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path, fake_gh: FakeGh) -> None:
-    _run_oracle(sr_module, tmp_path, fake_gh)
-
-
-def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
-    """Replace hidden gold and its sentinel digest so verifier scenarios remain integrity-valid."""
-    gold_path = case / "tests" / "golden-review.json"
-    gold_path.write_bytes(gold_bytes)
-    meta_path = case / "tests" / "verifier-metadata.json"
-    meta = json.loads(meta_path.read_bytes())
-    meta["gold_sha256"] = hashlib.sha256(gold_bytes).hexdigest()
-    meta_path.write_bytes(json.dumps(meta, sort_keys=True).encode("utf-8"))
-
-
-def _run_oracle(sr_module: Any, tmp_path: Path, fake_gh: FakeGh,
-    make_finding: Callable[[str, list[dict[str, Any]]], dict[str, Any]] | None = None,
-) -> tuple[Path, Path, Any]:
-    """Compile the seeded case, optionally restamp its gold/oracle, then score it."""
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    build.compile_workspace(ws)
-    case = ws / "harbor" / key
-    if make_finding is not None:
-        gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
-        finding = make_finding(key, gold)
-        _restamp_gold(case, json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8"))
-        (case / "solution" / "golden-review.json").write_bytes(
-            json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8")
-        )
-    out = tmp_path / "out"
-    reward = sr_module.run_verifier(
-        case / "tests" / "golden-review.json", case / "solution" / "golden-review.json", out, client=MatchClient(),
-        env=judge_env(),
-    )
-    assert reward.reward == 1.0 and reward.verifier_error == 0
-    return case, out, reward
-
-
-def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(sr_module: Any, tmp_path: Path, fake_gh: FakeGh
-) -> None:
-    def make_finding(_key: str, gold: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"], "severity": "high",
-            "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"], "end_line": gold[0]["end_line"]},
-            "provenance": {"kind": "authored", "source_ids": []},
-        }
-
-    _, out, _ = _run_oracle(sr_module, tmp_path, fake_gh, make_finding)
-    rj = json.loads((out / "reward.json").read_bytes())
-    assert rj["location_present"] == 1 and rj["location_exact"] == rj["tp"]
-    assert rj["severity_present"] == 1
-    assert rj["severity_exact"] == rj["tp"] and rj["severity_credit"] == 1.0
-
-def test_compiled_findings_oracle_locationless_null_severity_axes_absent(sr_module: Any, tmp_path: Path, fake_gh: FakeGh
-) -> None:
-    """Locationless / null-severity gold: axes absent, reward still 1.0.
-
-    Satisfied-or-absent (R13): a locationless, null-severity matched pair
-    contributes to no axis count and never counts as a miss.
-    """
-
-    def make_finding(_key: str, _gold: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
-            "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
-        }
-
-    _, out, _ = _run_oracle(sr_module, tmp_path, fake_gh, make_finding)
-    rj = json.loads((out / "reward.json").read_bytes())
-    assert rj["location_present"] == 0 and rj["severity_present"] == 0
-    assert rj["location_miss"] == 0  # absent, never imputed to a miss
 
 def test_compile_uses_shared_model_gated_loader(tmp_path: Path, fake_gh: FakeGh,) -> None:
     """Reject an invalid case before replacing an existing compiled workspace."""
@@ -950,32 +880,6 @@ def test_compile_uses_shared_model_gated_loader(tmp_path: Path, fake_gh: FakeGh,
     with pytest.raises(WorkspaceCorrupt, match=f"case cases/{case_id}.yaml is not a valid case document"):
         build.compile_workspace(ws)
     assert _harbor_tree_bytes(ws) == before
-
-def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    b1 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
-    b2 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
-    assert b1 == b2                                          # R3 byte determinism
-    text = b1.decode("utf-8")
-    for label in ("Purpose", "Input and conditions", "Environment and access boundary",
-                  "Scoring contract", "Accepted semantic alternatives", "Invalid-run rules",
-                  "Fairness analysis", "Leakage analysis", "Historical source provenance"):
-        assert label in text, label                         # R2 exact sections
-    assert build.ASSIGNMENT_TEXT.split()[0] in text          # exact fixed instruction present
-    assert raw["pull_request"]["title"] in text              # case-specific input present
-    assert "task_spec_approved_at" not in text               # R4 audit timestamp never in bytes
-    assert not re.search(r"\b[0-9a-f]{40}\b", text)          # no raw SHAs (R13 identifiers)
-    assert not re.search(r"\bpr-\d{6}-[0-9a-f]{12}\b", text) # no authoring case id
-    assert "2026-" not in text                               # no timestamps anywhere
-    raw2 = dict(raw)
-    raw2["pull_request"] = dict(raw["pull_request"])
-    raw2["pull_request"]["title"] = "Other"
-    assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
-
-    spec = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT).decode()
-    assert "reported" in spec  # axes are reported, never gating
-    assert "severity, location, and content are graded" not in spec  # the false claim is gone (R10)
 
 
 def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1000,33 +904,14 @@ def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: 
         build.compile_workspace(ws)
     assert _harbor_tree_bytes(ws) == before
 
+    raw["curation"].update(state="draft", snapshot_attested=False)
+    storage.atomic_write_yaml(case_path, raw)
+    _mark_ready(ws, case_id, raw["snapshot"]["original_head_sha"])
+    renewed = build.compile_workspace(ws)
+    assert renewed["authoring_input_digest"] != lock["authoring_input_digest"]
+    assert renewed["cases"][key]["task_spec_sha256"] != lock["cases"][key]["task_spec_sha256"]
+    assert (ws / "harbor" / key / "Task.md").read_bytes() != before[f"{key}/Task.md"]
 
-def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    lock1 = build.compile_workspace(ws)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = storage.load_yaml_strict(path)
-    head_sha = raw["snapshot"]["original_head_sha"]
-    raw["pull_request"] = dict(raw["pull_request"])
-    raw["pull_request"]["title"] = "Changed title"
-    # the case doc is model-validated on every read, so ship the truthful digest
-    raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed title").hexdigest()
-    storage.atomic_write_yaml(path, raw)
-    new_digest = hashlib.sha256(
-        build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
-    raw2 = storage.load_yaml_strict(path)
-    raw2["curation"] = dict(raw2["curation"])
-    raw2["curation"]["state"] = "draft"
-    raw2["curation"]["snapshot_attested"] = False
-    storage.atomic_write_yaml(path, raw2)
-    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
-    lock2 = build.compile_workspace(ws)
-    assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
-    # the task-spec digest itself must have changed (not merely the title member,
-    # which is already a direct authoring-input), proving the task_spec_sha256
-    # member's change-sensitivity is what forces the recompile
-    key = build.derive_task_key(case_id)
-    assert lock2["cases"][key]["task_spec_sha256"] != lock1["cases"][key]["task_spec_sha256"]
 
 def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> None:
     prose = ("## Purpose\nreview the change\n## Scoring contract\n"
@@ -1038,25 +923,6 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> No
         build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
     assert "Task.md" in str(rejected.value)
 
-
-
-def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """The OpenRouter workspace resolves both persisted allowlists to
-    ``openrouter.ai``; the compiled task.toml carries that host in both egress
-    boundaries and the control-plane leakage scan does not flag a bare
-    legitimate hostname.
-    """
-
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    raw = storage.load_yaml_strict(ws / "benchmark.yaml")
-    raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
-    raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
-    lock = build.compile_workspace(ws)          # must not raise a leakage CompileError
-    key = next(iter(lock["cases"]))
-    doc = tomllib.loads((ws / "harbor" / key / "task.toml").read_bytes().decode())
-    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
-    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
 
 def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1075,35 +941,23 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     lock_a = build.compile_workspace(ws)
     digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
-    raw["privacy"]["reviewer_allowed_hosts"] = ["other.example"]
+    raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
     storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
     lock_b = build.compile_workspace(ws)
     digest_b = lock_b["files"][next(iter(lock_b["cases"])) + "/task.toml"]
     assert digest_a != digest_b
     assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs
+    key = next(iter(lock_b["cases"]))
+    task_path = ws / "harbor" / key / "task.toml"
+    doc = tomllib.loads(task_path.read_text())
+    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
 
-def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
-    assert build._gold_severity_label(None) == "unknown"
-    assert build._gold_severity_label("HIGH") == "high"
-
-def test_compiled_stage_carries_canonical_module_and_metric_loads_it(tmp_path: Path, fake_gh: FakeGh,) -> None:
-    ws, _case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
-    _compile(ws)
-    stage = ws / "harbor"
-    metric = (stage / "metric.py").read_text()
-    canonical = (stage / "verifier_core.py").read_text()
-    source = (REPO / "daydream/benchmark/harbor/verifier_core.py").read_text()
-    assert canonical == source
-    assert "import daydream" not in metric and "getsource" not in metric
-    lock = json.loads((stage / "benchmark.lock.json").read_text())
-    assert "metric.py" in lock["files"] and "verifier_core.py" in lock["files"]
-    assert lock["files"]["verifier_core.py"] == hashlib.sha256((stage / "verifier_core.py").read_bytes()).hexdigest()
-    rows = stage / "rewards.jsonl"
-    rows.write_text(json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
-                    "verifier_error": 0, "clean_task": 1, "clean_pass": 1}) + "\n"
-    )
-    out = tmp_path / "m.json"
-    proc = subprocess.run(["uv", "run", "--script", str(stage / "metric.py"), "-i", str(rows), "-o", str(out)],
-        capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(out.read_text())["total_tp"] == 1
+    raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    lock_c = build.compile_workspace(ws)
+    doc = tomllib.loads(task_path.read_text())
+    assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+    assert lock_b["files"][key + "/task.toml"] != lock_c["files"][key + "/task.toml"]
+    assert lock_b != lock_c

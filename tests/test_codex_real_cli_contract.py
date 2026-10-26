@@ -208,15 +208,6 @@ async def test_generic_tool_transport_capture_maps_only_public_error_sentinel() 
     assert not [event for event in events if isinstance(event, (ToolStartEvent, ToolResultEvent))]
 
 @pytest.mark.asyncio
-async def test_real_golden_has_no_parser_or_transport_diagnostic() -> None:
-    backend = CodexBackend(model="gpt-5.5")
-    mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        events = [event async for event in backend.execute(Path("/tmp"), "golden contract")]
-
-    assert not [event for event in events if isinstance(event, DiagnosticEvent)]
-
-@pytest.mark.asyncio
 async def test_real_golden_parses_to_expected_events() -> None:
     """Parse the real golden structurally: text, paired tools without orphans, per-turn metrics, and a
     terminal result. Reworded model output must not break the contract.
@@ -231,6 +222,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
         async for event in backend.execute(Path("/tmp"), "Read README.md then hello.py"):
             events.append(event)
 
+    assert not any(isinstance(event, DiagnosticEvent) for event in events)
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert text_events, "real golden produced no TextEvent (agent_message lost)"
 

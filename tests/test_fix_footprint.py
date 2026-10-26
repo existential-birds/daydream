@@ -155,14 +155,6 @@ def test_model_path_normalization_removes_dot_prefix_and_rejects_symlink_escape(
     with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
         canonicalize_repository_file_path(repo, "src/a.py")
 
-def test_git_observed_confinement_accepts_non_model_names_but_rejects_escapes(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-
-    assert git_observed_path_is_confined(repo, "odd\n$name[1].txt")
-    assert not git_observed_path_is_confined(repo, "../outside")
-    assert not git_observed_path_is_confined(repo, "/outside")
-
 def test_git_observed_confinement_leaf_symlink_only_with_flag(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     outside = tmp_path / "outside"
@@ -194,31 +186,11 @@ def test_footprint_uses_item_uids_and_exact_item_group_and_run_unions(tmp_path: 
     assert ("primary", "src/a.py", "item:1") in actions
     assert ("related", "tests/test_a.py", "item:1") in actions
 
-def test_accepted_retarget_is_audited_without_widening_policy(tmp_path: Path) -> None:
-    footprint = AuthorizedFixFootprint.build(tmp_path, {"src/a.py"}, _items())
-    revision = footprint.policy_revision
-    run_scope = footprint.run_allowed_paths
-    item_scope = footprint.item_paths("item:1")
-    event_count = len(footprint.events)
-    accepted = footprint.accept_retarget(tmp_path, "item:1", "tests/test_a.py", phase="fix", round_number=2,)
-
-    assert accepted == "tests/test_a.py"
-    assert footprint.policy_revision == revision
-    assert footprint.run_allowed_paths == run_scope
-    assert footprint.item_paths("item:1") == item_scope
-    assert len(footprint.events) == event_count + 1
-    event = footprint.events[-1]
-    assert event.action == "authorize"
-    assert event.origin == "retarget"
-    assert event.path_kind == "model"
-    assert event.path == "tests/test_a.py"
-    assert event.item_uid == "item:1"
-    assert event.phase == "fix"
-    assert event.round_number == 2
-
-@pytest.mark.parametrize("reviewed_path", ["odd\nname.py", "literal-$(value)[1].py", "native-\udcff.py"])
+@pytest.mark.parametrize("reviewed_path", ["odd\n$name[1].txt", "literal-$(value)[1].py", "native-\udcff.py"])
 def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path, reviewed_path: str,) -> None:
 
+    if reviewed_path == "odd\n$name[1].txt":
+        assert git_observed_path_is_confined(git_repo, reviewed_path)
     try:
         _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
     except OSError as exc:
@@ -266,27 +238,29 @@ def test_generated_authorization_is_idempotent_and_retarget_is_item_bounded(tmp_
     )
     assert footprint.policy_revision == initial_revision + 1
     assert sum(event.action == "approve_generated" for event in footprint.events) == 1
+    revision = footprint.policy_revision
+    run_scope = footprint.run_allowed_paths
+    item_scope = footprint.item_paths("item:1")
+    event_count = len(footprint.events)
     assert footprint.accept_retarget(
-        tmp_path, "item:1", "./tests/test_a.py", phase="verify", round_number=2
+        tmp_path, "item:1", "./tests/test_a.py", phase="fix", round_number=2
     ) == "tests/test_a.py"
+    assert footprint.policy_revision == revision
+    assert footprint.run_allowed_paths == run_scope
+    assert footprint.item_paths("item:1") == item_scope
+    assert len(footprint.events) == event_count + 1
+    event = footprint.events[-1]
+    assert event.action == "authorize"
+    assert event.origin == "retarget"
+    assert event.path_kind == "model"
+    assert event.path == "tests/test_a.py"
+    assert event.item_uid == "item:1"
+    assert event.phase == "fix"
+    assert event.round_number == 2
     assert footprint.accept_retarget(tmp_path, "item:1", "src/b.py", phase="verify", round_number=2) is None
     assert footprint.item_paths("item:1") == frozenset({"src/a.py", "src/shared.py", "tests/test_a.py"})
     rejection = footprint.events[-1]
     assert (rejection.action, rejection.path, rejection.item_uid) == ("rejected_retarget", "src/b.py", "item:1",)
-
-def test_audit_payload_is_session_bound_monotonic_and_json_escapes_git_paths(tmp_path: Path) -> None:
-    footprint = AuthorizedFixFootprint.build(tmp_path, {"src/a.py"}, _items()[:1])
-    footprint.record_git_event(
-        action="remove",
-        path="odd\n$name.txt",
-        origin="guard", phase="scope", round_number=1, reason="new untracked file",
-    )
-    payload = footprint.audit_payload("session-123", tree_key="abc")
-    assert payload["session_id"] == "session-123"
-    assert payload["tree_key"] == "abc"
-    sequences = [event["sequence"] for event in payload["events"]]
-    assert sequences == list(range(1, len(sequences) + 1))
-    assert "odd\\n$name.txt" in json.dumps(payload)
 
 def test_changed_paths_z_preserves_newline_shell_metacharacters_and_surrogate_bytes(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
@@ -346,6 +320,12 @@ def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_rem
     assert ("restore", "scratch-deleted") in recorded
     assert ("restore", "outside.txt") in recorded
     assert ("remove", "odd\n$(ignored).txt") in recorded
+    payload = footprint.audit_payload("session-123", tree_key="abc")
+    assert payload["session_id"] == "session-123"
+    assert payload["tree_key"] == "abc"
+    sequences = [event["sequence"] for event in payload["events"]]
+    assert sequences == list(range(1, len(sequences) + 1))
+    assert "odd\\n$(ignored).txt" in json.dumps(payload)
 
 def test_runtime_artifacts_do_not_enter_fix_scope_or_invalidate_content_evidence(git_repo: Path) -> None:
     _seed(git_repo, {"allowed.txt": b"base\n"})
@@ -445,34 +425,12 @@ def test_group_worktree_rollback_preserves_sibling_index_entry(git_repo: Path) -
     assert (git_repo / "b.py").read_bytes() == b"B = sibling\n"
     assert git_ops.snapshot_index(git_repo) == sibling_index
 
-def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_warning(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _seed(git_repo, {"allowed.py": b"allowed\n", "outside.py": b"owner\n"})
-    footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
-    index_before = git_ops.snapshot_index(git_repo)
-    (git_repo / "outside.py").write_bytes(b"unauthorized\n")
-    gh_record = _install_scope_boundary_shims(
-        tmp_path, monkeypatch, fail_diff_path="outside.py", watched_paths=("outside.py",),
-    )
-    result = _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True)
-
-    assert result.mutated is True
-    assert (git_repo / "outside.py").read_bytes() == b"owner\n"
-    assert git_ops.snapshot_index(git_repo) == index_before
-    assert not gh_record.exists()
-    assert [(event.action, event.path) for event in footprint.events][-1] == ("restore", "outside.py",)
-    warning_output = capsys.readouterr().out
-    assert "continuing to" in warning_output
-    assert "restoration without filing" in warning_output
-    assert "SECRET_TOKEN" not in warning_output
-    assert "outside.py" not in warning_output
-
 def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_residuals(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _seed(git_repo, {"allowed.py": b"allowed\n", "outside-a.py": b"owner a\n", "outside-b.py": b"owner b\n"},)
     footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.py"}, [])
+    index_before = git_ops.snapshot_index(git_repo)
     (git_repo / "outside-a.py").write_bytes(b"unauthorized a\n")
     (git_repo / "outside-b.py").write_bytes(b"unauthorized b\n")
     gh_record = _install_scope_boundary_shims(
@@ -483,12 +441,22 @@ def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_res
     assert result.mutated is True
     assert (git_repo / "outside-a.py").read_bytes() == b"owner a\n"
     assert (git_repo / "outside-b.py").read_bytes() == b"owner b\n"
+    assert git_ops.snapshot_index(git_repo) == index_before
+    assert [(event.action, event.path) for event in footprint.events if event.origin == "guard"] == [
+        ("restore", "outside-a.py"), ("restore", "outside-b.py"),
+    ]
+    assert gh_record.is_file()
     calls = [json.loads(line) for line in gh_record.read_text().splitlines()]
     assert len(calls) == 1
     assert calls[0]["watched"] == {"outside-a.py": b"owner a\n".hex(), "outside-b.py": b"owner b\n".hex()}
     assert "outside-b.py" in calls[0]["body"]
     assert "+unauthorized b" in calls[0]["body"]
     assert "outside-a.py" not in calls[0]["body"]
+    warning_output = capsys.readouterr().out
+    assert "continuing to" in warning_output
+    assert "restoration without filing" in warning_output
+    assert "SECRET_TOKEN" not in warning_output
+    assert "outside-a.py" not in warning_output
 
 def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_effort(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -736,18 +704,6 @@ def _gitlink_rollback_snapshot(repo: Path, path: str = "dependency") -> Worktree
         untracked=git_ops.snapshot_untracked_paths(repo),
     )
 
-def test_gitlink_group_rollback_restores_captured_nested_oid(git_repo: Path) -> None:
-    nested = _add_gitlink(git_repo)
-    captured = _git(nested, "rev-parse", "HEAD")
-    snapshot = _gitlink_rollback_snapshot(git_repo)
-    _seed(nested, {"source.py": b"value = 2\n"})
-    assert _git(nested, "rev-parse", "HEAD") != captured
-
-    git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
-
-    assert _git(nested, "rev-parse", "HEAD") == captured
-    assert _git(nested, "status", "--porcelain=v1", "--untracked-files=all") == ""
-
 def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: Path) -> None:
     nested = _add_gitlink(git_repo)
     indexed = _git(nested, "rev-parse", "HEAD")
@@ -759,6 +715,7 @@ def test_gitlink_group_rollback_preserves_initial_non_index_checkout(git_repo: P
     git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])
 
     assert _git(nested, "rev-parse", "HEAD") == captured
+    assert _git(nested, "status", "--porcelain=v1", "--untracked-files=all") == ""
     assert _git(git_repo, "status", "--porcelain=v1", "--untracked-files=all") == "M dependency"
 
 def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(git_repo: Path,) -> None:

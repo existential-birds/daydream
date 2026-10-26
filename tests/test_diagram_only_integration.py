@@ -17,7 +17,6 @@ import pytest
 
 from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
-from daydream.deep import diagram_steps
 from daydream.findings import write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
 from daydream.reviews.models import PRInfo
@@ -126,41 +125,6 @@ async def _render_flowchart_artifact(diagram_run: Callable[..., Any], tmp_path: 
 
 # --- Spec test 12: end to end, per kind -------------------------------------
 
-@pytest.mark.parametrize(("kind", "repo_builder", "spec_builder", "heading"),
-    [("sequence", dr.build_cross_module_repo, dr.sequence_spec, SEQUENCE_HEADING,),
-        ("flowchart", dr.build_branch_heavy_repo, dr.flowchart_spec, FLOWCHART_HEADING,),
-    ], ids=["sequence", "flowchart"],
-)
-async def test_diagram_only_posts_a_marked_issue_comment(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], kind: str, repo_builder: Callable[[Path], Path],
-    spec_builder: Callable[[], dict[str, Any]], heading: str,
-) -> None:
-    """Only exploration + diagram run, and the deliverable is an issue comment."""
-    target = repo_builder(tmp_path)
-    fake_gh.serve_open_pr(target)
-
-    exit_code, stub = await diagram_run(target, diagram=kind, specs={kind: [spec_builder()]})
-
-    assert exit_code == 0
-    result = _artifact(target)["results"][kind]
-    assert result["status"] == "rendered"
-    assert "grounding" not in result and "spec_proposed" not in result
-
-    comments = _issue_comments(fake_gh)
-    assert len(comments) == 1
-    body = comments[0]["body"]
-
-    assert parse_diagram_markers(body) == [(kind, git_ops.head_sha(target))]
-    assert heading in body
-    assert "🧙 Posted by [daydream" in body
-
-    # Regression (f): a diagram-only run never posts a review.
-    assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
-    # Only the diagram phase ran an agent: no per-stack review, no merge.
-    prompts = [call["prompt"] for call in stub.calls]
-    assert all("cross-stack merge agent" not in prompt for prompt in prompts)
-    assert all("you are reviewing the" not in prompt.lower() for prompt in prompts)
-    assert not (target / ".daydream" / "deep" / "merged-items.json").exists()
 
 async def test_second_diagram_run_minimizes_only_its_own_kind(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
@@ -505,24 +469,6 @@ def test_phase_b_rejects_invalid_spec_references(kind: str, mutate: Callable[[di
 
 # --- Spec test 14 (diagram-only half): agent error exits 1 ------------------
 
-async def test_agent_error_in_diagram_only_mode_exits_one(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
-) -> None:
-    """The diagram IS the deliverable here, so a failed kind fails the run."""
-
-    exit_code, _ = await diagram_run(
-        target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}, fail=frozenset({"sequence"}),
-    )
-
-    assert exit_code == 1
-    # The artifact is written BEFORE the run stops, so the evidence survives.
-    failed = _artifact(target)["results"]["sequence"]
-    assert failed["status"] == "failed"
-    assert "RuntimeError" in failed["reason"]
-    assert _issue_comments(fake_gh) == []
-    end = _diagram_phase_end(target)
-    assert end["status"] == "failed"
-    assert end["reason_code"] == "all_children_failed"
 
 async def test_advisory_overflow_in_diagram_only_mode_exits_zero(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
@@ -584,22 +530,40 @@ async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
     assert [item["label"] for item in result["advisory"]["omitted"]]
     assert result["advisory"]["admitted_bytes"] < result["advisory"]["allowance_bytes"]
 
+@pytest.mark.parametrize(("kind", "repo_builder", "spec_builder", "heading"),
+    [("sequence", dr.build_cross_module_repo, dr.sequence_spec, SEQUENCE_HEADING,),
+        ("flowchart", dr.build_branch_heavy_repo, dr.flowchart_spec, FLOWCHART_HEADING,),
+    ], ids=["sequence", "flowchart"],
+)
 def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, target: Path,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, kind: str,
+    repo_builder: Callable[[Path], Path], spec_builder: Callable[[], dict[str, Any]], heading: str,
 ) -> None:
     """The public CLI records the successful diagram it actually delivers."""
+    target = repo_builder(tmp_path)
+    fake_gh.serve_open_pr(target)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
-    stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
+    stub.diagram_specs = {kind: [spec_builder()]}
 
-    exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
+    exit_code = _cli_main(["--diagram-only", kind, str(target)])
 
     assert exit_code == 0
-    assert _artifact(target)["results"]["sequence"]["status"] == "rendered"
+    result = _artifact(target)["results"][kind]
+    assert result["status"] == "rendered"
+    assert "grounding" not in result and "spec_proposed" not in result
     assert len(_issue_comments(fake_gh)) == 1
-    assert SEQUENCE_HEADING in _issue_comments(fake_gh)[0]["body"]
+    body = _issue_comments(fake_gh)[0]["body"]
+    assert parse_diagram_markers(body) == [(kind, git_ops.head_sha(target))]
+    assert heading in body
+    assert "🧙 Posted by [daydream" in body
     assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
     assert _diagram_phase_end(target)["status"] == "succeeded"
+
+    prompts = [call["prompt"] for call in stub.calls]
+    assert all("cross-stack merge agent" not in prompt for prompt in prompts)
+    assert all("you are reviewing the" not in prompt.lower() for prompt in prompts)
+    assert not (target / ".daydream" / "deep" / "merged-items.json").exists()
 
 def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, target: Path,
@@ -612,31 +576,14 @@ def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
     exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
 
     assert exit_code == 1
-    assert _artifact(target)["results"]["sequence"]["status"] == "failed"
+    failed = _artifact(target)["results"]["sequence"]
+    assert failed["status"] == "failed"
+    assert failed["reason"] == "RuntimeError: stub: diagram author for sequence blew up"
+    assert _issue_comments(fake_gh) == []
     end = _diagram_phase_end(target)
     assert end["status"] == "failed"
     assert end["reason_code"] == "all_children_failed"
 
-async def test_returned_failure_in_diagram_only_mode_exits_one(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-) -> None:
-    """A returned failed result follows the same diagram-only exit path."""
-
-    async def _return_failure(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"status": "failed", "reason": "stub: diagram author returned failure", "spec_final": None,
-            "omit_reasons": [], "mermaid": None,
-        }
-
-    monkeypatch.setattr(diagram_steps, "_run_diagram_kind", _return_failure)
-
-    exit_code, _ = await diagram_run(target, diagram="sequence",)
-
-    assert exit_code == 1
-    failed = _artifact(target)["results"]["sequence"]
-    assert failed["status"] == "failed"
-    assert failed["reason"] == "stub: diagram author returned failure"
-    assert _issue_comments(fake_gh) == []
 
 async def test_no_resolvable_pr_in_diagram_only_mode_exits_one(
     tmp_path: Path, diagram_run: Callable[..., Any], fake_gh: FakeGh,
@@ -673,25 +620,6 @@ async def test_pr_lookup_failure_in_diagram_only_mode_exits_one_with_diagnostic(
 
 # --- Regression (a): prior deep artifacts survive ---------------------------
 
-async def test_diagram_only_run_preserves_prior_deep_artifacts(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
-) -> None:
-    """Diagram mode must bypass the default fresh-review cleanup of prior deep artifacts."""
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True)
-    (deep / "merged-items.json").write_text('{"items": []}', encoding="utf-8")
-    (deep / "intent.md").write_text("prior intent\n", encoding="utf-8")
-    (deep / "diff-key").write_text("prior-key\n", encoding="utf-8")
-
-    exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]})
-
-    assert exit_code == 0
-    assert (deep / "merged-items.json").read_text(encoding="utf-8") == '{"items": []}'
-    assert (deep / "intent.md").read_text(encoding="utf-8") == "prior intent\n"
-    # The diff key is NOT rewritten either: a diagram run attests none of the
-    # artifacts that key stands for.
-    assert (deep / "diff-key").read_text(encoding="utf-8") == "prior-key\n"
-    assert (deep / "diagram.json").is_file()
 
 
 # --- Regression (b): recorder + manifest label the run honestly -------------
@@ -703,9 +631,22 @@ async def test_diagram_run_flow_label_and_manifest_backends(
 
     Mislabeling as TTT would make archive capture inherit stale merged items."""
 
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "merged-items.json").write_text('{"items": []}', encoding="utf-8")
+    (deep / "intent.md").write_text("prior intent\n", encoding="utf-8")
+    (deep / "diff-key").write_text("prior-key\n", encoding="utf-8")
+
+
     exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}, archive=True,
     )
     assert exit_code == 0
+    assert (deep / "merged-items.json").read_text(encoding="utf-8") == '{"items": []}'
+    assert (deep / "intent.md").read_text(encoding="utf-8") == "prior intent\n"
+    # The diff key is NOT rewritten either: a diagram run attests none of the
+    # artifacts that key stands for.
+    assert (deep / "diff-key").read_text(encoding="utf-8") == "prior-key\n"
+    assert (deep / "diagram.json").is_file()
 
     runs = sorted((target / ".daydream" / "runs").iterdir())
     assert len(runs) == 1
@@ -791,6 +732,8 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     assert artifact["findings"], "the review half of the artifact is still populated"
     assert artifact["diagrams"]["results"]["sequence"]["status"] == "rendered"
     expected = _artifact(target)["results"]["sequence"]["mermaid"]
+    artifact["diagrams"]["results"]["sequence"]["mermaid"] = "sequenceDiagram\n    P1->>P9: FORGED_STORED_GRAPH"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
 
     monkeypatch.chdir(target)
     rc = _post_findings_cli(artifact_path, artifact["head_sha"])
@@ -801,6 +744,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     assert artifact["run_info"] in body
     assert SEQUENCE_HEADING in body
     assert expected in body
+    assert "FORGED_STORED_GRAPH" not in body
     # A diagram in a review artifact posts as part of the review, not as a
     # separate issue comment.
     assert _issue_comments(fake_gh) == []

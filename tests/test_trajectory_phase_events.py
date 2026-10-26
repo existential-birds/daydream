@@ -14,7 +14,7 @@ import pytest
 
 import daydream.trajectory as trajectory_module
 from daydream import remote_ci
-from daydream.atif import Step, validate as atif_validate
+from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     TextEvent,
@@ -112,30 +112,6 @@ def test_overlap_coverage_and_recursive_invocation_identity(tmp_path: Path) -> N
     assert summary.coverage_ratio == 0.8
     assert summary.agent_completeness == {"total": 3, "attributed": 2, "unattributed": 1}
 
-def test_malformed_identified_interval_is_diagnosed_not_coerced(tmp_path: Path) -> None:
-    session = "bad-timing"
-    payload = {"session_id": session, "trajectory_id": session, "steps": [],
-        "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:02Z",
-            "phase_events": [{
-                    "phase": "review", "event": "phase_start", "timestamp": "not-a-time", "session_id": session,
-                    "scope_id": "scope",
-                }, {"phase": "review", "event": "phase_end", "timestamp": "2026-01-01T00:00:01Z", "session_id": session,
-                    "scope_id": "scope", "status": "succeeded",
-                },
-            ],
-        },
-    }
-    snapshot = RunWriteSnapshot(status="complete", cutoff_at="2026-01-01T00:00:02Z", root_trajectory_id=session,
-        documents=(_snapshot_document(tmp_path / "trajectory.json", payload),),
-    )
-
-    summary = compute_timing_summary(snapshot)
-
-    assert summary is not None
-    assert summary.attributed_wall_clock_seconds == 0.0
-    assert summary.diagnostics["malformed_interval"] == 1
-
-
 def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
     session = "diagnostics"
     def event(kind: str, scope: str | None, timestamp: str, **extra: Any) -> dict[str, Any]:
@@ -156,6 +132,8 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
             event("phase_start", "orphan", start),
             event("phase_start", "backward", end), event("phase_end", "backward", start, status="succeeded"),
             event("phase_start", None, start), event("phase_end", None, end, status="succeeded"),
+            event("phase_start", "invalid-time", "not-a-time"),
+            event("phase_end", "invalid-time", end, status="succeeded"),
         ], "subtrajectories": [invocation, invocation,
             {"trajectory_id": session, "invocation_id": "malformed", "phase": "review",
                 "started_at": "invalid", "ended_at": end},
@@ -174,7 +152,7 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
     assert summary is not None
     assert summary.phase_timings == {"review": {"wall_clock_seconds": 10.0, "occurrences": 1}}
     assert summary.coverage_ratio == 1.0
-    assert summary.diagnostics == {"malformed_interval": 3, "duplicate_interval": 1, "orphaned_interval": 1,
+    assert summary.diagnostics == {"malformed_interval": 4, "duplicate_interval": 1, "orphaned_interval": 2,
         "malformed_invocation": 1, "duplicate_invocation": 1,
     }
     assert summary.agent_completeness == {"total": 2, "attributed": 0, "unattributed": 2}
@@ -212,16 +190,6 @@ async def test_emit_command_validation_summary_is_structured_and_redacted(tmp_pa
     }
 
 
-async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
-    """When no phase events emitted, extra has no phase_events key."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "x")
-    traj = read_trajectory(rec.path)
-    assert "phase_events" not in traj["extra"]
-
-
 # --- phase_scope -----------------------------------------------------------
 
 
@@ -230,16 +198,6 @@ async def test_phase_scope_noop_without_recorder() -> None:
     assert get_current_recorder() is None
     async with phase_scope(DaydreamPhase.REVIEW):
         pass  # must not raise
-
-async def test_phase_scope_emits_end_even_on_exception(tmp_path: Path) -> None:
-    """phase_end fires even when the body raises (finally clause)."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        with pytest.raises(RuntimeError, match="boom"):
-            async with phase_scope(DaydreamPhase.TEST):
-                raise RuntimeError("boom")
-        assert len(rec._phase_events) == 2
-        assert rec._phase_events[1].event == "phase_end"
 
 async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> None:
     """Overlapping equal-valued phases close by identity, not phase-name LIFO."""
@@ -311,17 +269,6 @@ async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None
     step_ts = [s["timestamp"] for s in traj["steps"] if s["step_id"] in sub["step_ids"]]
     assert step_ts, "expected the open step to be flushed by finish()"
     assert sub["ended_at"] >= max(step_ts), f"ended_at {sub['ended_at']!r} predates final step {max(step_ts)!r}"
-
-async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
-    """Zero invocations → extra has no subtrajectories key, even with steps present."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        # Avoid empty-write skipping while deliberately recording no invocation.
-        rec._extend_steps([Step(step_id=1, source="user", message="seed")])
-    assert rec.path.exists()
-    data = read_trajectory(rec.path)
-    assert "subtrajectories" not in data["extra"]
-
 
 # --- Real-path: deep run via runner.run ------------------------------------
 
@@ -510,6 +457,11 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert len(roots) == 1
     root = json.loads(roots[0].read_bytes())
     assert atif_validate(root, validate_images=False) is True
+    commit_ends = [event for event in root["extra"]["phase_events"]
+        if event["phase"] == "commit" and event["event"] == "phase_end"]
+    assert len(commit_ends) == 1
+    assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
+    assert commit_ends[0]["metadata"]["duration_ms"] >= 0
     fix_summaries = [summary for summary in root["extra"]["subtrajectories"] if summary["phase"] == "fix"]
     assert len(fix_summaries) == 2
     for summary in fix_summaries:

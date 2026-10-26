@@ -6,6 +6,7 @@ preserving bounded-container order and independent limit counters."""
 from __future__ import annotations
 
 import base64
+import json
 from typing import Any
 
 import pytest
@@ -18,7 +19,7 @@ from opentelemetry.trace import Link, SpanContext, TraceFlags, TraceState
 
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
-from tests.harness.otlp import attributes, exporting_provider, otlp_collector
+from tests.harness.otlp import attributes, otlp_collector
 
 _FLAGS_HAS_IS_REMOTE = 256
 _FLAGS_IS_REMOTE = 512
@@ -79,10 +80,12 @@ def _vendor_wire(monkeypatch: pytest.MonkeyPatch, vendor: str, spans: list[Reada
             exporter = otlp_exporter(ObservabilityConfig())
         try:
             exporter.export(spans)
+            assert exporter.force_flush()
         finally:
             exporter.shutdown()
         assert len(receiver.requests) == 1
         return _wire_spans(receiver.requests[0])
+
 
 def test_stock_encoder_drops_low_trace_flags_and_link_state() -> None:
     """Documents the pinned SDK's fidelity gap the Task 4A repair exists for."""
@@ -93,130 +96,284 @@ def test_stock_encoder_drops_low_trace_flags_and_link_state() -> None:
     assert wire.links[0].flags & _FLAGS_SAMPLED == 0  # and on the link
     assert wire.links[0].trace_state == ""  # link trace state lost entirely
 
-def test_wire_repairs_span_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    remote_parent = _ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=False)
-    cases = [
-        # Remote parent with an unsampled span context: masks only.
-        (_span(sampled=False, parent=remote_parent), _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE,),
-        # Local root, unsampled span context.
-        (_span(span_id=0x4444444444444444, sampled=False, parent=None), _FLAGS_HAS_IS_REMOTE,),
-        # Local root, sampled span context: the low sampled bit is restored.
-        (_span(span_id=0x5555555555555555, parent=None), _FLAGS_HAS_IS_REMOTE | _FLAGS_SAMPLED),
-        # Remote parent, sampled span context.
-        (_span(parent=_ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=True)),
-            _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE | _FLAGS_SAMPLED,
-        ),
-    ]
-    for span, expected in cases:
-        for vendor in _VENDORS:
-            wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-            assert wire.get("flags", 0) == expected, vendor
-
-@pytest.mark.parametrize("remote_sampled", [(False, False), (False, True), (True, False), (True, True)])
-def test_wire_repairs_link_flags_and_trace_state(monkeypatch: pytest.MonkeyPatch, remote_sampled: tuple[bool, bool]
-) -> None:
-    remote, sampled = remote_sampled
-    link = Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=remote, sampled=sampled, state_entries=[("vendor", "1")]))
-    span = _span(links=[link])
-    expected = _FLAGS_HAS_IS_REMOTE | (_FLAGS_IS_REMOTE if remote else 0) | (_FLAGS_SAMPLED if sampled else 0)
-    for vendor in _VENDORS:
-        wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-        assert wire["links"][0].get("flags", 0) == expected, vendor
-        assert wire["links"][0]["traceState"] == "vendor=1", vendor
-
-def test_wire_keeps_duplicate_position_links_with_distinct_flags_and_state(monkeypatch: pytest.MonkeyPatch,) -> None:
-    links = [Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=False, sampled=True, state_entries=[("a", "1")])),
-        Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=True, sampled=False, state_entries=[("b", "2")])),
-    ]
-    span = _span(links=links)
-    for vendor in _VENDORS:
-        wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-        assert len(wire["links"]) == 2, vendor
-        assert wire["links"][0].get("flags", 0) == _FLAGS_HAS_IS_REMOTE | _FLAGS_SAMPLED, vendor
-        assert wire["links"][0]["traceState"] == "a=1", vendor
-        assert wire["links"][1].get("flags", 0) == _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE, vendor
-        assert wire["links"][1]["traceState"] == "b=2", vendor
 
 def test_wire_preserves_identity_order_and_fields_for_all_destinations(monkeypatch: pytest.MonkeyPatch,) -> None:
-    root = _span(name="root")
-    child = _span(name="child", span_id=0x4444444444444444, parent=root.context)
-    for vendor in _VENDORS:
-        wires = _vendor_wire(monkeypatch, vendor, [root, child])
-        assert [wire["name"] for wire in wires] == ["root", "child"], vendor
-        assert _hex_id(wires[0]["traceId"]) == f"{_TRACE_ID:032x}", vendor
-        assert _hex_id(wires[0]["spanId"]) == f"{_SPAN_ID:016x}", vendor
-        assert "parentSpanId" not in wires[0], vendor  # empty root parent
-        assert _hex_id(wires[1]["spanId"]) == f"{0x4444444444444444:016x}", vendor
-        assert _hex_id(wires[1]["parentSpanId"]) == f"{_SPAN_ID:016x}", vendor
-        assert wires[0]["kind"] == "SPAN_KIND_INTERNAL", vendor
-        assert wires[0].get("droppedAttributesCount", 0) == 0, vendor
+    """The real exporter preserves one heterogeneous span batch under simultaneous limit pressure.
 
-@pytest.mark.parametrize("pressure", ["attributes", "events", "links", "event_attributes", "link_attributes"],)
-def test_wire_preserves_exact_dropped_counters_under_limit_pressure(monkeypatch: pytest.MonkeyPatch, pressure: str,
-) -> None:
-    span: ReadableSpan
-    if pressure == "attributes":
-        attrs = BoundedAttributes(maxlen=2, attributes={"a": 1, "b": 2, "c": 3})
-        span = _span(attributes=attrs)
-    elif pressure == "events":
-        events: BoundedList[Event] = BoundedList(2)
-        for index in range(3):
-            try:
-                events.append(Event(f"e{index}"))
-            except Exception:
-                pass
-        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
-            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=events, links=BoundedList(0),
+    Separate scalar exports could miss position-based repair and interference between dropped
+    containers. Literal per-span/link expectations also protect repeated identities with distinct flags.
+    """
+    attrs = BoundedAttributes(
+        maxlen=3,
+        attributes={
+            "discarded": 0,
+            "daydream.span.kind": "attempt",
+            "daydream.billing.owner": "structural_attempt",
+            "gen_ai.usage.input_tokens": 100,
+        },
+    )
+    events: BoundedList[Event] = BoundedList(2)
+    events.extend(
+        (
+            Event("discarded"),
+            Event("retained", attributes=BoundedAttributes(maxlen=1, attributes={"discarded": 0, "retained": 1})),
+            Event("last"),
         )
-    elif pressure == "links":
-        links: BoundedList[Link] = BoundedList(2)
-        for index in range(3):
-            try:
-                links.append(Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID + index)))
-            except Exception:
-                pass
-        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
-            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=BoundedList(0), links=links,
+    )
+    links: BoundedList[Link] = BoundedList(4)
+    links.append(Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID + 1)))
+    for remote_flag, sampled_flag, state in (
+        (False, False, "a"),
+        (False, True, "b"),
+        (True, False, "c"),
+        (True, True, "d"),
+    ):
+        links.append(
+            Link(
+                _ctx(
+                    _LINK_TRACE_ID,
+                    _LINK_SPAN_ID,
+                    is_remote=remote_flag,
+                    sampled=sampled_flag,
+                    state_entries=[(state, "1")],
+                ),
+                attributes=BoundedAttributes(maxlen=1, attributes={"discarded": 0, "retained": 1}),
+            )
         )
-    elif pressure == "event_attributes":
-        event = Event("e", attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}))
-        span = _span(events=[event])
-    else:
-        link = Link(
-            _ctx(_LINK_TRACE_ID, _LINK_SPAN_ID), attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}),
-        )
-        span = _span(links=[link])
-    for vendor in _VENDORS:
-        wire = _vendor_wire(monkeypatch, vendor, [span])[0]
-        if pressure == "attributes":
-            assert wire["droppedAttributesCount"] == 1, vendor
-            assert wire.get("droppedEventsCount", 0) == 0 and wire.get("droppedLinksCount", 0) == 0, vendor
-        elif pressure == "events":
-            assert wire["droppedEventsCount"] == 1, vendor
-            assert len(wire["events"]) == 2, vendor  # the two surviving events
-        elif pressure == "links":
-            assert wire["droppedLinksCount"] == 1, vendor
-            assert len(wire["links"]) == 2, vendor
-        elif pressure == "event_attributes":
-            assert wire["events"][0]["droppedAttributesCount"] == 1, vendor
-        else:
-            assert wire["links"][0]["droppedAttributesCount"] == 1, vendor
-
-def test_vendor_wire_attributes_survive_additions_on_the_wire(monkeypatch: pytest.MonkeyPatch,) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("HH_API_URL", receiver.base_url)
-        monkeypatch.setenv("HH_API_KEY", "opaque-key")
-        exporter = honeyhive_exporter(ObservabilityConfig())
-        with exporting_provider(exporter) as provider:
-            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
-                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
+    root = ReadableSpan(
+        name="root",
+        context=_ctx(_TRACE_ID, _SPAN_ID),
+        parent=None,
+        resource=Resource({"service.name": "daydream-test"}),
+        attributes=attrs,
+        events=events,
+        links=links,
+    )
+    local = _span(name="local-child", span_id=0x4444444444444444, parent=root.context, sampled=False)
+    remote_parent = _ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=False)
+    remote = _span(name="remote-child", span_id=0x6666666666666666, parent=remote_parent, sampled=False)
+    sampled = _span(name="sampled-remote", span_id=0x7777777777777777, parent=remote_parent)
+    # The destination receives one actual span population, including observed-zero and missing
+    # usage on structural scopes. Native billing aliases must follow the resolved owner per span.
+    mapping: list[ReadableSpan] = []
+    zero_usage = {
+        "gen_ai.usage.input_tokens": 0,
+        "gen_ai.usage.output_tokens": 0,
+        "gen_ai.usage.cost": 0.0,
+        "gen_ai.usage.cache_read.input_tokens": 0,
+        "gen_ai.usage.cache_creation.input_tokens": 0,
+        "gen_ai.usage.reasoning.output_tokens": 0,
+    }
+    identity = {
+        "daydream.run.id": "run-bind",
+        "daydream.flow": "review",
+        "gen_ai.conversation.id": "native-conversation",
+    }
+    for session_present in (False, True):
+        for usage_known in (False, True):
+            for kind in ("run", "phase", "agent", "tool", "attempt"):
+                scope_attributes: dict[str, Any] = {**identity, "daydream.span.kind": kind}
+                if session_present:
+                    scope_attributes["traceloop.association.properties.session_id"] = "session-bind"
+                if usage_known:
+                    scope_attributes.update(zero_usage)
+                if kind == "agent":
+                    scope_attributes.update(
+                        {
+                            "gen_ai.agent.name": "review",
+                            "daydream.agent.name": "review",
+                            "daydream.agent.role": "root" if session_present else "subagent",
+                        }
+                    )
+                if kind == "attempt":
+                    scope_attributes.update(
+                        {"daydream.billing.owner": "structural_attempt", "daydream.agent.role": "root"}
+                    )
+                mapping.append(
+                    _span(
+                        name=f"{kind}-{session_present}-{usage_known}",
+                        span_id=_SPAN_ID + 0x100 + len(mapping),
+                        parent=root.context,
+                        attributes=scope_attributes,
+                    )
+                )
+    mapping.extend(
+        (
+            _span(
+                name="generation-attempt",
+                span_id=_SPAN_ID + 0x200,
+                attributes={
+                    **identity,
+                    "daydream.span.kind": "attempt",
+                    "daydream.billing.owner": "generation_children",
                     "gen_ai.usage.input_tokens": 100,
                 },
-            ):
-                pass
-    wire = _wire_spans(receiver.requests[0])[0]
-    keys = [attr["key"] for attr in wire["attributes"]]
-    assert "daydream.span.kind" in keys
-    assert "honeyhive_event_type" in keys
-    native = attributes(receiver.spans[0])
-    assert native["honeyhive_event_type"] == "chain"
+            ),
+            _span(
+                name="billed-generation",
+                span_id=_SPAN_ID + 0x201,
+                attributes={
+                    **identity,
+                    "daydream.span.kind": "generation",
+                    "daydream.generation.billed": True,
+                    "gen_ai.usage.input_tokens": 60,
+                    "gen_ai.usage.output_tokens": 10,
+                    "gen_ai.usage.cost": 0.05,
+                },
+            ),
+            _span(
+                name="unbilled-generation",
+                span_id=_SPAN_ID + 0x202,
+                attributes={
+                    **identity,
+                    "daydream.span.kind": "generation",
+                    "daydream.generation.billed": False,
+                    "gen_ai.usage.input_tokens": 60,
+                },
+            ),
+            _span(
+                name="owner-none",
+                span_id=_SPAN_ID + 0x203,
+                attributes={
+                    **identity,
+                    "daydream.span.kind": "attempt",
+                    "daydream.billing.owner": "none",
+                    "gen_ai.usage.input_tokens": 100,
+                },
+            ),
+            _span(
+                name="pressure-two",
+                span_id=_SPAN_ID + 0x204,
+                attributes=BoundedAttributes(
+                    maxlen=4, attributes={"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6"}
+                ),
+            ),
+        )
+    )
+    originals = (root, local, remote, sampled, *mapping)
+    before = [dict(span.attributes or {}) for span in originals]
+    for vendor in _VENDORS:
+        batch = _vendor_wire(monkeypatch, vendor, list(originals))
+        assert len(batch) == 29
+        wires, mapped = batch[:4], batch[4:]
+        assert [wire["name"] for wire in wires] == ["root", "local-child", "remote-child", "sampled-remote"]
+        assert [_hex_id(wire["spanId"]) for wire in wires] == [
+            "3333333333333333",
+            "4444444444444444",
+            "6666666666666666",
+            "7777777777777777",
+        ]
+        assert all(_hex_id(wire["traceId"]) == "11111111111111111111111111111111" for wire in wires)
+        assert "parentSpanId" not in wires[0]
+        assert [_hex_id(wire["parentSpanId"]) for wire in wires[1:]] == [
+            "3333333333333333",
+            "2222222222222222",
+            "2222222222222222",
+        ]
+        assert [wire["flags"] for wire in wires] == [257, 256, 768, 769]
+        assert all(wire["kind"] == "SPAN_KIND_INTERNAL" for wire in wires)
+        wire = wires[0]
+        assert wire["droppedAttributesCount"] == wire["droppedEventsCount"] == wire["droppedLinksCount"] == 1
+        assert [event["name"] for event in wire["events"]] == ["retained", "last"]
+        assert wire["events"][0]["droppedAttributesCount"] == 1
+        assert [link["flags"] for link in wire["links"]] == [256, 257, 768, 769]
+        assert [link["traceState"] for link in wire["links"]] == ["a=1", "b=1", "c=1", "d=1"]
+        assert all(_hex_id(link["spanId"]) == "5555555555555555" for link in wire["links"])
+        assert all(link["droppedAttributesCount"] == 1 for link in wire["links"])
+        assert all(attributes(link) == {"retained": 1} for link in wire["links"])
+        native = attributes(wire)
+        assert native["daydream.span.kind"] == "attempt"
+        assert native["gen_ai.usage.input_tokens"] == 100
+        if vendor == "honeyhive":
+            assert native["honeyhive_event_type"] == "chain"
+        elif vendor == "langsmith":
+            assert native["langsmith.span.kind"] == "chain"
+        for child in wires[1:]:
+            assert child.get("droppedAttributesCount", 0) == child.get("droppedEventsCount", 0) == 0
+            assert child.get("droppedLinksCount", 0) == 0
+        assert [wire["name"] for wire in mapped] == [span.name for span in mapping]
+        for original, wire in zip(mapping, mapped, strict=True):
+            assert original.context is not None
+            assert _hex_id(wire["spanId"]) == f"{original.context.span_id:016x}"
+            native = attributes(wire)
+            assert all(native[key] == value for key, value in (original.attributes or {}).items())
+        for original, wire in zip(mapping[:20], mapped[:20], strict=True):
+            source = dict(original.attributes or {})
+            native = attributes(wire)
+            kind_name = str(source["daydream.span.kind"])
+            billed = kind_name == "attempt" and "gen_ai.usage.input_tokens" in source
+            if vendor == "honeyhive":
+                assert (
+                    native["honeyhive_event_type"]
+                    == {"run": "chain", "phase": "chain", "agent": "chain", "attempt": "chain", "tool": "tool"}[
+                        kind_name
+                    ]
+                )
+                assert native["honeyhive.session_id"] == source.get(
+                    "traceloop.association.properties.session_id", "run-bind"
+                )
+                assert (
+                    native["honeyhive.session_name"] == "daydream.review"
+                    and native["honeyhive.session_auto_create"] is True
+                )
+                assert {key: value for key, value in native.items() if key.startswith("honeyhive_metadata.")} == (
+                    {
+                        "honeyhive_metadata.prompt_tokens": 0,
+                        "honeyhive_metadata.completion_tokens": 0,
+                        "honeyhive_metadata.cost": 0.0,
+                        "honeyhive_metadata.cache_read_input_tokens": 0,
+                        "honeyhive_metadata.cache_write_input_tokens": 0,
+                        "honeyhive_metadata.reasoning_tokens": 0,
+                    }
+                    if billed
+                    else {}
+                )
+                if kind_name == "agent":
+                    assert native["gen_ai.agent.name"] == "review"
+                    assert not any(key.startswith(("_", "honeyhive_metadata.agent_")) for key in native)
+            elif vendor == "langsmith":
+                assert (
+                    native["langsmith.span.kind"]
+                    == {"run": "chain", "phase": "chain", "agent": "chain", "attempt": "chain", "tool": "tool"}[
+                        kind_name
+                    ]
+                )
+                assert ("langsmith.usage_metadata" in native) == billed
+                if billed:
+                    assert json.loads(native["langsmith.usage_metadata"]) == {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_cost": 0.0,
+                        "input_token_details": {"cache_read": 0, "cache_creation": 0},
+                        "output_token_details": {"reasoning": 0},
+                    }
+                assert native.get("langsmith.metadata.ls_agent_type") == (
+                    source["daydream.agent.role"] if kind_name == "agent" else None
+                )
+        special = {wire["name"]: attributes(wire) for wire in mapped[20:]}
+        assert mapped[-1]["droppedAttributesCount"] == 2
+        if vendor in {"honeyhive", "langsmith"}:
+            usage_key = "honeyhive_metadata.prompt_tokens" if vendor == "honeyhive" else "langsmith.usage_metadata"
+            assert all(
+                usage_key not in special[name] for name in ("generation-attempt", "unbilled-generation", "owner-none")
+            )
+            if vendor == "honeyhive":
+                assert special["billed-generation"]["honeyhive_event_type"] == "model"
+                assert special["billed-generation"]["honeyhive_metadata.prompt_tokens"] == 60
+                assert special["billed-generation"]["honeyhive_metadata.cost"] == 0.05
+                assert special["generation-attempt"]["honeyhive_event_type"] == "chain"
+            else:
+                assert special["billed-generation"]["langsmith.span.kind"] == "llm"
+                assert special["unbilled-generation"]["langsmith.span.kind"] == "llm"
+                assert json.loads(special["billed-generation"]["langsmith.usage_metadata"]) == {
+                    "input_tokens": 60,
+                    "output_tokens": 10,
+                    "total_cost": 0.05,
+                }
+                assert (
+                    special["generation-attempt"]["langsmith.span.kind"]
+                    == special["owner-none"]["langsmith.span.kind"]
+                    == "chain"
+                )
+        assert [dict(span.attributes or {}) for span in originals] == before
+        assert attrs.dropped == events.dropped == links.dropped == 1

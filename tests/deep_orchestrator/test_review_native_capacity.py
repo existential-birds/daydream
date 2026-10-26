@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ToolResultEvent, ToolStartEvent
+from tests.deep_orchestrator.test_review_capture_and_retry import part_identity
 from tests.deep_orchestrator.test_review_completion import scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate, read_events, stage_ends
 from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
@@ -45,15 +46,23 @@ def _workload(wired: bool, *, guide_lines: int = 800) -> tuple[dict[str, str], d
 
 
 @pytest.mark.parametrize('wired', [False, True], ids=['late-cross-file-defect', 'correctly-wired-clean'])
+@pytest.mark.parametrize('inline', [False, True], ids=['exact-paths', 'inline'])
 async def test_late_cross_file_judgment_fits_cumulative_native_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool, inline: bool) -> None:
     repo = tmp_path / 'production_sized_work'
     before, after = _workload(wired)
     seed_feature_branch(repo, base=before, feature=after)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
+    monkeypatch.setattr(review.backend, 'read_only_disposable_clone', inline, raising=False)
     late = 'package_8/module_40.py'
+    finding = {'id': 1, 'file': late, 'line': 4, 'severity': 'medium', 'confidence': 'MEDIUM',
+               'description': 'Late request builder drops the parsed dry-run flag',
+               'rationale': 'The changed request builder omits the dry-run value.',
+               'evidence': f'{late}:4 omits dry_run required by the changed request contract.'}
     assigned_files: set[str] = set()
     assignment_units = 0
+    original_parts: list[dict[str, Any]] = []
+    inline_sizes: list[int] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -62,14 +71,17 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
                            output_schema=stage['response_contract']['schema'],
                            config=PiRequestConfig(schema_emulated=False, no_tools=False))
         assert stage['remaining_tool_calls'] <= 192
+        assert stage['context_transport'] == ('inline' if inline else 'exact_paths')
         assigned_files.update(stage['assigned_files'])
         assignment_units += len(stage['assignment_parts'])
+        original_parts.extend(stage['assignment_parts'])
+        assert len(stage['assigned_files']) <= 4
+        if inline:
+            prompt = review.backend.calls[-1]['prompt']
+            inline_sizes.append(len(prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):].encode()))
+            assert inline_sizes[-1] <= 64 * 1024
         output['notes'] = 'The late request builder is assessed against the changed dry-run contract.'
         if not wired and late in stage['assigned_files']:
-            finding = {'id': 1, 'file': late, 'line': 4, 'severity': 'medium', 'confidence': 'MEDIUM',
-                       'description': 'Late request builder drops the parsed dry-run flag',
-                       'rationale': 'The changed request builder omits the dry-run value.',
-                       'evidence': f'{late}:4 omits dry_run required by the changed request contract.'}
             output['candidates'] = [candidate(disposition='confirmed', finding=finding, file=late, line=4,
                                              trigger='Parse --dry-run and build the request',
                                              consequence='The request omits dry_run', grounds=finding['evidence'])]
@@ -78,9 +90,20 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
 
     data = await review.finish('python', deep_shard_enabled=False,
                                findings=() if wired else ('Late request builder drops the parsed dry-run flag',))
+    records = json.loads((repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert records['issues'] == ([] if wired else [dict(finding, uid='python:1')])
+    assert records['analyzed_revision'] == data['terminal_result']['analyzed_revision']
+    assert records['originating_run_id'] == data['terminal_result']['run_id']
     assert len(scopes(data)['python']['files']) == 41 and late in scopes(data)['python']['files']
     assert assigned_files == set(after for after in before if after.endswith('.py'))
-    assert assignment_units == 48
+    assert assignment_units == (87 if inline else 48)
+    if not wired:
+        assert part_identity(original_parts) == (
+            'b7ffdded77bde58734507239644a02736dfa1ad536f3b87ee4f4f83134b966d9' if inline else
+            'f2db6343fff423e67434d336e9548fb6d2930470a24b447457878430fc9543de')
+    if inline:
+        assert max(inline_sizes) > 12 * 1024
+        assert len(stage_ends(review, 'python')) < 37
     metadata = [phase['metadata'] for phase in stage_ends(review, 'python')]
     assert metadata[0]['hard_tool_call_allowance'] == 192
     assert metadata[-1]['observed_tool_starts'] <= 192

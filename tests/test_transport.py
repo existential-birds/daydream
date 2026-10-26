@@ -29,14 +29,6 @@ def emit_lines(*lines: str, exit_code: int = 0, to_stderr: str = "") -> str:
     stderr_part = f"print({to_stderr!r}, file=sys.stderr)" if to_stderr else ""
     return "import sys\n" + body + stderr_part + f"\nraise SystemExit({exit_code})\n"
 
-async def test_transport_streams_jsonl_lines_with_exit_code() -> None:
-    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", emit_lines('{"a":1}', '{"b":2}')])
-    await t.start()
-    events = [json.loads(line) async for line in t.lines(timeout_for_line=lambda: 5.0)]
-    assert events == [{"a": 1}, {"b": 2}]
-    assert await t.wait() == 0  # exit code surfaced, transport reaped
-    assert t.returncode == 0
-
 async def test_transport_writes_stdin_then_closes() -> None:
     child = (
         "import sys\n"
@@ -67,13 +59,15 @@ async def test_transport_nonzero_exit_raises_exit_error() -> None:
 
 async def test_transport_stderr_drain_task_feeds_sink() -> None:
     diagnostics: list[str] = []
-    t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", emit_lines('{"a":1}', to_stderr="boom")],
+    t = CliTransport(limit=LIMIT, cli="fake",
+        argv=[sys.executable, "-c", emit_lines('{"a":1}', '{"b":2}', to_stderr="boom")],
         stderr_policy=StderrPolicy.DRAIN_TASK, stderr_sink=diagnostics.append,
     )
     await t.start()
     events = [json.loads(line) async for line in t.lines(timeout_for_line=lambda: 5.0)]
-    assert events == [{"a": 1}]
+    assert events == [{"a": 1}, {"b": 2}]
     assert await t.wait() == 0
+    assert t.returncode == 0
     await t.drain_finished()
     assert diagnostics == ["boom"]
 

@@ -27,16 +27,6 @@ class _EqualBackend(ScriptedBackend):
 
 
 
-def test_resolve_run_context_creates_a_fresh_standalone_default() -> None:
-    first = resolve_run_context()
-    second = resolve_run_context()
-
-    assert first is not second
-    assert first.policy == InteractionPolicy()
-    assert second.policy == InteractionPolicy()
-
-
-
 def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
     def prompt(_console: Any, message: str, _default: str) -> str:
@@ -51,35 +41,32 @@ def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPa
     assert prompts == ["free form"]
 
 def test_backend_registration_is_identity_aware_and_reference_counted() -> None:
-    backend = ScriptedBackend()
-    sibling = ScriptedBackend()
-    first = RunContext(InteractionPolicy())
-    second = RunContext(InteractionPolicy())
+    backend = _EqualBackend()
+    sibling = _EqualBackend()
+    first = resolve_run_context()
+    second = resolve_run_context()
+    assert first is not second
+    assert first.policy == InteractionPolicy()
+    assert second.policy == InteractionPolicy()
     with first.backend_registration(backend):
         with first.backend_registration(backend):
             with second.backend_registration(backend):
                 with second.backend_registration(sibling):
                     assert first.active_backends() == (backend,)
-                    assert second.active_backends() == (backend, sibling)
-                    assert active_backends() == (backend, sibling)
+                    assert first.active_backends()[0] is backend
+                    local = second.active_backends()
+                    process = active_backends()
+                    assert len(local) == len(process) == 2
+                    assert local[0] is process[0] is backend
+                    assert local[1] is process[1] is sibling
             assert first.active_backends() == (backend,)
+            assert first.active_backends()[0] is backend
             assert active_backends() == (backend,)
+            assert active_backends()[0] is backend
         assert active_backends() == (backend,)
+        assert active_backends()[0] is backend
     assert first.active_backends() == ()
     assert active_backends() == ()
-
-def test_backend_registration_does_not_collapse_equal_distinct_objects() -> None:
-    first_backend = _EqualBackend()
-    second_backend = _EqualBackend()
-    context = RunContext(InteractionPolicy())
-    with context.backend_registration(first_backend), context.backend_registration(second_backend):
-        local = context.active_backends()
-        process = active_backends()
-        assert len(local) == len(process) == 2
-        assert local[0] is process[0] is first_backend
-        assert local[1] is process[1] is second_backend
-    assert active_backends() == ()
-
 
 def test_signal_snapshot_reenters_registration_and_interrupted_enter_cleans_up() -> None:
     """A same-thread signal snapshot must neither deadlock nor leak membership."""
