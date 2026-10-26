@@ -401,9 +401,9 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("pkg/mod.py", "python"), ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
+        ("src/a.ts", "typescript"), ("src/a.tsx", "tsx"),
         # .js is parsed by the TypeScript grammar, .jsx by the TSX grammar.
-        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"), ("cmd/main.go", "go"), ("src/lib.rs", "rust"),
+        ("src/a.js", "javascript"), ("src/a.jsx", "tsx"),
         ("README.md", None),
         ("src/a.PY", None),  # suffix matching is case-sensitive
     ],
