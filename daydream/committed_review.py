@@ -47,7 +47,7 @@ from daydream.hunk_index import write_hunk_index
 from daydream.json_utils import canonical_json
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
-from daydream.review_profile import resolve_profile
+from daydream.review_profile import build_default_profile, resolve_profile
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, ReviewCoverage, reason_for_exception
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
@@ -365,6 +365,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         file_config=config.file_config,
         repo_root=source,
     )
+    strategies = build_default_profile().strategies | profile.profile.strategies
     execution_input = BackendExecutionInput.from_environment(dict(os.environ), backend="pi")
     backends: dict[str, PiBackend] = {}
     settings: dict[str, Any] = {
@@ -379,8 +380,8 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         },
         "selections": {},
         "strategies": {
-            "discovery": profile.profile.strategies["discovery.generic_fallback"].content,
-            "challenge": profile.profile.strategies["arbitration"].content.replace(
+            "discovery": strategies["discovery.generic_fallback"].content,
+            "challenge": strategies["arbitration"].content.replace(
                 "{arbiter_input_path}", "the captured-source claim inventory below"
             ),
         },

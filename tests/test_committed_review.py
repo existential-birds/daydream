@@ -25,6 +25,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hunk_index import write_hunk_index
 from daydream.review_budget import ReviewLimits
+from daydream.review_profile import build_default_profile
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
@@ -275,6 +276,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     usage and interrupted coverage must survive artifact-session teardown.
     Unsupported plan/export requests must refuse before native work; domain
     admission cases cannot catch a billable dispatch of an unrepresentable plan.
+    The successful journey also uses a valid pipeline-only profile: default-profile
+    journeys cannot detect missing per-stage strategy fallback.
     """
     from daydream import agent
 
@@ -364,6 +367,10 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
     monkeypatch.setattr(agent, "run_agent", execute)
     repo = review_inputs.work.source
+    profile_path: Path | None = None
+    if challenge == "exhausted":
+        profile_path = repo.parent / "pipeline-only.toml"
+        profile_path.write_text('name = "pipeline-only"\n[pipeline]\nreviewer_investigation_budget_s = 60\n')
     if challenge == "too-many-assignments":
         paths = [f"extra-{number:03}.py" for number in range(511)]
         for path in paths:
@@ -385,6 +392,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         config=RunConfig(
             backend="pi", output_mode="review",
             trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
+            review_profile_path=profile_path,
         ),
         limits=ReviewLimits(90, 12, 10),
     )
@@ -442,6 +450,15 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     )
     assert result.output_installed is (challenge != "output-install")
     assert result.capture_state == "complete"
+    if challenge == "exhausted":
+        assert value["settings"]["profile_name"] == "pipeline-only"
+        assert value["settings"]["profile_source"] == "explicit"
+        assert value["settings"]["limits"]["effective_investigation_s"] == 60
+        defaults = build_default_profile().strategies
+        assert value["settings"]["strategies"]["discovery"] == defaults["discovery.generic_fallback"].content
+        assert value["settings"]["strategies"]["challenge"] == defaults["arbitration"].content.replace(
+            "{arbiter_input_path}", "the captured-source claim inventory below"
+        )
     if challenge == "output-install":
         assert result.output_error is not None
         assert not (repo / ".daydream/committed-review.json").exists()

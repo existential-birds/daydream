@@ -1,5 +1,6 @@
 /** Attempt-local exact-schema final submission for the packaged Pi provider. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
@@ -16,14 +17,66 @@ export default function (pi: ExtensionAPI) {
     closeSync(fd);
   }
   if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Output packet unavailable");
-  if (packet.native_thinking_settings) {
-    // Resolve inherited policy against Pi's selected model, preserving native
-    // provider inference and capability clamping in a relocated review snapshot.
-    pi.on("input", (_event, ctx) => {
-      if (ctx.model) {
-        const settings = packet.native_thinking_settings;
-        const perModel = settings.modelThinkingLevels?.[`${ctx.model.provider}/${ctx.model.id}`];
-        pi.setThinkingLevel(perModel || settings.defaultThinkingLevel || "medium");
+  if (packet.native_selection) {
+    pi.on("input", async (_event, ctx) => {
+      try {
+        const sdk = await import("@earendil-works/pi-coding-agent");
+        const frozen = packet.native_selection;
+        const agentDir = sdk.getAgentDir();
+        const global = sdk.SettingsManager.inMemory(frozen.global);
+        const storedTrust = new sdk.ProjectTrustStore(agentDir).get(frozen.source);
+        const trusted = !sdk.hasTrustRequiringProjectResources(frozen.source)
+          || (storedTrust ?? global.getDefaultProjectTrust() === "always");
+        const settings = sdk.SettingsManager.fromStorage({
+          withLock(scope, apply) {
+            const updated = apply(JSON.stringify(scope === "global"
+              ? { ...frozen.global, cacheWarming: "off" } : frozen.project));
+            if (updated !== undefined) throw new Error("Selection settings are immutable");
+          },
+        }, { projectTrusted: trusted });
+        // Never reload this loader: selection uses no resources, tools or model
+        // generation, and its settings/session cannot persist to the operator.
+        const resourceLoader = new sdk.DefaultResourceLoader({ cwd: ctx.cwd, agentDir, settingsManager: settings,
+          noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+        const modelRuntime = await sdk.ModelRuntime.create({
+          authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
+        const patterns = settings.getEnabledModels();
+        let modelText = frozen.model;
+        let provider = frozen.provider;
+        if (!modelText && settings.getDefaultModel() === undefined && !patterns?.length) {
+          modelText = frozen.fallback_model;
+          provider ??= frozen.fallback_provider;
+        } else if (!modelText && provider) {
+          modelText = settings.getDefaultModel();
+          if (!modelText) throw new Error("Native provider selection requires a model");
+        }
+        const resolved = modelText ? sdk.resolveCliModel({ cliModel: modelText,
+          cliProvider: provider, cliThinking: frozen.thinking, modelRuntime }) : undefined;
+        if (resolved?.error || (resolved && !resolved.model)) throw new Error("Native model selection unavailable");
+        const scopedModels = patterns?.length
+          ? (await sdk.resolveModelScopeWithDiagnostics(patterns, modelRuntime)).scopedModels : [];
+        let model = resolved?.model;
+        let thinking = frozen.thinking ?? resolved?.thinkingLevel;
+        if (!model && scopedModels.length) {
+          const saved = scopedModels.find(item => item.model.provider === settings.getDefaultProvider()
+            && item.model.id === settings.getDefaultModel());
+          const initial = saved ?? scopedModels[0];
+          model = initial.model;
+          thinking ??= initial.thinkingLevel;
+        }
+        const selected = await sdk.createAgentSession({ cwd: ctx.cwd, agentDir, settingsManager: settings,
+          sessionManager: sdk.SessionManager.inMemory(ctx.cwd), resourceLoader, noTools: "all", tools: [], modelRuntime,
+          scopedModels, ...(model ? { model } : {}), ...(thinking ? { thinkingLevel: thinking } : {}) });
+        try {
+          if (!selected.session.model || !await pi.setModel(selected.session.model)) {
+            throw new Error("Native model selection unavailable");
+          }
+          pi.setThinkingLevel(selected.session.thinkingLevel);
+        } finally { selected.session.dispose(); }
+        return { action: "continue" as const };
+      } catch {
+        process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed" }) + "\n");
+        return { action: "handled" as const };
       }
     });
   }

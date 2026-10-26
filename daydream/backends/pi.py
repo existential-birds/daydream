@@ -170,8 +170,7 @@ class _PiSelection:
     model: str
     provider: str | None
     thinking: str | None
-    model_thinking: bool
-    thinking_settings: dict[str, Any] | None
+    native_selection: dict[str, Any]
     agent_dir: Path
     inputs: tuple[tuple[Path, str | None], ...]
 
@@ -637,7 +636,7 @@ class PiBackend:
             environment.get("PI_CODING_AGENT_DIR", str(Path(environment.get("HOME", str(Path.home()))) / ".pi/agent"))
         )
         settings_paths = (cwd / ".pi/settings.json", agent_dir / "settings.json")
-        settings: dict[str, Any] = {}
+        layers: dict[str, dict[str, Any]] = {"global": {}, "project": {}}
         inputs: list[tuple[Path, str | None]] = []
         for path in reversed(settings_paths):
             try:
@@ -652,42 +651,29 @@ class PiBackend:
                 continue
             if not isinstance(value, dict):
                 continue
-            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel", "modelThinkingLevels"):
-                if key not in value:
-                    continue
-                item = value[key]
-                if key == "modelThinkingLevels" and isinstance(item, dict) and isinstance(settings.get(key), dict):
-                    settings[key] = {**settings[key], **item}
-                else:
-                    settings[key] = item
-        configured = settings.get("defaultModel")
-        configured = configured.strip() if isinstance(configured, str) and configured.strip() else None
-        self.model = self._model_override or configured or DEFAULT_PI_MODEL
-        _, separator, model_thinking = (self._model_override or "").rpartition(":")
-        if not separator or model_thinking not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
-            model_thinking = ""
-        provider = environment.get("PI_PROVIDER") or settings.get("defaultProvider")
-        provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
-        if provider is None and self._model_override is None and configured is None:
-            provider = _PI_DEFAULT_PROVIDER
+            layers["project" if path == settings_paths[0] else "global"] = value
+        self.model = self._model_override or _configured_pi_model(cwd, agent_dir=agent_dir) or DEFAULT_PI_MODEL
+        provider = environment.get("PI_PROVIDER") or None
         thinking = self.reasoning_effort or environment.get("PI_THINKING")
-        thinking_from_model = not thinking and bool(model_thinking)
+        native_selection = {
+            **layers, "source": str(cwd), "model": self._model_override, "provider": provider, "thinking": thinking,
+            "fallback_model": DEFAULT_PI_MODEL, "fallback_provider": _PI_DEFAULT_PROVIDER,
+        }
         self._frozen_selection = _PiSelection(
             self.model,
             provider,
-            thinking or model_thinking or None,
-            thinking_from_model,
-            None if thinking or model_thinking else {
-                key: settings[key] for key in ("defaultThinkingLevel", "modelThinkingLevels") if key in settings
-            },
+            thinking,
+            native_selection,
             agent_dir,
-            (*inputs, (agent_dir / "models.json", _selection_digest(agent_dir / "models.json"))),
+            (*inputs, *((agent_dir / name, _selection_digest(agent_dir / name))
+                        for name in ("models.json", "trust.json"))),
         )
         return self._selection_metadata(self._frozen_selection)
 
     @staticmethod
     def _selection_metadata(selection: _PiSelection) -> dict[str, str | None]:
-        return {"requested_model": selection.model, "requested_provider": selection.provider,
+        return {"requested_model": selection.native_selection["model"],
+                "requested_provider": selection.provider,
                 "requested_thinking": selection.thinking}
 
     def _check_frozen_selection(self) -> None:
@@ -809,7 +795,9 @@ class PiBackend:
             self._check_frozen_selection()
             configured_model = self._frozen_selection.model
             self.model = configured_model
-        if self._model_override is not None or configured_model is None or self._frozen_selection is not None:
+        native_selection = self._frozen_selection is not None
+        if not native_selection and (
+                self._model_override is not None or configured_model is None or self._frozen_selection is not None):
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
@@ -863,13 +851,13 @@ class PiBackend:
         )
         if self._frozen_selection is not None:
             selection = self._frozen_selection
-            thinking = None if selection.model_thinking else selection.thinking
+            thinking = selection.thinking
             child_env["PI_CODING_AGENT_DIR"] = str(selection.agent_dir)
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
-        if provider:
+        if provider and not native_selection:
             args.extend(["--provider", provider])
-        if thinking:
+        if thinking and not native_selection:
             args.extend(["--thinking", thinking])
 
         child_env.pop("PI_API_KEY", None)
@@ -1088,7 +1076,7 @@ class PiBackend:
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,
-            model_name=self.model,
+            model_name=self._model_override if native_selection else self.model,
             provider_name=provider,
             session_id=effective_session_id,
             reasoning_effort=thinking,
@@ -1108,9 +1096,9 @@ class PiBackend:
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
-                no_extensions=read_only and (native_output or host_tools is not None),
+                no_extensions=read_only and (native_output or host_tools is not None or native_selection),
             ),
-            model_source="configured",
+            model_source=None if native_selection and self._model_override is None else "configured",
             provider_source="configured" if provider is not None else None,
             session_source="host_generated" if resume_id is None else "configured",
         )
@@ -1123,10 +1111,11 @@ class PiBackend:
                 host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(cwd, child_env, host_tools)
                 extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
-            if native_output:
-                packet: dict[str, Any] = {"output_schema": output_schema}
-                if self._frozen_selection is not None and self._frozen_selection.thinking_settings is not None:
-                    packet["native_thinking_settings"] = self._frozen_selection.thinking_settings
+            if native_output or native_selection:
+                packet: dict[str, Any] = {"output_schema": output_schema} if native_output else {}
+                if self._frozen_selection is not None:
+                    packet["native_selection"] = {**self._frozen_selection.native_selection,
+                                                  "thinking": thinking}
                 if host_server is not None:
                     packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:
@@ -1137,7 +1126,7 @@ class PiBackend:
                 extensions.append(("DAYDREAM_PI_OUTPUT_PACKET", "pi_structured_output.ts", packet))
             for variable in ("DAYDREAM_PI_HOST_PACKET", "DAYDREAM_PI_OUTPUT_PACKET"):
                 child_env.pop(variable, None)
-            if read_only and (native_output or host_tools is not None):
+            if read_only and (native_output or host_tools is not None or native_selection):
                 args.append("--no-extensions")
             for variable, resource, packet in extensions:
                 child_env[variable] = str(_write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments))

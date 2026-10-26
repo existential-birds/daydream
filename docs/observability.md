@@ -71,13 +71,19 @@ grounds and canonical source references. Missing verdicts and native failures
 remain unfinished work rather than rejection evidence.
 
 Native configuration inputs are frozen before dispatch, including the merged
-original project/global per-model thinking policy. An unconfigured provider stays
-unset so Pi can infer it from its registry; requested provider/thinking metadata
-is null where native selection remains authoritative. After Pi selects the model,
-the packaged extension applies inherited thinking through Pi's session-only setter,
-which preserves per-model precedence and native capability clamping without writing
-settings. Explicit phase/environment overrides and model thinking suffixes retain
-their native precedence. Actual generation model/provider observations remain
+original project/global per-model thinking policy and project-trust input. The
+packaged extension resolves inherited settings with the original native trust
+policy. A selection-only SDK session uses in-memory settings/session storage,
+loads no resources or tools, performs no model generation, and is disposed before
+the ordinary invocation continues. Native setters apply its selected model and
+clamped thinking without writing settings. Fully absent model configuration retains
+Daydream's DEFAULT_PI_MODEL/nous fallback; an explicit blank project model retains
+native saved-model reset and registry fallback. Requested model/provider/thinking
+metadata is null where native selection remains authoritative. Explicit phase/environment
+overrides and model thinking suffixes retain their native precedence over saved
+providers and enabled-model scopes. Native scope resolution preserves the saved
+model when admitted by the scope and otherwise selects its first resolved entry.
+Actual generation model/provider observations remain
 separate evidence from requested inputs; frozen configuration alone proves neither.
 
 The sealed result records admission, native settlement and cleanup independently

@@ -729,12 +729,12 @@ async def test_frozen_pi_selection_pins_native_defaults_but_leaves_auth_refresh_
     backend = PiBackend(cwd=original)
     selection = backend.freeze_selection(original)
     assert selection["requested_thinking"] is None, "inherited native policy is not a pinned CLI request"
+    assert selection["requested_model"] is None and selection["requested_provider"] is None
     monkeypatch.setenv("PI_PROVIDER", "other-provider")
     monkeypatch.setenv("NOUS_API_KEY", "refreshed-loopback-credential")
     (agent_dir / "auth.json").write_text('{"refreshed": true}')
     args, process = await _run_and_capture_args(backend, cwd=snapshot)
-    assert args[args.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
-    assert args[args.index("--provider") + 1] == "nous"
+    assert "--model" not in args and "--provider" not in args
     assert "--thinking" not in args
     assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
     assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"

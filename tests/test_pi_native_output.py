@@ -104,7 +104,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
             self.end_headers()
             for chunk in chunks:
                 self.wfile.write(("data: " + json.dumps({"id": f"host-output-{index}",
-                    "object": "chat.completion.chunk", "created": 1, "model": "output-model", **chunk})
+                    "object": "chat.completion.chunk", "created": 1, "model": request["model"], **chunk})
                     + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -118,7 +118,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive"])
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "scope-only"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -129,7 +129,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     findings/coverage/report/trajectory when composing the committed Git entry.
     Null and concrete claim locations must survive JSON delivery and render without
     inventing a line number for a locationless finding.
+    Explicit blank and absent defaultModel are independent inputs: the blank reset
+    row cannot catch a fallback that wrongly preempts an enabled-model-only policy.
     """
+    empty = case in {"empty", "scope-only"}
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
@@ -143,28 +146,50 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
     # rather than bypassing their resolution with a test-only explicit backend.
     settings = native_provider.config / "settings.json"
+    expected_model = "alternate-model" if empty else "output-model"
     settings.write_text(json.dumps({
-        **({"defaultProvider": "output-fixture"} if case == "defect" else {}),
-        "defaultModel": "output-model", "defaultThinkingLevel": "low",
-        "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium"},
+        "defaultProvider": "nous" if case == "false-positive" else "output-fixture",
+        **({"defaultModel": "output-model"} if case != "scope-only" else {}),
+        "defaultThinkingLevel": "low",
+        "defaultProjectTrust": "ask" if case == "defect" else "always",
+        "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium",
+                                "output-fixture/alternate-model": "high"},
+        **({"enabledModels": ["output-fixture/alternate-model", "output-fixture/output-model"]}
+           if empty else {"enabledModels": ["output-fixture/alternate-model"]}
+           if case == "false-positive" else {}),
         "retry": {"enabled": False, "maxRetries": 0},
     }))
     # This ignored original project policy is absent from the committed snapshot.
-    # Known-provider discovery preserves a nested inherited entry; inferred-provider
-    # discovery must apply this project's per-model override after native selection.
+    # Untrusted nonblank defaults must not override global policy. A trusted blank
+    # resets saved model selection while preserving inherited nested thinking;
+    # explicit model thinking must override a conflicting trusted per-model value.
     (repo / ".git/info/exclude").write_text(".pi/\n")
     project_settings = repo / ".pi/settings.json"
     project_settings.parent.mkdir()
-    project_settings.write_text(json.dumps({"modelThinkingLevels": (
-        {"unrelated-provider/model": "off"} if case == "defect" else {
-            "output-fixture/output-model": "low" if case == "false-positive" else "high"}
-    )}))
+    project_settings.write_text(json.dumps({
+        **({"defaultModel": "alternate-model"} if case == "defect" else
+           {"defaultModel": ""} if case == "empty" else {}),
+        "modelThinkingLevels": ({"unrelated-provider/model": "off"} if empty else
+                                {"output-fixture/output-model": "low"}),
+    }))
     models_path = native_provider.config / "models.json"
     models = json.loads(models_path.read_text())
     models["providers"]["output-fixture"]["models"][0]["reasoning"] = True
+    model = models["providers"]["output-fixture"]["models"][0]
+    models["providers"]["output-fixture"]["models"].append({**model, "id": "alternate-model"})
     models_path.write_text(json.dumps(models))
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
     monkeypatch.delenv("PI_PROVIDER", raising=False)
+    if case not in {"false-positive", "scope-only"}:
+        # Ordinary installed Pi supplies the independent selection control; the
+        # committed entry must preserve its actual wire model after relocating.
+        native_provider.turns = [[("ordinary-submit", "structured_output", {"verdict": "complete", "findings": []})]]
+        ordinary = [event async for event in PiBackend(cwd=repo).execute(
+            repo, "Submit the empty result.", output_schema=_SCHEMA, read_only=True, persist_session=False)]
+        assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
+        assert next(event.model_name for event in ordinary if isinstance(event, ResultEvent)) == expected_model
+        native_provider.requests.clear()
+        native_provider.turns.clear()
     assignments_seen: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
     counterevidence = "The captured count == 0 guard returns zero before division; the proposed trigger cannot fail."
@@ -197,7 +222,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                 "file": "ratio.py", "line": None if case == "defect" else 2, "evidence_refs": refs}}
             payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",
                                     "evidence_refs": target_refs} for target_id, target_refs in refs_by_target.items()],
-                       "claims": [] if case == "empty" else [claim]}
+                       "claims": [] if empty else [claim]}
         else:
             assert kind == "challenge" and len(assignment["claims"]) == 1
             claim = assignment["claims"][0]
@@ -219,12 +244,12 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert value["analyzed_revision"]["merge_base_sha"] == base
     assert value["terminal_result"]["analysis_state"] == "complete"
     assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
-    expected_kinds = ["discovery"] if case == "empty" else ["discovery", "challenge"]
+    expected_kinds = ["discovery"] if empty else ["discovery", "challenge"]
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
     assert len(native_provider.requests) == 2 * len(expected_kinds)
-    assert all(request["model"] == "output-model" for request in native_provider.requests)
+    assert all(request["model"] == expected_model for request in native_provider.requests)
     assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
-    if case != "empty":
+    if not empty:
         assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
         assert "discovery-read" not in json.dumps(histories["challenge"])
         assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
@@ -241,8 +266,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
     report = (repo / ".review-output.md").read_text()
     assert head in report and base in report and value["planned_work_id"] in report
-    assert ("Division can fail" in report) == (case != "empty")
-    if case != "empty":
+    assert ("Division can fail" in report) == (not empty)
+    if not empty:
         line_suffix = "" if case == "defect" else ":<code>2</code>"
         assert f"Location: <code>ratio.py</code>{line_suffix}; claim " in report
     if case == "false-positive":
@@ -257,7 +282,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
     generations = [generation for invocation in invocations
                    for generation in invocation["generation_lifecycle"]["drafts"]]
-    assert all(generation["model_name"] == "output-model" and generation["provider_name"] == "output-fixture"
+    assert all(generation["model_name"] == expected_model and generation["provider_name"] == "output-fixture"
                for generation in generations)
     assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
                for execution in value["execution"])
