@@ -65,7 +65,6 @@ def test_public_content_parser_preserves_valid_values(locationless: bool) -> Non
         {"title": "x" * 501},
         {"title": "a\x00b"},
         {"body": ""},
-        {"body": "é" * 4096 + "x"},
         {"body": "a\x00b"},
         {"severity": "critical"},
         {"path": ""},
@@ -77,7 +76,6 @@ def test_public_content_parser_preserves_valid_values(locationless: bool) -> Non
         {"start_line": "3"},
         {"end_line": "5"},
         {"end_line": 2},
-        {"path": None},
     ],
 )
 def test_public_content_parser_rejects_invalid_content(changes: dict[str, Any]) -> None:
@@ -142,9 +140,9 @@ def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType)
         bad_gold = deepcopy(gold)
         bad_gold[located_gold].update(changes)
         for module in (verifier_core, copied_verifier):
-            with pytest.raises(module.VerifierError):
+            with pytest.raises(module.VerifierError, match="8 KiB|null|severity"):
                 module.validate_candidate_artifact(bad_candidate)
-            with pytest.raises(module.VerifierError):
+            with pytest.raises(module.VerifierError, match="8 KiB|null|severity"):
                 module.validate_gold_set(bad_gold, case_id=key)
 
     for module in (verifier_core, copied_verifier):
