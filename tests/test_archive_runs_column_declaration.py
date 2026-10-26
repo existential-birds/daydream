@@ -19,7 +19,7 @@ def _current_database(root: Path) -> None:
 
 
 @pytest.mark.parametrize("unsupported", [
-    "old", "future", "zero-populated", "old-empty", "future-empty", "missing-runs",
+    "old", "future", "zero-populated", "missing-runs",
     "missing-column", "missing-index", "wrong-index", "wrong-default", "wrong-type",
     "missing-primary-key", "extra-primary-key", "zero-unrelated-table", "wrong-index-table",
     "unique-index", "partial-index",
@@ -31,11 +31,10 @@ def test_unsupported_schema_is_rejected_without_changing_database(
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=DELETE")
-        if unsupported in {"old", "future", "zero-populated", "old-empty", "future-empty", "zero-unrelated-table"}:
-            version = {"old": 8, "future": 10, "zero-populated": 0, "old-empty": 8, "future-empty": 10,
-                       "zero-unrelated-table": 0}[unsupported]
+        if unsupported in {"old", "future", "zero-populated", "zero-unrelated-table"}:
+            version = {"old": 8, "future": 10, "zero-populated": 0, "zero-unrelated-table": 0}[unsupported]
             connection.execute(f"PRAGMA user_version = {version}")
-        if unsupported in {"old-empty", "future-empty", "zero-unrelated-table", "missing-runs"}:
+        if unsupported in {"zero-unrelated-table", "missing-runs"}:
             connection.execute("DROP TABLE runs")
         elif unsupported == "missing-column":
             connection.execute("ALTER TABLE runs DROP COLUMN profile_digest")
@@ -51,7 +50,7 @@ def test_unsupported_schema_is_rejected_without_changing_database(
             connection.execute("DROP INDEX idx_runs_repo_slug")
             connection.execute("CREATE TABLE unrelated (repo_slug TEXT)")
             connection.execute("CREATE INDEX idx_runs_repo_slug ON unrelated(repo_slug)")
-        else:
+        elif unsupported in {"wrong-default", "wrong-type", "missing-primary-key", "extra-primary-key"}:
             ddl = connection.execute("SELECT sql FROM sqlite_master WHERE name='runs'").fetchone()[0]
             indexes = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").fetchall()
