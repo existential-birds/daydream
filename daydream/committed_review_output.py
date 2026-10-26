@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession
@@ -56,11 +57,14 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def write_committed_review_output(session: ArtifactSession, payload: dict[str, Any]) -> None:
+def write_committed_review_output(
+    session: ArtifactSession, payload: dict[str, Any], *,
+    report_path: Path | None = None, result_path: Path | None = None,
+) -> None:
     """Stage the report first; the session owns conflict-safe final publication."""
     validate_committed_result(payload)
     if payload['run_id'] != session.layout.session_id:
         raise ValueError('committed review output differs from its artifact run')
     report = render_committed_review(payload).encode('utf-8')
-    atomic_write_bytes(session.review_output, report)
-    atomic_write_json(session.daydream_dir / 'committed-review.json', payload, trailing_newline=True)
+    atomic_write_bytes(report_path or session.review_output, report)
+    atomic_write_json(result_path or session.daydream_dir / 'committed-review.json', payload, trailing_newline=True)

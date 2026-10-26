@@ -44,6 +44,10 @@ export default function (pi: ExtensionAPI) {
           || !isDeepStrictEqual(JSON.parse(JSON.stringify(tool.parameters)), packet.schema)) {
         throw new Error("Host terminal tool unavailable");
       }
+      if (packet.allowed_tools && (!isDeepStrictEqual([...pi.getActiveTools()].sort(), packet.allowed_tools)
+          || process.versions.node !== "24.18.1")) {
+        throw new Error("Unsupported hosted native tool or Node configuration");
+      }
       const status = await request("/ready", { tool_name: packet.tool_name, schema: tool.parameters });
       if (status.ready !== true) throw new Error("Host binding unavailable");
       ready = true;

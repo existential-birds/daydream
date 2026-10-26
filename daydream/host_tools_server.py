@@ -57,6 +57,7 @@ class PiHostToolServer:
             "request_timeout_ms": max(1, int(policy._CALLBACK_TIMEOUT_S * 1000)),
             "max_frame_bytes": policy._MAX_FRAME_BYTES,
             "max_argument_bytes": policy._MAX_ARGUMENT_BYTES,
+            **({"allowed_tools": sorted(self.binding.allowed_tools)} if self.binding.allowed_tools is not None else {}),
         }
 
     async def start(self) -> None:

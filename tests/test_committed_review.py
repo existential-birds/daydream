@@ -230,7 +230,8 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 @pytest.mark.parametrize(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled",
-        "report-stage", "bundle-stage", "too-many-assignments", "hub-export",
+        "report-stage", "bundle-stage", "too-many-assignments", "hub-export", "hosted-output-install",
+        "hosted-bundle-install",
     ]
 )
 async def test_program_retains_work_and_reserves_challenge_after_discovery(
@@ -246,7 +247,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     refusals, pipeline-only strategy fallback, and real locked-worktree cleanup.
     Native journeys separately own transport/history/accounting.
     """
-    output_failure = challenge in {"output-install", "report-stage", "bundle-stage"}
+    output_failure = challenge in {
+        "output-install", "report-stage", "bundle-stage", "hosted-output-install", "hosted-bundle-install",
+    }
     injected = staging_output = False
     dispatches: list[dict[str, Any]] = []
     challenge_started = asyncio.Event()
@@ -320,12 +323,31 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             (repo / path).write_text("VALUE = 1\n")
         git(repo, "add", *paths)
         commit(repo, "add files beyond committed review capacity")
-    if challenge == "output-install":
+    output_root = repo
+    hosted_policy = None
+    if challenge.startswith("hosted-"):
+        from daydream.hosted_review import HostedReviewPolicy
+        from daydream.review_profile import ResolvedProfile
+
+        operator = repo.parent / "operator"
+        operator.mkdir()
+        output_root = repo.parent / "hosted-output"
+        hosted_policy = HostedReviewPolicy(
+            agent_dir=operator, environment={"PATH": os.environ["PATH"]},
+            output_dir=output_root, private_base=repo.parent / "private-hosted",
+            profile=ResolvedProfile(build_default_profile(), "operator"),
+            limits=ReviewLimits(90, 12, 10), trusted_prepared_source=True,
+        )
+    if challenge in {"output-install", "hosted-output-install", "hosted-bundle-install"}:
         real_link = os.link
 
         def fail_output_install(source: Any, destination: Any, **kwargs: Any) -> None:
             nonlocal injected
-            if Path(destination) == repo / ".review-output.md":
+            output_name = (
+                "committed-review.json" if challenge == "hosted-bundle-install"
+                else "review-output.md" if hosted_policy is not None else ".review-output.md"
+            )
+            if Path(destination) == output_root / output_name:
                 injected = True
                 raise OSError("new current report cannot install")
             real_link(source, destination, **kwargs)
@@ -361,6 +383,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             review_profile_path=profile_path,
         ),
         limits=ReviewLimits(90, 12, 10),
+        hosted_policy=hosted_policy,
     )
     if challenge in {"too-many-assignments", "hub-export"}:
         expected = "at most 512 assignment parts" if challenge == "too-many-assignments" else "external export"
@@ -441,6 +464,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert injected and result.output_error is not None
         assert not (repo / ".daydream/committed-review.json").exists()
         assert not (repo / ".review-output.md").exists()
+        if hosted_policy is not None:
+            assert not (output_root / "committed-review.json").exists()
+            assert not (output_root / "review-output.md").exists()
         assert value["terminal_result"]["run_id"] == value["run_id"]
         assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
     assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
@@ -466,6 +492,47 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         _forge_completion(corrupted)
         with pytest.raises(ValueError, match="native execution"):
             validate_committed_result(corrupted)
+
+
+@pytest.mark.parametrize("fault", ["preparation", "backend", "provider", "model", "output-overlap"])
+async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
+    review_inputs: StageInputFactory, fault: str,
+) -> None:
+    """Hosted admission owns preparation authority; ordinary native tests cannot prove it.
+
+    A post-checkout hook would execute before raw-byte validation if policy admission
+    moved below worktree creation. No unsupported request may reach that effect.
+    """
+    from dataclasses import replace
+
+    from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
+    from daydream.review_profile import ResolvedProfile
+
+    repo = review_inputs.work.source
+    marker = repo.parent / "checkout-executed"
+    hook = repo / ".git/hooks/post-checkout"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    hook.chmod(0o755)
+    operator = repo.parent / "operator"
+    operator.mkdir()
+    policy = HostedReviewPolicy(
+        agent_dir=operator, environment={"PATH": os.environ["PATH"]},
+        output_dir=repo.parent / "hosted-output", private_base=repo.parent / "hosted-private",
+        profile=ResolvedProfile(build_default_profile(), "operator"), trusted_prepared_source=True,
+    )
+    changes: dict[str, dict[str, Any]] = {
+        "preparation": {"trusted_prepared_source": False}, "backend": {"backend": "claude"},
+        "provider": {"provider": "unapproved"}, "model": {"model": "unapproved"},
+        "output-overlap": {"output_dir": repo / "output"},
+    }
+    before = git(repo, "worktree", "list", "--porcelain")
+    with pytest.raises(UnsupportedHostedPolicy):
+        await run_committed_review(CommittedReviewRequest(
+            repo, review_inputs.revision["merge_base_sha"], hosted_policy=replace(policy, **changes[fault]),
+        ))
+    assert not marker.exists()
+    assert git(repo, "worktree", "list", "--porcelain") == before
+    assert not policy.output_dir.exists()
 
 
 @pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution"])

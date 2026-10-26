@@ -782,7 +782,9 @@ class ArtifactSession:
                 late_parent.rmdir()
                 _fsync_directory(late_parent.parent)
 
-    def finalize_frozen(self, snapshot: ArtifactTreeSnapshot, *, disposition: ArtifactDisposition) -> None:
+    def finalize_frozen(
+        self, snapshot: ArtifactTreeSnapshot, *, disposition: ArtifactDisposition, publish_public: bool = True,
+    ) -> None:
         if self._state is not _SessionState.FROZEN:
             raise ArtifactVisibilityError("artifact session is not ready for frozen publication")
         if snapshot is not self._frozen_snapshot:
@@ -800,9 +802,12 @@ class ArtifactSession:
             self._retire_late_paths()
             self._state = _SessionState.PUBLISHED
             return
+        # Hosted callers deliver explicit routes while preserving the source's
+        # prior public bytes through the same conflict-safe transaction.
+        public_root = snapshot.root if publish_public else self.layout.state_root / "canonical"
         public_entries = tuple(
             entry
-            for entry in snapshot.manifest
+            for entry in (snapshot.manifest if publish_public else self._canonical_entries)
             if entry.path == _DAYDREAM or entry.path.startswith(f"{_DAYDREAM}/") or entry.path == _REVIEW_OUTPUT
         )
         transaction_id = f"publish-{self.layout.session_id}-{secrets.token_hex(8)}"
@@ -830,9 +835,9 @@ class ArtifactSession:
                 workspace_key=self.layout.workspace_key,
             )
             public_stage = publication_stage / "public"
-            filesystem._copy_tree(snapshot.root, public_stage, public_entries)
+            filesystem._copy_tree(public_root, public_stage, public_entries)
             canonical_stage = transaction / "canonical-stage"
-            filesystem._copy_tree(snapshot.root, canonical_stage, public_entries)
+            filesystem._copy_tree(public_root, canonical_stage, public_entries)
             publish_records: list[_DestinationRecord] = []
             for index, item in enumerate(self._routed):
                 destination, baseline_record = item.route, item.record

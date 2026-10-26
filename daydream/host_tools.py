@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Set
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -139,7 +139,8 @@ def _submission_schema_error(arguments: Any, schema: dict[str, Any] | None) -> s
 class HostToolBinding:
     """One review acceptance callback with attempt-local native correlation."""
 
-    def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]]) -> None:
+    def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]],
+                 allowed_tools: Set[str] | None = None) -> None:
         if type(deadline) not in {int, float} or not math.isfinite(deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
         if not callable(accept):
@@ -149,6 +150,7 @@ class HostToolBinding:
         self.authority_open = self.native_settled = self.cleanup_complete = False
         self.fatal_error: HostToolFatal | None = None
         self._accept = accept
+        self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
         self._call_limit: int | None = None
         self._schema: dict[str, Any] | None = None
         self._session_active = self._cleanup_failed = self._acceptance_started = False
@@ -175,19 +177,27 @@ class HostToolBinding:
     def schema(self) -> dict[str, Any] | None:
         return self._schema
 
+    @property
+    def allowed_tools(self) -> frozenset[str] | None:
+        return self._allowed_tools
+
     def configure_schema(self, schema: dict[str, Any]) -> None:
         """Bind readiness and native argument validation to the model-facing schema."""
         if self._session_active or self.possibly_accepted:
             raise ValueError("cannot change an active host submission schema")
         self._schema = json.loads(json.dumps(schema, ensure_ascii=False, allow_nan=False))
 
-    def restrict(self, *, deadline: float | None, tool_call_budget: int | None) -> None:
+    def restrict(self, *, deadline: float | None, tool_call_budget: int | None,
+                 allowed_tools: Set[str] | None = None) -> None:
         """Intersect original cumulative policy; retries cannot replenish it."""
         if deadline is not None:
             self.deadline = min(self.deadline, deadline)
         if tool_call_budget is not None:
             self._call_limit = (tool_call_budget if self._call_limit is None
                                 else min(self._call_limit, tool_call_budget))
+        if allowed_tools is not None:
+            self._allowed_tools = (frozenset(allowed_tools) if self._allowed_tools is None
+                                   else self._allowed_tools & allowed_tools)
 
     def _check_open(self, *, preacceptance: bool | None = None) -> None:
         if self.fatal_error is not None:
@@ -256,6 +266,9 @@ class HostToolBinding:
         if self._call_limit is not None and self.calls > self._call_limit:
             raise self._fatal("Original cumulative tool allowance exhausted; no further native calls are authorized",
                               code="capacity_exhausted")
+        if self._allowed_tools is not None and name not in self._allowed_tools:
+            raise self._reject("This tool is not granted by the operator's read-only policy; use only granted tools",
+                               code="permission_denied")
         if malformed:
             raise self._reject(malformed if isinstance(malformed, str) else
                                "Invalid bounded host frame; reduce the submitted argument size and nesting")

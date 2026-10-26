@@ -123,6 +123,7 @@ class BackendExecutionInput:
     codex_terminal_drain_timeout_s: float = DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S
     codex_process_reap_timeout_s: float = 5.0
     codex_cleanup_timeout_s: float = 10.0
+    pi_hosted_read_only: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(

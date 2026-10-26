@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import time
 import uuid
@@ -118,6 +119,12 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 
 # Read-only tool subset. Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
+
+
+def _unsupported_hosted_policy(message: str) -> ValueError:
+    from daydream.hosted_review import UnsupportedHostedPolicy
+
+    return UnsupportedHostedPolicy(message)
 
 _PI_PROVIDER_API_KEY_ENV = {
     "openrouter": "OPENROUTER_API_KEY",
@@ -620,6 +627,51 @@ class PiBackend:
             self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
 
+    @property
+    def _hosted_read_only(self) -> bool:
+        return self._execution_input is not None and self._execution_input.pi_hosted_read_only
+
+    def _check_hosted_resources(self, agent_dir: Path) -> None:
+        """Reject package resolution inputs before Pi's resource loader can run them.
+
+        Pi resolves configured packages before applying --no-extensions. An
+        isolated, resource-free operator directory is therefore required in
+        addition to the CLI's native resource and forced-untrusted switches.
+        """
+        try:
+            for name in ("settings.json", "models.json", "auth.json"):
+                path = agent_dir / name
+                if path.is_symlink() or path.exists() and not stat.S_ISREG(path.lstat().st_mode):
+                    raise _unsupported_hosted_policy(
+                        "Hosted Pi requires regular operator-owned configuration/authentication files; "
+                        f"{name} cannot be a link or special file")
+            settings_path = agent_dir / "settings.json"
+            settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+            if not isinstance(settings, dict) or any(settings.get(name) for name in (
+                "packages", "extensions", "skills", "prompts", "themes",
+            )):
+                raise _unsupported_hosted_policy(
+                    "Hosted Pi requires operator settings without packages, extensions, skills, prompts or themes")
+            for name in ("extensions", "skills", "prompts", "themes", ".pi", ".agents",
+                         "SYSTEM.md", "APPEND_SYSTEM.md"):
+                path = agent_dir / name
+                if path.exists() or path.is_symlink():
+                    raise _unsupported_hosted_policy(
+                        f"Hosted Pi requires an isolated resource-free operator directory; remove {name}")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise _unsupported_hosted_policy("Hosted Pi operator settings could not be validated") from exc
+
+    async def validate_hosted_policy(self) -> None:
+        """Verify the installed supported native baseline before review work begins."""
+        if not self._hosted_read_only or self._review_context is None:
+            raise _unsupported_hosted_policy("Hosted Pi preflight requires an operator-bound review context")
+        self._check_review_context()
+        assert self._execution_input is not None
+        binding = HostToolBinding(deadline=clock.monotonic() + host_policy._SETUP_TIMEOUT_S,
+                                  accept=lambda _: {})
+        await self._require_host_tools_version(self._review_context.source,
+                                               self._execution_input.child_environment(), binding)
+
     def bind_review_context(self, original_source: Path) -> dict[str, object]:
         """Bind native configuration context without resolving its model selection.
 
@@ -637,11 +689,33 @@ class PiBackend:
         original_source = original_source.resolve(strict=True)
         if not agent_dir.is_absolute():
             agent_dir = original_source / agent_dir
-        inputs = (original_source / ".pi/settings.json", *(agent_dir / name
-                  for name in ("settings.json", "models.json", "trust.json")))
+        if self._hosted_read_only:
+            assert self._execution_input is not None
+            if (self._execution_input.pi_agent_dir is None or not self._execution_input.pi_agent_dir.is_absolute()
+                    or self._execution_input.pi_provider != "nous"
+                    or self._model_override != "deepseek/deepseek-v4.1-flash"):
+                raise _unsupported_hosted_policy(
+                    "Hosted Pi requires an explicit isolated agent directory and nous/deepseek/deepseek-v4.1-flash")
+            agent_dir = agent_dir.resolve(strict=True)
+            if agent_dir.is_relative_to(original_source) or original_source.is_relative_to(agent_dir):
+                raise _unsupported_hosted_policy("Hosted Pi operator configuration and source must be disjoint")
+            if any(environment.get(name) for name in (
+                "NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV",
+            )):
+                raise _unsupported_hosted_policy("Hosted Pi environment must not contain executable loader overrides")
+            self._check_hosted_resources(agent_dir)
+            # Native settings/resource discovery never sees the reviewed project.
+            original_source = agent_dir
+            inputs = tuple(agent_dir / name for name in ("settings.json", "models.json"))
+            provider: str | None = self._execution_input.pi_provider
+            thinking = self.reasoning_effort or self._execution_input.pi_thinking
+        else:
+            inputs = (original_source / ".pi/settings.json", *(agent_dir / name
+                      for name in ("settings.json", "models.json", "trust.json")))
+            provider = environment.get("PI_PROVIDER") or None
+            thinking = self.reasoning_effort or environment.get("PI_THINKING")
         self._review_context = _PiReviewContext(
-            original_source, agent_dir, environment.get("PI_PROVIDER") or None,
-            self.reasoning_effort or environment.get("PI_THINKING"),
+            original_source, agent_dir, provider, thinking,
             tuple((path, _selection_digest(path)) for path in inputs),
         )
         self.model = self._model_override or "pi-native"
@@ -654,13 +728,23 @@ class PiBackend:
 
     def _check_review_context(self) -> None:
         context = self._review_context
+        if context is not None and self._hosted_read_only:
+            self._check_hosted_resources(context.agent_dir)
         if context is not None and any(_selection_digest(path) != digest for path, digest in context.inputs):
+            if self._hosted_read_only:
+                raise _unsupported_hosted_policy("Hosted Pi operator configuration changed after review binding")
             raise PiError("Pi configuration changed after review binding; start a new run", category="AUTH_CONFIG")
 
     async def _require_host_tools_version(self, cwd: Path, environment: dict[str, str],
                                          binding: HostToolBinding) -> None:
         """Pin the fail-closed extension loader used by the readiness barrier."""
-        probe = CliTransport("pi", ["pi", "--version"], limit=4096, env=environment, cwd=str(cwd),
+        if self._hosted_read_only:
+            await self._require_native_version("node", "v24.18.1", cwd, environment, binding)
+        await self._require_native_version("pi", "1.4.0", cwd, environment, binding)
+
+    async def _require_native_version(self, command: str, expected: str, cwd: Path,
+                                      environment: dict[str, str], binding: HostToolBinding) -> None:
+        probe = CliTransport(command, [command, "--version"], limit=4096, env=environment, cwd=str(cwd),
                              stderr_policy=StderrPolicy.DRAIN_TASK)
         self._transports.append(probe)
         probe_failed = False
@@ -675,10 +759,18 @@ class PiBackend:
                     if len(lines) > 1:
                         break
                 code = await reap(probe, timeout_s=allowance)
-            if code != 0 or lines != ["1.4.0"]:
+            if code != 0 or lines != [expected]:
+                if self._hosted_read_only:
+                    raise _unsupported_hosted_policy(
+                        f"Hosted read-only policy requires verified official Pi 1.4.0 / Node 24.18.1; "
+                        f"{command} did not report {expected}")
                 raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
         except (TimeoutError, OSError, ValueError):
             probe_failed = True
+            if self._hosted_read_only:
+                raise _unsupported_hosted_policy(
+                    f"Could not verify hosted read-only native baseline: {command} {expected}; "
+                    "install official Pi 1.4.0 and Node 24.18.1") from None
             raise PiError("Could not verify required Pi 1.4.0 host-tool capabilities", category="HOST_TOOLS") from None
         except BaseException:
             probe_failed = True
@@ -738,7 +830,21 @@ class PiBackend:
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
             )
 
+        if self._hosted_read_only:
+            from daydream.hosted_review import HOSTED_PI_TOOLS
+
+            if (not read_only or persist_session or finalization or tools_disabled or host_tools is None
+                    or output_schema is None or not validate_structured_output or continuation is not None
+                    or self._review_context is None):
+                raise _unsupported_hosted_policy(
+                    "Hosted Pi requires a fresh, nonpersistent read-only invocation with bound native host submission")
+            host_tools.restrict(deadline=None, tool_call_budget=None, allowed_tools=HOSTED_PI_TOOLS)
+            if host_tools.allowed_tools != HOSTED_PI_TOOLS:
+                raise _unsupported_hosted_policy("Hosted Pi requires the exact operator read/search/submission grant")
+
         args: list[str] = ["pi", "--mode", "json"]
+        if self._hosted_read_only:
+            args.extend(["--no-approve", "--no-mcp", "--no-prompt-templates", "--no-themes"])
         native_output = (output_schema is not None and validate_structured_output
                          and not (finalization or tools_disabled))
         if host_tools is not None:
@@ -1089,6 +1195,8 @@ class PiBackend:
                 packet: dict[str, Any] = {"output_schema": output_schema} if native_output else {}
                 if review_context is not None:
                     packet["source_root"] = str(cwd)
+                if self._hosted_read_only:
+                    packet["hosted_read_only"] = True
                 if host_server is not None:
                     packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:
@@ -1185,6 +1293,10 @@ class PiBackend:
                     host_ready = True
                     continue
                 if event_type == "daydream_host_tools_failed":
+                    if self._hosted_read_only:
+                        raise _unsupported_hosted_policy(
+                            "Hosted Pi native readiness failed; required stock tools and packaged helpers "
+                            "must be supported by official Pi 1.4.0 / Node 24.18.1")
                     raise PiError("Required native host-tool binding is unavailable", category="HOST_TOOLS")
                 if event_type == "daydream_host_tool_fatal" and host_tools is not None:
                     # Native details only explain the stop. Binding-local state

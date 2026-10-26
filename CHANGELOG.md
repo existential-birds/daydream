@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **review:** add an explicit hosted operator policy for committed Pi reviews,
+  isolating configuration/resources, enforcing read/search and bounded submission
+  grants, and delivering host-owned outputs without repository policy overrides
+  ([#1420](https://github.com/existential-birds/daydream/issues/1420)). Requires
+  official Pi 1.4.0 / Node 24.18.1 and trusted host-prepared source; committed
+  result schema 1 and extension API 8 remain compatible.
+
 ### Fixed
 
 - Honor configured staged-review deadlines and retain bounded large-review source

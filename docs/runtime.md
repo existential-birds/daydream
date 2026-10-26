@@ -55,7 +55,7 @@ challenge/finalization allowances. Whole-submission admission rechecks authority
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.
 
-Pi's CLI resolves model/provider/thinking/trust/authentication in the original
+Without a hosted policy, Pi's CLI resolves model/provider/thinking/trust/authentication in the original
 configuration context; stock read/search tools, model-visible cwd and AGENTS context
 use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
@@ -70,9 +70,67 @@ native settlement/cleanup, completeness, output, capture and delivery are separa
 Explicit unsupported exports fail before dispatch. CLI routing/default cutover and
 external delivery remain separate integration work; existing schemas stay unchanged.
 
+### Hosted operator policy
+
+Pass `daydream.hosted_review.HostedReviewPolicy` as
+`CommittedReviewRequest(..., hosted_policy=policy)` to the same
+`run_committed_review` entry point. The trusted host supplies an explicit
+`ResolvedProfile`, `ReviewLimits`, complete child `environment`, isolated
+`agent_dir`, `private_base` for the normal artifact owner, and an initially absent
+`output_dir` whose parent exists. These canonical absolute roots must be disjoint
+from one another and from the source. Request `config` and `limits` are replaced
+by this policy; repository configuration, phase overrides and ambient environment
+cannot supply hosted authority.
+
+| Supported hosted execution | Required value |
+|---|---|
+| Backend / provider / model | Pi / `nous` / `deepseek/deepseek-v4.1-flash` |
+| Native baseline | Official Pi 1.4.0 / Node 24.18.1 |
+| Model tools | Stock `read`, `find`, `ls`, `grep`; bounded `structured_output` admission |
+| Source preparation | Explicit `trusted_prepared_source=True` operator attestation |
+
+Prepare `agent_dir` separately from target and ambient user configuration. Only
+regular operator-approved native provider configuration, authentication and inert settings
+belong there. Resource settings/directories, system-prompt files and executable
+loader environment overrides are rejected. Native authentication and credential
+refresh remain native; Daydream never copies or changes persistent user credentials.
+`HOME`, `PI_CODING_AGENT_DIR` and provider selection are fixed to this isolated
+context. Use a trusted executable `PATH` and explicitly supply credential variables
+needed by the operator's native provider configuration; do not copy an uncontrolled
+ambient environment.
+
+The native process starts in that operator context with forced-untrusted project
+behavior and executable resource loading disabled. Packaged helpers bind stock
+readers to captured source without promoting project, ancestor or global instruction
+files into system policy. Instructions remain readable review data. Startup
+checks verify the supported versions and exact tool set before provider work;
+`UnsupportedHostedPolicy` identifies unavailable support without switching harnesses.
+If native readiness fails during an invocation, already admitted work and partial
+coverage are sealed through the normal output session before that error propagates.
+Every discovery, fresh challenge/rechallenge and retry keeps the same policy and
+cumulative allowances. Tool admission intersects grants before effects, and domain
+submission may change only the assigned in-memory Review state.
+
+Trusted host writers publish `review-output.md`, `committed-review.json` and
+`trajectory.json` (or its partial counterpart) under `output_dir` using the same
+private session and conflict-safe installation. Existing source public artifacts
+are restored unchanged. Diagnostics stay under `private_base`; output destinations
+do not become model write grants. Recorded policy/configuration identities omit
+credentials and callback capabilities. This additive API retains committed result
+schema 1 and extension API 8; it is a minor feature addition.
+
+The preparation attestation is required **before Git worktree materialization**:
+the operator must control/audit source Git configuration, checkout hooks and filters.
+Later raw-byte validation cannot prove inert preparation. This API does not safely
+prepare arbitrary local Git repositories. Read/search policy is not filesystem
+confinement or an egress firewall; stock readers can follow symlinks. The host owns
+infrastructure isolation, scoped credentials, staging, deadlines, concurrency and
+cleanup. Immutable input/materialization and strict PR exports remain #1421;
+the 512-assignment limit and other-harness/CLI integration boundaries still apply.
+
 ## Pi host-tool lifetime and limits
 
-Pi keeps its stock read/search tools, offsets and pagination. Committed reviews
+Pi keeps its stock read/search tools, offsets and pagination. Ordinary committed reviews
 bind those tools, the model-visible working directory and native AGENTS context
 to the captured source while native configuration and its trust policy remain
 rooted in the original source.

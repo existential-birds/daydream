@@ -247,6 +247,38 @@ async def test_native_rejections_spend_original_allowance_and_retry_does_not_ren
     assert binding.calls == 3 and installed == [] and binding.cleanup_complete
 
 
+async def test_http_operator_grants_are_frozen_and_retries_only_narrow_them() -> None:
+    """Caller mutation or a retry must not authorize an ungranted native effect.
+
+    Installed Pi excludes forbidden tools before native lookup, so it cannot prove
+    the host endpoint independently denies their starts and preserves narrowed
+    authority across attempt-local readiness sessions.
+    """
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        installed.append(value)
+        return value
+    grants = {"read", NATIVE_SUBMIT}
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept, allowed_tools=grants)
+    grants.add("write")
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        rejected = (await client.post("/admit", json={"id": "write", "name": "write", "arguments": None})).json()
+        assert rejected["allowed"] is False and rejected["code"] == "permission_denied"
+        assert binding.authority_open and installed == []
+    binding.restrict(deadline=None, tool_call_budget=None, allowed_tools=frozenset({NATIVE_SUBMIT}))
+    binding.restrict(deadline=None, tool_call_budget=None, allowed_tools=frozenset({"read", "write", NATIVE_SUBMIT}))
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        rejected = (await client.post("/admit", json={"id": "read", "name": "read", "arguments": None})).json()
+        assert rejected["allowed"] is False and rejected["code"] == "permission_denied"
+        assert binding.authority_open and installed == []
+        assert (await client.post("/admit", json={"id": "submit", "name": NATIVE_SUBMIT,
+            "arguments": _RESULT, "terminal": True})).json()["allowed"]
+        assert (await client.post("/submit", json={"id": "submit", "arguments": _RESULT})).json()["accepted"]
+    assert installed == [_RESULT] and binding.calls == 3 and binding.rejections == 2 and binding.cleanup_complete
+
+
 @pytest.mark.parametrize("fault", ["schema", "semantic", "items", "none"])
 async def test_last_available_native_call_cannot_invite_an_impossible_correction(
     monkeypatch: pytest.MonkeyPatch, fault: str,
