@@ -83,6 +83,9 @@ metadata is null where native selection remains authoritative. Explicit phase/en
 overrides and model thinking suffixes retain their native precedence over saved
 providers and enabled-model scopes. Native scope resolution preserves the saved
 model when admitted by the scope and otherwise selects its first resolved entry.
+The PI_API_KEY compatibility alias retains ordinary Daydream routing, including
+NOUS_API_KEY for its implicit default provider; credentials remain in the child
+environment and are separate from requested native selection metadata.
 Actual generation model/provider observations remain
 separate evidence from requested inputs; frozen configuration alone proves neither.
 

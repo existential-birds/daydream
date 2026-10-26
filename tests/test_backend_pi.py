@@ -456,18 +456,27 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
     assert result_events[0].continuation is None
 
 
-async def test_pi_api_key_never_enters_process_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("freeze", [False, True])
+async def test_pi_api_key_never_enters_process_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, freeze: bool,
+) -> None:
     sentinel = "synthetic-pi-api-key-sentinel"
     monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setenv("PI_API_KEY", sentinel)
     monkeypatch.setenv("PI_THINKING", "medium")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     backend = PiBackend(model="glm-5.2")
+    if freeze:
+        backend.freeze_selection(tmp_path)
     flat_args, mock_exec = await _run_and_capture_args(backend)
-    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert ("--provider" in flat_args) is not freeze
+    if not freeze:
+        assert flat_args[flat_args.index("--provider") + 1] == "zai"
     assert sentinel not in flat_args
     assert "--api-key" not in flat_args
     assert mock_exec.call_args.kwargs["env"]["ZAI_API_KEY"] == sentinel
-    assert flat_args[flat_args.index("--thinking") + 1] == "medium"
+    if not freeze:
+        assert flat_args[flat_args.index("--thinking") + 1] == "medium"
 
 async def test_pi_api_key_unknown_provider_warns_and_skips(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,

@@ -267,6 +267,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
     challenge: str,
+    request: pytest.FixtureRequest,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The actual program owns failure retention and fixed later-work reservations.
 
@@ -279,12 +281,23 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     admission cases cannot catch a billable dispatch of an unrepresentable plan.
     The successful journey also uses a valid pipeline-only profile: default-profile
     journeys cannot detect missing per-stage strategy fallback.
+    A real locked-worktree removal must warn without replacing a successful result
+    or caller cancellation; ordinary cleanup never exercises that Git failure.
     """
     from daydream import agent
 
     dispatches: list[dict[str, Any]] = []
     challenge_started = asyncio.Event()
     bindings: list[HostToolBinding] = []
+    locked_captures: list[Path] = []
+
+    def remove_locked_captures() -> None:
+        for captured in locked_captures:
+            if captured.exists():
+                git(review_inputs.work.source, "worktree", "unlock", str(captured))
+                git_ops.worktree_remove(review_inputs.work.source, captured, force=True)
+
+    request.addfinalizer(remove_locked_captures)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         assignment = json.loads(
@@ -293,6 +306,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         dispatches.append(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"]}
         )
+        if assignment["kind"] == "discovery" and challenge in {"exhausted", "cancelled"}:
+            git(review_inputs.work.source, "worktree", "lock", "--reason", "cleanup regression lock", str(cwd))
+            locked_captures.append(cwd)
         binding = kwargs["host_tools"]
         bindings.append(binding)
         binding.configure_schema(kwargs["output_schema"])
@@ -387,7 +403,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             real_link(source, destination, **kwargs)
 
         monkeypatch.setattr(os, "link", fail_output_install)
-    request = CommittedReviewRequest(
+    review_request = CommittedReviewRequest(
         repo,
         review_inputs.revision["merge_base_sha"],
         config=RunConfig(
@@ -400,13 +416,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge in {"too-many-assignments", "hub-export"}:
         expected = "at most 512 assignment parts" if challenge == "too-many-assignments" else "external export"
         with pytest.raises(ValueError, match=expected):
-            await run_committed_review(request)
+            await run_committed_review(review_request)
         assert dispatches == []
         assert not (repo / ".daydream/committed-review.json").exists()
         assert not (repo / ".review-output.md").exists()
         return
     if challenge == "cancelled":
-        task = asyncio.create_task(run_committed_review(request))
+        task = asyncio.create_task(run_committed_review(review_request))
         started = asyncio.create_task(challenge_started.wait())
         ready, _ = await asyncio.wait({task, started}, timeout=20, return_when=asyncio.FIRST_COMPLETED)
         if started not in ready:
@@ -441,8 +457,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert trajectory["session_id"] == value["run_id"] and trajectory["extra"]["partial"]
         assert trajectory["final_metrics"]["total_prompt_tokens"] == 17
         assert trajectory["final_metrics"]["total_cost_usd"] == 0.002
+        captured = locked_captures[0]
+        assert captured.exists() and f"worktree {captured}\n" in git(repo, "worktree", "list", "--porcelain")
+        warning = capsys.readouterr().out
+        assert "Failed to remove captured worktree" in warning and "locked" in warning
+        assert str(captured) in "".join(warning.replace("│", "").split())
         return
-    result = await run_committed_review(request)
+    result = await run_committed_review(review_request)
     value = result.to_dict()
     assert len(value["assignments"][0]["source_refs"]) == 6
     assert all(
@@ -452,6 +473,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert result.output_installed is (challenge != "output-install")
     assert result.capture_state == "complete"
     if challenge == "exhausted":
+        assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
+        assert root_trajectory(repo)["session_id"] == value["run_id"]
+        captured = locked_captures[0]
+        assert captured.exists() and f"worktree {captured}\n" in git(repo, "worktree", "list", "--porcelain")
+        warning = capsys.readouterr().out
+        assert "Failed to remove captured worktree" in warning and "locked" in warning
+        assert str(captured) in "".join(warning.replace("│", "").split())
         assert value["settings"]["profile_name"] == "pipeline-only"
         assert value["settings"]["profile_source"] == "explicit"
         assert value["settings"]["limits"]["effective_investigation_s"] == 60

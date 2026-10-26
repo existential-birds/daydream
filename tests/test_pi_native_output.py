@@ -31,6 +31,7 @@ from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
 from daydream.committed_review_model import validate_committed_result
+from daydream.config import DEFAULT_PI_MODEL
 from daydream.host_tools import HostToolBinding
 from daydream.host_tools_server import PiHostToolServer
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -55,6 +56,7 @@ _SCHEMA = {"type": "object", "additionalProperties": False,
 class _NativeProvider:
     config: Path
     requests: list[dict[str, Any]] = field(default_factory=list)
+    authorizations: list[str | None] = field(default_factory=list)
     turns: list[list[tuple[str, str, dict[str, Any]]]] = field(default_factory=list)
     choose: Callable[[dict[str, Any]], list[tuple[str, str, dict[str, Any]]]] | None = None
     text: str | None = None
@@ -79,6 +81,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         def do_POST(self) -> None:
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             fixture.requests.append(request)
+            fixture.authorizations.append(self.headers.get("Authorization"))
             index = len(fixture.requests) - 1
             if index in fixture.errors:
                 self.send_response(400)
@@ -118,7 +121,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "scope-only"])
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "scope-only", "fallback"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -131,8 +134,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     inventing a line number for a locationless finding.
     Explicit blank and absent defaultModel are independent inputs: the blank reset
     row cannot catch a fallback that wrongly preempts an enabled-model-only policy.
+    The fallback row has no saved selection: configured rows cannot catch losing
+    the documented PI_API_KEY alias for the implicit default provider.
     """
-    empty = case in {"empty", "scope-only"}
+    empty = case in {"empty", "scope-only", "fallback"}
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
@@ -146,16 +151,18 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
     # rather than bypassing their resolution with a test-only explicit backend.
     settings = native_provider.config / "settings.json"
-    expected_model = "alternate-model" if empty else "output-model"
+    expected_model = DEFAULT_PI_MODEL if case == "fallback" else "alternate-model" if empty else "output-model"
+    expected_provider = "nous" if case == "fallback" else "output-fixture"
     settings.write_text(json.dumps({
-        "defaultProvider": "nous" if case == "false-positive" else "output-fixture",
-        **({"defaultModel": "output-model"} if case != "scope-only" else {}),
+        **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
+           if case != "fallback" else {}),
+        **({"defaultModel": "output-model"} if case not in {"scope-only", "fallback"} else {}),
         "defaultThinkingLevel": "low",
         "defaultProjectTrust": "ask" if case == "defect" else "always",
         "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium",
-                                "output-fixture/alternate-model": "high"},
+                                "output-fixture/alternate-model": "high", f"nous/{DEFAULT_PI_MODEL}": "high"},
         **({"enabledModels": ["output-fixture/alternate-model", "output-fixture/output-model"]}
-           if empty else {"enabledModels": ["output-fixture/alternate-model"]}
+           if case in {"empty", "scope-only"} else {"enabledModels": ["output-fixture/alternate-model"]}
            if case == "false-positive" else {}),
         "retry": {"enabled": False, "maxRetries": 0},
     }))
@@ -177,6 +184,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     models["providers"]["output-fixture"]["models"][0]["reasoning"] = True
     model = models["providers"]["output-fixture"]["models"][0]
     models["providers"]["output-fixture"]["models"].append({**model, "id": "alternate-model"})
+    if case == "fallback":
+        models["providers"] = {"nous": {**models["providers"]["output-fixture"],
+            "apiKey": "$NOUS_API_KEY", "authHeader": True, "models": [{**model, "id": DEFAULT_PI_MODEL}]}}
+        monkeypatch.setenv("PI_API_KEY", "synthetic-implicit-fallback-alias")
     models_path.write_text(json.dumps(models))
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
     monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -189,6 +200,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
         assert next(event.model_name for event in ordinary if isinstance(event, ResultEvent)) == expected_model
         native_provider.requests.clear()
+        native_provider.authorizations.clear()
         native_provider.turns.clear()
     assignments_seen: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
@@ -249,6 +261,9 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert len(native_provider.requests) == 2 * len(expected_kinds)
     assert all(request["model"] == expected_model for request in native_provider.requests)
     assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
+    if case == "fallback":
+        assert native_provider.authorizations == ["Bearer synthetic-implicit-fallback-alias"] * len(
+            native_provider.requests)
     if not empty:
         assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
         assert "discovery-read" not in json.dumps(histories["challenge"])
@@ -282,7 +297,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
     generations = [generation for invocation in invocations
                    for generation in invocation["generation_lifecycle"]["drafts"]]
-    assert all(generation["model_name"] == expected_model and generation["provider_name"] == "output-fixture"
+    assert all(generation["model_name"] == expected_model and generation["provider_name"] == expected_provider
                for generation in generations)
     assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
                for execution in value["execution"])

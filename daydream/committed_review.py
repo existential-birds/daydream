@@ -559,7 +559,12 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                             raise cancellation
         finally:
             with anyio.CancelScope(shield=True):
-                git_ops.worktree_remove(source, captured_root, force=True)
+                try:
+                    git_ops.worktree_remove(source, captured_root, force=True)
+                except git_ops.GitError as exc:
+                    from daydream.ui import print_warning
+
+                    print_warning(agent.console, f"Failed to remove captured worktree {captured_root}: {exc}")
 
 
 async def _dispatch(

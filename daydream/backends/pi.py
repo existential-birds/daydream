@@ -169,6 +169,7 @@ def _configured_pi_model(
 class _PiSelection:
     model: str
     provider: str | None
+    api_key_provider: str | None
     thinking: str | None
     native_selection: dict[str, Any]
     agent_dir: Path
@@ -652,8 +653,13 @@ class PiBackend:
             if not isinstance(value, dict):
                 continue
             layers["project" if path == settings_paths[0] else "global"] = value
-        self.model = self._model_override or _configured_pi_model(cwd, agent_dir=agent_dir) or DEFAULT_PI_MODEL
+        configured_model = _configured_pi_model(cwd, agent_dir=agent_dir) if self._model_override is None else None
+        self.model = self._model_override or configured_model or DEFAULT_PI_MODEL
         provider = environment.get("PI_PROVIDER") or None
+        # Preserve ordinary PI_API_KEY routing independently of native model inference.
+        api_key_provider = environment.get("PI_PROVIDER")
+        if api_key_provider is None and configured_model is None:
+            api_key_provider = _PI_DEFAULT_PROVIDER
         thinking = self.reasoning_effort or environment.get("PI_THINKING")
         native_selection = {
             **layers, "source": str(cwd), "model": self._model_override, "provider": provider, "thinking": thinking,
@@ -662,6 +668,7 @@ class PiBackend:
         self._frozen_selection = _PiSelection(
             self.model,
             provider,
+            api_key_provider,
             thinking,
             native_selection,
             agent_dir,
@@ -862,13 +869,14 @@ class PiBackend:
 
         child_env.pop("PI_API_KEY", None)
         if api_key:
-            native_key_name = _PI_PROVIDER_API_KEY_ENV.get(provider.casefold()) if provider else None
+            api_key_provider = self._frozen_selection.api_key_provider if self._frozen_selection else provider
+            native_key_name = _PI_PROVIDER_API_KEY_ENV.get(api_key_provider.casefold()) if api_key_provider else None
             if native_key_name is None:
                 logger.warning(
                     "PI_API_KEY could not be mapped to a native credential "
                     "environment variable for provider %r and is being ignored. "
                     "Set the provider's native credential variable directly.",
-                    provider,
+                    api_key_provider,
                 )
             else:
                 child_env[native_key_name] = api_key
