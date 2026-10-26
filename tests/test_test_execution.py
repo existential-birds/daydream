@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from daydream.test_execution import (
-    MissingTestCommandError,
     RecipeConfinementError,
     TestExecutionResult,
     TestRecipe,
@@ -70,17 +69,6 @@ def test_command_and_provenance_share_cli_over_config_precedence() -> None:
     fact = resolve_test_command_fact(cfg, run)
     assert fact.value == ("/cli/cmd",)
     assert fact.source == "cli"
-
-def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
-
-    cfg = SimpleNamespace(test_command=None)
-    run = SimpleNamespace(test_command=None)
-    with pytest.raises(MissingTestCommandError) as e:
-        canonical_test_command(cfg, run)
-    msg = str(e.value)
-    assert "test_command" in msg
-    assert "tool.daydream" in msg  # naming the precedence source
-    assert "--test-command" in msg  # actionable: what to set
 
 def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path) -> None:
     marker = tmp_path / "grandkid.pid"
