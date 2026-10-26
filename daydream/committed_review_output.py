@@ -1,8 +1,4 @@
-"""Render and install the sealed committed-review result through its run owner.
-
-The required JSON pairs findings and typed coverage in one atomic installation.
-Presentation has a separate outcome and cannot grant publication authority.
-"""
+"""Render the report and atomically stage its validated findings/coverage bundle."""
 from __future__ import annotations
 
 import html
@@ -28,13 +24,11 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
         f"Run: {_code(payload['run_id'])}; planned work: {_code(payload['planned_work_id'])}.",
         f"Captured head: {_code(revision['head_sha'])}; merge base: {_code(revision['merge_base_sha'])}.",
         f"Captured diff: {_code(revision['diff_key'])}.",
-        'Source correspondence does not independently prove reading, understanding, or executed checks.',
     ]
     if terminal['reason_codes']:
         lines.append('Unfinished work: ' + ', '.join(_code(reason) for reason in terminal['reason_codes']) + '.')
     lines.extend(['', '## Findings', ''])
-    confirmed = [claim for claim in payload['claims'] if claim['disposition'] == 'confirmed']
-    if not confirmed:
+    if not payload['findings']:
         lines.append('No confirmed findings.')
     for disposition, heading in (
         ('confirmed', None), ('unresolved', 'Unresolved concerns'), ('rejected', 'Rejected concerns'),
@@ -44,40 +38,26 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
             lines.extend(['', '## ' + heading, ''])
         for claim in claims:
             semantic = claim['payload']
-            location = _code(semantic['file'])
-            if semantic['line'] is not None:
-                location += ':' + _code(semantic['line'])
+            location = ':'.join(_code(semantic[key]) for key in ('file', 'line') if semantic[key] is not None)
             lines.extend([
                 f"### {claim['id']}. {claim['title']}", '',
-                f"Location: {location}; "
-                f"claim {_code(claim['uid'])}, revision {_code(claim['revision'])}.", '',
-                semantic['claim'], '',
-                '**Trigger:** ' + semantic['trigger'], '',
-                '**Consequence:** ' + semantic['consequence'], '',
-                '**Supporting grounds:** ' + semantic['grounds'],
+                f"Location: {location}.", '',
+                semantic['claim'],
             ])
+            for key, label in (
+                ('trigger', 'Trigger'), ('consequence', 'Consequence'), ('grounds', 'Supporting grounds'),
+            ):
+                lines.extend(['', f'**{label}:** {semantic[key]}'])
             for challenge in claim['challenge_evidence']:
                 lines.extend([
                     '', f"Challenge {_code(challenge['verdict'])} for revision {_code(challenge['revision'])}:", '',
                     challenge['grounds'],
                 ])
-    lines.extend(['', '## Native execution', ''])
-    for execution in payload['execution']:
-        lines.append(
-            f"- {_code(execution['assignment'])}: accepted {_code(execution['accepted'])}; "
-            f"settled {_code(execution['settled'])}; cleanup complete {_code(execution['cleanup_complete'])}."
-        )
-        if execution['reason']:
-            lines.append('  ' + str(execution['reason']))
     return '\n'.join(lines) + '\n'
 
 
 def write_committed_review_output(session: ArtifactSession, payload: dict[str, Any]) -> None:
-    """Install one validated findings/coverage bundle after staging its report.
-
-    The session owns isolation, conflict preservation and final publication.
-    Writing JSON last leaves no successful current bundle if report staging fails.
-    """
+    """Stage the report first; the session owns conflict-safe final publication."""
     validate_committed_result(payload)
     if payload['run_id'] != session.layout.session_id:
         raise ValueError('committed review output differs from its artifact run')

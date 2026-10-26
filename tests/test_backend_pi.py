@@ -712,29 +712,24 @@ def test_public_model_reflects_pi_settings_before_execute(pi_workspace: Path) ->
 
 
 async def test_bound_pi_context_preserves_native_configuration_and_auth_refresh(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    pi_workspace: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Configuration context survives relocation without resolving the native model.
 
     Ordinary settings tests cannot detect binding the CLI to the captured cwd or
     accepting changed run configuration. Authentication must remain refreshable.
     """
-    agent_dir = tmp_path / "pi-agent"
+    agent_dir = pi_workspace / "pi-agent"
     agent_dir.mkdir()
-    settings = agent_dir / "settings.json"
-    settings.write_text(json.dumps({"defaultProvider": "nous", "defaultModel": "global-model",
-                                    "defaultThinkingLevel": "low"}))
-    original = tmp_path / "original"
-    (original / ".pi").mkdir(parents=True)
-    (original / ".pi/settings.json").write_text(json.dumps({"defaultModel": "deepseek/deepseek-v4.1-flash"}))
-    snapshot = tmp_path / "snapshot"
+    settings = pi_workspace / ".pi/settings.json"
+    snapshot = pi_workspace / "snapshot"
     snapshot.mkdir()
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_THINKING", raising=False)
-    backend = PiBackend(cwd=original)
-    identity = backend.bind_review_context(original)
-    assert backend.bind_review_context(original) == identity
+    backend = PiBackend(cwd=pi_workspace)
+    identity = backend.bind_review_context(pi_workspace)
+    assert backend.bind_review_context(pi_workspace) == identity
     assert backend.model == "pi-native"
     monkeypatch.setenv("PI_PROVIDER", "other-provider")
     monkeypatch.setenv("NOUS_API_KEY", "refreshed-loopback-credential")
@@ -742,7 +737,7 @@ async def test_bound_pi_context_preserves_native_configuration_and_auth_refresh(
     args, process = await _run_and_capture_args(backend, cwd=snapshot)
     assert "--model" not in args and "--provider" not in args
     assert "--thinking" not in args
-    assert process.call_args.kwargs["cwd"] == str(original)
+    assert process.call_args.kwargs["cwd"] == str(pi_workspace)
     assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
     assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"
     settings.write_text(json.dumps({"defaultProvider": "another-run"}))

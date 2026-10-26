@@ -122,22 +122,10 @@ system instruction, never a synthetic user turn. Read
 
 ### Committed-review program
 
-The package-level committed-review request/result callable owns assignments,
-semantic claim revisions and fresh challenge as one Review program. It reuses
-native Pi host tools and source selectors directly. Pi's native CLI owns model,
-provider, thinking and authentication resolution in the original configuration
-context; stock read/search tools use the captured source. Each publication claim
-requires counterevidence-seeking challenge in a distinct conversation against
-the original captured source, including confident investigator claims and
-semantic revisions. Substantive rejection evidence and unresolved concerns are
-retained in its sealed result and `committed-review.json` output.
-
-This entry has its own explicit request/result contract and does not invoke
-extension flow steps or stage-aware prompt builders. Extension API 8, private
-stage/cache contract 13, reuse-key format 2 and the existing CLI routes keep their
-current contracts. Route integration belongs to #1679, default cutover to #1641
-after #1686 comparison and owner acceptance, and final retirement to #1687.
-See [committed-review runtime](runtime.md#committed-review-requestresult).
+The [committed-review API](runtime.md#committed-review-requestresult) owns review
+independently of extension flow steps/builders. Existing extension and CLI contracts
+remain unchanged. Route integration is #1679; default cutover is #1641 after #1686
+comparison/owner acceptance; final retirement is #1687.
 
 ### Plan-writer
 

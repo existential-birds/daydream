@@ -63,35 +63,11 @@ result cannot prove cleanup. See
 
 ## Committed-review evidence
 
-The committed-review program records investigation and each fresh challenge as
-separate native invocations through the run's recorder. Original captured source,
-claim UID and semantic revision identify challenge work; a same-conversation
-second look cannot discharge it. Retained challenge verdicts include substantive
-grounds and canonical source references. Missing verdicts and native failures
-remain unfinished work rather than rejection evidence.
-
-Before dispatch, the host records opaque identities for the original native
-configuration inputs. It rejects configuration drift without interpreting or
-merging model settings. The ordinary Pi CLI starts in that original context and
-owns defaults, enabled-model scopes, provider, thinking, trust and authentication
-resolution before its first generation. Explicit phase/environment overrides
-remain explicit native CLI inputs. The extension binds stock read/search tools,
-the model-visible working directory and native AGENTS context to the captured
-source; it does not create another model-selection session or write settings.
-
-The result's `settings.native_contexts` records configuration identities and
-phase associations. Actual generation model/provider/thinking observations
-remain separate trajectory evidence; configuration identities and requested
-overrides alone do not prove which model generated a response. Credentials remain
-outside persisted configuration and public evidence, and native credential refresh
-remains supported.
-
-The sealed result records admission, native settlement and cleanup independently
-for each assignment. A completed process or accepted submission cannot establish
-review completion. Close authority and join or isolate callback/evidence writers
-before freezing the run. Required JSON output, report, trajectory, capture and
-external delivery have separate outcomes; an output failure cannot erase admitted
-findings or make a prior run appear to be the current successful result.
+[Committed reviews](runtime.md#committed-review-requestresult) record discovery and
+fresh challenges as separate native invocations. Claim UID/revision and captured
+source identify challenge evidence. `settings.native_contexts` holds opaque native
+configuration identities and phase associations; actual generation settings remain
+separate trajectory observations. Credentials stay private and refreshable.
 
 ## Codex lifecycle evidence
 

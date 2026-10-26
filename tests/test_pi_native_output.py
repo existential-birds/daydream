@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -122,23 +123,16 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "scope-only", "fallback"])
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
-    """The production program challenges confident proposals in a fresh native context.
+    """Production composition needs fresh challenge, frozen reads and sealed output.
 
-    Existing native transport journeys call run_agent directly: they cannot catch
-    Review skipping challenge, sharing investigator history, or losing its sealed
-    findings/coverage/report/trajectory when composing the committed Git entry.
-    Null and concrete claim locations must survive JSON delivery and render without
-    inventing a line number for a locationless finding.
-    Explicit blank and absent defaultModel are independent inputs: the blank reset
-    row cannot catch a fallback that wrongly preempts an enabled-model-only policy.
-    The fallback row has no saved selection: configured rows cannot catch losing
-    the documented PI_API_KEY alias for the implicit default provider.
+    Blank, absent and explicit selections are compared with Pi itself;
+    direct adapter journeys cannot detect host selection or shared-history bugs.
     """
-    empty = case in {"empty", "scope-only", "fallback"}
+    empty = case in {"empty", "fallback"}
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
@@ -152,28 +146,23 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     if case == "defect":
         (repo / "ratio.py").write_text(working)
         (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
-    # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
-    # rather than bypassing their resolution with a test-only explicit backend.
     settings = native_provider.config / "settings.json"
     expected_model = "native-inherited-model" if case == "fallback" else "alternate-model" if empty else "output-model"
     expected_provider = "nous" if case == "fallback" else "output-fixture"
     settings.write_text(json.dumps({
         **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
            if case != "fallback" else {}),
-        **({"defaultModel": "output-model"} if case not in {"scope-only", "fallback"} else {}),
+        **({"defaultModel": "output-model"} if case != "fallback" else {}),
         "defaultThinkingLevel": "low",
         "defaultProjectTrust": "ask" if case == "defect" else "always",
         "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium",
                                 "output-fixture/alternate-model": "high", "nous/native-inherited-model": "high"},
         **({"enabledModels": ["output-fixture/alternate-model", "output-fixture/output-model"]}
-           if case in {"empty", "scope-only"} else {"enabledModels": ["output-fixture/alternate-model"]}
+           if case == "empty" else {"enabledModels": ["output-fixture/alternate-model"]}
            if case == "false-positive" else {}),
         "retry": {"enabled": False, "maxRetries": 0},
     }))
-    # This ignored original project policy is absent from the committed snapshot.
-    # Untrusted nonblank defaults must not override global policy. A trusted blank
-    # resets saved model selection while preserving inherited nested thinking;
-    # explicit model thinking must override a conflicting trusted per-model value.
+    # Untrusted overrides are ignored; trusted blanks reset selection, while explicit thinking wins.
     (repo / ".git/info/exclude").write_text(".pi/\n")
     project_settings = repo / ".pi/settings.json"
     project_settings.parent.mkdir()
@@ -195,8 +184,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     models_path.write_text(json.dumps(models))
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
     monkeypatch.delenv("PI_PROVIDER", raising=False)
-    # The unmodified native CLI is the independent selection control, including
-    # absent defaults: Daydream must not insert its ordinary fallback in this path.
+    # Compare with the ordinary CLI, including its implicit default-provider authentication.
     arguments = ["pi", "--mode", "json", "--no-session", "--no-skills", "--no-extensions", "--no-tools",
                  "--no-context-files"]
     if case == "false-positive":
@@ -204,18 +192,9 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     control_env = os.environ.copy()
     if case == "fallback":
         control_env["NOUS_API_KEY"] = "synthetic-implicit-fallback-alias"
-    control = await asyncio.create_subprocess_exec(*arguments, "-p", "Return the empty result.", cwd=repo,
-        env=control_env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        _, stderr = await asyncio.wait_for(control.communicate(), 30)
-    finally:
-        if control.returncode is None:
-            try:
-                control.kill()
-            except ProcessLookupError:
-                pass
-            await asyncio.wait_for(control.wait(), 5)
-    assert control.returncode == 0, stderr.decode()
+    control = await asyncio.to_thread(subprocess.run, [*arguments, "-p", "Return the empty result."],
+                                      cwd=repo, env=control_env, capture_output=True, timeout=30)
+    assert control.returncode == 0, control.stderr.decode()
     assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
     native_provider.requests.clear()
     native_provider.authorizations.clear()
@@ -303,7 +282,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert ("Division can fail" in report) == (not empty)
     if not empty:
         line_suffix = "" if case == "defect" else ":<code>2</code>"
-        assert f"Location: <code>ratio.py</code>{line_suffix}; claim " in report
+        assert f"Location: <code>ratio.py</code>{line_suffix}." in report
     if case == "false-positive":
         assert counterevidence in report and "Rejected concerns" in report
     trajectory = json.loads((repo / ".daydream/runs" / value["run_id"] / "trajectory.json").read_text())

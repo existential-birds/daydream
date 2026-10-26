@@ -96,15 +96,8 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
   `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
-- The committed-review callable owns assignments, admitted claim revisions,
-  challenge obligations and derived coverage. Every proposed publication claim
-  needs fresh counterevidence-seeking challenge against captured source in a
-  distinct native context. Semantic revisions renew that obligation; absent or
-  failed verdicts retain unresolved concerns. Pi owns native model, provider,
-  thinking and authentication resolution; the host retains configuration drift
-  identities and explicit phase policy. CLI route/default cutover and
-  remaining flow retirement have separate owners; read
-  [its runtime contract](docs/runtime.md#committed-review-requestresult).
+- Before changing `committed_review*`, read [its runtime contract](docs/runtime.md#committed-review-requestresult)
+  for claim revisions, mandatory fresh challenge, native configuration ownership and sealed output.
 - Keep changing budgets, pacing, and progress state authoritative on the host.
   Do not send orchestration nudges as user messages, including SDK custom messages
   that serialize as user turns. Put stable policy in system/developer instructions;

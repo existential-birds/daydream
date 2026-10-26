@@ -31,51 +31,35 @@ because a failed replacement may preserve an older complete artifact.
 ## Committed-review request/result
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
-is the production package entry. It defaults to native Pi and review-only policy;
-`config` resolves Daydream global/file and `review`/`arbiter` phase overrides before work.
-Pi's CLI starts in the original source's configuration context and resolves its
-model, provider, thinking and authentication before generation. The host passes
-only explicit overrides and records opaque configuration identities to reject
-later settings/model-registry changes; native credential refresh remains live.
-Requested overrides and observed generation settings remain distinct evidence.
-The resolved profile supplies `discovery.generic_fallback` and `arbitration`
-strategies; protected host obligations cannot be disabled by profile prose.
+reviews a captured committed diff through native Pi. It excludes working-tree edits,
+external diff drivers and text conversion; native regular files must match raw Git
+blobs, including under checkout filters/EOL conversion. Plans over 512 assignment
+parts are refused before dispatch.
 
-The package-level committed-review program owns one captured committed change,
-its complete planned targets, admitted semantic claim revisions and challenge
-obligations. This entry supports at most 512 assignment parts; a larger captured
-plan is refused before native dispatch. Native regular files must match raw committed blob identities;
-checkout filters or EOL transforms that change those bytes cause refusal before
-model work. The diff uses exact commit endpoints without working-tree changes,
-external diff drivers or text conversion. It uses native Pi investigation followed by a distinct native
-conversation seeking counterevidence for every proposed publication claim.
-Confidence and investigation completion cannot waive challenge. A changed claim,
-trigger, consequence, location or supporting grounds requires fresh challenge;
-presentation-only title changes preserve the semantic revision.
+Review alone owns planned targets, semantic claim revisions, mandatory challenge
+and derived coverage. Every publication claim receives counterevidence-seeking
+challenge in a distinct native conversation against captured source. Changes to
+claim, trigger, consequence, location or grounds renew that obligation; titles do
+not. Retain confirmed, substantively rejected and unresolved concerns separately.
+Missing/failed challenge is unfinished work. Discovery cannot consume protected
+challenge/finalization allowances. Whole-submission admission rechecks authority,
+revisions and limits before installation; closure precedes cleanup and sealing.
+Cancellation installs interrupted coverage and retained concerns before propagating.
 
-Confirmed findings, substantively rejected concerns with their counterevidence,
-and unresolved concerns remain distinct in the sealed result. Missing or failed
-challenge leaves unfinished work. Discovery cannot consume the protected
-challenge and finalization allowance. Admission validates a complete submission
-before synchronously rechecking authority, revisions and shared limits at install;
-closing authority precedes cleanup and sealing. Accepted work survives later
-native settlement failure. Task cancellation seals and installs interrupted
-coverage and retained concerns under the protected finalization allowance, then
-propagates cancellation to the caller; it does not restore judgments in a later run.
+Pi's CLI resolves model/provider/thinking/trust/authentication in the original
+configuration context; stock read/search tools, model-visible cwd and AGENTS context
+use captured source. Daydream forwards explicit phase/environment overrides and
+rejects drift in opaque configuration identities, while credentials remain live.
+Profile discovery/arbitration strategies cannot disable host obligations.
 
-The run's artifact session installs `committed-review.json` with schema version 1:
-canonical claims and challenge evidence, typed terminal coverage, run ID, captured
-head/base/diff identity and planned-work identity share one atomic JSON write.
-The report is staged before that write. The session owns final publication and
-preserves competing bytes on conflict. Required-output installation, native
-settlement, review completion, capture and external delivery have independent
-outcomes. The existing findings envelope 2 and terminal-result schema 1 retain
-their contracts; this package-level entry does not change CLI routing.
-`CommittedReviewResult.to_dict()` returns a copy of the sealed payload;
-`output_installed` reports public installation, and `capture_state` reports the
-trajectory snapshot independently. Dataset upload/external exports and delivery
-are left to route/consumer integration; explicitly requested unsupported export
-routes fail before model dispatch.
+The run's artifact session stages the report then atomically writes schema-1
+`committed-review.json`: claims/challenge evidence, typed coverage, run/source and
+complete planned-work identity. Prior/competing bytes survive publication failure.
+`CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
+and `capture_state` report installation and trajectory independently. Admission,
+native settlement/cleanup, completeness, output, capture and delivery are separate.
+Explicit unsupported exports fail before dispatch. CLI routing/default cutover and
+external delivery remain separate integration work; existing schemas stay unchanged.
 
 ## Pi host-tool lifetime and limits
 

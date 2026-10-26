@@ -1,8 +1,4 @@
-"""Shared Review obligations using real Git captures and the actual host callback.
-
-Installed-Pi journeys own native history/configuration/transport proof. These
-cases exercise semantic revisions and whole-admission failures once at Review.
-"""
+"""Review admission, revision and failure contracts; native journeys own transport proof."""
 
 from __future__ import annotations
 
@@ -10,18 +6,20 @@ import asyncio
 import hashlib
 import json
 import os
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import clock, git_ops
+from daydream import agent, clock, git_ops, json_utils
 from daydream.backends import MetricsEvent, TextEvent
 from daydream.backends.pi import PiBackend
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
+from daydream.git_ops.source import FrozenSourceRejected
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hunk_index import write_hunk_index
 from daydream.review_budget import ReviewLimits
@@ -31,7 +29,15 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
-from tests.harness.git_helpers import commit, git, seed_feature_branch, work_context
+from tests.harness.git_helpers import (
+    commit,
+    git,
+    init_repo,
+    seed_feature_branch,
+    tracked_source_state,
+    work_context,
+    write_and_stage,
+)
 from tests.harness.trajectory import root_trajectory
 
 
@@ -44,31 +50,21 @@ def review_inputs(tmp_path: Path) -> StageInputFactory:
         + "# unchanged context\n" * 12 + "THIRD = 1\n",
         "caller.py": "VALUE = 1\nOTHER = 1\n",
     }
-    head = seed_feature_branch(
-        repo,
-        base=base_contents,
-        feature={name: contents.replace("= 1", "= 0") for name, contents in base_contents.items()},
-    )
-    base = git(repo, "rev-parse", "main")
-    diff = git_ops.diff(repo, base, head)
-    inputs = tmp_path / "inputs"
-    inputs.mkdir()
-    diff_path = inputs / "diff.patch"
-    diff_path.write_text(diff)
-    index_path = write_hunk_index(inputs, diff)
-    revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(diff.encode()).hexdigest()}
-    return StageInputFactory(
-        PiBackend(model="unexecuted-domain-test"),
-        work_context(repo, run_id="domain"),
-        StackAssignment("committed", sorted(base_contents)),
-        diff_path=diff_path,
-        hunk_index_path=index_path,
-        shared_paths={},
-        revision=revision,
-        artifact_session=None,
-        allow_standalone=True,
-        read_only=True,
-    )
+    seed_feature_branch(repo, base=base_contents,
+                        feature={name: contents.replace("= 1", "= 0") for name, contents in base_contents.items()})
+    return _inputs(repo, tmp_path / "inputs", sorted(base_contents))
+
+
+def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) -> StageInputFactory:
+    root.mkdir()
+    base, head = git(repo, "rev-parse", "main"), git(repo, "rev-parse", "HEAD")
+    patch = patch if patch is not None else git_ops.diff(repo, base, head)
+    diff_path = root / "diff.patch"
+    diff_path.write_text(patch)
+    revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(patch.encode()).hexdigest()}
+    return StageInputFactory(PiBackend(model="unexecuted-domain-test"), work_context(repo, run_id="domain"),
+        StackAssignment("committed", files), diff_path=diff_path, hunk_index_path=write_hunk_index(root, patch),
+        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
 
 
 def _selectors(inputs: StageInputFactory, file: str = "api.py") -> list[dict[str, Any]]:
@@ -78,37 +74,33 @@ def _selectors(inputs: StageInputFactory, file: str = "api.py") -> list[dict[str
 
 
 def _proposal(inputs: StageInputFactory) -> dict[str, Any]:
-    return {
-        "uid": "",
-        "revision": 0,
-        "source_uids": [],
-        "title": "Zero breaks the caller",
-        "payload": {
-            "claim": "The new zero reaches a divisor.",
-            "trigger": "The caller divides by VALUE.",
-            "consequence": "A request fails.",
-            "grounds": "The changed assignment feeds the caller.",
-            "file": "api.py",
-            "line": 1,
-            "evidence_refs": _selectors(inputs),
-        },
-    }
+    return {"uid": "", "revision": 0, "source_uids": [], "title": "Zero breaks the caller", "payload": {
+        "claim": "The new zero reaches a divisor.", "trigger": "The caller divides by VALUE.",
+        "consequence": "A request fails.", "grounds": "The changed assignment feeds the caller.",
+        "file": "api.py", "line": 1, "evidence_refs": _selectors(inputs)}}
 
 
 def _discovery(inputs: StageInputFactory) -> dict[str, Any]:
-    return {
-        "targets": [
-            {
-                "target_id": part["target_id"],
-                "status": "reviewed",
-                "reason": "Captured change inspected.",
-                "evidence_refs": _selectors(inputs, part["file"]),
-            }
-            for batch in inputs.assignment_batches
-            for part in batch
-        ],
-        "claims": [_proposal(inputs)],
-    }
+    return {"targets": [
+        {"target_id": part["target_id"], "status": "reviewed", "reason": "Captured change inspected.",
+         "evidence_refs": _selectors(inputs, part["file"])}
+        for batch in inputs.assignment_batches for part in batch
+    ], "claims": [_proposal(inputs)]}
+
+
+def _verdict(inputs: StageInputFactory, claim: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    return {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+            "grounds": "Original source corroborates the trigger after counterevidence search.",
+            "evidence_refs": _selectors(inputs), **fields}
+
+
+def _forge_completion(value: dict[str, Any]) -> None:
+    terminal = value["terminal_result"]
+    terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
+    terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
+    terminal.update(analysis_state="complete", pipeline_state="completed", reason_codes=[],
+                    completed_stacks=["committed"], uncovered_stacks=[])
+    validate_terminal_result(terminal)
 
 
 async def _submit(review: Review, kind: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -126,11 +118,7 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
     review_inputs: StageInputFactory,
     change: str,
 ) -> None:
-    """A verdict cannot clear changed meaning; first-pass/triage tests have no revisions.
-
-    Each canonical semantic field is independently protected against accidental
-    omission from applicability. Title-only formatting retains the same verdict.
-    """
+    """Each semantic field renews challenge; legacy phase tests have no revision authority."""
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     previous = review.pending()[0]
@@ -149,13 +137,7 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
         revised["payload"]["evidence_refs"][0]["source_range"] = {"start": 1, "end": 1}
     else:
         revised["payload"][change] += " New source-supported meaning."
-    verdict = {
-        "uid": previous["uid"],
-        "revision": 1,
-        "verdict": "confirmed",
-        "grounds": "The original claim survives counterevidence search.",
-        "evidence_refs": _selectors(review_inputs),
-    }
+    verdict = _verdict(review_inputs, previous)
     await _submit(review, "challenge", {"verdicts": [verdict], "claims": [revised]})
     if change == "title":
         assert review.pending() == []
@@ -178,13 +160,8 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
                     stale_binding.admit("stale", "structured_output", stale, terminal=True)
                     stale_binding.submit("stale", stale)
             assert review.pending() == pending
-        rejection = {
-            **verdict,
-            "uid": pending[0]["uid"],
-            "revision": pending[0]["revision"],
-            "verdict": "rejected",
-            "grounds": "The captured caller guards zero before division.",
-        }
+        rejection = _verdict(review_inputs, pending[0], verdict="rejected",
+                             grounds="The captured caller guards zero before division.")
         await _submit(review, "challenge", {"verdicts": [rejection], "claims": []})
         value = review.seal({})
         rejected = next(c for c in value["claims"] if c["uid"] == pending[0]["uid"])
@@ -209,14 +186,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     prior = review.pending()
-    verdict = {
-        "uid": prior[0]["uid"],
-        "revision": 1,
-        "verdict": "confirmed",
-        "grounds": "Counterevidence checked.",
-        "evidence_refs": _selectors(review_inputs),
-    }
-    update = {"verdicts": [verdict], "claims": [_proposal(review_inputs)]}
+    update = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": [_proposal(review_inputs)]}
     if fault == "shared-capacity":
         compact = _proposal(review_inputs)
         for key in ("claim", "trigger", "consequence", "grounds"):
@@ -260,7 +230,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 @pytest.mark.parametrize(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled",
-        "too-many-assignments", "hub-export",
+        "report-stage", "bundle-stage", "too-many-assignments", "hub-export",
     ]
 )
 async def test_program_retains_work_and_reserves_challenge_after_discovery(
@@ -270,22 +240,14 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     request: pytest.FixtureRequest,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The actual program owns failure retention and fixed later-work reservations.
+    """Real host/Git/output/recorder composition preserves work across execution failures.
 
-    This scripts only the external execution boundary and calls the real host
-    admission, Git workspace, recorder and output owners. Installed native tests
-    own transport accounting/history; old flow tests never enter this program.
-    Cancellation is a distinct BaseException exit: accepted concerns, recorded
-    usage and interrupted coverage must survive artifact-session teardown.
-    Unsupported plan/export requests must refuse before native work; domain
-    admission cases cannot catch a billable dispatch of an unrepresentable plan.
-    The successful journey also uses a valid pipeline-only profile: default-profile
-    journeys cannot detect missing per-stage strategy fallback.
-    A real locked-worktree removal must warn without replacing a successful result
-    or caller cancellation; ordinary cleanup never exercises that Git failure.
+    Distinct rows cover cancellation usage, protected allowances, pre-dispatch
+    refusals, pipeline-only strategy fallback, and real locked-worktree cleanup.
+    Native journeys separately own transport/history/accounting.
     """
-    from daydream import agent
-
+    output_failure = challenge in {"output-install", "report-stage", "bundle-stage"}
+    injected = staging_output = False
     dispatches: list[dict[str, Any]] = []
     challenge_started = asyncio.Event()
     bindings: list[HostToolBinding] = []
@@ -327,49 +289,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                     ))
                     challenge_started.set()
                     await asyncio.Event().wait()
-            selectors = {
-                part["target_id"]: [
-                    {
-                        "source_id": next(ref["source_id"] for ref in part["source_options"] if ref["side"] == "new"),
-                        "basis": "supplied_diff",
-                        "source_range": None,
-                    }
-                ]
-                for part in assignment["assignments"]
-            }
             if assignment["kind"] == "discovery":
-                proposal = _proposal(review_inputs)
-                proposal["payload"]["evidence_refs"] = selectors["api.py"]
-                value = {
-                    "targets": [
-                        {
-                            "target_id": key,
-                            "status": "reviewed",
-                            "reason": "Original source inspected.",
-                            "evidence_refs": refs,
-                        }
-                        for key, refs in selectors.items()
-                    ],
-                    "claims": [proposal],
-                }
+                value = _discovery(review_inputs)
                 for number in range(kwargs["tool_call_budget"] - 1):
                     binding.admit(f"read-{number}", "read", {})
             else:
-                concern = assignment["claims"][0]
-                value = {
-                    "verdicts": []
-                    if challenge == "missing"
-                    else [
-                        {
-                            "uid": concern["uid"],
-                            "revision": concern["revision"],
-                            "verdict": "confirmed",
-                            "grounds": "Original source corroborates the trigger after counterevidence search.",
-                            "evidence_refs": selectors["api.py"],
-                        }
-                    ],
-                    "claims": [],
-                }
+                value = {"verdicts": [] if challenge == "missing" else [
+                    _verdict(review_inputs, assignment["claims"][0])], "claims": []}
             binding.admit("terminal", "structured_output", value, terminal=True)
             accepted = binding.submit("terminal", value)
             kwargs["investigation_budget"].observed_tool_starts += binding.calls
@@ -398,11 +324,34 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         real_link = os.link
 
         def fail_output_install(source: Any, destination: Any, **kwargs: Any) -> None:
+            nonlocal injected
             if Path(destination) == repo / ".review-output.md":
+                injected = True
                 raise OSError("new current report cannot install")
             real_link(source, destination, **kwargs)
 
         monkeypatch.setattr(os, "link", fail_output_install)
+    if challenge in {"report-stage", "bundle-stage"}:
+        stage, allocate = json_utils._stage_bytes, tempfile.mkstemp
+        target = ".review-output.md" if challenge == "report-stage" else "committed-review.json"
+
+        def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            nonlocal staging_output
+            staging_output = path.name == target
+            try:
+                return stage(path, content, **kwargs)
+            finally:
+                staging_output = False
+
+        def fail_allocation(*args: Any, **kwargs: Any) -> tuple[int, str]:
+            nonlocal injected
+            if staging_output:
+                injected = True
+                raise OSError("committed output staging failed")
+            return allocate(*args, **kwargs)
+
+        monkeypatch.setattr(json_utils, "_stage_bytes", observe_stage)
+        monkeypatch.setattr(tempfile, "mkstemp", fail_allocation)
     review_request = CommittedReviewRequest(
         repo,
         review_inputs.revision["merge_base_sha"],
@@ -470,7 +419,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         len(decision["evidence_refs"]) == 1
         for scope in value["terminal_result"]["stack_outcomes"] for decision in scope["target_decisions"]
     )
-    assert result.output_installed is (challenge != "output-install")
+    assert result.output_installed is (not output_failure)
     assert result.capture_state == "complete"
     if challenge == "exhausted":
         assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
@@ -488,9 +437,10 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert value["settings"]["strategies"]["challenge"] == defaults["arbitration"].content.replace(
             "{arbiter_input_path}", "the captured-source claim inventory below"
         )
-    if challenge == "output-install":
-        assert result.output_error is not None
+    if output_failure:
+        assert injected and result.output_error is not None
         assert not (repo / ".daydream/committed-review.json").exists()
+        assert not (repo / ".review-output.md").exists()
         assert value["terminal_result"]["run_id"] == value["run_id"]
         assert value["analyzed_revision"]["head_sha"] == review_inputs.revision["head_sha"]
     assert value["claims"] and [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
@@ -501,9 +451,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     complete = challenge == "exhausted"
     assert result.complete is complete
     assert value["terminal_result"]["analysis_state"] == (
-        "complete" if challenge in {"exhausted", "output-install"} else "incomplete"
+        "complete" if challenge == "exhausted" or output_failure else "incomplete"
     )
-    confirmed = challenge in {"exhausted", "accepted-then-failed", "output-install"}
+    confirmed = challenge in {"exhausted", "accepted-then-failed"} or output_failure
     assert len(value["findings"]) == int(confirmed)
     assert value["claims"][0]["disposition"] == ("confirmed" if confirmed else "unresolved")
     assert value["execution"][0]["accepted"]
@@ -513,14 +463,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         corrupted = deepcopy(value)
         corrupted["execution"][1]["settled"] = True
         assert corrupted["execution"][1]["reason"] == "backend_failure"
-        terminal = corrupted["terminal_result"]
-        terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
-        terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
-        terminal.update(
-            analysis_state="complete", pipeline_state="completed", reason_codes=[],
-            completed_stacks=["committed"], uncovered_stacks=[],
-        )
-        validate_terminal_result(terminal)
+        _forge_completion(corrupted)
         with pytest.raises(ValueError, match="native execution"):
             validate_committed_result(corrupted)
 
@@ -530,22 +473,11 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
     review_inputs: StageInputFactory,
     corruption: str,
 ) -> None:
-    """Persisted new-core output needs its own source/revision/plan validation.
-
-    Existing terminal schema tests have no semantic claim/challenge records or
-    complete assignment identity, so they cannot reject these forged envelopes.
-    Valid typed coverage cannot replace missing native execution evidence.
-    """
+    """Typed coverage alone cannot prove claim, source, plan or native-execution identity."""
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     concern = review.pending()[0]
-    verdict = {
-        "uid": concern["uid"],
-        "revision": 1,
-        "verdict": "confirmed",
-        "grounds": "The original source corroborates this trigger.",
-        "evidence_refs": _selectors(review_inputs),
-    }
+    verdict = _verdict(review_inputs, concern)
     await _submit(review, "challenge", {"verdicts": [verdict], "claims": []})
     value = review.seal({})
     if corruption == "wrong-source":
@@ -561,14 +493,79 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         assert terminal["analysis_state"] == "incomplete"
         assert terminal["reason_codes"] == ["evidence_incomplete"]
         assert value["findings"][0]["uid"] == concern["uid"]
-        terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
-        terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
-        terminal.update(
-            analysis_state="complete", pipeline_state="completed", reason_codes=[],
-            completed_stacks=["committed"], uncovered_stacks=[],
-        )
         assert value["execution"] == []
-        validate_terminal_result(terminal)
+        _forge_completion(value)
     value["findings"] = deepcopy(value["claims"])
     with pytest.raises(ValueError):
         validate_committed_result(value)
+
+
+async def test_committed_review_refuses_clean_checkout_with_transformed_native_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clean Git status can hide changed native bytes; refuse before model dispatch."""
+    repo = tmp_path / "source"
+    init_repo(repo)
+    git(repo, "config", "filter.review.clean", "sed 's/NATIVE/CANONICAL/g'")
+    git(repo, "config", "filter.review.smudge", "sed 's/CANONICAL/NATIVE/g'")
+    write_and_stage(repo, ".gitattributes", "*.py filter=review\n")
+    write_and_stage(repo, "api.py", "VALUE = 'CANONICAL base'\n")
+    base = commit(repo, "base")
+    write_and_stage(repo, "api.py", "VALUE = 'CANONICAL head'\n")
+    head = commit(repo, "change")
+
+    # Git's own clean-status check accepts the transformed worktree. That is
+    # precisely why status cannot stand in for raw blob/native byte coherence.
+    control = tmp_path / "transformed-control"
+    git_ops.worktree_add(repo, control, head, detach=True)
+    try:
+        assert git(control, "status", "--porcelain") == ""
+        assert (control / "api.py").read_bytes() == b"VALUE = 'NATIVE head'\n"
+        assert git(control, "show", f"{head}:api.py") == "VALUE = 'CANONICAL head'"
+    finally:
+        git_ops.worktree_remove(repo, control, force=True)
+
+    (repo / "api.py").write_bytes(b"VALUE = 'DIRTY_USER_BYTES'\n")
+    original = tracked_source_state(repo)
+    original_worktrees = git(repo, "worktree", "list", "--porcelain")
+
+    async def unexpected_dispatch(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("incoherent source reached model dispatch")
+
+    monkeypatch.setattr(agent, "run_agent", unexpected_dispatch)
+    with pytest.raises(FrozenSourceRejected, match="api.py.*differs.*captured Git blob"):
+        await run_committed_review(CommittedReviewRequest(repo, base))
+    assert tracked_source_state(repo) == original
+    assert git(repo, "worktree", "list", "--porcelain") == original_worktrees
+
+
+def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp_path: Path) -> None:
+    """Local diff drivers, colour and prefixes cannot erase raw text or metadata assignments."""
+    repo = tmp_path / "source"
+    init_repo(repo)
+    write_and_stage(repo, ".gitattributes", "*.py diff=review\n")
+    write_and_stage(repo, "api.py", "VALUE = 'base'\n")
+    write_and_stage(repo, "data.bin", b"\0base\n")
+    write_and_stage(repo, "mode.sh", "#!/bin/sh\n")
+    base = commit(repo, "base")
+    write_and_stage(repo, "api.py", "VALUE = 'head'\n")
+    write_and_stage(repo, "data.bin", b"\0head\n")
+    git(repo, "update-index", "--chmod=+x", "mode.sh")
+    head = commit(repo, "change")
+    (repo / "api.py").write_text("VALUE = 'dirty'\n")
+    git(repo, "config", "diff.review.textconv", "echo DRIVER_OUTPUT")
+    git(repo, "config", "diff.external", "false")
+    git(repo, "config", "diff.noprefix", "true")
+    git(repo, "config", "color.diff", "always")
+
+    patch = git_ops.committed_diff(repo, base, head)
+
+    inputs = _inputs(repo, tmp_path / "captured", ["api.py", "data.bin", "mode.sh"], patch)
+    for assignment in (part for batch in inputs.assignment_batches for part in batch if part["file"] != "api.py"):
+        [ref] = assignment["source_refs"]
+        assert ref["side"] == "diff" and ref["fragment"]["bytes"] > 0
+    assert "-VALUE = 'base'" in patch
+    assert "+VALUE = 'head'" in patch
+    assert "dirty" not in patch and "DRIVER_OUTPUT" not in patch
+    assert "Binary files a/data.bin and b/data.bin differ" in patch
+    assert "old mode 100644\nnew mode 100755" in patch

@@ -1,13 +1,9 @@
-"""Canonical claims and the sealed committed-review contract.
-
-Semantic payloads identify a claim revision. Titles are presentation; neither a
-native receipt nor a previous revision's verdict grants publication authority.
-"""
+"""Canonical claims, revision-sensitive challenge evidence and sealed output."""
 
 from __future__ import annotations
 
 import hashlib
-from copy import deepcopy
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,118 +24,74 @@ _ID = {"type": "string", "maxLength": 512}
 COMMITTED_ASSIGNMENT_LIMIT = 512
 
 
-def claim_schema(*, selectors: bool) -> dict[str, Any]:
-    return strict_object(
-        {
-            "uid": _ID,
-            "revision": {"type": "integer", "minimum": 0},
-            "source_uids": {"type": "array", "maxItems": 128, "uniqueItems": True, "items": _ID},
-            "title": _TEXT,
-            "payload": strict_object(
-                {
-                    **{key: _TEXT for key in ("claim", "trigger", "consequence", "grounds", "file")},
-                    "line": {"type": ["integer", "null"], "minimum": 1},
-                    "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
-                }
-            ),
-        }
+def _array(items: dict[str, Any], limit: int = 128, **constraints: Any) -> dict[str, Any]:
+    return {"type": "array", "maxItems": limit, "items": items, **constraints}
+
+
+def _claim_schema(*, selectors: bool) -> dict[str, Any]:
+    return strict_object({
+        "uid": _ID,
+        "revision": {"type": "integer", "minimum": 0},
+        "source_uids": _array(_ID, uniqueItems=True),
+        "title": _TEXT,
+        "payload": strict_object({
+            **{key: _TEXT for key in ("claim", "trigger", "consequence", "grounds", "file")},
+            "line": {"type": ["integer", "null"], "minimum": 1},
+            "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
+        }),
+    })
+
+
+def assignment_schema(kind: str, *, selectors: bool, retained: bool = False) -> dict[str, Any]:
+    """Use the same assignment shape for model selectors and canonical host output."""
+    fields: dict[str, Any] = (
+        {"target_id": _ID, "status": {"enum": ["reviewed", "not_reviewed"]},
+         "reason": {"type": "string", "maxLength": 4096}}
+        if kind == "discovery" else
+        {"uid": _ID, "revision": {"type": "integer", "minimum": 1},
+         "verdict": {"enum": ["confirmed", "rejected", "unresolved"]}, "grounds": _TEXT}
     )
-
-
-def discovery_schema(*, selectors: bool) -> dict[str, Any]:
-    return strict_object(
-        {
-            "targets": {
-                "type": "array",
-                "maxItems": COMMITTED_ASSIGNMENT_LIMIT,
-                "items": strict_object(
-                    {
-                        "target_id": _ID,
-                        "status": {"enum": ["reviewed", "not_reviewed"]},
-                        "reason": {"type": "string", "maxLength": 4096},
-                        "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
-                    }
-                ),
-            },
-            "claims": {"type": "array", "maxItems": 128, "items": claim_schema(selectors=selectors)},
-        }
-    )
-
-
-def challenge_schema(*, selectors: bool) -> dict[str, Any]:
-    return strict_object(
-        {
-            "verdicts": {
-                "type": "array",
-                "maxItems": 128,
-                "items": strict_object(
-                    {
-                        "uid": _ID,
-                        "revision": {"type": "integer", "minimum": 1},
-                        "verdict": {"enum": ["confirmed", "rejected", "unresolved"]},
-                        "grounds": _TEXT,
-                        "evidence_refs": SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA,
-                    }
-                ),
-            },
-            "claims": {"type": "array", "maxItems": 128, "items": claim_schema(selectors=selectors)},
-        }
-    )
-
-
-def semantic_revision(payload: dict[str, Any]) -> str:
-    """All canonical semantic fields participate; presentation is outside this hash."""
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    fields["evidence_refs"] = SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA
+    return strict_object({
+        "targets" if kind == "discovery" else "verdicts": _array(
+            strict_object(fields), COMMITTED_ASSIGNMENT_LIMIT if kind == "discovery" else 128),
+        "claims": _array(_RECORD_SCHEMA if retained else _claim_schema(selectors=selectors)),
+    })
 
 
 def planned_work_id(revision: dict[str, Any], assignments: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical_json({"revision": revision, "assignments": assignments}).encode()).hexdigest()
 
 
-_RECORD_SCHEMA = claim_schema(selectors=False)
-_RECORD_SCHEMA["properties"].update(
-    {
-        "item_uid": _ID,
-        "id": {"type": "integer", "minimum": 1},
-        "disposition": {"enum": ["confirmed", "rejected", "unresolved"]},
-        "challenge_evidence": challenge_schema(selectors=False)["properties"]["verdicts"],
-    }
-)
-_RECORD_SCHEMA["required"] = list(_RECORD_SCHEMA["properties"])
-COMMITTED_RESULT_SCHEMA = strict_object(
-    {
-        "schema_version": {"const": 1},
-        "run_id": _TEXT,
-        "analyzed_revision": TERMINAL_RESULT_SCHEMA["properties"]["analyzed_revision"],
-        "planned_work_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "assignments": {
-            "type": "array",
-            "maxItems": COMMITTED_ASSIGNMENT_LIMIT,
-            "items": {
-                "type": "object",
-                "required": ["target_id", "file", "source_refs"],
-                "properties": {
-                    "target_id": _ID, "file": _TEXT,
-                    "source_refs": {"type": "array", "minItems": 1, "items": SOURCE_REF_SCHEMA},
-                },
-            },
+_RECORD_SCHEMA = strict_object({
+    **_claim_schema(selectors=False)["properties"],
+    "item_uid": _ID,
+    "id": {"type": "integer", "minimum": 1},
+    "disposition": {"enum": ["confirmed", "rejected", "unresolved"]},
+    "challenge_evidence": assignment_schema("challenge", selectors=False)["properties"]["verdicts"],
+})
+COMMITTED_RESULT_SCHEMA = strict_object({
+    "schema_version": {"const": 1},
+    "run_id": _TEXT,
+    "analyzed_revision": TERMINAL_RESULT_SCHEMA["properties"]["analyzed_revision"],
+    "planned_work_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "assignments": _array({
+        "type": "object",
+        "required": ["target_id", "file", "source_refs"],
+        "properties": {
+            "target_id": _ID, "file": _TEXT,
+            "source_refs": {"type": "array", "minItems": 1, "items": SOURCE_REF_SCHEMA},
         },
-        "claims": {"type": "array", "maxItems": 128, "items": _RECORD_SCHEMA},
-        "findings": {"type": "array", "maxItems": 128, "items": _RECORD_SCHEMA},
-        "terminal_result": TERMINAL_RESULT_SCHEMA,
-        "settings": {"type": "object"},
-        "execution": {
-            "type": "array",
-            "items": strict_object(
-                {
-                    "assignment": _TEXT,
-                    **{key: {"type": "boolean"} for key in ("accepted", "settled", "cleanup_complete")},
-                    "reason": {"enum": [None, *[reason.value for reason in ReasonCode]]},
-                }
-            ),
-        },
-    }
-)
+    }, COMMITTED_ASSIGNMENT_LIMIT),
+    **{key: _array(_RECORD_SCHEMA) for key in ("claims", "findings")},
+    "terminal_result": TERMINAL_RESULT_SCHEMA,
+    "settings": {"type": "object"},
+    "execution": {"type": "array", "items": strict_object({
+        "assignment": _TEXT,
+        **{key: {"type": "boolean"} for key in ("accepted", "settled", "cleanup_complete")},
+        "reason": {"enum": [None, *[reason.value for reason in ReasonCode]]},
+    })},
+})
 
 
 def validate_committed_result(value: dict[str, Any]) -> None:
@@ -249,9 +201,8 @@ class CommittedReviewResult:
     output_error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        import json
-
-        return deepcopy(json.loads(self.json_text))
+        value: dict[str, Any] = json.loads(self.json_text)
+        return value
 
     @property
     def complete(self) -> bool:

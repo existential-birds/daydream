@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 from pathlib import Path, PurePosixPath
 
 from daydream.git_ops import process, queries
 from daydream.git_ops.models import GitError
+from daydream.repository_paths import git_observed_path_is_confined
 
 
 class FrozenSourceRejected(GitError):
@@ -38,13 +38,7 @@ def committed_diff(repo: Path, base_sha: str, head_sha: str) -> str:
 
 
 def validate_committed_worktree(repo: Path, revision: str) -> None:
-    """Refuse native regular-file reads that would differ from captured Git blobs.
-
-    A clean index/status is insufficient: reversible checkout filters and EOL
-    conversion can leave different native bytes while Git reports no changes.
-    Symlinks and gitlinks retain their nonregular identity; this validation does
-    not grant them regular-file source authority.
-    """
+    """Reject native bytes changed by checkout transforms, even in a clean index."""
     _validate_commit(repo, revision)
     tree = process._run_git(
         repo, ["ls-tree", "-r", "-z", revision], capture_bytes=True,
@@ -61,19 +55,8 @@ def validate_committed_worktree(repo: Path, revision: str) -> None:
         if mode not in {b"100644", b"100755"} or kind != b"blob":
             raise FrozenSourceRejected("committed source inventory has unsupported entry metadata")
         path = os.fsdecode(raw_path)
-        relative = PurePosixPath(path)
-        if relative.is_absolute() or ".." in relative.parts or not path:
-            raise FrozenSourceRejected("committed source inventory has an invalid path")
-        current = repo
-        try:
-            for index, part in enumerate(relative.parts):
-                current /= part
-                mode_bits = current.lstat().st_mode
-                expected = stat.S_ISREG if index == len(relative.parts) - 1 else stat.S_ISDIR
-                if not expected(mode_bits):
-                    raise FrozenSourceRejected(f"committed source {path!r} is not a native regular file")
-        except OSError as exc:
-            raise FrozenSourceRejected(f"committed source {path!r} is unavailable in the captured worktree") from exc
+        if not git_observed_path_is_confined(repo, path) or not (repo / path).is_file():
+            raise FrozenSourceRejected(f"committed source {path!r} is not a native regular file")
         regular.append((path, oid))
     # Bound argv size/count and never invoke a clean filter or write an object.
     for offset in range(0, len(regular), 32):
