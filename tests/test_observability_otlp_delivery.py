@@ -369,12 +369,24 @@ def test_grpc_scheme_precedence_over_insecure_variable(monkeypatch: pytest.Monke
 # ------------------------------------------------------------------ shared lifecycle
 
 def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch) -> None:
-    with scripted_otlp_collector([ScriptedResponse()]) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
+    with otlp_collector() as receiver:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url + "/otlp-prefix")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        exporter.shutdown()
+        try:
+            assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+            assert len(receiver.spans) == 1
+            assert receiver.requests[-1]["path"] == "/otlp-prefix/v1/traces"
+            # Reach into the transport seam the shutdown contract owns.
+            transport = exporter._transport
+            assert isinstance(transport, HttpxOtlpTransport)
+            client = transport._client
+            assert client is not None
+        finally:
+            exporter.shutdown()
+        assert client.is_closed
+        assert transport._state == "CLOSED"
         exporter.shutdown()  # idempotent, no error
+        assert transport._state == "CLOSED"
         assert exporter.export(_spans()) == SpanExportResult.FAILURE  # CLOSED refuses sends
         assert len(receiver.requests) == 1
 
@@ -396,28 +408,3 @@ def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.Mon
             assert "OTLP_RETRY_BUDGET_EXHAUSTED" in snapshot["diagnostics"]
         finally:
             exporter.shutdown()
-
-def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url + "/otlp-prefix")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        exporter.export(_spans())
-        assert receiver.requests[-1]["path"] == "/otlp-prefix/v1/traces"
-        exporter.shutdown()
-
-def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.MonkeyPatch) -> None:
-    with otlp_collector() as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        exporter.export(_spans())
-        assert len(receiver.spans) == 1
-        # Reach into the transport seam the shutdown contract owns.
-        transport = exporter._transport
-        assert isinstance(transport, HttpxOtlpTransport)
-        client = transport._client
-        assert client is not None
-        exporter.shutdown()
-        assert client.is_closed
-        # Exactly-once shutdown stays exactly-once even when the client is gone.
-        exporter.shutdown()
-        assert transport._state == "CLOSED"
