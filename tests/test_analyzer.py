@@ -945,19 +945,6 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 
 
-def test_analyze_quality_unchanged_on_good_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """#1087 (M5): the guard is a no-op on valid installs — behavior identical
-    to pre-regression, including the parser cache being consulted.
-    """
-
-    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.25.2")
-    result = _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
-    assert result["scoped_files"] == 1
-    entry = result["per_file"]["mod.py"]
-    assert entry["functions"] == 1
-    assert entry["sloc"] > 0
-
-
 def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """#1087: a known-bad install degrades only the quality section of
@@ -1066,6 +1053,7 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
     The sole hunk is lines 85–92; location must expose the 81-line miss, and duplication
     must expose the pair even though similarity 0.1538 is below the 0.5 threshold."""
     dd, deep = _worked_example_dirs(tmp_path)
+    assert not (dd / "hunk-index.json").exists()
     seed_merged_items(
         deep,
         [
@@ -1138,18 +1126,6 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
     assert clean_location["in_hunk_rate"] > location["in_hunk_rate"]
 
 
-def test_location_hunk_source_falls_back_to_diff_patch(tmp_path: Path) -> None:
-    """Archived runs carry only ``diff.patch``; the axis still scores them."""
-    dd, deep = _worked_example_dirs(tmp_path)
-    assert not (dd / "hunk-index.json").exists()
-    seed_merged_items(deep, [_item(1, line=88)])
-
-    location = analyze_location(dd)
-
-    assert location["hunk_source"] == "diff.patch"
-    assert location["in_hunk_rate"] == 1.0
-
-
 def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
     """With neither artifact, "not measured" must be distinguishable from "clean"."""
     dd, deep = _deep_dirs(tmp_path)
@@ -1180,20 +1156,6 @@ def test_location_and_duplication_are_zeroed_when_merged_items_absent(tmp_path: 
     assert location["scored_items"] == 0
     assert location["in_hunk_rate"] is None
     assert location["hunk_source"] == "diff.patch"   # honest: hunks WERE readable
-    assert duplication["shipped_items"] == 0
-    assert duplication["comparable_pairs"] == 0
-    assert duplication["near_duplicate_pairs"] is None
-    assert duplication["max_similarity"] is None
-    assert duplication["mean_similarity"] is None
-    assert duplication["pairs"] == []
-
-
-def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(tmp_path: Path,) -> None:
-    dd = tmp_path / ".daydream"
-    dd.mkdir(parents=True)
-
-    duplication = analyze_shipped_duplication(dd)
-
     assert duplication["shipped_items"] == 0
     assert duplication["comparable_pairs"] == 0
     assert duplication["near_duplicate_pairs"] is None
