@@ -66,6 +66,16 @@ def test_run_label_appends_human_history_and_refuses_ambiguous_prefix(
     assert {(r["role"], r["run_id"], r["author"], r["payload"]["label"]) for r in history
             if r["role"] != "automatic"} == {
         ("rater", "run-first", "alice", "accepted"), ("rater", "run-first", "alice", "unknown")}
+    assert cli_main([
+        "corpus", "label", "run-second", "--store", str(store.root), "--author", "bob", "--outcome", "contested",
+    ]) == 0
+    assert "No prior label for run-second." in capsys.readouterr().out
+    updated_history = store.read_records()["observations"]
+    assert len(updated_history) == 5
+    assert [(r["role"], r["run_id"], r["author"], r["payload"]["label"], r["semantic_evidence"]["outcome"])
+            for r in updated_history if r["run_id"] == "run-second"] == [
+        ("rater", "run-second", "bob", "contested", "contested")]
+    assert tuple(r for r in updated_history if r["run_id"] == "run-first") == history
 
 
 def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -1482,6 +1482,12 @@ def test_strict_enumeration_raises_where_soft_fails(tmp_path: Path) -> None:
     assert "untracked.txt" in git_ops.list_untracked(repo, strict=True)
 
 
+def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
+    target = tmp_path / "nope"
+    with pytest.raises(git_ops.GitError, match="git clone .* failed"):
+        git_ops.clone("file:///nonexistent/repo.git", target)
+
+
 @pytest.mark.parametrize(
     ("blobless", "expected_flags"), [(True, ["--filter=blob:none", "--no-local"]), (False, [])],
     ids=["blobless_passes_filter_flag", "default_no_filter_flag"],
