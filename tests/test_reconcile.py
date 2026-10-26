@@ -40,7 +40,7 @@ def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Trust and partition the complete fetched population, including human-controlled marker text."""
-    a, b, c, d, e, forged_thread, forged_review = (letter * 64 for letter in "abcdefg")
+    a, b, c, d, e, forged_thread, forged_review = (letter * 64 for letter in "abcdef0")
     resolved = _thread("RT_RESOLVED", comment_node_id="C_RESOLVED", database_id=3,
                        body=finding_marker(c), viewer_did_author=True)
     resolved["isResolved"] = True
