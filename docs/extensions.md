@@ -120,6 +120,13 @@ evidence remain compatible. Budgets/reserves remain host policy; feedback is
 system instruction, never a synthetic user turn. Read
 [output selection](../daydream/agent_output.py) and the relevant backend.
 
+### Committed-review program
+
+The [committed-review API](runtime.md#committed-review-requestresult) owns review
+independently of extension flow steps/builders. Existing extension and CLI contracts
+remain unchanged. Route integration is #1679; default cutover is #1641 after #1686
+comparison/owner acceptance; final retirement is #1687.
+
 ### Plan-writer
 
 `verification_commands` stays `Sequence[str]`; typed command evidence is in

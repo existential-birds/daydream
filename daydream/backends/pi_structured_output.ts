@@ -1,8 +1,9 @@
 /** Attempt-local exact-schema final submission for the packaged Pi provider. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
   const packetPath = process.env.DAYDREAM_PI_OUTPUT_PACKET;
   delete process.env.DAYDREAM_PI_OUTPUT_PACKET;
   if (!packetPath) throw new Error("Output packet unavailable");
@@ -16,6 +17,35 @@ export default function (pi: ExtensionAPI) {
     closeSync(fd);
   }
   if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Output packet unavailable");
+  if ("source_root" in packet) {
+    let sourceReady = false;
+    // Pi catches extension load errors; an incomplete binding must not leave its
+    // original-checkout tools active for a captured-source review.
+    pi.on("input", () => {
+      if (sourceReady) return { action: "continue" as const };
+      process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed" }) + "\n");
+      return { action: "handled" as const };
+    });
+    if (typeof packet.source_root !== "string" || !isAbsolute(packet.source_root)) {
+      throw new Error("Captured source root unavailable");
+    }
+    const sdk = await import("@earendil-works/pi-coding-agent");
+    const contextFiles = sdk.loadProjectContextFiles({ cwd: packet.source_root, agentDir: sdk.getAgentDir() });
+    pi.on("session_start", () => {
+      for (const tool of sdk.createReadOnlyTools(packet.source_root, {
+        read: { autoResizeImages: pi.getSettings().images?.autoResize ?? true },
+      })) pi.registerTool({ ...tool,
+        // AgentTool's public four-argument API retains the factory's source cwd;
+        // forwarding ExtensionToolContext would replace it with the session cwd.
+        execute: (id, args, signal, onUpdate) => tool.execute(id, args, signal, onUpdate),
+      });
+      sourceReady = true;
+    });
+    pi.on("before_agent_start", event => {
+      event.systemPromptOptions.cwd = packet.source_root;
+      event.systemPromptOptions.contextFiles = contextFiles;
+    });
+  }
   if (packet.host_tools) {
     // The paired helper owns the active-schema handshake. A missing or broken
     // helper cannot silently turn a required host admission into serialization.

@@ -456,12 +456,18 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
     assert result_events[0].continuation is None
 
 
-async def test_pi_api_key_never_enters_process_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("bound", [False, True])
+async def test_pi_api_key_never_enters_process_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool,
+) -> None:
     sentinel = "synthetic-pi-api-key-sentinel"
     monkeypatch.setenv("PI_PROVIDER", "zai")
     monkeypatch.setenv("PI_API_KEY", sentinel)
     monkeypatch.setenv("PI_THINKING", "medium")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     backend = PiBackend(model="glm-5.2")
+    if bound:
+        backend.bind_review_context(tmp_path)
     flat_args, mock_exec = await _run_and_capture_args(backend)
     assert flat_args[flat_args.index("--provider") + 1] == "zai"
     assert sentinel not in flat_args
@@ -703,6 +709,42 @@ async def test_default_model_does_not_override_pi_settings(pi_workspace: Path, m
 def test_public_model_reflects_pi_settings_before_execute(pi_workspace: Path) -> None:
     backend = PiBackend(cwd=pi_workspace)
     assert backend.model == "gpt-5.6-luna"
+
+
+async def test_bound_pi_context_preserves_native_configuration_and_auth_refresh(
+    pi_workspace: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuration context survives relocation without resolving the native model.
+
+    Ordinary settings tests cannot detect binding the CLI to the captured cwd or
+    accepting changed run configuration. Authentication must remain refreshable.
+    """
+    agent_dir = pi_workspace / "pi-agent"
+    agent_dir.mkdir()
+    settings = pi_workspace / ".pi/settings.json"
+    snapshot = pi_workspace / "snapshot"
+    snapshot.mkdir()
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent_dir))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.delenv("PI_THINKING", raising=False)
+    backend = PiBackend(cwd=pi_workspace)
+    identity = backend.bind_review_context(pi_workspace)
+    assert backend.bind_review_context(pi_workspace) == identity
+    assert backend.model == "pi-native"
+    monkeypatch.setenv("PI_PROVIDER", "other-provider")
+    monkeypatch.setenv("NOUS_API_KEY", "refreshed-loopback-credential")
+    (agent_dir / "auth.json").write_text('{"refreshed": true}')
+    args, process = await _run_and_capture_args(backend, cwd=snapshot)
+    assert "--model" not in args and "--provider" not in args
+    assert "--thinking" not in args
+    assert process.call_args.kwargs["cwd"] == str(pi_workspace)
+    assert process.call_args.kwargs["env"]["PI_CODING_AGENT_DIR"] == str(agent_dir)
+    assert process.call_args.kwargs["env"]["NOUS_API_KEY"] == "refreshed-loopback-credential"
+    settings.write_text(json.dumps({"defaultProvider": "another-run"}))
+    with pytest.raises(PiError, match="start a new run"):
+        async for _ in backend.execute(snapshot, "Review captured source"):
+            pass
+
 
 async def test_explicit_model_overrides_pi_settings(pi_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)

@@ -1,10 +1,12 @@
 # daydream/backends/pi.py
 """Translate pi --mode json (@earendil-works/pi-coding-agent) into AgentEvent.
 
-Respect Pi's project/global defaultModel. Without one, use DEFAULT_PI_MODEL
+Ordinary calls respect Pi's project/global defaultModel. Without one, use DEFAULT_PI_MODEL
 with the nous provider; explicit model and PI_PROVIDER/API_KEY/THINKING
 remain overrides. Provider endpoints and credentials belong to Pi's registry
 and auth files under ~/.pi/agent; Daydream never writes a models.json override.
+Bound reviews let the actual Pi CLI resolve native defaults in the original
+configuration context while its stock read/search tools use captured source.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, ExitStack
+from dataclasses import dataclass
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -162,6 +165,22 @@ def _configured_pi_model(
         if model:
             return model
     return None
+
+
+@dataclass(frozen=True)
+class _PiReviewContext:
+    source: Path
+    agent_dir: Path
+    provider: str | None
+    thinking: str | None
+    inputs: tuple[tuple[Path, str | None], ...]
+
+
+def _selection_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
 
 
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
@@ -569,6 +588,7 @@ class PiBackend:
         self._model_override = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
+        self._review_context: _PiReviewContext | None = None
         # ``.model`` must be resolved at construction (runner/recorder read it
         # before execute); cache the settings lookup so execute() need not
         # re-read settings.json for the same workspace.
@@ -599,6 +619,43 @@ class PiBackend:
             self.retry_base_delay_s = _pi_retry_base_delay()
             self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
+
+    def bind_review_context(self, original_source: Path) -> dict[str, object]:
+        """Bind native configuration context without resolving its model selection.
+
+        Pi starts in the original project; stock tools and context files bind to
+        execute's captured source. Configuration drift requires a new run, while
+        native authentication remains live. The returned identity is opaque.
+        """
+        if self._review_context is not None:
+            self._check_review_context()
+            return self._context_identity(self._review_context)
+        environment = self._execution_input.child_environment() if self._execution_input else os.environ.copy()
+        agent_dir = (self._execution_input.pi_agent_dir if self._execution_input else None) or Path(
+            environment.get("PI_CODING_AGENT_DIR", str(Path(environment.get("HOME", str(Path.home()))) / ".pi/agent"))
+        )
+        original_source = original_source.resolve(strict=True)
+        if not agent_dir.is_absolute():
+            agent_dir = original_source / agent_dir
+        inputs = (original_source / ".pi/settings.json", *(agent_dir / name
+                  for name in ("settings.json", "models.json", "trust.json")))
+        self._review_context = _PiReviewContext(
+            original_source, agent_dir, environment.get("PI_PROVIDER") or None,
+            self.reasoning_effort or environment.get("PI_THINKING"),
+            tuple((path, _selection_digest(path)) for path in inputs),
+        )
+        self.model = self._model_override or "pi-native"
+        return self._context_identity(self._review_context)
+
+    @staticmethod
+    def _context_identity(context: _PiReviewContext) -> dict[str, object]:
+        identity = json.dumps([(str(path), digest) for path, digest in context.inputs]).encode()
+        return {"configuration_identity": hashlib.sha256(identity).hexdigest()}
+
+    def _check_review_context(self) -> None:
+        context = self._review_context
+        if context is not None and any(_selection_digest(path) != digest for path, digest in context.inputs):
+            raise PiError("Pi configuration changed after review binding; start a new run", category="AUTH_CONFIG")
 
     async def _require_host_tools_version(self, cwd: Path, environment: dict[str, str],
                                          binding: HostToolBinding) -> None:
@@ -696,8 +753,11 @@ class PiBackend:
                                 tool_call_budget=(host_tools.calls + tool_call_budget)
                                 if tool_call_budget is not None else None)
 
+        review_context = self._review_context
+        self._check_review_context()
+        process_cwd = review_context.source if review_context is not None else cwd
         configured_model = None
-        if self._model_override is None:
+        if self._model_override is None and review_context is None:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
@@ -709,15 +769,17 @@ class PiBackend:
                         else _AMBIENT_AGENT_DIR
                     ),
                 )
-        self.model = self._model_override if self._model_override is not None else configured_model or DEFAULT_PI_MODEL
-        if self._model_override is not None or configured_model is None:
+        self.model = self._model_override or ("pi-native" if review_context else configured_model or DEFAULT_PI_MODEL)
+        if self._model_override is not None or (review_context is None and configured_model is None):
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
             if self._execution_input is not None
             else os.environ.get("PI_PROVIDER")
         )
-        if provider is None and configured_model is None:
+        if review_context is not None:
+            provider = review_context.provider
+        if review_context is None and provider is None and configured_model is None:
             provider = _PI_DEFAULT_PROVIDER
             if self._model_override is not None and self.model.casefold().startswith("glm-"):
                 _warn_migration_mismatch_once(
@@ -732,7 +794,7 @@ class PiBackend:
                     _PI_DEFAULT_PROVIDER,
                 )
         elif (
-            self._model_override is None and configured_model is None
+            review_context is None and self._model_override is None and configured_model is None
             and provider and provider != _PI_DEFAULT_PROVIDER
         ):
             _warn_migration_mismatch_once(
@@ -760,6 +822,10 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
+        if review_context is not None:
+            thinking = review_context.thinking
+            child_env["PI_CODING_AGENT_DIR"] = str(review_context.agent_dir)
+            args.append("--no-context-files")
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:
@@ -769,13 +835,14 @@ class PiBackend:
 
         child_env.pop("PI_API_KEY", None)
         if api_key:
-            native_key_name = _PI_PROVIDER_API_KEY_ENV.get(provider.casefold()) if provider else None
+            api_key_provider = (provider or _PI_DEFAULT_PROVIDER) if review_context else provider
+            native_key_name = _PI_PROVIDER_API_KEY_ENV.get(api_key_provider.casefold()) if api_key_provider else None
             if native_key_name is None:
                 logger.warning(
                     "PI_API_KEY could not be mapped to a native credential "
                     "environment variable for provider %r and is being ignored. "
                     "Set the provider's native credential variable directly.",
-                    provider,
+                    api_key_provider,
                 )
             else:
                 child_env[native_key_name] = api_key
@@ -983,7 +1050,7 @@ class PiBackend:
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,
-            model_name=self.model,
+            model_name=self._model_override if review_context else self.model,
             provider_name=provider,
             session_id=effective_session_id,
             reasoning_effort=thinking,
@@ -1003,9 +1070,9 @@ class PiBackend:
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
-                no_extensions=read_only and (native_output or host_tools is not None),
+                no_extensions=read_only and (native_output or host_tools is not None or review_context is not None),
             ),
-            model_source="configured",
+            model_source=None if review_context and self._model_override is None else "configured",
             provider_source="configured" if provider is not None else None,
             session_source="host_generated" if resume_id is None else "configured",
         )
@@ -1016,10 +1083,12 @@ class PiBackend:
             extensions: list[tuple[str, str, dict[str, Any]]] = []
             if host_tools is not None:
                 host_server = await attachments.enter_async_context(host_tools.session())
-                await self._require_host_tools_version(cwd, child_env, host_tools)
+                await self._require_host_tools_version(process_cwd, child_env, host_tools)
                 extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
-            if native_output:
-                packet: dict[str, Any] = {"output_schema": output_schema}
+            if native_output or review_context is not None:
+                packet: dict[str, Any] = {"output_schema": output_schema} if native_output else {}
+                if review_context is not None:
+                    packet["source_root"] = str(cwd)
                 if host_server is not None:
                     packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:
@@ -1030,7 +1099,7 @@ class PiBackend:
                 extensions.append(("DAYDREAM_PI_OUTPUT_PACKET", "pi_structured_output.ts", packet))
             for variable in ("DAYDREAM_PI_HOST_PACKET", "DAYDREAM_PI_OUTPUT_PACKET"):
                 child_env.pop(variable, None)
-            if read_only and (native_output or host_tools is not None):
+            if read_only and (native_output or host_tools is not None or review_context is not None):
                 args.append("--no-extensions")
             for variable, resource, packet in extensions:
                 child_env[variable] = str(_write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments))
@@ -1044,6 +1113,7 @@ class PiBackend:
                 # size-independent transport as the user prompt.
                 index = args.index("--append-system-prompt") + 1
                 args[index] = str(_write_prompt_attachment(system_prompt, attachments))
+            self._check_review_context()
             transport = CliTransport(
                 "pi",
                 args,
@@ -1052,7 +1122,7 @@ class PiBackend:
                 stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
-                cwd=str(cwd),
+                cwd=str(process_cwd),
                 spawn_pending=lifecycle.spawn_pending if lifecycle is not None else None,
                 spawn_completed=lifecycle.spawn_completed if lifecycle is not None else None,
                 raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,

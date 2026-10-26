@@ -19,6 +19,20 @@ current branch and retry normally, or report the blocker. Sign commits and stage
 only related paths explicitly. A commit or push is complete only after the
 normal hook-enabled command succeeds.
 
+## Implementation standard (mandatory)
+
+Build the smallest cohesive implementation that satisfies the required behavior.
+Reuse fitting owners, validators and fixtures; consolidate duplicate logic and
+remove superseded code as part of implementation. Add an abstraction only when it
+simplifies callers or enforces a distinct contract.
+
+Before committing or requesting review, inspect the full base-to-head PR diff,
+including tests, docs and support files. Remove redundant plumbing, repeated setup
+and duplicated prose while preserving independent behavior and failure-path proof.
+Keep each documented rule in one authoritative home and link to it elsewhere.
+Simplicity is part of completion. PR descriptions should explain final behavior
+and validation, with routine cleanup and implementation history left out of the summary.
+
 ## Validation
 
 ```bash
@@ -68,6 +82,7 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 | `flows/`, `extensions/` | Ordered/gated flow execution and the per-run extension registry |
 | `deep/`, `improve/` | Flow assembly and domain steps; `deep/state.py` validates the shared `FlowContext.data` mapping |
 | `agent.py`, `agent_output.py`, `agent_retry.py` | Backend lifecycle/budgets, host result selection/validation, retry policy |
+| `committed_review*` | Explicit committed-review request/result, semantic claim revisions, mandatory fresh challenge and sealed output |
 | `backends/` | Native transport and the common `Backend` / `AgentEvent` contract |
 | `trajectory/`, `observability/` | Recorded evidence, generation billing ownership, and per-run tracing |
 | `artifact_visibility.py`, `artifacts/`, `workspace.py` | Private artifact ownership, finalization/recovery, and operational worktrees |
@@ -95,6 +110,8 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
   `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
+- Before changing `committed_review*`, read [its runtime contract](docs/runtime.md#committed-review-requestresult)
+  for claim revisions, mandatory fresh challenge, native configuration ownership and sealed output.
 - Keep changing budgets, pacing, and progress state authoritative on the host.
   Do not send orchestration nudges as user messages, including SDK custom messages
   that serialize as user turns. Put stable policy in system/developer instructions;

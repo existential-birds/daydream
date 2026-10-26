@@ -753,31 +753,6 @@ def _emit_diagram_findings(
     )
 
 
-def _emit_findings_from_items(
-    target_dir: Path,
-    config: RunConfig,
-    items: list[dict[str, Any]],
-    *,
-    diagrams: dict[str, Any] | None = None,
-    review_warnings: tuple[str, ...] = (),
-    run_info: str,
-    renderers: "pr_review.ReviewRenderers",
-    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    captured_pr: "pr_review.PRInfo",
-    terminal_result: dict[str, Any],
-    snapshot_diff: str,
-    review_context: dict[str, Any] | None = None,
-) -> int:
-    """Write canonical review items; grounded diagrams ride along for Phase B rendering."""
-    parsed = pr_review.parsed_issues_from_items(items)
-    return _write_findings_for_parsed(
-        target_dir, config, parsed, diagrams=diagrams, auth=auth,
-        run_info=run_info, renderers=renderers, review_warnings=review_warnings,
-        captured_pr=captured_pr, terminal_result=terminal_result, snapshot_diff=snapshot_diff,
-        review_context=review_context,
-    )
-
-
 def _write_findings_for_parsed(
     target_dir: Path,
     config: RunConfig,

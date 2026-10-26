@@ -138,6 +138,10 @@ from daydream.git_ops.queries import (
 )
 from daydream.git_ops.repository import resolve_github_repository as resolve_github_repository
 from daydream.git_ops.snapshot import prepare_independent_snapshot as prepare_independent_snapshot
+from daydream.git_ops.source import (
+    committed_diff as committed_diff,
+    validate_committed_worktree as validate_committed_worktree,
+)
 from daydream.git_ops.state import (
     build_recommended_patch_strict as build_recommended_patch_strict,
     copy_worktree_paths as copy_worktree_paths,

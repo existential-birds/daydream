@@ -28,10 +28,47 @@ publication target. A moved PR head fails before export. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
 because a failed replacement may preserve an older complete artifact.
 
+## Committed-review request/result
+
+`daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
+reviews a captured committed diff through native Pi. It excludes working-tree edits,
+external diff drivers and text conversion; native regular files must match raw Git
+blobs, including under checkout filters/EOL conversion. Plans over 512 assignment
+parts are refused before dispatch.
+
+Review alone owns planned targets, semantic claim revisions, mandatory challenge
+and derived coverage. Every publication claim receives counterevidence-seeking
+challenge in a distinct native conversation against captured source. Changes to
+claim, trigger, consequence, location or grounds renew that obligation; titles do
+not. Retain confirmed, substantively rejected and unresolved concerns separately.
+Missing/failed challenge is unfinished work. Discovery cannot consume protected
+challenge/finalization allowances. Whole-submission admission rechecks authority,
+revisions and limits before installation; closure precedes cleanup and sealing.
+Cancellation installs interrupted coverage and retained concerns before propagating.
+
+Pi's CLI resolves model/provider/thinking/trust/authentication in the original
+configuration context; stock read/search tools, model-visible cwd and AGENTS context
+use captured source. Daydream forwards explicit phase/environment overrides and
+rejects drift in opaque configuration identities, while credentials remain live.
+Profile discovery/arbitration strategies cannot disable host obligations.
+
+The run's artifact session stages the report then atomically writes schema-1
+`committed-review.json`: claims/challenge evidence, typed coverage, run/source and
+complete planned-work identity. Prior/competing bytes survive publication failure.
+`CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
+and `capture_state` report installation and trajectory independently. Admission,
+native settlement/cleanup, completeness, output, capture and delivery are separate.
+Explicit unsupported exports fail before dispatch. CLI routing/default cutover and
+external delivery remain separate integration work; existing schemas stay unchanged.
+
 ## Pi host-tool lifetime and limits
 
-Pi keeps its stock read/search tools, offsets and pagination. Existing private
-artifact/sanctioned-input owners furnish frozen diff parts and source context.
+Pi keeps its stock read/search tools, offsets and pagination. Committed reviews
+bind those tools, the model-visible working directory and native AGENTS context
+to the captured source while native configuration and its trust policy remain
+rooted in the original source.
+Existing private artifact/sanctioned-input owners furnish frozen diff parts and
+source context.
 Models select assigned source IDs or supporting path/side/LF ranges; the host
 constructs canonical `evidence_refs` from the full assignment inventory and pinned
 regular Git blobs. Exact continuation fragments retain their null source ranges.

@@ -14,7 +14,7 @@ from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_bytes, atomic_write_json
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
-from daydream.pr_review import PRInfo, resolve_review_renderers
+from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.review_budget import render_review_warnings, review_warnings
 from daydream.review_result import ReasonCode
@@ -64,7 +64,7 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
 
 def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = False) -> int:
     """Freeze validated coverage and findings once, without dispatching a model."""
-    from daydream.runner import _emit_findings_from_items
+    from daydream.runner import _write_findings_for_parsed
 
     state = DeepState(ctx.data)
     coverage = state.review_coverage
@@ -136,8 +136,8 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
     if info.diagnostic is not None:
         print_warning(console, info.diagnostic)
-    return _emit_findings_from_items(
-        ctx.work.repo, ctx.config, items, run_info=info.markdown,
+    return _write_findings_for_parsed(
+        ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
         review_warnings=review_warnings(state.dd), renderers=resolve_review_renderers(ctx.registry),
         diagrams=(state.diagrams or {}).get("payload"), auth=ctx.github_execution.auth,
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],

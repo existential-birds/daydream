@@ -61,6 +61,14 @@ A successful callback cannot establish native settlement; suppressing a late
 result cannot prove cleanup. See
 [the lifetime contract](runtime.md#pi-host-tool-lifetime-and-limits).
 
+## Committed-review evidence
+
+[Committed reviews](runtime.md#committed-review-requestresult) record discovery and
+fresh challenges as separate native invocations. Claim UID/revision and captured
+source identify challenge evidence. `settings.native_contexts` holds opaque native
+configuration identities and phase associations; actual generation settings remain
+separate trajectory observations. Credentials stay private and refreshable.
+
 ## Codex lifecycle evidence
 
 Success requires the latest public turn's completion, stdout EOF, and an
