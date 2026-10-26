@@ -16,6 +16,17 @@ export default function (pi: ExtensionAPI) {
     closeSync(fd);
   }
   if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Output packet unavailable");
+  if (packet.native_thinking_settings) {
+    // Resolve inherited policy against Pi's selected model, preserving native
+    // provider inference and capability clamping in a relocated review snapshot.
+    pi.on("input", (_event, ctx) => {
+      if (ctx.model) {
+        const settings = packet.native_thinking_settings;
+        const perModel = settings.modelThinkingLevels?.[`${ctx.model.provider}/${ctx.model.id}`];
+        pi.setThinkingLevel(perModel || settings.defaultThinkingLevel || "medium");
+      }
+    });
+  }
   if (packet.host_tools) {
     // The paired helper owns the active-schema handshake. A missing or broken
     // helper cannot silently turn a required host admission into serialization.

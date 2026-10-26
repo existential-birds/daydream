@@ -141,8 +141,27 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     # Exercise configured native defaults through the original PI_CODING_AGENT_DIR,
     # rather than bypassing their resolution with a test-only explicit backend.
     settings = native_provider.config / "settings.json"
-    settings.write_text(json.dumps({"defaultProvider": "output-fixture", "defaultModel": "output-model",
-                                    "defaultThinkingLevel": "off", "retry": {"enabled": False, "maxRetries": 0}}))
+    settings.write_text(json.dumps({
+        **({"defaultProvider": "output-fixture"} if case == "defect" else {}),
+        "defaultModel": "output-model", "defaultThinkingLevel": "low",
+        "modelThinkingLevels": {"output-fixture/output-model": "high" if case == "defect" else "medium"},
+        "retry": {"enabled": False, "maxRetries": 0},
+    }))
+    # This ignored original project policy is absent from the committed snapshot.
+    # Known-provider discovery preserves a nested inherited entry; inferred-provider
+    # discovery must apply this project's per-model override after native selection.
+    (repo / ".git/info/exclude").write_text(".pi/\n")
+    project_settings = repo / ".pi/settings.json"
+    project_settings.parent.mkdir()
+    project_settings.write_text(json.dumps({"modelThinkingLevels": (
+        {"unrelated-provider/model": "off"} if case == "defect" else {
+            "output-fixture/output-model": "low" if case == "false-positive" else "high"}
+    )}))
+    models_path = native_provider.config / "models.json"
+    models = json.loads(models_path.read_text())
+    models["providers"]["output-fixture"]["models"][0]["reasoning"] = True
+    models_path.write_text(json.dumps(models))
+    config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     assignments_seen: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = {}
@@ -188,7 +207,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
 
     native_provider.choose = choose
     result = await run_committed_review(CommittedReviewRequest(
-        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False,
+                                    model="output-model:high" if case == "false-positive" else None),
         limits=ReviewLimits(90, 12, 12)))
     assert result.complete and result.output_installed and result.capture_state == "complete"
     value = result.to_dict()
@@ -201,6 +221,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
     assert len(native_provider.requests) == 2 * len(expected_kinds)
     assert all(request["model"] == "output-model" for request in native_provider.requests)
+    assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
     if case != "empty":
         assert not any(message["role"] in {"assistant", "tool"} for message in histories["challenge"])
         assert "discovery-read" not in json.dumps(histories["challenge"])
@@ -235,6 +256,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
                for execution in value["execution"])
     assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
+    assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 
 async def test_native_stock_pagination_and_corrected_source_submission_are_admitted_once(

@@ -168,8 +168,10 @@ def _configured_pi_model(
 @dataclass(frozen=True)
 class _PiSelection:
     model: str
-    provider: str
-    thinking: str
+    provider: str | None
+    thinking: str | None
+    model_thinking: bool
+    thinking_settings: dict[str, Any] | None
     agent_dir: Path
     inputs: tuple[tuple[Path, str | None], ...]
 
@@ -618,12 +620,13 @@ class PiBackend:
             self.retry_max_delay_s = _pi_retry_max_delay()
         self._transports: list[CliTransport] = []
 
-    def freeze_selection(self, cwd: Path) -> dict[str, str]:
-        """Pin native selection for one review while leaving credential refresh live.
+    def freeze_selection(self, cwd: Path) -> dict[str, str | None]:
+        """Freeze native configuration inputs while leaving registry inference/auth live.
 
         Ordinary callers continue to defer to native settings. Committed reviews
-        resolve project/global defaults before creating their snapshot, pass exact
-        native flags thereafter, and require a new run when configuration changes.
+        resolve project/global inputs before creating their snapshot and require a
+        new run when configuration changes. Native Pi still resolves ambiguous model
+        references and per-model thinking against the model it actually selects.
         Requested selection is not evidence that the native provider honored it.
         """
         if self._frozen_selection is not None:
@@ -634,7 +637,7 @@ class PiBackend:
             environment.get("PI_CODING_AGENT_DIR", str(Path(environment.get("HOME", str(Path.home()))) / ".pi/agent"))
         )
         settings_paths = (cwd / ".pi/settings.json", agent_dir / "settings.json")
-        settings: dict[str, str] = {}
+        settings: dict[str, Any] = {}
         inputs: list[tuple[Path, str | None]] = []
         for path in reversed(settings_paths):
             try:
@@ -649,26 +652,41 @@ class PiBackend:
                 continue
             if not isinstance(value, dict):
                 continue
-            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel"):
-                item = value.get(key)
-                if isinstance(item, str) and item.strip():
-                    settings[key] = item.strip()
-        self.model = self._model_override or settings.get("defaultModel") or DEFAULT_PI_MODEL
+            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel", "modelThinkingLevels"):
+                if key not in value:
+                    continue
+                item = value[key]
+                if key == "modelThinkingLevels" and isinstance(item, dict) and isinstance(settings.get(key), dict):
+                    settings[key] = {**settings[key], **item}
+                else:
+                    settings[key] = item
+        configured = settings.get("defaultModel")
+        configured = configured.strip() if isinstance(configured, str) and configured.strip() else None
+        self.model = self._model_override or configured or DEFAULT_PI_MODEL
         _, separator, model_thinking = (self._model_override or "").rpartition(":")
         if not separator or model_thinking not in {"off", "minimal", "low", "medium", "high", "xhigh", "max"}:
             model_thinking = ""
+        provider = environment.get("PI_PROVIDER") or settings.get("defaultProvider")
+        provider = provider.strip() if isinstance(provider, str) and provider.strip() else None
+        if provider is None and self._model_override is None and configured is None:
+            provider = _PI_DEFAULT_PROVIDER
+        thinking = self.reasoning_effort or environment.get("PI_THINKING")
+        thinking_from_model = not thinking and bool(model_thinking)
         self._frozen_selection = _PiSelection(
             self.model,
-            environment.get("PI_PROVIDER") or settings.get("defaultProvider") or _PI_DEFAULT_PROVIDER,
-            self.reasoning_effort or environment.get("PI_THINKING") or model_thinking
-            or settings.get("defaultThinkingLevel") or "medium",
+            provider,
+            thinking or model_thinking or None,
+            thinking_from_model,
+            None if thinking or model_thinking else {
+                key: settings[key] for key in ("defaultThinkingLevel", "modelThinkingLevels") if key in settings
+            },
             agent_dir,
             (*inputs, (agent_dir / "models.json", _selection_digest(agent_dir / "models.json"))),
         )
         return self._selection_metadata(self._frozen_selection)
 
     @staticmethod
-    def _selection_metadata(selection: _PiSelection) -> dict[str, str]:
+    def _selection_metadata(selection: _PiSelection) -> dict[str, str | None]:
         return {"requested_model": selection.model, "requested_provider": selection.provider,
                 "requested_thinking": selection.thinking}
 
@@ -845,7 +863,7 @@ class PiBackend:
         )
         if self._frozen_selection is not None:
             selection = self._frozen_selection
-            thinking = selection.thinking
+            thinking = None if selection.model_thinking else selection.thinking
             child_env["PI_CODING_AGENT_DIR"] = str(selection.agent_dir)
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
@@ -1107,6 +1125,8 @@ class PiBackend:
                 extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
             if native_output:
                 packet: dict[str, Any] = {"output_schema": output_schema}
+                if self._frozen_selection is not None and self._frozen_selection.thinking_settings is not None:
+                    packet["native_thinking_settings"] = self._frozen_selection.thinking_settings
                 if host_server is not None:
                     packet["host_tools"] = host_server.packet()
                 if tool_call_budget is not None:

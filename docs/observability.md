@@ -70,6 +70,16 @@ second look cannot discharge it. Retained challenge verdicts include substantive
 grounds and canonical source references. Missing verdicts and native failures
 remain unfinished work rather than rejection evidence.
 
+Native configuration inputs are frozen before dispatch, including the merged
+original project/global per-model thinking policy. An unconfigured provider stays
+unset so Pi can infer it from its registry; requested provider/thinking metadata
+is null where native selection remains authoritative. After Pi selects the model,
+the packaged extension applies inherited thinking through Pi's session-only setter,
+which preserves per-model precedence and native capability clamping without writing
+settings. Explicit phase/environment overrides and model thinking suffixes retain
+their native precedence. Actual generation model/provider observations remain
+separate evidence from requested inputs; frozen configuration alone proves neither.
+
 The sealed result records admission, native settlement and cleanup independently
 for each assignment. A completed process or accepted submission cannot establish
 review completion. Close authority and join or isolate callback/evidence writers
