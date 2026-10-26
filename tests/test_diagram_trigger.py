@@ -149,24 +149,6 @@ def _decide(
 
 # --- Sequence eligibility ---------------------------------------------------
 
-def test_cross_module_rule_fires_on_a_real_import_edge(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "def run(x):\n    return x + 1\n",
-        "core/util.py": "def util(x):\n    return x\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    eligibility = _decide(repo, changed, ranges)
-
-    assert eligibility.code_files == ["api/handler.py", "core/engine.py", "core/util.py"]
-    assert eligibility.modules == {"api/handler.py": "api", "core/engine.py": "core", "core/util.py": "core"}
-    assert eligibility.cross_module_edges == 1
-    assert eligibility.sequence.eligible
-    assert eligibility.sequence.rule == "cross-module"
-    assert "2 modules" in eligibility.sequence.reason
-    assert eligibility.eligible_kinds() == ["sequence"]
-
 def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> None:
     """Two services and no import edge still qualify: HTTP boundaries have no edge."""
     repo = tmp_path / "repo"
@@ -191,6 +173,7 @@ def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> Non
     assert eligibility.modules == {"services/a/main.py": "services/a", "services/b/main.py": "services/b"}
     assert eligibility.sequence.rule == "cross-service"
     assert "2 services (a, b)" in eligibility.sequence.reason
+    assert eligibility.eligible_kinds() == ["sequence"]
 
 def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -253,16 +236,6 @@ def test_sharded_stack_names_classify_like_unsharded_ones(tmp_path: Path) -> Non
     changed, ranges = _diff_repo(repo, {}, {"api/a.py": "def a():\n    return 1\n"})
     sharded = [StackAssignment(stack_name="python#2", files=["api/a.py"])]
     assert _decide(repo, changed, ranges, stacks=sharded).code_files == ["api/a.py"]
-
-def test_cross_module_edges_are_counted_per_direction(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    head = {
-        "api/a.py": "from core.b import b\n\n\ndef a():\n    return b()\n",
-        "core/b.py": "from api.a import a\n\n\ndef b():\n    return a\n",
-        "core/c.py": "def c():\n    return 3\n",
-    }
-    changed, ranges = _diff_repo(repo, {}, head)
-    assert _decide(repo, changed, ranges).cross_module_edges == 2
 
 
 # --- Flowchart eligibility and branch counting ------------------------------
@@ -479,7 +452,7 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
-        "core/engine.py": "def run(x):\n    return x\n",
+        "core/engine.py": "from api.handler import handle\n\n\ndef run(x):\n    return x\n",
         "core/util.py": PYTHON_SOURCE,
     }
     changed, ranges = _diff_repo(repo, {}, head)
@@ -491,6 +464,13 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
         "code_files", "modules", "services", "cross_module_edges", "function_branch_counts", "candidate_roots",
         "sequence", "flowchart", "thresholds", "force",
     }
+    assert payload["code_files"] == ["api/handler.py", "core/engine.py", "core/util.py"]
+    assert payload["modules"] == {"api/handler.py": "api", "core/engine.py": "core", "core/util.py": "core"}
+    assert payload["cross_module_edges"] == 2
+    assert payload["sequence"]["eligible"] is True
+    assert payload["sequence"]["rule"] == "cross-module"
+    assert "2 modules" in payload["sequence"]["reason"]
+    assert eligibility.eligible_kinds() == ["sequence", "flowchart"]
     assert set(payload["sequence"]) == {"eligible", "rule", "reason"}
     assert payload["thresholds"] == {"min_code_files": 3, "min_modules": 2, "min_branch_points": 3}
     assert payload["candidate_roots"][0] == {
