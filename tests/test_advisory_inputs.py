@@ -33,30 +33,34 @@ def _write(path: Path, size: int) -> Path:
 def _inline_backend() -> SimpleNamespace:
     return SimpleNamespace(read_only_disposable_clone=True, model="fake")
 
-@pytest.mark.parametrize('allowance', [12 * 1024, 64 * 1024])
-def test_admitted_set_fits_capture_order_when_a_bigger_label_sorts_first(tmp_path: Path, allowance: int) -> None:
+@pytest.mark.parametrize('staged_review,allowance', [(False, 12 * 1024), (True, 64 * 1024)])
+def test_admitted_set_fits_capture_order_when_a_bigger_label_sorts_first(
+    tmp_path: Path, staged_review: bool, allowance: int,
+) -> None:
     # "1-large" sorts before "9-small", so the selector's declared order and the
     # capture routine's sorted order disagree. Both fit the emitted inline budget.
     large = _write(tmp_path / "large.md", allowance - 2_000)
     small = _write(tmp_path / "small.md", 190)
     selection = select_advisory_inputs(
         _inline_backend(), tmp_path, [AdvisoryCandidate("9-small", small), AdvisoryCandidate("1-large", large)],
-        read_only=True, inline_max_bytes=allowance,
+        read_only=True, staged_review=staged_review,
     )
     prepared = prepare_sanctioned_inputs(_inline_backend(), tmp_path, selection.selected_paths(), read_only=True,
-                                         inline_max_bytes=allowance)
+                                         staged_review=staged_review)
     assert [item.label for item in prepared.inputs] == ["1-large", "9-small"]
     assert len(prepared.render().encode()) <= allowance
     assert selection.allowance_bytes == allowance
 
-@pytest.mark.parametrize('allowance', [12 * 1024, 64 * 1024])
-def test_selected_candidate_that_grows_before_capture_still_fails_closed(tmp_path: Path, allowance: int) -> None:
+@pytest.mark.parametrize('staged_review,allowance', [(False, 12 * 1024), (True, 64 * 1024)])
+def test_selected_candidate_that_grows_before_capture_still_fails_closed(
+    tmp_path: Path, staged_review: bool, allowance: int,
+) -> None:
     path = _write(tmp_path / "summary.md", 100)
     selection = select_advisory_inputs(
         _inline_backend(), tmp_path, [AdvisoryCandidate("exploration-summary", path)], read_only=True,
-        inline_max_bytes=allowance,
+        staged_review=staged_review,
     )
     _write(path, allowance + 1)
     with pytest.raises(SanctionedInputUnavailable):
         prepare_sanctioned_inputs(_inline_backend(), tmp_path, selection.selected_paths(), read_only=True,
-                                  inline_max_bytes=allowance)
+                                  staged_review=staged_review)

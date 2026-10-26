@@ -183,17 +183,14 @@ def test_prepare_sanctioned_inputs_selects_transport_and_enforces_aggregate_byte
     with pytest.raises(SanctionedInputUnavailable, match='byte budget'):
         prepare_sanctioned_inputs(strict, tmp_path, {'required': first}, read_only=True)
     staged = prepare_sanctioned_inputs(strict, tmp_path, {'required': first}, read_only=True,
-                                      inline_max_bytes=64 * 1024)
+                                      staged_review=True)
     assert staged.inputs[0].text == '界' * 21000
     staged.revalidate(strict, tmp_path, True)
     assert 12 * 1024 < len(staged.render().encode()) <= 64 * 1024
-    with pytest.raises(SanctionedInputUnavailable, match='inline.*allowance'):
-        prepare_sanctioned_inputs(strict, tmp_path, {'required': first}, read_only=True,
-                                  inline_max_bytes=64 * 1024 + 1)
     first.write_bytes(b'x' * (64 * 1024 + 1))
     with pytest.raises(SanctionedInputUnavailable, match='byte budget'):
         prepare_sanctioned_inputs(strict, tmp_path, {'required': first}, read_only=True,
-                                  inline_max_bytes=64 * 1024)
+                                  staged_review=True)
 
 
 def test_prepare_sanctioned_inputs_rejects_mismatched_strict_audit_root(tmp_path: Path) -> None:
@@ -272,7 +269,7 @@ def test_revalidate_skips_rehash_when_identity_unchanged(
         backend = _strict_backend(tmp_path.resolve())
         artifact.write_text('界' * 21000, encoding='utf-8')
         prepared = prepare_sanctioned_inputs(backend, tmp_path, {'artifact': artifact}, read_only=False,
-                                             inline_max_bytes=64 * 1024)
+                                             staged_review=True)
     capture_calls = _count_capture_calls(monkeypatch)
     # Unchanged file: identity matches, so no re-read/re-hash happens.
     prepared.revalidate(backend, tmp_path, read_only=False)

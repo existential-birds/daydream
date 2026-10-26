@@ -112,8 +112,8 @@ sanctioned input, including wrappers. First-pass groups assign at most four file
 the structural interaction stage retains its whole-scope inventory. Original
 part sizing remains 12 KiB inline and 24 KiB for exact paths, preserving target
 IDs, hashes, selectors, and canonical bytes. Other input callers retain the
-12 KiB default; an explicit capture allowance cannot exceed 64 KiB and remains
-bound through revalidation. Exact-path resource limits and backend read roots
+12 KiB default; staged review selects a fixed 64 KiB allowance that remains bound
+through revalidation. Exact-path resource limits and backend read roots
 retain their existing policy.
 
 Open/unresolved candidates receive one triage round. Closed reviewer assertions,
