@@ -241,11 +241,11 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 # Skip opening braces to reach nested keys; handle blocks in the later block
 # pass. Sensitive values preserve complete redaction markers after matching.
 _BARE_STRUCTURED_VALUE = (
-    # A semicolon followed by another assignment ends this value. Leave the
-    # next key in the scan so it receives its own policy. Other semicolon tails
-    # stay inside the sensitive token; consume their runs without backtracking.
+    # A statement/query delimiter followed by another assignment ends this
+    # value. Leave the next key in the scan for its own policy; other delimiter
+    # tails stay inside the sensitive token without backtracking.
     rf"(?:(?i:{_COMPLETE_REDACTION_MARKER.pattern})|"
-    r"[^;\s\"'\[\]{}():,=]|;++(?![^\S\n\r]*[A-Za-z_][A-Za-z0-9_.\-]*[^\S\n\r]*[:=]))++"
+    r"[^;&\s\"'\[\]{}():,=]|[;&]++(?![^\S\n\r]*[A-Za-z_][A-Za-z0-9_.\-]*[^\S\n\r]*[:=]))++"
 )
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
@@ -316,9 +316,9 @@ def _bare_value_redactable(sep: str, text: str, end: int) -> bool:
     if not text[end:] or re.match(r"[^\S\n\r]*[,}\]\r\n]", text[end:]) is not None:
         return True
     # A later explicit sensitive pair establishes a statement boundary; an
-    # arbitrary prose clause after a semicolon does not make colon text a secret.
+    # arbitrary prose clause after a delimiter does not make colon text a secret.
     next_pair = re.match(
-        r"[^\S\n\r]*;+[^\S\n\r]*(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1[^\S\n\r]*[:=]",
+        r"[^\S\n\r]*[;&]+[^\S\n\r]*(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1[^\S\n\r]*[:=]",
         text[end:],
     )
     return next_pair is not None and _is_sensitive_key(next_pair.group(2))

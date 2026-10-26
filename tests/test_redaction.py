@@ -471,10 +471,12 @@ def test_sensitive_container_redaction_is_not_replaced_by_marker_token_parsing(c
      'refresh_token=[REDACTED];api_key: "[REDACTED_CREDENTIAL]"'),
     ('refresh_token:[REDACTED]opaque-first-canary;api_key:opaque-second-canary',
      'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]"'),
+    ('refresh_token:[REDACTED]opaque-first-canary&api_key=opaque-second-canary',
+     'refresh_token:[REDACTED]&api_key="[REDACTED_CREDENTIAL]"'),
     ('refresh_token:[REDACTED]opaque-first-canary;api_key:opaque-second-canary;password=opaque-third-canary',
      'refresh_token:[REDACTED];api_key:"[REDACTED_CREDENTIAL]";password="[REDACTED_CREDENTIAL]"'),
 ])
-def test_secret_assignment_redaction_preserves_semicolon_and_is_idempotent(source: str, expected: str) -> None:
+def test_secret_assignment_redaction_preserves_boundaries_and_is_idempotent(source: str, expected: str) -> None:
     redacted = redact_structured_text(source)
     assert redacted == expected
     assert redact_structured_text(redacted) == redacted
