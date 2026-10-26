@@ -530,6 +530,7 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
 ) -> None:
     """Root/fork provenance is stable source identity, not the deleted model cwd."""
     repo = _feature_repo(tmp_path, remote=True)
+    approved_head = _git(repo, "rev-parse", "HEAD")
     ext_dir.write_module(
         "from daydream.agent import run_agent\n"
         "from daydream.extensions import FlowStep\n"
@@ -537,7 +538,7 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
         "async def _probe(ctx):\n"
         "    recorder = get_current_recorder()\n"
         "    assert recorder is not None\n"
-        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'ROOT', "
+        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, ctx.work.head_sha, "
         "phase=DaydreamPhase.REVIEW)\n"
         "    async with recorder.fork('source-probe'):\n"
         "        await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE', "
@@ -551,7 +552,7 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
     result = await _run_private(
         RunConfig(
             target=str(repo), base="main", flow_name="source-probe", force_worktree=True, run_eval=True, archive=True,
-            non_interactive=True,
+            non_interactive=True, approved_head_sha=approved_head,
         ), tmp_path,
     )
     assert result == 0
@@ -564,6 +565,7 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
         for path in (run_dir / "trajectory.json", *sorted((run_dir / "trajectories").glob("*.json")))
     ]
     assert len(payloads) == 2
+    assert [step["message"] for step in payloads[0]["steps"] if step["source"] == "user"] == [approved_head]
     assert {payload["extra"]["target_dir"] for payload in payloads} == {str(repo.resolve())}
     assert str(backend.cwd) not in json.dumps(payloads)
     assert (public_run_dir / "trajectory.json").read_bytes() == (run_dir / "trajectory.json" ).read_bytes()
@@ -830,25 +832,6 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     assert exit_code == 1
     assert called == []
 
-async def test_run_allows_matching_approved_head_on_real_worktree(
-    monkeypatch: pytest.MonkeyPatch,
-    silence_runner_ui: None,  # noqa: F841
-    deep_target: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    called: list[str] = []
-    head_shas: list[str] = []
-    def _capture(_name: str, work: Any, _config: RunConfig, _run_context: RunContext) -> None:
-        head_shas.append(work.head_sha)
-    _record = _make_recording_dispatch(called, _capture)
-    for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    real_head = _git(deep_target, "rev-parse", "HEAD").strip()
-    config = make_config(deep_target, approved_head_sha=real_head)
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called == ["_run_loop_deep"]
-    assert head_shas == [real_head]
-
 @pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
 async def test_deep_run_mints_app_identity_before_posting_path(
     flow_name: str | None, monkeypatch: pytest.MonkeyPatch, deep_target: Path, patch_sdk: None,
@@ -1099,13 +1082,6 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
         "evidence": "main.py:1", "source_uids": [f"python:{item_id}"], "related_files": None,
     }
 
-def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
-    """Silence fix-cycle UI while leaving the observed phase hero bindings live."""
-    silence_console("daydream.runner")
-    silence_console("daydream.deep.orchestrator")
-    silence_console("daydream.deep.fix_steps")
-    silence_console("daydream.ui", keep=("print_phase_hero", "print_dim"))
-
 async def _stub_verify(*_a: Any, **kwargs: Any) -> tuple[Path, dict[str, Any]]:
     items = json.loads(kwargs["merged_items_path"].read_text())["items"]
     return Path("/nonexistent"), {"verdicts": [], "selection": {"decisions": [
@@ -1123,53 +1099,6 @@ async def _stub_fix_verify(
 
 async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
     return {}
-
-async def _noop_commit(*_a: Any, **_k: Any) -> None:
-    return None
-
-async def test_fix_cycle_awaken_hero_followed_by_model_line(
-    monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
-    silence_console: Callable[..., None],
-) -> None:
-    """Drive real test-and-heal in a resumed shallow cycle; the test model line must immediately follow
-    AWAKEN.
-    """
-    _seed_fix_resume(feature_branch_repo, [_fix_item()])
-    _silence_fix_cycle_ui(silence_console)
-    test_backend = ScriptedBackend(
-        script=[_BEYOND_SCRIPT], model="test-model-xyz",
-    )
-    monkeypatch.setattr(
-        "daydream.runner._resolve_backend",
-        lambda _config, phase, cache=None, **_kwargs: (
-            test_backend if phase == "test" else ScriptedBackend(model="stub-model")
-        ),
-    )
-    monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
-    monkeypatch.setattr("daydream.phases.phase_fix_verify", _stub_fix_verify)
-    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _noop_fix)
-    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
-    calls: list[tuple[str, str]] = []  # (kind, payload)
-    def _hero_spy(_console: Any, title: Any, _description: Any) -> None:
-        calls.append(("hero", title))
-    def _dim_spy(_console: Any, message: Any) -> None:
-        calls.append(("dim", message))
-    monkeypatch.setattr("daydream.ui.print_phase_hero", _hero_spy)
-    monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
-    exit_code = await runner.run(
-        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes", test_command="true"),
-    )
-    assert exit_code == 0
-    awaken_idx = next(( i for i, (kind, payload) in enumerate(calls) if kind == "hero" and payload == "AWAKEN" ), None)
-    assert awaken_idx is not None, f"AWAKEN hero never rendered; calls={calls!r}"
-    assert awaken_idx + 1 < len(calls), "AWAKEN hero has no following call"
-    next_kind, next_payload = calls[awaken_idx + 1]
-    assert next_kind == "dim", (
-        f"Call after AWAKEN hero was not a dim line; got {(next_kind, next_payload)!r}"
-    )
-    assert next_payload == "Model: test-model-xyz", (
-        f"Dim line after AWAKEN hero did not echo the test backend's model; got {next_payload!r}"
-    )
 
 # --- non_interactive threading ----------------------------------------------
 
@@ -1320,6 +1249,13 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     The real cycle follows fail/fix/fail/summary, never reads stdin, and emits one fix prompt.
     The fix prompt is served by the FIX backend; only the summary stays on TEST.
     """
+    calls: list[tuple[str, str]] = []  # (kind, payload)
+    def _hero_spy(_console: Any, title: Any, _description: Any) -> None:
+        calls.append(("hero", title))
+    def _dim_spy(_console: Any, message: Any) -> None:
+        calls.append(("dim", message))
+    monkeypatch.setattr("daydream.ui.print_phase_hero", _hero_spy)
+    monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
         # Suite executions are host processes; reject a second TEST backend turn after the handoff.
@@ -1343,6 +1279,17 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     assert all(value in repair.lower() for value in ("generated", "migration", "package manifests", "lockfile update"))
     assert repair_backend.read_only_calls == [False]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
+
+    awaken_idx = next(( i for i, (kind, payload) in enumerate(calls) if kind == "hero" and payload == "AWAKEN" ), None)
+    assert awaken_idx is not None, f"AWAKEN hero never rendered; calls={calls!r}"
+    assert awaken_idx + 1 < len(calls), "AWAKEN hero has no following call"
+    next_kind, next_payload = calls[awaken_idx + 1]
+    assert next_kind == "dim", (
+        f"Call after AWAKEN hero was not a dim line; got {(next_kind, next_payload)!r}"
+    )
+    assert next_payload == "Model: test-model-xyz", (
+        f"Dim line after AWAKEN hero did not echo the test backend's model; got {next_payload!r}"
+    )
 
 @pytest.mark.parametrize(
     'flow', [DaydreamRunFlow.NORMAL, DaydreamRunFlow.PR, DaydreamRunFlow.TTT, DaydreamRunFlow.CUSTOM]
