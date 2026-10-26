@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from daydream import git_ops
 from daydream.backends import (
@@ -24,6 +25,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
@@ -1049,6 +1051,9 @@ async def test_sharded_admission_rejects_each_bad_sibling_atomically_and_retains
     repo = tmp_path / "independent_admission"
     seed_feature_branch(repo, base=before, feature={name: "VALUE = 1\n" for name in before})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
+    native = CodexBackend(model=review.backend.model)
+    monkeypatch.setattr(native, 'execute', review.backend.execute)
+    monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     admitted: dict[str, list[dict[str, Any]]] = {}
     rejected: dict[str, list[str]] = {}
     scope_faults: dict[str, str] = {}
@@ -1057,6 +1062,9 @@ async def test_sharded_admission_rejects_each_bad_sibling_atomically_and_retains
         scope_id = stage["scope_id"]
         if scope_id == "structure":
             return
+        revision_schema = review.backend.calls[-1]['output_schema']['properties']['targets']['items'][
+            'properties']['evidence_refs']['items']['properties']['revision']
+        assert revision_schema['enum'] == [review.pr.head_sha, review.pr.base_sha]
         fault = stage["assigned_files"][0].split("/", 1)[0]
         assert all(path.startswith(fault + "/") for path in stage["assigned_files"])
         scope_faults[scope_id] = fault
@@ -1197,6 +1205,10 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     git(repo, 'config', 'diff.context', '0')
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend.sandbox = sandbox
+    if sandbox:
+        native = CodexBackend(model=review.backend.model)
+        monkeypatch.setattr(native, 'execute', review.backend.execute)
+        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -1204,6 +1216,8 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
+        if sandbox:
+            assert Draft202012Validator(review.backend.calls[-1]['output_schema']).is_valid(output)
         scoped = index['api.py']
         fragments.append(diff)
         decisions.extend(copy.deepcopy(output['targets']))

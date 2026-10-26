@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from daydream import git_ops
 from daydream.agent import StructuredOutputFailure, run_agent
@@ -47,6 +48,7 @@ from daydream.backends.codex import (
     _rebind_source_paths,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
+from daydream.phases.schemas import REVIEW_STAGE_SCHEMA, review_stage_generation_schema, review_stage_schema
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
@@ -296,8 +298,16 @@ async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> No
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
-    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    head, base = '98d18d2e9f66792e1e732e1cddbb7007d84f5485', '7ec97298a90c28789e36afb4412ecdc640d8abae'
+    canonical = review_stage_schema(['api.py'], [], triage=False)
+    schema = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': base})
+    persisted: dict[str, Any] = {}
+
+    async def spawn(*args: str, **kwargs: Any) -> Any:
+        persisted.update(json.loads(Path(args[args.index('--output-schema') + 1]).read_text()))
+        return mock_proc
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn) as mock_exec:
         events = [
             event
             async for event in backend.execute(
@@ -315,7 +325,23 @@ async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> No
         request = next(event for event in events if isinstance(event, RequestEvent))
         assert isinstance(request.config, CodexRequestConfig)
         assert request.config.continuation_mode == "resume" and request.config.native_output_schema is True
-        assert request.output_schema == schema
+        assert request.output_schema == schema == persisted
+        revision = persisted['properties']['targets']['items']['properties']['evidence_refs']['items'][
+            'properties']['revision']
+        assert revision['enum'] == [head, base]
+        validator = Draft202012Validator(revision)
+        assert validator.is_valid(head) and validator.is_valid(base)
+        assert not validator.is_valid('98d18d2e9f66792e1732e1cddbb7007d84f5485')
+        assert 'enum' not in canonical['properties']['targets']['items']['properties'][
+            'evidence_refs']['items']['properties']['revision']
+        assert 'enum' not in REVIEW_STAGE_SCHEMA['properties']['targets']['items']['properties'][
+            'evidence_refs']['items']['properties']['revision']
+        assert review_stage_generation_schema(canonical, {}) == canonical
+        assert review_stage_generation_schema(canonical, {'head_sha': head}) == canonical
+        assert review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': 'main'}) == canonical
+        identical = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': head})
+        assert identical['properties']['targets']['items']['properties']['evidence_refs']['items'][
+            'properties']['revision']['enum'] == [head]
         assert (request.session_id, request.session_source) == ("th_prev", "configured")
         result = next(event for event in events if isinstance(event, ResultEvent))
         assert result.continuation is not None

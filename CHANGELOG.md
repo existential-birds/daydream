@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities
   ([#1701](https://github.com/existential-birds/daydream/issues/1701)).
+- **codex:** constrain staged native output to captured head and merge-base
+  revisions, preventing abbreviated citations while preserving source admission.
 - Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
   same-revision runs from being accepted.
 - Isolate mutable test registries and consolidate equivalent cases; retain

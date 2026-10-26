@@ -1,6 +1,7 @@
 """Structured phase outputs, sharing the canonical finding and verdict fields."""
 
 import copy
+import re
 from typing import Any
 
 from daydream.output_schema import result_array_schema, severity_enum_schema, strict_object
@@ -72,6 +73,16 @@ def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str,
     schema = copy.deepcopy(transport_schema)
     schema['required'].remove('supporting_files')
     schema['properties']['supporting_files'] = {}
+    return schema
+
+
+def review_stage_generation_schema(canonical_schema: dict[str, Any], revision: dict[str, Any]) -> dict[str, Any]:
+    """Constrain native generation to frozen commits without changing admission."""
+    schema = copy.deepcopy(canonical_schema)
+    revisions = [revision.get(key) for key in ('head_sha', 'merge_base_sha')]
+    if all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) for value in revisions):
+        schema['properties']['targets']['items']['properties']['evidence_refs']['items']['properties'][
+            'revision']['enum'] = list(dict.fromkeys(revisions))
     return schema
 
 

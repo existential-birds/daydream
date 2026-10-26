@@ -8,6 +8,7 @@ import json
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from contextlib import aclosing
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.codex import CodexBackend
+from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
@@ -911,6 +914,10 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
     if sandbox:
         review.backend.merge_echo_records = False
         review.backend.merge_items = [dict(record(), lens='per-stack', source_uids=['python:1'])]
+        native = CodexBackend(model=review.backend.model)
+        monkeypatch.setattr(native, 'execute', review.backend.execute)
+        monkeypatch.setattr(native, 'supports_review_instructions', True, raising=False)
+        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     later_assignments: list[dict[str, Any]] = []
 
     @review.backend.script('python')
@@ -919,6 +926,18 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         prose = call['prompt'].split('Host review stage:\n')[0]
         assert set(call['output_schema']['properties']) == {
             'targets', 'notes', 'supporting_files', 'candidates', 'contradictions'}
+        revision = call['output_schema']['properties']['targets']['items']['properties'][
+            'evidence_refs']['items']['properties']['revision']
+        if sandbox:
+            assert revision['enum'] == [review.pr.head_sha, review.pr.base_sha]
+            if output['targets']:
+                assert Draft202012Validator(call['output_schema']).is_valid(output)
+                shortened = deepcopy(output)
+                shortened['targets'][0]['evidence_refs'][0]['revision'] = review.pr.head_sha[:12]
+                assert not Draft202012Validator(call['output_schema']).is_valid(shortened)
+                assert Draft202012Validator(REVIEW_STAGE_SCHEMA).is_valid(shortened)
+        else:
+            assert 'enum' not in revision
         assert 'with issues' not in prose
         assert 'AI-generated code' not in prose
         assert 'Be strict' not in prose
