@@ -67,7 +67,7 @@ canonical_lock = files('daydream.benchmark.harbor').joinpath('runtime-requiremen
 for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')):
     suffix, assets, identity = reviewer_build(Path(sys.argv[1]), backend=backend, platform=platform)
     assert identity['platform'] == platform
-    assert identity[backend + '_cli'] == ('1.3.0' if backend == 'pi' else '0.163.0')
+    assert identity[backend + '_cli'] == ('1.4.0' if backend == 'pi' else '0.163.0')
     assert 'reviewer-runtime.lock' in assets and 'runtime.lock' not in assets
     assert assets['reviewer-runtime.lock'] == canonical_lock
     assert identity['reviewer_runtime_lock_sha256'] == hashlib.sha256(canonical_lock).hexdigest()

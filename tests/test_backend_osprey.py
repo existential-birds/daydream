@@ -35,7 +35,7 @@ from daydream.backends.osprey import (
     OspreyUnsupportedOption,
 )
 from daydream.trajectory import DaydreamPhase
-from tests.harness.fake_cli_process import FakeCliSpawner, install_fake_cli_process
+from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner, install_fake_cli_process
 from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants

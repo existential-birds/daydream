@@ -252,9 +252,9 @@ def test_native_sdk_factory_shares_canonical_lock_and_retains_rotation(
     else:
         configured = os.environ.get('DAYDREAM_REVIEWBENCH_NATIVE_PI')
         if not configured:
-            pytest.skip('set DAYDREAM_REVIEWBENCH_NATIVE_PI to the locked native Pi 1.3.0 package directory')
+            pytest.skip('set DAYDREAM_REVIEWBENCH_NATIVE_PI to the locked native Pi 1.4.0 package directory')
         package = Path(configured).resolve()
-        assert json.loads((package / 'package.json').read_text())['version'] == '1.3.0'
+        assert json.loads((package / 'package.json').read_text())['version'] == '1.4.0'
     canonical, independent = tmp_path / 'canonical', tmp_path / 'independent-auth'
     native_auth(canonical, 'judge')
     native_auth(independent, 'judge')

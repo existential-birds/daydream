@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from daydream import git_ops, runner
@@ -293,6 +294,8 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         if not args or args[0] != 'pi':
             return cast(MagicMock, await real_exec(*args, **kwargs))
         argv = [str(arg) for arg in args]
+        if argv[1:] == ["--version"]:
+            return make_mock_process(["1.4.0"])
         captured.append(argv)
         assert Path(kwargs['env']['DAYDREAM_RB_PI_AUTH_PATH']).read_text() == auth_body
         delivered = json.loads((Path(kwargs['env']['PI_CODING_AGENT_DIR']) / 'models.json').read_text())
@@ -309,9 +312,25 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         call = {'type': 'toolCall', 'id': 'submit', 'name': 'structured_output', 'arguments': payload}
         assistant = {'role': 'assistant', 'content': [call], 'stopReason': 'toolUse',
             'usage': {'input': 11, 'output': 3, 'cacheRead': 2, 'cost': {'total': 0.125}}}
-        tool = {'content': [{'type': 'text', 'text': 'Submitted.'}], 'details': payload}
+        admitted = payload
+        ready = []
+        if packet_path := kwargs['env'].get('DAYDREAM_PI_HOST_PACKET'):
+            packet = json.loads(Path(packet_path).read_text())
+            async with httpx.AsyncClient(trust_env=False, headers={'Authorization': packet['authorization']}) as client:
+                response = await client.post(packet['url'] + '/ready',
+                    json={'tool_name': packet['tool_name'], 'schema': packet['schema']})
+                assert response.json() == {'ready': True}
+                response = await client.post(packet['url'] + '/admit', json={
+                    'id': 'submit', 'name': packet['tool_name'], 'arguments': payload, 'terminal': True})
+                assert response.json()['allowed'] is True
+                response = await client.post(packet['url'] + '/submit', json={'id': 'submit', 'arguments': payload})
+                assert response.json()['accepted'] is True
+                admitted = response.json()['result']
+            ready = [{'type': 'daydream_host_tools_ready'}]
+        tool = {'content': [{'type': 'text', 'text': 'Submitted.'}], 'details': admitted}
         return make_mock_process([json.dumps(row) for row in [
-            {'type': 'session', 'sessionId': 'offline-fixture'}, {'type': 'agent_start'}, {'type': 'turn_start'},
+            {'type': 'session', 'sessionId': 'offline-fixture'}, *ready,
+            {'type': 'agent_start'}, {'type': 'turn_start'},
             {'type': 'message_end', 'message': assistant},
             {'type': 'tool_execution_start', 'toolCallId': 'submit', 'toolName': 'structured_output', 'args': payload},
             {'type': 'tool_execution_end', 'toolCallId': 'submit', 'toolName': 'structured_output',

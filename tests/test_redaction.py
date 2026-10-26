@@ -379,7 +379,7 @@ def test_json_key_collisions_preserve_entries_and_reserved_public_keys(
     ('foo' + '_' * 100_000 + 'xapi_key: opaque-scan-canary', 'opaque-scan-canary', 'foo' + '_' * 100_000 + 'x'),
     ('foo' + '_' * 100_000 + 'xapi_key: {\n "nested": "opaque-scan-canary"\n}',
      'opaque-scan-canary', 'foo' + '_' * 100_000 + 'x'),
-])
+], ids=['separatorless', 'nested-pair', 'long-key', 'separators', 'suffix-key', 'suffix-object'])
 def test_redaction_scan_is_bounded(source: str, private: str, prefix: str) -> None:
     start = time.process_time()
     result = redact_structured_text(source)
@@ -861,7 +861,7 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
         (
             "json-config",
             '{"credentials": "[REDACTED_CREDENTIAL]", "profiles": ['
-            '{"apiKey": "[REDACTED_CREDENTIAL]"},\n{"apiKey": "[REDACTED_CREDENTIAL]"}], "enabled": true}',
+            '{"apiKey": "[REDACTED_CREDENTIAL]"}, {"apiKey": "[REDACTED_CREDENTIAL]"}], "enabled": true}',
         ),
         ("python-config", "{'client_secret': '[REDACTED_CREDENTIAL]'}"),
         (

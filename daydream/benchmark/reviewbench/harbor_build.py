@@ -14,7 +14,7 @@ NODE_IMAGE = 'node:24.18.1-bookworm-slim@sha256:235600a8101ab264e117b1768e925532
 UV_IMAGE = 'ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc'
 HARBOR_REVISION = '6ce6abee0b9fa94a50c88f0557d030a419998d78'
 REVIEWBENCH_PLATFORMS = ('linux/amd64', 'linux/arm64')
-PI_VERSION = '1.3.0'
+PI_VERSION = '1.4.0'
 
 
 def reviewer_build(wheel: Path, *, platform: str = 'linux/amd64',

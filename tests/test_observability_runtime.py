@@ -733,7 +733,8 @@ async def test_operator_service_instance_id_generated_per_run_when_absent(monkey
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("raw", [
-    'key=%', 'key=%0', 'key=%FF', 'not-a-pair', '=value', 'ke%Gy=value', 'dup.key=a%2Bone,dup.k%65y=two', 'bad\x01key=value', 'key=bad\x02value',
+    'key=%', 'key=%0', 'key=%FF',
+    'not-a-pair', '=value', 'ke%Gy=value', 'dup.key=a%2Bone,dup.k%65y=two', 'bad\x01key=value', 'key=bad\x02value',
 ])
 async def test_invalid_operator_resource_rejects_entire_variable(
     raw: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture

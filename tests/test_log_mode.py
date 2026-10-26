@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from collections.abc import AsyncIterator, Callable
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import anyio
@@ -221,7 +222,7 @@ def test_verbose_flag_invocation_reaches_log_mode_pipeline(
     """One real verbose invocation presents all event kinds and retains its trajectory."""
     rejected_secret = "ghp_" + "z" * 16
     install_backend(ScriptedBackend(events=[
-        TextEvent(f"token=hello {REDACTION_SENTINEL} world"),
+        TextEvent(f"hello {REDACTION_SENTINEL} world"),
         ThinkingEvent(f"thinking about {REDACTION_SENTINEL}"),
         ToolStartEvent(id="read", name="bash", input={"command": f"echo {REDACTION_SENTINEL}"}),
         ToolResultEvent(id="read", output=f"token={REDACTION_SENTINEL}", is_error=False),
@@ -243,9 +244,9 @@ def test_verbose_flag_invocation_reaches_log_mode_pipeline(
         "hello", "[thinking] thinking about", "[tool:bash]", "[tool:bash result]", "[tool:bash ERROR] command failed",
         "[metrics] prompt=100 completion=50", "[cost] $0.0042", "[REDACTED_API_KEY]",
     ))
-    agent_lines = [line for line in output.splitlines() if line.startswith(("token=hello ", "[thinking] ", "[tool:"))]
+    agent_lines = [line for line in output.splitlines() if line.startswith(("hello ", "[thinking] ", "[tool:"))]
     assert all(line in agent_lines for line in (
-        "token=hello [REDACTED_API_KEY] world", "[thinking] thinking about [REDACTED_API_KEY]",
+        "hello [REDACTED_API_KEY] world", "[thinking] thinking about [REDACTED_API_KEY]",
         "[tool:bash] echo [REDACTED_API_KEY]", "[tool:bash result] token=[REDACTED_API_KEY]",
     ))
     assert REDACTION_SENTINEL not in "\n".join(agent_lines)

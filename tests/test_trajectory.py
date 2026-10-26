@@ -17,8 +17,8 @@ from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
     CostEvent,
-    MetricsEvent,
     DiagnosticEvent,
+    MetricsEvent,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
@@ -84,15 +84,20 @@ async def test_diagnostic_is_json_safe_redacted_and_persisted_in_arrival_order(t
     """Diagnostics cross one fail-closed recorder privacy/type boundary."""
     secret = "sk-diagnostic123456"
     unsupported = object()
-    _, steps = await _record_events(tmp_path,
+    inv, steps = await _record_events(tmp_path,
         DiagnosticEvent(code=secret, message=f"API_KEY={secret}",
             metadata={"nested": {secret: f"TOKEN={secret}", "api_key": secret}, "unsupported": unsupported,
                 "unsupported_key": {42: "retained safely"}, "non_finite": float("nan"),
             },
         ), DiagnosticEvent(code="second", message="safe", metadata={"count": 2}),
+        MetricsEvent(message_id="m1", prompt_tokens=5, completion_tokens=3, cached_tokens=0, cost_usd=0.001),
+        TurnEndEvent(message_id="m1"),
         ResultEvent(structured_output=None, continuation=None),
     )
 
+    lifecycle = inv._generation_ledger.to_dict()
+    assert lifecycle["drafts"] == [] and lifecycle["billing_owner"] == "unresolved"
+    assert "generation_lifecycle" not in read_trajectory(inv.recorder.path)["extra"]["subtrajectories"][0]
     assert len(steps) == 1
     records = (steps[0].extra or {})["backend_diagnostics"]
     assert [record["code"] for record in records] == ["[REDACTED_API_KEY]", "second"]
