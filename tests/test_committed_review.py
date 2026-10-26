@@ -29,7 +29,7 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
-from tests.harness.git_helpers import git, seed_feature_branch, work_context
+from tests.harness.git_helpers import commit, git, seed_feature_branch, work_context
 from tests.harness.trajectory import root_trajectory
 
 
@@ -256,7 +256,10 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 
 
 @pytest.mark.parametrize(
-    "challenge", ["missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled"]
+    "challenge", [
+        "missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled",
+        "too-many-assignments", "hub-export",
+    ]
 )
 async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
@@ -270,6 +273,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     own transport accounting/history; old flow tests never enter this program.
     Cancellation is a distinct BaseException exit: accepted concerns, recorded
     usage and interrupted coverage must survive artifact-session teardown.
+    Unsupported plan/export requests must refuse before native work; domain
+    admission cases cannot catch a billable dispatch of an unrepresentable plan.
     """
     from daydream import agent
 
@@ -359,6 +364,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
     monkeypatch.setattr(agent, "run_agent", execute)
     repo = review_inputs.work.source
+    if challenge == "too-many-assignments":
+        paths = [f"extra-{number:03}.py" for number in range(511)]
+        for path in paths:
+            (repo / path).write_text("VALUE = 1\n")
+        git(repo, "add", *paths)
+        commit(repo, "add files beyond committed review capacity")
     if challenge == "output-install":
         real_link = os.link
 
@@ -371,9 +382,20 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     request = CommittedReviewRequest(
         repo,
         review_inputs.revision["merge_base_sha"],
-        config=RunConfig(backend="pi", output_mode="review"),
+        config=RunConfig(
+            backend="pi", output_mode="review",
+            trajectory_hub_repo="fixture/requested-export" if challenge == "hub-export" else None,
+        ),
         limits=ReviewLimits(90, 12, 10),
     )
+    if challenge in {"too-many-assignments", "hub-export"}:
+        expected = "at most 512 assignment parts" if challenge == "too-many-assignments" else "external export"
+        with pytest.raises(ValueError, match=expected):
+            await run_committed_review(request)
+        assert dispatches == []
+        assert not (repo / ".daydream/committed-review.json").exists()
+        assert not (repo / ".review-output.md").exists()
+        return
     if challenge == "cancelled":
         task = asyncio.create_task(run_committed_review(request))
         started = asyncio.create_task(challenge_started.wait())

@@ -31,6 +31,7 @@ from daydream.artifacts.ownership import operational_worktree_root
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiBackend
 from daydream.committed_review_model import (
+    COMMITTED_ASSIGNMENT_LIMIT,
     COMMITTED_RESULT_SCHEMA,
     CommittedReviewResult,
     challenge_schema,
@@ -71,6 +72,12 @@ class Review:
     """Only writer of live assignments, semantic revisions and challenge evidence."""
 
     def __init__(self, inputs: StageInputFactory, run_id: str, *, deadline: float) -> None:
+        population = sum(len(batch) for batch in inputs.assignment_batches)
+        if population > COMMITTED_ASSIGNMENT_LIMIT:
+            raise ValueError(
+                f"committed review supports at most {COMMITTED_ASSIGNMENT_LIMIT} assignment parts; "
+                f"the captured plan has {population}"
+            )
         self.inputs, self.run_id, self.deadline = inputs, run_id, deadline
         self.assignments = deepcopy([part for batch in inputs.assignment_batches for part in batch])
         self._targets: list[dict[str, Any]] = []
@@ -335,7 +342,10 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
     config.file_config = config.file_config or load_file_config(source)
     if config.flow_name or config.output_mode not in {"review", "comment"}:
         raise ValueError("committed review requires review-only policy without a custom flow")
-    if config.dataset_capture or config.findings_out or config.trajectory_path or config.dump_artifacts:
+    if (
+        config.dataset_capture or config.findings_out or config.trajectory_path or config.dump_artifacts
+        or config.trajectory_hub_repo
+    ):
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )

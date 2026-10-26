@@ -25,6 +25,7 @@ from daydream.review_source_refs import (
 
 _TEXT = {"type": "string", "minLength": 1, "maxLength": 4096}
 _ID = {"type": "string", "maxLength": 512}
+COMMITTED_ASSIGNMENT_LIMIT = 512
 
 
 def claim_schema(*, selectors: bool) -> dict[str, Any]:
@@ -50,7 +51,7 @@ def discovery_schema(*, selectors: bool) -> dict[str, Any]:
         {
             "targets": {
                 "type": "array",
-                "maxItems": 512,
+                "maxItems": COMMITTED_ASSIGNMENT_LIMIT,
                 "items": strict_object(
                     {
                         "target_id": _ID,
@@ -113,7 +114,7 @@ COMMITTED_RESULT_SCHEMA = strict_object(
         "planned_work_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "assignments": {
             "type": "array",
-            "maxItems": 512,
+            "maxItems": COMMITTED_ASSIGNMENT_LIMIT,
             "items": {
                 "type": "object",
                 "required": ["target_id", "file", "source_refs"],

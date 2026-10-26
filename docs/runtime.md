@@ -41,7 +41,8 @@ strategies; protected host obligations cannot be disabled by profile prose.
 
 The package-level committed-review program owns one captured committed change,
 its complete planned targets, admitted semantic claim revisions and challenge
-obligations. Native regular files must match raw committed blob identities;
+obligations. This entry supports at most 512 assignment parts; a larger captured
+plan is refused before native dispatch. Native regular files must match raw committed blob identities;
 checkout filters or EOL transforms that change those bytes cause refusal before
 model work. The diff uses exact commit endpoints without working-tree changes,
 external diff drivers or text conversion. It uses native Pi investigation followed by a distinct native
