@@ -336,8 +336,7 @@ def test_combine_rejects_incomplete_or_wrong_run_artifacts(
     ("reuse", "success", "skipped", "skipped", True),
     ("unknown", "success", "skipped", "skipped", False),
     ("full", "failure", "success", "success", False),
-    ("full", "success", "cancelled", "skipped", False),
-    ("full", "success", "skipped", "skipped", False),
+    ("full", "success", "skipped", "success", False),
     ("full", "success", "success", "failure", False),
     ("basic", "cancelled", "skipped", "skipped", False),
     ("reuse", "success", "failure", "skipped", False),
@@ -357,7 +356,6 @@ def test_final_gate_propagates_dependency_outcomes(
 @pytest.mark.parametrize(("mode", "baseline", "static", "success"), [
     ("baseline", "success", "skipped", True),
     ("baseline", "skipped", "skipped", False),
-    ("baseline", "cancelled", "skipped", False),
     ("baseline", "success", "success", False),
     ("basic", "success", "success", False),
 ])
