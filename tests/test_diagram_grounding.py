@@ -308,7 +308,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
         {
             "kind": "alt",
             "branches": [
-                {"condition": "real alternative", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0]},
+                {"condition": "real alternative", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [2]},
                 {"condition": "fabricated", "evidence": {"file": "pkg/flow.py", "line": 5}, "messages": [2, 3]},
             ],
         },
@@ -317,7 +317,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
             "kind": "opt",
             "branches": [
                 {"condition": "retained", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [1, 2, 3]},
-                {"condition": "surplus", "evidence": {"file": "pkg/flow.py", "line": 4}, "messages": [0]},
+                {"condition": "surplus", "evidence": {"file": "pkg/flow.py", "line": 4}, "messages": [3]},
             ],
         },
     ]
@@ -335,6 +335,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
     assert [check.reason for check in report.elements if check.element == "participant"].count("MALFORMED_ELEMENT") == 2
     assert check_for(report, "branch", "b0.0").reason == "NOT_A_BRANCH_STATEMENT"
     assert check_for(report, "block", "b0").reason == "NOT_A_BRANCH_STATEMENT"
+    assert check_for(report, "branch", "b1.0").grounded
     assert check_for(report, "branch", "b1.1").reason == "NOT_A_BRANCH_STATEMENT"
     assert check_for(report, "block", "b1").grounded
     assert check_for(report, "block", "b2").reason == check_for(report, "branch", "b2.0").reason == "MALFORMED_ELEMENT"
