@@ -803,8 +803,7 @@ class PiBackend:
             configured_model = self._frozen_selection.model
             self.model = configured_model
         native_selection = self._frozen_selection is not None
-        if not native_selection and (
-                self._model_override is not None or configured_model is None or self._frozen_selection is not None):
+        if not native_selection and (self._model_override is not None or configured_model is None):
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
