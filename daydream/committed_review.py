@@ -265,6 +265,12 @@ class Review:
         self._sealed = True
         coverage = self._coverage
         reasons = {e["reason"] for e in self.execution if e["reason"] is not None}
+        native_assignments = {e["assignment"] for e in self.execution}
+        if (
+            self.assignments and "discovery" not in native_assignments
+            or self._claims and "challenge" not in native_assignments
+        ):
+            reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
         completed = (
             self._discovered
             and len(self._targets) == len(self.assignments)

@@ -26,6 +26,7 @@ from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hunk_index import write_hunk_index
 from daydream.review_budget import ReviewLimits
 from daydream.review_profile import build_default_profile
+from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
@@ -480,9 +481,23 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert value["execution"][0]["accepted"]
     if challenge == "accepted-then-failed":
         assert value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
+        # Persisted success flags cannot erase the actual retained execution failure.
+        corrupted = deepcopy(value)
+        corrupted["execution"][1]["settled"] = True
+        assert corrupted["execution"][1]["reason"] == "backend_failure"
+        terminal = corrupted["terminal_result"]
+        terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
+        terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
+        terminal.update(
+            analysis_state="complete", pipeline_state="completed", reason_codes=[],
+            completed_stacks=["committed"], uncovered_stacks=[],
+        )
+        validate_terminal_result(terminal)
+        with pytest.raises(ValueError, match="native execution"):
+            validate_committed_result(corrupted)
 
 
-@pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan"])
+@pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution"])
 async def test_sealed_result_cannot_rebind_publication_or_planned_work(
     review_inputs: StageInputFactory,
     corruption: str,
@@ -491,6 +506,7 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
 
     Existing terminal schema tests have no semantic claim/challenge records or
     complete assignment identity, so they cannot reject these forged envelopes.
+    Valid typed coverage cannot replace missing native execution evidence.
     """
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
@@ -509,9 +525,22 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
     elif corruption == "unchallenged-revision":
         value["claims"][0]["revision"] = 2
         value["claims"][0]["payload"]["trigger"] = "A new unchallenged trigger."
-    else:
+    elif corruption == "foreign-plan":
         value["assignments"][0]["target_id"] = "foreign"
         value["planned_work_id"] = planned_work_id(value["analyzed_revision"], value["assignments"])
+    else:
+        terminal = value["terminal_result"]
+        assert terminal["analysis_state"] == "incomplete"
+        assert terminal["reason_codes"] == ["evidence_incomplete"]
+        assert value["findings"][0]["uid"] == concern["uid"]
+        terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
+        terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
+        terminal.update(
+            analysis_state="complete", pipeline_state="completed", reason_codes=[],
+            completed_stacks=["committed"], uncovered_stacks=[],
+        )
+        assert value["execution"] == []
+        validate_terminal_result(terminal)
     value["findings"] = deepcopy(value["claims"])
     with pytest.raises(ValueError):
         validate_committed_result(value)

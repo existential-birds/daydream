@@ -225,9 +225,15 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             raise ValueError("publication/rejection requires current-revision challenge evidence")
     if value["findings"] != [claim for claim in claims if claim["disposition"] == "confirmed"]:
         raise ValueError("findings differ from challenged publication claims")
+    native_assignments = {e["assignment"] for e in value["execution"]}
     if terminal["analysis_state"] == "complete" and (
-        any(c["disposition"] == "unresolved" for c in claims)
-        or any(not e["settled"] or not e["accepted"] or not e["cleanup_complete"] for e in value["execution"])
+        assignments and "discovery" not in native_assignments
+        or claims and "challenge" not in native_assignments
+        or any(c["disposition"] == "unresolved" for c in claims)
+        or any(
+            not e["settled"] or not e["accepted"] or not e["cleanup_complete"] or e["reason"] is not None
+            for e in value["execution"]
+        )
     ):
         raise ValueError("unfinished obligations/native execution cannot be complete")
 
