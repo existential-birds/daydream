@@ -125,7 +125,8 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 
 @pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
-                                  "hosted-capability", "hosted-config-link", "hosted-challenge-capability"])
+                                  "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
+                                  "hosted-model-fallback", "hosted-settings-encoding"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -135,6 +136,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     direct adapter journeys cannot detect host selection or shared-history bugs.
     The hosted row additionally proves that native resource/context discovery and
     attempted effects cannot broaden the operator policy across fresh challenges.
+    Suffix-only model registries and invalid UTF-8 settings exercise readiness
+    faults that the exact-model, valid-JSON success path cannot detect.
     """
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
@@ -203,7 +206,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         expected_provider, expected_model = "nous", "deepseek/deepseek-v4.1-flash"
         models_path.write_text(json.dumps({"providers": {"nous": {
             **models["providers"]["output-fixture"], "apiKey": "$NOUS_API_KEY", "authHeader": True,
-            "models": [{**model, "id": expected_model}],
+            "models": [{**model,
+                        "id": expected_model + "-1017" if case == "hosted-model-fallback" else expected_model}],
         }}}))
         settings.write_text('{"defaultProjectTrust": "always", "retry": {"enabled": false, "maxRetries": 0}}')
         (native_provider.config / "trust.json").write_text(json.dumps({
@@ -234,6 +238,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             target_auth = repo / ".pi/auth.json"
             target_auth.write_text("{}")
             (native_provider.config / "auth.json").symlink_to(target_auth)
+        elif case == "hosted-settings-encoding":
+            settings.write_bytes(b"\xff")
         if case.startswith("hosted-unsupported"):
             executable_name = "node" if case.endswith("node") else "pi"
             executable = shutil.which(executable_name)
@@ -399,11 +405,13 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
                                     model="output-model:high" if case == "false-positive" else None),
         limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy)
-    unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability"}
+    unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
+                   "hosted-model-fallback", "hosted-settings-encoding"}
     if case.startswith("hosted-unsupported") or case in unsupported:
         from daydream.hosted_review import UnsupportedHostedPolicy
 
-        with pytest.raises(UnsupportedHostedPolicy, match="Hosted|hosted"):
+        message = "Hosted Pi model selection" if case == "hosted-model-fallback" else "Hosted|hosted"
+        with pytest.raises(UnsupportedHostedPolicy, match=message):
             await run_committed_review(request)
         assert len(native_provider.requests) == (4 if case == "hosted-challenge-capability" else 0)
         assert not forbidden_marker.exists()

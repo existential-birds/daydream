@@ -36,7 +36,8 @@ export default function (pi: ExtensionAPI) {
   };
   // Pi reports extension load errors without necessarily stopping. Install the
   // input barrier before parsing so missing/invalid authority stays fail closed.
-  pi.on("input", async () => {
+  pi.on("input", async (_event, ctx) => {
+    let failureCode: string | undefined;
     try {
       if (failed || !packet) throw new Error("Host binding unavailable");
       const tool = pi.getAllTools().find(candidate => candidate.name === packet.tool_name);
@@ -48,6 +49,11 @@ export default function (pi: ExtensionAPI) {
           || process.versions.node !== "24.18.1")) {
         throw new Error("Unsupported hosted native tool or Node configuration");
       }
+      if (packet.hosted_model && (ctx.model?.provider !== packet.hosted_model.provider
+          || ctx.model?.id !== packet.hosted_model.id)) {
+        failureCode = "hosted_model_selection";
+        throw new Error("Unsupported hosted provider/model selection");
+      }
       const status = await request("/ready", { tool_name: packet.tool_name, schema: tool.parameters });
       if (status.ready !== true) throw new Error("Host binding unavailable");
       ready = true;
@@ -55,7 +61,7 @@ export default function (pi: ExtensionAPI) {
       return { action: "continue" as const };
     } catch { /* A thrown input handler is caught by Pi; explicitly handle below. */ }
     failed = true;
-    process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed" }) + "\n");
+    process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed", code: failureCode }) + "\n");
     return { action: "handled" as const };
   });
   // This public event is awaited before tool execution. It carries the complete

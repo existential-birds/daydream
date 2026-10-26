@@ -646,7 +646,7 @@ class PiBackend:
                         "Hosted Pi requires regular operator-owned configuration/authentication files; "
                         f"{name} cannot be a link or special file")
             settings_path = agent_dir / "settings.json"
-            settings = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+            settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
             if not isinstance(settings, dict) or any(settings.get(name) for name in (
                 "packages", "extensions", "skills", "prompts", "themes",
             )):
@@ -658,7 +658,7 @@ class PiBackend:
                 if path.exists() or path.is_symlink():
                     raise _unsupported_hosted_policy(
                         f"Hosted Pi requires an isolated resource-free operator directory; remove {name}")
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise _unsupported_hosted_policy("Hosted Pi operator settings could not be validated") from exc
 
     async def validate_hosted_policy(self) -> None:
@@ -1190,7 +1190,10 @@ class PiBackend:
             if host_tools is not None:
                 host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(process_cwd, child_env, host_tools)
-                extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_server.packet()))
+                host_packet = host_server.packet()
+                if self._hosted_read_only:
+                    host_packet["hosted_model"] = {"provider": provider, "id": self.model}
+                extensions.append(("DAYDREAM_PI_HOST_PACKET", "pi_host_tools.ts", host_packet))
             if native_output or review_context is not None:
                 packet: dict[str, Any] = {"output_schema": output_schema} if native_output else {}
                 if review_context is not None:
@@ -1294,6 +1297,11 @@ class PiBackend:
                     continue
                 if event_type == "daydream_host_tools_failed":
                     if self._hosted_read_only:
+                        if event.get("code") == "hosted_model_selection":
+                            raise _unsupported_hosted_policy(
+                                "Hosted Pi model selection must exactly match the operator's provider/model; "
+                                f"configure the native registry with {provider}/{self.model}. "
+                                "Fuzzy model fallback is unsupported.")
                         raise _unsupported_hosted_policy(
                             "Hosted Pi native readiness failed; required stock tools and packaged helpers "
                             "must be supported by official Pi 1.4.0 / Node 24.18.1")

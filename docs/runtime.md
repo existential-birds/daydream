@@ -91,7 +91,9 @@ cannot supply hosted authority.
 
 Prepare `agent_dir` separately from target and ambient user configuration. Only
 regular operator-approved native provider configuration, authentication and inert settings
-belong there. Resource settings/directories, system-prompt files and executable
+belong there. The approved registry must contain the exact provider/model ID;
+implicit fuzzy model substitution is rejected before provider work.
+Resource settings/directories, system-prompt files and executable
 loader environment overrides are rejected. Native authentication and credential
 refresh remain native; Daydream never copies or changes persistent user credentials.
 `HOME`, `PI_CODING_AGENT_DIR` and provider selection are fixed to this isolated
