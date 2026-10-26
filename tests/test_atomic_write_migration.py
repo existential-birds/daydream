@@ -125,7 +125,7 @@ class TestWriterCharacterization:
             assert target.read_bytes() == content
 
 
-    def test_candidate_bytes_mode_and_no_stray_temp(self, tmp_path: Path) -> None:
+    def test_candidate_bytes_mode_and_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         artifact = candidate.build_candidate_artifact("case-abc123def456", [])
         dest = tmp_path / "logs" / "artifacts" / "review.json"
         with _umask(0o022):
@@ -134,6 +134,17 @@ class TestWriterCharacterization:
         assert dest.read_bytes() == json.dumps(artifact).encode("utf-8")
         assert not dest.read_bytes().endswith(b"\n")
         assert stat.S_IMODE(dest.stat().st_mode) == 0o644
+        assert list(dest.parent.glob("*.tmp")) == []
+
+        artifact["head_ref"] = "updated-head"
+        calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
+        with _umask(0o077):
+            candidate.write_candidate_artifact_atomic(dest, artifact)
+        [(target, content, kwargs)] = calls
+        assert target == dest
+        assert content == json.dumps(artifact).encode("utf-8") == dest.read_bytes()
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o600
+        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
         assert list(dest.parent.glob("*.tmp")) == []
 
     def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,18 +168,6 @@ class TestWriterCharacterization:
 
 
 class TestCandidateKnobs:
-    def test_candidate_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
-                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
-        artifact = candidate.build_candidate_artifact("case-abc123def456", [])
-        dest = tmp_path / "review.json"
-        calls = _instrument(monkeypatch, "daydream.benchmark.harbor.candidate")
-        with _umask(0o077):
-            candidate.write_candidate_artifact_atomic(dest, artifact)
-        [(target, content, kwargs)] = calls
-        assert target == dest
-        assert content == json.dumps(artifact).encode("utf-8")
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
-
     def test_candidate_failure_stays_typed_and_leaves_no_temp(self, tmp_path: Path) -> None:
         # Isolate the destination so the autouse archive_dir fixture's tmp_path/archive
         # does not pollute the "no temp survives" observation.

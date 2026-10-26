@@ -363,7 +363,9 @@ fn f(a: bool, b: bool, v: Option<i32>, items: &[i32]) -> Result<i32, std::io::Er
         println!("{}", x);
     }
     let _s = fs::read_to_string("f")?;
-    if a {
+    if
+        let Some(x) = v
+    {
         process::exit(1);
     }
     if b {
@@ -638,17 +640,11 @@ def test_branch_lines_go_has_no_else_node_and_four_switch_kinds() -> None:
 
 def test_branch_lines_rust_nested_else_chain_and_match_arms() -> None:
     # Rust nests else_clause exactly like TypeScript (5, 7 are the two heads).
-    # 26 is an if_expression whose condition is a let_condition (both on that
-    # line); 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
+    # 26 keeps if/let on one line; a second pair at 30/31 exposes let_condition.
+    # 29 is a `?` try_expression; `match v {` (21) is dropped in favour of
     # its match_arm lines (22, 23, 24).
-    assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 33]
+    assert branch_statement_lines("rust", RUST_CF) == [5, 7, 12, 15, 18, 22, 23, 24, 26, 29, 30, 31, 35]
     assert is_branch_line("rust", RUST_CF, 21) is True
-
-def test_branch_lines_rust_let_condition_on_its_own_line() -> None:
-    # Isolates let_condition from the if_expression head, which they normally
-    # share a line with.
-    source = b"fn g(v: Option<i32>) {\n    if\n        let Some(x) = v\n    {\n        1;\n    }\n}\n"
-    assert branch_statement_lines("rust", source) == [2, 3]
 
 def test_branch_lines_unknown_language_is_empty() -> None:
     assert branch_statement_lines("elixir", b"if x do\n  1\nend\n") == []
@@ -793,8 +789,8 @@ def test_terminal_lines_go_return_os_exit_panic_and_log_fatal() -> None:
 
 def test_terminal_lines_rust_return_exit_abort_and_panic_macros() -> None:
     # 6/8 return, 10 std::process::exit, 22 panic!, 23 unreachable!, 24 todo!,
-    # 31 process::exit, 34 std::process::abort, 36 process::abort.
-    assert _terminal_lines("rust", RUST_CF) == [6, 8, 10, 22, 23, 24, 31, 34, 36]
+    # 33 process::exit, 36 std::process::abort, 38 process::abort.
+    assert _terminal_lines("rust", RUST_CF) == [6, 8, 10, 22, 23, 24, 33, 36, 38]
     assert is_terminal_line("rust", RUST_CF, 27) is False
     assert "println" not in TERMINAL_MACRO_NAMES
     assert TERMINAL_MACRO_NAMES == frozenset({"panic", "unreachable", "todo", "unimplemented"})

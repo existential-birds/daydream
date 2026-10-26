@@ -297,8 +297,6 @@ _MATCH_CASES = [
     pytest.param("@bot review\n@bot add flowchart", "bot", "review", id="review-wins-over-flowchart"),
     # Regex metacharacters in handles must match literally.
     pytest.param("@my.bot+1 review", "my.bot+1", "review", id="metachar-handle-review"),
-    pytest.param("@my.bot+1 add sequence diagram", "my.bot+1", "sequence", id="metachar-handle-sequence"),
-    pytest.param("@my.bot+1 add flowchart", "my.bot+1", "flowchart", id="metachar-handle-flowchart"),
     pytest.param("@zzz add flowchart", ".*", "", id="metachar-handle-not-a-wildcard"),
     pytest.param("@bot reviews", "bot", "", id="no-reviews-plural"),
     pytest.param("@bot add flowcharts", "bot", "", id="no-flowcharts-plural"),

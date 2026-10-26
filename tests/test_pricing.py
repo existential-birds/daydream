@@ -31,38 +31,25 @@ def test_openai_long_context_rates_apply_to_whole_request(model: str) -> None:
     )
 
 def test_claude_sonnet_5_uses_the_rate_in_effect_on_the_usage_date() -> None:
-    """Introductory pricing lasts through 2026-08-31."""
-    assert compute_cost(
-        model="claude-sonnet-5", input_tokens=1_000_000, cached_input_tokens=1_000_000, output_tokens=1_000_000,
-        effective_date=date(2026, 8, 31),
-    ) == pytest.approx(12.20)
-    assert compute_cost(
-        model="claude-sonnet-5", input_tokens=1_000_000, cached_input_tokens=1_000_000, output_tokens=1_000_000,
-        effective_date=date(2026, 9, 1),
-    ) == pytest.approx(18.30)
+    """Introductory pricing lasts through 2026-08-31; an omitted date uses standard rates."""
+    tokens = (1_000_000, 1_000_000, 1_000_000)
+    assert compute_cost("claude-sonnet-5", *tokens, effective_date=date(2026, 8, 31)) == pytest.approx(12.20)
+    assert compute_cost("claude-sonnet-5", *tokens, effective_date=date(2026, 9, 1)) == pytest.approx(18.30)
+    assert compute_cost("claude-sonnet-5", *tokens) == pytest.approx(18.30)
 
 
 @pytest.mark.parametrize(("model", "expected"),
     [
-        ("gpt-5.6-sol", 3.55), ("gpt-5.6-terra", 1.775), ("gpt-5.6-luna", 0.71),
-        ("gpt-5.6", 3.55), ("claude-sonnet-5", 1.83),
-        ("openai/gpt-6.1-sol", 1.21), ("gpt-6.1-sol", 1.21),
+        ("gpt-5.6-terra", 1.775), ("gpt-5.6-luna", 0.71),
+        ("gpt-5.6", 3.55),
     ],
 )
 def test_new_default_model_ids_price_to_published_rates(model: str, expected: float) -> None:
-    """Exact-match lookup requires every default id and alias to have a price entry."""
+    """Distinct GPT-5.6 policies must use their own baseline rates."""
     cost = compute_cost(model=model, input_tokens=100_000, cached_input_tokens=100_000, output_tokens=100_000,)
     assert cost is not None, model
     assert cost > 0, model
     assert cost == pytest.approx(expected), model
-
-
-def test_superseded_model_ids_still_price() -> None:
-    """Archived trajectories still reference superseded model ids."""
-    for legacy in ("gpt-5.5", "gpt-5.5-pro", "gpt-5-codex", "gpt-5.3-codex", "glm-5.2"):
-        cost = compute_cost(model=legacy, input_tokens=1_000_000, cached_input_tokens=0, output_tokens=0,)
-        assert cost is not None, legacy
-        assert cost > 0, legacy
 
 
 # --- User-overridable pricing -------------------------------------------------
@@ -75,28 +62,18 @@ def _write(path: Path, content: str) -> Path:
 
 def test_load_user_prices_missing_required_field_skips_entry(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     prices_file = _write(tmp_path / "prices.toml",
-        '[prices."has-output"]\noutput = 5.0\n[prices."ok"]\ninput = 1.0\noutput = 2.0\n',
+        '[prices."has-output"]\noutput = 5.0\n[prices."neg"]\ninput = -1.0\noutput = 2.0\n'
+        '[prices."nan-model"]\ninput = nan\noutput = 2.0\n[prices."ok"]\ninput = 1.0\noutput = 2.0\n',
     )
     with caplog.at_level("WARNING"):
         loaded = load_user_prices(path=prices_file)
     assert "has-output" not in loaded
-    assert "ok" in loaded
-    assert any("missing required field" in rec.message for rec in caplog.records)
-
-@pytest.mark.parametrize(("model", "input_value", "warning"),
-    [
-        pytest.param("neg", "-1.0", "negative", id="negative"),
-        pytest.param("nan-model", "nan", "non-finite", id="nan"),
-    ],
-)
-def test_load_user_prices_invalid_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, model: str, input_value: str, warning: str,
-) -> None:
-    prices_file = _write(tmp_path / "prices.toml", f'[prices."{model}"]\ninput = {input_value}\noutput = 2.0\n',)
-    with caplog.at_level("WARNING"):
-        loaded = load_user_prices(path=prices_file)
-    assert loaded == {}
-    assert any(warning in rec.message for rec in caplog.records)
+    assert "neg" not in loaded
+    assert "nan-model" not in loaded
+    assert loaded == {"ok": ModelPrice(input=1.0, cached_input=1.0, output=2.0)}
+    assert any("'has-output' missing required field 'input'" in rec.message for rec in caplog.records)
+    assert any("'neg' field 'input' is negative" in rec.message for rec in caplog.records)
+    assert any("'nan-model' field 'input' is non-finite" in rec.message for rec in caplog.records)
 
 def test_load_user_prices_unresolvable_home_returns_empty(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
@@ -116,7 +93,21 @@ def test_load_user_prices_unresolvable_home_returns_empty(
 def test_resolve_prices_none_returns_builtin_copy() -> None:
     """The returned table must be independently mutable."""
     resolved = resolve_prices()
-    assert resolved == MODEL_PRICES
+    assert resolved == {
+        "gpt-5.5": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+        "gpt-5.5-pro": ModelPrice(input=30.00, cached_input=30.00, output=180.00),
+        "gpt-5-codex": ModelPrice(input=1.25, cached_input=1.25, output=10.00),
+        "gpt-5.3-codex": ModelPrice(input=1.75, cached_input=1.75, output=14.00),
+        "gpt-5.6-sol": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+        "gpt-5.6-terra": ModelPrice(input=2.50, cached_input=0.25, output=15.00),
+        "gpt-5.6-luna": ModelPrice(input=1.00, cached_input=0.10, output=6.00),
+        "gpt-5.6": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+        "openai/gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
+        "gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
+        "claude-sonnet-5": ModelPrice(input=3.00, cached_input=0.30, output=15.00),
+        "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
+        "deepseek/deepseek-v4-flash-0731": ModelPrice(input=0.28, cached_input=0.028, output=0.42),
+    }
     assert resolved is not MODEL_PRICES
 
     resolved["gpt-5.5"] = ModelPrice(input=0.0, cached_input=0.0, output=0.0)

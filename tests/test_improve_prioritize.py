@@ -128,9 +128,12 @@ def test_member_aliases_survive_wording_and_expose_membership_drift() -> None:
 
     before = aggregate_cross_service([first])[0]
     after = aggregate_cross_service([reworded])[0]
-    expanded = aggregate_cross_service([reworded, added])[0]
+    expanded, bare = aggregate_cross_service([reworded, added, {"title": "x"}])
 
     assert before["member_aliases"] == after["member_aliases"]
     assert before["package_fingerprint"] == after["package_fingerprint"]
     assert set(after["member_aliases"]) < set(expanded["member_aliases"])
     assert expanded["package_fingerprint"] != after["package_fingerprint"]
+    assert expanded["member_aliases"][0] == "member:33dc485da5dce8f6160b9c0e2ebb1dee85078f795929502a6bf7b16babe3dd6c"
+    assert expanded["member_aliases"][1] == "member:ec9652f854fb905fdc5744fb08bcbd18681e45f153b1b1cdda54fba0cb54e602"
+    assert bare["member_aliases"] == ["member:aee8bc487098438d8abf22bd68eacb59752131851a25ca9430116254d459890e"]

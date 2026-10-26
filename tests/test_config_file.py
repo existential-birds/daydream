@@ -5,7 +5,9 @@ import pytest
 from daydream.config_file import DaydreamFileConfig, load_file_config
 
 
-def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_path: Path) -> None:
+def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     """A reload must admit each field independently and preserve sibling file settings."""
     (tmp_path / "pyproject.toml").write_text(
         '[tool.daydream]\nbackend = "claude"\n'
@@ -14,6 +16,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
         '[tool.daydream.improve.service_groups]\ncore = ["apps/billing", "apps/catalog"]\n'
         "[tool.daydream.improve.github]\npublish-issues = true\n"
         '[tool.daydream.diagram]\nmin_branch_points = 6\nmode = "auto"\n'
+        '[tool.daydream.bench]\nmodel = "claude-opus-4-5-20251101"\n'
     )
     dotfile = tmp_path / ".daydream.toml"
     dotfile.write_text(
@@ -30,6 +33,8 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
 
     config = load_file_config(tmp_path)
 
+    assert not hasattr(config, "bench")
+    assert any("no longer a supported daydream config section" in rec.message for rec in caplog.records)
     assert config.backend == "claude"
     assert config.phases == {"review": {"model": "pyproject-review"}, "fix": {"backend": "codex"}}
     assert (config.precision_mode, config.approve_on_clean, config.scope_issue_filing) == (True, True, True)
@@ -54,6 +59,7 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
     assert (config.diagram_mode, config.diagram_min_branch_points) == ("off", 6)
 
     dotfile.write_text(
+        "retry_recovery_allowance_s = -5\n"
         "precision_mode = 1\napprove_on_clean = 1\nscope_issue_filing = 1\n"
         'supervisor = "unknown"\nsupervisor_deny_globs = [1]\n'
         'tool_supervisor = "unknown"\ntool_bash_deny = [1]\n'
@@ -68,6 +74,8 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_pa
 
     degraded = load_file_config(tmp_path)
 
+    assert degraded.retry_recovery_allowance_s is None
+    assert any("retry_recovery_allowance_s=-5" in rec.message for rec in caplog.records)
     assert (degraded.precision_mode, degraded.approve_on_clean, degraded.scope_issue_filing) == (None, None, None)
     assert (degraded.supervisor, degraded.supervisor_deny_globs) == (None, [])
     assert (degraded.tool_supervisor, degraded.tool_bash_deny) == (None, [])
@@ -98,15 +106,6 @@ def test_malformed_toml_raises_valueerror(tmp_path: Path) -> None:
         load_file_config(tmp_path)
 
 
-def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nmodel = "claude-opus-4-5-20251101"\n')
-    cfg = load_file_config(tmp_path)
-    assert not hasattr(cfg, "bench")
-    # A stale bench table must produce a warning, matching the removed CLI verb's explicit
-    # rejection.
-    assert any("no longer a supported daydream config section" in rec.message for rec in caplog.records)
-
-
 @pytest.mark.parametrize("value",
     [pytest.param("-0.1", id="negative"), pytest.param("nan", id="nan"), pytest.param("inf", id="inf"),
         pytest.param("true", id="bool"), pytest.param('"0.25"', id="string"),
@@ -131,13 +130,3 @@ def test_diagram_junk_table_degrades_to_unset(tmp_path: Path) -> None:
     cfg = load_file_config(tmp_path)
     assert cfg.diagram_mode is None
     assert cfg.diagram_min_branch_points is None
-
-
-def test_an_invalid_retry_recovery_allowance_degrades_observably(tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    (tmp_path / ".daydream.toml").write_text('retry_recovery_allowance_s = -5\n', encoding="utf-8")
-
-    config = load_file_config(tmp_path)
-
-    assert config.retry_recovery_allowance_s is None            # default applies
-    assert any("retry_recovery_allowance_s" in r.message for r in caplog.records)

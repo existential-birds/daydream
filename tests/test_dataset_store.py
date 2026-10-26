@@ -68,8 +68,16 @@ def test_current_records_read_all_history_without_creating_snapshot(
         'scoring-redacted': (LEGACY_REVIEW, len(LEGACY_REVIEW) + 7,
                              {'applied': True, 'policy': 'retained-redaction-policy'}),
     }
+    source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
+    store.record_download_source(source, **current)
+    path = store.root / "source.json"
+    assert json.loads(path.read_bytes()) == source
+    assert store.download_source() == source
+    assert path.read_bytes().endswith(b"\n")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert list((store.root / "snapshots").iterdir()) == []
     pinned = store.select_snapshot(observed_before="2300-01-01T00:00:00Z")
+    assert pinned["source"] == {**source, "manifest_sha256": None}
     assert store.read_snapshot(pinned["snapshot_id"]).runs == current["runs"]
 
 
@@ -91,17 +99,6 @@ def test_current_record_reads_reject_orphaned_observations(store: LocalRecordSto
         store.record_download_source({"revision": "a" * 40}, **current)
     assert not (store.root / "source.json").exists()
     assert list((store.root / "snapshots").iterdir()) == []
-
-
-def test_download_source_records_exact_membership_privately(store: LocalRecordStore) -> None:
-    current = store.read_records()
-    source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
-    store.record_download_source(source, **current)
-    path = store.root / "source.json"
-    assert json.loads(path.read_bytes()) == source
-    assert store.download_source() == source
-    assert path.read_bytes().endswith(b"\n")
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize("change", ["run", "observation", "content"])
