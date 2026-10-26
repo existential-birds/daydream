@@ -24,6 +24,7 @@ from daydream.backends import (
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
+    ToolStartEvent,
     TurnEndEvent,
 )
 from daydream.backends.osprey import (
@@ -167,19 +168,6 @@ async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof(
         _collect(OspreyBackend(osprey_binary="fake"), lines, stderr_held_open=True), timeout=0.5,
     )
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
-
-
-async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": "Let"},
-        {"event": "thinking_delta", "content": " me"}, {"event": "thinking_delta", "content": " think."},
-        {"event": "text_delta", "content": "Done."}, {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
-    )
-    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-    assert [type(event) for event in events] == [
-        RequestEvent, ThinkingEvent, TextEvent, TurnEndEvent, CostEvent, ResultEvent,
-    ]
-    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["Let me think."]
 
 
 async def test_osprey_turns_retain_thinking_boundaries_and_native_identity(tmp_path: Path) -> None:
@@ -434,6 +422,9 @@ async def test_invalid_turn_event_order_fails_closed(events: list[dict[str, obje
 async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "turn", "timestamp": "2026-08-15T00:00:01Z"},
+        {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"}, {"event": "thinking_delta", "content": " think."},
+        {"event": "text_delta", "content": "Done."},
         {"event": "tool_call", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "arguments": {"id": "7"}},
         {
             "event": "tool_result", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "status": "success",
@@ -480,6 +471,13 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     assert (result.session_id, result.provider_name, result.finish_reason, result.duration_ms) == (
         "s-137", "openai-compatible", "completed", 120,
     )
+    assert [type(event) for event in events] == [
+        RequestEvent, ThinkingEvent, TextEvent, ToolStartEvent, ToolResultEvent, MetricsEvent,
+        TurnEndEvent, CostEvent, ResultEvent,
+    ]
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["Let me think."]
+    assert trajectory["steps"][1]["message"] == "Done."
+    assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
 
 
 # --- P18 Task 1: effective request-config admission at the Osprey argv seam --
