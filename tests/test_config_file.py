@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, load_file_config
-from tests.harness.config import write_daydream_pyproject
 
 
 def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(tmp_path: Path) -> None:
@@ -106,12 +105,6 @@ def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixt
     # A stale bench table must produce a warning, matching the removed CLI verb's explicit
     # rejection.
     assert any("no longer a supported daydream config section" in rec.message for rec in caplog.records)
-
-
-def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
-    write_daydream_pyproject(tmp_path, trajectory_hub_repo="evil/repo")
-    cfg = load_file_config(tmp_path)
-    assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
 
 @pytest.mark.parametrize("value",

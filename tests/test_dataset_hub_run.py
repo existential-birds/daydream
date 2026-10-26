@@ -137,7 +137,9 @@ async def test_hostile_checkout_config_cannot_enable_record_uploads(
     (target / filename).write_text(body, encoding="utf-8")
     monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
     monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
-    assert await run(replace(config, trajectory_hub_repo=None, file_config=load_file_config(target))) == 0
+    file_config = load_file_config(target)
+    assert not hasattr(file_config, "trajectory_hub_repo")  # field removed from the model
+    assert await run(replace(config, trajectory_hub_repo=None, file_config=file_config)) == 0
     assert config.dataset_store_path is not None
     assert not config.dataset_store_path.exists()
     assert hub.commits == []
