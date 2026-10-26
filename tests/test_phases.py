@@ -300,6 +300,7 @@ def test_test_healing_guard_restores_generated_population_and_paired_manifests(
     init_repo(tmp_path)
     originals = {
         "migrations/0001_init.sql": "-- original migration\n",
+        "alembic/versions/abc123_add_col.py": "revision = 'abc123'\n",
         "migrations/a/b.sql": "-- nested migration\n",
         "migrations/a-b.sql": "-- flat migration\n",
         "internal/model_generated.go": "package generated\n",
@@ -332,7 +333,9 @@ def test_test_healing_guard_restores_generated_population_and_paired_manifests(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(protected),
         pre_untracked_contents=protected, allow_standalone=True,
     )
+    assert (tmp_path / "alembic/versions/abc123_add_col.py").read_bytes() == b"revision = 'abc123'\n"
     assert set(violations or ()) == {
+        "alembic/versions/abc123_add_col.py",
         "migrations/0001_init.sql", "internal/model_generated.go", "src/client.py", "src/client.go",
         "src/client.txt", "Cargo.lock", "frontend/package-lock.json",
         "migrations/a/b.sql", "migrations/a-b.sql", "migrations/0000_local_draft.sql",

@@ -249,11 +249,12 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
     call = base_sequence()["messages"][1]
     reply = base_sequence()["messages"][2]
     messages = [
-        spec["messages"][0],
+        {**spec["messages"][0], "from": "BadExternal"},
         {**call, "label": "mid-list fault", "evidence": {**call["evidence"], "line": 999}},
         *spec["messages"][1:],
     ]
-    expected = {"message:1": "LINE_OUT_OF_RANGE"}
+    expected = {"message:0": "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT",
+                "message:1": "LINE_OUT_OF_RANGE"}
     faults: list[tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], str]] = [
         ("escape", call, {"file": "../outside/secrets.py"}, {}, "PATH_ESCAPES_REPO"),
         ("range", call, {"line": 999}, {}, "LINE_OUT_OF_RANGE"),
@@ -341,11 +342,10 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
     assert report.spec_final["blocks"] == [
         {
             "kind": "opt",
-            "branches": [{"condition": "retained", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [1, 2]}],
+            "branches": [{"condition": "retained", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0, 1]}],
         }
     ]
     assert [message["label"] for message in report.spec_final["messages"]] == [
-        "request",
         "resolve identity",
         "payload",
         "return check call",
@@ -354,22 +354,21 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
         "self interaction",
     ]
     assert check_for(report, "message", str(snap_index)).snapped_line == 5
-    assert report.spec_final["messages"][5]["evidence"]["line"] == 5
-    assert [check_for(report, "message", str(i)).defined_at for i in (0, 2, 3)] == [
-        "pkg/api.py:4",
+    assert report.spec_final["messages"][4]["evidence"]["line"] == 5
+    assert [check_for(report, "message", str(i)).defined_at for i in (2, 3)] == [
         "pkg/service.py:1",
         "pkg/service.py:1",
     ]
     assert all(
         check_for(report, "message", str(i)).strength == "definition"
         and check_for(report, "message", str(i)).in_changed_hunk
-        for i in (0, 2, 3)
+        for i in (2, 3)
     )
     assert report.rejected is None and report.omit_reasons == []
     # The two surviving interactions stay in one remapped branch, without an
     # extra opt/else boundary between the valid call and its corresponding reply.
     assert (
-        "    opt retained\n        P2->>P3: resolve identity\n        P3-->>P2: payload\n    end\n"
+        "    opt retained\n        P1->>P2: resolve identity\n        P2-->>P1: payload\n    end\n"
     ) in render_sequence_mermaid(report.spec_final)
 
 
@@ -484,6 +483,10 @@ def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols)
     report = run_sequence(repo, symbols, spec)
 
     assert len(report.spec_final["blocks"]) == DIAGRAM_MAX_BLOCKS
+    assert check_for(report, "participant", "Client").grounded
+    entrypoint = check_for(report, "message", "0")
+    assert entrypoint.grounded and entrypoint.in_changed_hunk
+    assert (entrypoint.strength, entrypoint.defined_at) == ("definition", "pkg/api.py:4")
 
 
 def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:

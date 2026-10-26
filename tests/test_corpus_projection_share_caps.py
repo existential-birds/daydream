@@ -114,7 +114,11 @@ def _store_with_caps_population(tmp_path: Path) -> Any:
 def test_real_cli_applies_caps_and_pins_matching_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    store = _store_with_caps_population(tmp_path)
+    store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"))
+    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "accepted"), repo_slug="owner/repo-b")
+    add_projection_run(store, run_id="sess-c", dispositions=("accepted", "accepted"), stack="rust",
+                       profile="quick-review")
+    add_projection_run(store, run_id="sess-d", dispositions=("accepted",), stack="rust", repo_slug="owner/repo-b")
     config = projection_config(store, tmp_path, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7)
     args = [
         "corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
@@ -126,18 +130,25 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     assert not config.out_dir.exists()
     assert cli_main(args) == 0
     records = _read_jsonl(config.out_dir / "corpus.jsonl")
-    assert len(records) == 4 and "4" in dry_text
+    assert [(row["session_id"], row["item_uid"]) for row in records] == [
+        ("sess-b", "item:0"), ("sess-c", "item:1"),
+    ]
+    assert "2 records" in dry_text
     lineage = json.loads((config.out_dir / "lineage.json").read_text())
+    assert lineage["snapshot_id"] == config.snapshot_id
     report = lineage["share_caps"]
     assert report["version"] == 1
     assert report["configured"] == {"stack": 0.5, "repo": 0.6, "profile": 0.7}
     assert report["applied"] == {
-        "stack": {"python": {"count": 2, "share": 0.5}, "rust": {"count": 2, "share": 0.5}},
-        "repo": {"owner/repo-a": {"count": 2, "share": 0.5}, "owner/repo-b": {"count": 2, "share": 0.5}},
-        "profile": {"deep-review": {"count": 2, "share": 0.5}, "quick-review": {"count": 2, "share": 0.5}},
+        "stack": {"python": {"count": 1, "share": 0.5}, "rust": {"count": 1, "share": 0.5}},
+        "repo": {"owner/repo-a": {"count": 1, "share": 0.5}, "owner/repo-b": {"count": 1, "share": 0.5}},
+        "profile": {"deep-review": {"count": 1, "share": 0.5}, "quick-review": {"count": 1, "share": 0.5}},
     }
-    assert report["exclusions"] == {"stack:python": 1}
-    assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 0, "share-cap:stack:python": 1}
+    assert report["exclusions"] == {"stack:python": 3, "repo:owner/repo-a": 1, "profile:deep-review": 2}
+    assert lineage["exclusions_by_reason"] == {
+        "non-decisive-adjudication": 0, "share-cap:stack:python": 3,
+        "share-cap:repo:owner/repo-a": 1, "share-cap:profile:deep-review": 2,
+    }
     direct = build_frozen_corpus(projection_config(
         store, tmp_path, out_dir=tmp_path / "direct", max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7,
     ))

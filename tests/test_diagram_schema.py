@@ -65,3 +65,23 @@ def test_coerce_flowchart_nulls_an_unusable_root() -> None:
     coerced = coerce_flowchart_spec({"root": {"file": "a.py", "name": "f"}, "nodes": [_node()], "edges": []})
     assert coerced["root"] is None
     assert len(coerced["nodes"]) == 1
+
+
+def test_coerce_sequence_remaps_branch_indices_over_a_dropped_message() -> None:
+    coerced = coerce_sequence_spec({"participants": [],
+            "messages": [_message(label="first"), _message(label="dropped", kind="broadcast"), _message(label="third"),
+            ], "blocks": [{"kind": "alt",
+                    "branches": [{"condition": "a", "evidence": {"file": "a.py", "line": 1}, "messages": [0, 2, 2, 9]},
+                        {"condition": "b", "evidence": {"file": "a.py", "line": 5}, "messages": [1]},
+                    ],
+                }
+            ],
+        }
+    )
+    assert [m["label"] for m in coerced["messages"]] == ["first", "third"]
+    branches = coerced["blocks"][0]["branches"]
+    # 0 -> 0, 2 -> 1, the duplicate and the out-of-range index are dropped, and
+    # the branch that pointed only at the dropped message keeps no indices.
+    assert branches[0]["messages"] == [0, 1]
+    assert branches[1]["messages"] == []
+    jsonschema.validate(coerced, SEQUENCE_SPEC_SCHEMA)
