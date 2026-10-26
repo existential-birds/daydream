@@ -7,17 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.31.0] - 2026-10-26
+
 ### Added
 
 - **review:** add a native-Pi committed-review API with fresh challenge of every
   finding and atomic, source-bound findings/coverage; CLI routing stays unchanged
-  ([#1645](https://github.com/existential-birds/daydream/issues/1645)).
-
+  ([#1645](https://github.com/existential-birds/daydream/issues/1645), #1706).
 - **pi:** admit review submissions inside the native terminal tool, with
   correctable source selectors and host-built canonical references while keeping
   stock reads, search and pagination
-  ([#1620](https://github.com/existential-birds/daydream/issues/1620)). Requires
-  Pi 1.4.0; extension API 8 remains compatible. Private stage/cache contract 13
+  ([#1620](https://github.com/existential-birds/daydream/issues/1620), #1694).
+  Requires Pi 1.4.0; extension API 8 remains compatible. Private stage/cache contract 13
   invalidates prior stage caches.
 
 ### Changed
@@ -25,11 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **dependencies:** consolidate pending Dependabot updates for the root and RL
   projects, including Claude Agent SDK 0.2.172, aiohttp 3.14.4, Filelock 4.2.1,
   Pillow 13.0.0, certifi 2026.10.19, grpcio 1.84.1, and Ruff 0.17.2; refresh
-  the benchmark runtime lock and pinned Python/uv setup actions.
-
+  the benchmark runtime lock and pinned Python/uv setup actions (#1705).
 - Reduce the README to agent setup, code review, and research entry points; remove
-  historical documentation and retain concise agent contracts with source links.
-
+  historical documentation and retain concise agent contracts with source links
+  (#1671, #1674, #1675).
 - Default full GitHub CI to eight duration-weighted pytest jobs on free standard
   runners, retaining the required `check`, complete execution evidence and
   aggregate branch coverage
