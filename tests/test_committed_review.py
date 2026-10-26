@@ -494,7 +494,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             validate_committed_result(corrupted)
 
 
-@pytest.mark.parametrize("fault", ["preparation", "backend", "provider", "model", "output-overlap"])
+@pytest.mark.parametrize("fault", [
+    "preparation", "backend", "provider", "model", "output-overlap", "missing-agent-dir", "file-agent-dir",
+])
 async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
     review_inputs: StageInputFactory, fault: str,
 ) -> None:
@@ -502,6 +504,8 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
 
     A post-checkout hook would execute before raw-byte validation if policy admission
     moved below worktree creation. No unsupported request may reach that effect.
+    Missing/file configuration roots must produce the same actionable policy error,
+    rather than escaping as raw filesystem errors during native context binding.
     """
     from dataclasses import replace
 
@@ -515,6 +519,11 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     hook.chmod(0o755)
     operator = repo.parent / "operator"
     operator.mkdir()
+    if fault == "missing-agent-dir":
+        operator.rmdir()
+    elif fault == "file-agent-dir":
+        operator.rmdir()
+        operator.write_text("not a configuration directory")
     policy = HostedReviewPolicy(
         agent_dir=operator, environment={"PATH": os.environ["PATH"]},
         output_dir=repo.parent / "hosted-output", private_base=repo.parent / "hosted-private",
@@ -526,13 +535,15 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
         "output-overlap": {"output_dir": repo / "output"},
     }
     before = git(repo, "worktree", "list", "--porcelain")
-    with pytest.raises(UnsupportedHostedPolicy):
+    message = "agent_dir.*existing directory" if fault.endswith("agent-dir") else None
+    with pytest.raises(UnsupportedHostedPolicy, match=message):
         await run_committed_review(CommittedReviewRequest(
-            repo, review_inputs.revision["merge_base_sha"], hosted_policy=replace(policy, **changes[fault]),
+            repo, review_inputs.revision["merge_base_sha"], hosted_policy=replace(policy, **changes.get(fault, {})),
         ))
     assert not marker.exists()
     assert git(repo, "worktree", "list", "--porcelain") == before
     assert not policy.output_dir.exists()
+    assert not policy.private_base.exists()
 
 
 @pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution"])

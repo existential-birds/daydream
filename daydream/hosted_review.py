@@ -67,6 +67,9 @@ class HostedReviewPolicy:
         if any(a.is_relative_to(b) or b.is_relative_to(a)
                for index, a in enumerate(roots) for b in roots[index + 1:]):
             raise UnsupportedHostedPolicy("Hosted source, configuration, output and private roots must be disjoint")
+        if not self.agent_dir.is_dir():
+            raise UnsupportedHostedPolicy(
+                "Hosted agent_dir must be an existing directory; prepare isolated operator configuration before review")
         if self.output_dir.exists() or self.output_dir.is_symlink():
             raise UnsupportedHostedPolicy("Hosted output_dir must be initially absent; select a unique run destination")
         if not isinstance(self.profile, ResolvedProfile):
