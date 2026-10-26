@@ -156,26 +156,19 @@ def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
 
 
 
-def test_warning_retains_distinct_diagnostics_for_a_shared_scope_and_phase() -> None:
-    coverage = review_coverage(scope_ids=('merge',), phases=('merge',))
-    coverage.record_scope('merge', 'failed', reasons=('backend_failure',))
-    coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
-    warnings = ('merge: synthesis transport failed', 'merge: reviewer backend failed',
-                'merge: additional evidence unavailable', 'merge: synthesis transport failed')
-    rendered = render_github_review_context(coverage.finalize('failed'), review_warnings=warnings)
-    for warning in set(warnings):
-        assert rendered.count(warning) == 1
-
-
 @pytest.mark.parametrize("with_terminal_result", [False, True])
 def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result: bool) -> None:
     """Payload assembly must not restore diagnoses omitted by the bounded summary."""
     warnings = tuple(f"stack-{index:02}: <unsafe> & reviewer timed out" for index in range(12))
     summary = None
     if with_terminal_result:
-        coverage = review_coverage(scope_ids=(), phases=('merge',))
+        coverage = review_coverage(scope_ids=('structural',), phases=('structural', 'merge'))
+        coverage.record_scope('structural', 'failed', reasons=('backend_failure',))
+        coverage.record_phase('structural', 'failed', reasons=('synthesis_failure',))
         coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
-        warnings += ("Transport evidence unavailable.",)
+        warnings = ('structural: synthesis transport failed', 'structural: reviewer backend failed',
+                    'structural: additional evidence unavailable', 'structural: synthesis transport failed',
+                    *warnings, "Transport evidence unavailable.")
         summary = render_github_review_context(coverage.finalize("failed"), review_warnings=warnings)
     body = build_payload_for_event(
         pr, pr_review.ClassifiedIssues(), event=pr_review.ReviewEvent.COMMENT,
@@ -183,8 +176,11 @@ def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result:
         review_warnings=warnings, review_summary=summary,
     ).body
 
-    assert body.count("reviewer timed out") == (7 if with_terminal_result else 8)
-    assert f"{6 if with_terminal_result else 4} additional" in body
+    if with_terminal_result:
+        for warning in warnings[:3]:
+            assert body.count(warning) == 1
+    assert body.count("reviewer timed out") == (4 if with_terminal_result else 8)
+    assert f"{9 if with_terminal_result else 4} additional" in body
     assert "&lt;unsafe&gt; &amp;" in body
     assert ('merge: synthesis failure' in body) is with_terminal_result
     assert "stack-11:" not in body
