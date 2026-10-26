@@ -534,11 +534,12 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
         "provider": {"provider": "unapproved"}, "model": {"model": "unapproved"},
         "output-overlap": {"output_dir": repo / "output"},
     }
+    policy = replace(policy, **changes.get(fault, {}))
     before = git(repo, "worktree", "list", "--porcelain")
     message = "agent_dir.*existing directory" if fault.endswith("agent-dir") else None
     with pytest.raises(UnsupportedHostedPolicy, match=message):
         await run_committed_review(CommittedReviewRequest(
-            repo, review_inputs.revision["merge_base_sha"], hosted_policy=replace(policy, **changes.get(fault, {})),
+            repo, review_inputs.revision["merge_base_sha"], hosted_policy=policy,
         ))
     assert not marker.exists()
     assert git(repo, "worktree", "list", "--porcelain") == before

@@ -136,6 +136,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     direct adapter journeys cannot detect host selection or shared-history bugs.
     The hosted row additionally proves that native resource/context discovery and
     attempted effects cannot broaden the operator policy across fresh challenges.
+    Unsupported versions must retain the command and expected version in their
+    mismatch diagnostic; a generic readiness rejection would hide the cause.
     Suffix-only model registries and invalid UTF-8 settings exercise readiness
     faults that the exact-model, valid-JSON success path cannot detect.
     """
@@ -410,7 +412,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     if case.startswith("hosted-unsupported") or case in unsupported:
         from daydream.hosted_review import UnsupportedHostedPolicy
 
-        message = "Hosted Pi model selection" if case == "hosted-model-fallback" else "Hosted|hosted"
+        message = {
+            "hosted-model-fallback": "Hosted Pi model selection",
+            "hosted-unsupported-pi": "pi did not report 1[.]4[.]0",
+            "hosted-unsupported-node": "node did not report v24[.]18[.]1",
+        }.get(case, "Hosted|hosted")
         with pytest.raises(UnsupportedHostedPolicy, match=message):
             await run_committed_review(request)
         assert len(native_provider.requests) == (4 if case == "hosted-challenge-capability" else 0)

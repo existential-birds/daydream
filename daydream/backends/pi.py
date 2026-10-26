@@ -759,12 +759,6 @@ class PiBackend:
                     if len(lines) > 1:
                         break
                 code = await reap(probe, timeout_s=allowance)
-            if code != 0 or lines != [expected]:
-                if self._hosted_read_only:
-                    raise _unsupported_hosted_policy(
-                        f"Hosted read-only policy requires verified official Pi 1.4.0 / Node 24.18.1; "
-                        f"{command} did not report {expected}")
-                raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
         except (TimeoutError, OSError, ValueError):
             probe_failed = True
             if self._hosted_read_only:
@@ -775,6 +769,14 @@ class PiBackend:
         except BaseException:
             probe_failed = True
             raise
+        else:
+            if code != 0 or lines != [expected]:
+                probe_failed = True
+                if self._hosted_read_only:
+                    raise _unsupported_hosted_policy(
+                        f"Hosted read-only policy requires verified official Pi 1.4.0 / Node 24.18.1; "
+                        f"{command} did not report {expected}")
+                raise PiError("Native host tools require verified Pi 1.4.0", category="HOST_TOOLS")
         finally:
             try:
                 await teardown(probe, self._transports, cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S)
