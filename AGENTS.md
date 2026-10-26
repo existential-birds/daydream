@@ -19,6 +19,20 @@ current branch and retry normally, or report the blocker. Sign commits and stage
 only related paths explicitly. A commit or push is complete only after the
 normal hook-enabled command succeeds.
 
+## Implementation standard (mandatory)
+
+Build the smallest cohesive implementation that satisfies the required behavior.
+Reuse fitting owners, validators and fixtures; consolidate duplicate logic and
+remove superseded code as part of implementation. Add an abstraction only when it
+simplifies callers or enforces a distinct contract.
+
+Before committing or requesting review, inspect the full base-to-head PR diff,
+including tests, docs and support files. Remove redundant plumbing, repeated setup
+and duplicated prose while preserving independent behavior and failure-path proof.
+Keep each documented rule in one authoritative home and link to it elsewhere.
+Simplicity is part of completion. PR descriptions should explain final behavior
+and validation, with routine cleanup and implementation history left out of the summary.
+
 ## Validation
 
 ```bash
