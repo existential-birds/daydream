@@ -44,9 +44,12 @@ def render_committed_review(payload: Mapping[str, Any]) -> str:
             lines.extend(['', '## ' + heading, ''])
         for claim in claims:
             semantic = claim['payload']
+            location = _code(semantic['file'])
+            if semantic['line'] is not None:
+                location += ':' + _code(semantic['line'])
             lines.extend([
                 f"### {claim['id']}. {claim['title']}", '',
-                f"Location: {_code(semantic['file'])}:{_code(semantic['line'])}; "
+                f"Location: {location}; "
                 f"claim {_code(claim['uid'])}, revision {_code(claim['revision'])}.", '',
                 semantic['claim'], '',
                 '**Trigger:** ' + semantic['trigger'], '',

@@ -127,6 +127,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     Existing native transport journeys call run_agent directly: they cannot catch
     Review skipping challenge, sharing investigator history, or losing its sealed
     findings/coverage/report/trajectory when composing the committed Git entry.
+    Null and concrete claim locations must survive JSON delivery and render without
+    inventing a line number for a locationless finding.
     """
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
@@ -192,7 +194,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                 "trigger": "Call ratio(5, 1)." if case == "defect" else "Call ratio(5, 0).",
                 "consequence": "A normal input raises ZeroDivisionError.",
                 "grounds": "Investigator is confident and considers its investigation complete.",
-                "file": "ratio.py", "line": 2, "evidence_refs": refs}}
+                "file": "ratio.py", "line": None if case == "defect" else 2, "evidence_refs": refs}}
             payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",
                                     "evidence_refs": target_refs} for target_id, target_refs in refs_by_target.items()],
                        "claims": [] if case == "empty" else [claim]}
@@ -228,6 +230,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
         claim = value["claims"][0]
         assert claim["source_uids"] == [] and claim["revision"] == 1
+        assert claim["payload"]["line"] == (None if case == "defect" else 2)
         assert claim["disposition"] == ("confirmed" if case == "defect" else "rejected")
         assert claim["challenge_evidence"][0]["revision"] == 1
         assert len(value["findings"]) == int(case == "defect")
@@ -239,6 +242,9 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     report = (repo / ".review-output.md").read_text()
     assert head in report and base in report and value["planned_work_id"] in report
     assert ("Division can fail" in report) == (case != "empty")
+    if case != "empty":
+        line_suffix = "" if case == "defect" else ":<code>2</code>"
+        assert f"Location: <code>ratio.py</code>{line_suffix}; claim " in report
     if case == "false-positive":
         assert counterevidence in report and "Rejected concerns" in report
     trajectory = json.loads((repo / ".daydream/runs" / value["run_id"] / "trajectory.json").read_text())
