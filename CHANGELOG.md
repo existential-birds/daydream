@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **review:** allow review profiles to configure the cumulative staged-review
+  tool-call budget while retaining host enforcement and diff-size scaling
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - **review:** consume versioned immutable PR inputs offline through the committed
   Pi API, with inert source materialization, distinct original/local identities,
   strict findings export and independent publisher target checks

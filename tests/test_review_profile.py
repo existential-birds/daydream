@@ -20,28 +20,30 @@ def test_review_deadline_is_profiled_and_validated() -> None:
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
 
-@pytest.mark.parametrize("seconds", [0, 900])
-def test_reviewer_investigation_budget_is_independent_and_changes_identity(seconds: int) -> None:
-    base = _profile("[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = 600")
-    configured = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = {seconds}")
-    assert configured.pipeline.reviewer_investigation_budget_s == seconds
+@pytest.mark.parametrize("field", ["reviewer_investigation_budget_s", "reviewer_tool_call_budget"])
+@pytest.mark.parametrize("value", [0, 900])
+def test_reviewer_budget_is_independent_and_changes_identity(field: str, value: int) -> None:
+    base = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\n{field} = 600")
+    configured = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\n{field} = {value}")
+    assert getattr(configured.pipeline, field) == value
     assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
     assert configured.to_canonical_dict() != base.to_canonical_dict()
     assert configured.digest != base.digest
 
 
+@pytest.mark.parametrize("field", ["reviewer_investigation_budget_s", "reviewer_tool_call_budget"])
 @pytest.mark.parametrize('value', [
     "-1",
     "true",
     '"480"',
 ])
-def test_invalid_reviewer_investigation_budget_names_field_and_source(value: str) -> None:
+def test_invalid_reviewer_budget_names_field_and_source(field: str, value: str) -> None:
     source = "/tmp/reviewer-profile.toml"
     with pytest.raises(rp.ProfileError) as error:
-        _profile(f"[pipeline]\nreviewer_investigation_budget_s = {value}", source=source)
+        _profile(f"[pipeline]\n{field} = {value}", source=source)
     assert error.value.source == source
     assert source in str(error.value)
-    assert "pipeline.reviewer_investigation_budget_s" in str(error.value)
+    assert f"pipeline.{field}" in str(error.value)
 
 
 # Task 2 (R4): canonical serialization + deterministic digest.
@@ -67,7 +69,8 @@ content = "X"
 source = "copied: a"
 [pipeline]
 structural_enabled = true
-reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s}''')
+reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s}
+reviewer_tool_call_budget = {rp.Pipeline().reviewer_tool_call_budget}''')
     assert implicit.to_canonical_dict() == explicit.to_canonical_dict()
     assert implicit.digest == explicit.digest
 

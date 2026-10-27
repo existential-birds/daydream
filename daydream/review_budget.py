@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import clock
+from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 
 _CANONICAL_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs (at most four, 8192 UTF-8 JSON bytes). For reviewed work, cite at least
@@ -132,7 +133,7 @@ class ReviewLimits:
 
     investigation_s: float = 480
     finalization_s: float = 120
-    tool_calls: int = 48
+    tool_calls: int = REVIEWER_TOOL_CALL_BUDGET
     discovery: bool = True
 
 

@@ -400,8 +400,9 @@ async def test_precision_overlap_publishes_only_joined_whole_unit_and_restores_b
     assert all(coverage.phases[phase]["status"] == "complete" for phase in ("arbiter", "suppression"))
 
 
+@pytest.mark.parametrize('field', ['reviewer_investigation_budget_s', 'reviewer_tool_call_budget'])
 async def test_configured_reviewer_policy_invalidates_reuse_and_records_resolved_identity(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, field: str,
 ) -> None:
     """A local-policy change must not serve a completed review under incompatible limits."""
     from tests.harness.stub_backend import review_stage_state
@@ -410,8 +411,8 @@ async def test_configured_reviewer_policy_invalidates_reuse_and_records_resolved
     profile_path = tmp_path / 'review-profile.toml'
     digests = []
     deep = multi_stack_target / '.daydream' / 'deep'
-    for index, seconds in enumerate((480, 900, 900)):
-        profile_path.write_text(f'[pipeline]\nreviewer_investigation_budget_s = {seconds}\n')
+    for index, value in enumerate((480, 900, 900)):
+        profile_path.write_text(f'[pipeline]\n{field} = {value}\n')
         resolved = resolve_profile(explicit_path=str(profile_path))
         trajectory_path = tmp_path / f'policy-{index}.json'
         stub.calls.clear()

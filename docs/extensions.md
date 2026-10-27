@@ -132,6 +132,14 @@ Configured reviewer time and the shared pipeline deadline cover preparation,
 every stage, and retries. Explicit caller wall or absolute deadlines can tighten
 that same cumulative bound.
 
+For staged stack and structural reviewers, `--review-profile` accepts
+`[pipeline].reviewer_tool_call_budget`, a nonnegative integer base allowance
+independent of those time limits. The host applies existing diff-size scaling
+once, counts every observed tool start across stages and retries, and retains
+incomplete coverage on exhaustion; zero stops review dispatch. Changing the
+allowance changes profile identity and invalidates incompatible cached reviews.
+The default remains defined in [configuration](../daydream/config.py).
+
 ### Committed-review program
 
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
