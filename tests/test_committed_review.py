@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import tempfile
+import tracemalloc
 import zlib
 from copy import deepcopy
 from dataclasses import replace
@@ -864,7 +865,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
 @pytest.mark.parametrize("fault", ["version", "float-version", "unknown", "original", "head", "base", "tree",
                                     "canonical", "review-key", "missing-object", "object-fifo", "raw-bytes",
-                                    "object-hash", "symlink-parent", "source-size", "authority"])
+                                    "object-hash", "symlink-parent", "source-size", "base-source-size",
+                                    "source-total-size", "authority"])
 async def test_immutable_invalid_evidence_fails_before_native_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
@@ -882,11 +884,32 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
         (repo / "nested/link").symlink_to("../api.py")
         git(repo, "add", "nested/link")
         commit(repo, "capture a symlink under a real parent")
-    elif fault == "source-size":
-        write_and_stage(repo, "too-large.bin", b"\0" * (8 * 1024 * 1024 + 1))
-        commit(repo, "capture an unsupported regular blob size")
     identity = immutable_input_for(repo)
     value = identity.to_dict()
+    if fault in {"source-size", "base-source-size", "source-total-size"}:
+        if fault == "base-source-size":
+            git(repo, "checkout", "main")
+        write_and_stage(repo, "too-large.txt", "x" * (8 * 1024 * 1024 - (fault == "source-total-size")) + "\n")
+        if fault == "source-total-size":
+            # 33 admitted blobs exceed the tree bound, sharing one inode and
+            # one compressed Git object rather than 264 MiB of fixture storage.
+            for index in range(32):
+                name = f"copy-{index}.txt"
+                os.link(repo / "too-large.txt", repo / name)
+                git(repo, "add", name)
+        commit(repo, "capture an unsupported compressible text blob")
+        if fault == "base-source-size":
+            git(repo, "checkout", "-b", "bounded-head")
+            git(repo, "rm", "too-large.txt")
+            commit(repo, "delete the oversized comparison blob")
+        head, base = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "main")
+        for group in ("provenance", "materialization"):
+            value[group].update(head_sha=head, requested_base_sha=base, comparison_base_sha=base)
+        value["materialization"].update(head_tree_sha=git(repo, "rev-parse", head + "^{tree}"),
+                                         comparison_tree_sha=git(repo, "rev-parse", base + "^{tree}"))
+        # Source bounds precede expansion, including validation of the stale
+        # digest. Binary zeros never exercised text stdout allocation here.
+        identity = ImmutableReviewInput.from_dict(value)
     if fault in {"version", "float-version", "unknown", "original"}:
         if fault == "unknown":
             value["unknown"] = True
@@ -939,11 +962,23 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
         "missing-object": "source validation failed", "object-hash": "source validation failed",
         "object-fifo": "bounded regular file", "raw-bytes": "checkout differs from captured raw",
         "symlink-parent": "checkout differs from captured raw", "source-size": "files exceed the supported size",
+        "base-source-size": "files exceed the supported size",
+        "source-total-size": "files exceed the supported size",
         "authority": "trusted_prepared_source=True",
     }[fault]
-    with pytest.raises((ValueError, git_ops.GitError), match=expected):
-        await run_committed_review(CommittedReviewRequest(
-            repo, value["materialization"]["requested_base_sha"], hosted_policy=policy, immutable_input=identity))
+    bounded_source = fault in {"source-size", "base-source-size", "source-total-size"}
+    if bounded_source:
+        tracemalloc.start()
+    try:
+        with pytest.raises((ValueError, git_ops.GitError), match=expected):
+            await run_committed_review(CommittedReviewRequest(
+                repo, value["materialization"]["requested_base_sha"], hosted_policy=policy, immutable_input=identity))
+    finally:
+        if bounded_source:
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+    if bounded_source:
+        assert peak < 16 * 1024 * 1024
     assert attempts == [] and not policy.output_dir.exists()
 
 

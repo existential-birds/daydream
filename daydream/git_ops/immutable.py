@@ -24,6 +24,7 @@ from daydream.immutable_review import ImmutableReviewInput
 
 _CONTEXT: ContextVar[tuple[Path, dict[str, str]] | None] = ContextVar("immutable_git_context", default=None)
 _MAX_SOURCE_BYTES = 256 * 1024 * 1024
+_MAX_BLOB_BYTES = 8 * 1024 * 1024
 _MAX_OBJECT_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_FILES = 100_000
 
@@ -62,23 +63,23 @@ def redaction_environment() -> Mapping[str, str]:
 def canonical_diff_sha256(repo: Path, base_sha: str, head_sha: str) -> str:
     """Hash the binary-safe compiler diff, separately from the decoded review key."""
     args = _diff_args(base_sha, head_sha)
-    with _immutable_diff_source(repo, head_sha) as view:
+    with _immutable_diff_source(repo, base_sha, head_sha) as view:
         raw = process._run_git(
             view, ["--attr-source=" + head_sha, "-c", "core.abbrev=40", "diff", "--binary", *args],
             capture_bytes=True, timeout=30, error_context="immutable canonical diff unavailable",
+            max_output_bytes=_MAX_SOURCE_BYTES,
         ).stdout
-    if len(raw) > _MAX_SOURCE_BYTES:
-        raise GitError("immutable canonical diff exceeds the supported size")
     return hashlib.sha256(raw).hexdigest()
 
 
 def immutable_review_diff(repo: Path, base_sha: str, head_sha: str) -> str:
     """Decode the review diff under the same captured-head attribute/config policy."""
     args = _diff_args(base_sha, head_sha)
-    with _immutable_diff_source(repo, head_sha) as view:
+    with _immutable_diff_source(repo, base_sha, head_sha) as view:
         diff = process._run_git(
             view, ["--attr-source=" + head_sha, "diff", *args], timeout=30,
             error_context="immutable review diff unavailable",
+            max_output_bytes=_MAX_SOURCE_BYTES,
         ).stdout
     if len(diff.encode()) > _MAX_SOURCE_BYTES:
         raise GitError("immutable review diff exceeds the supported size")
@@ -93,7 +94,7 @@ def _diff_args(base_sha: str, head_sha: str) -> list[str]:
 
 
 @contextmanager
-def _immutable_diff_source(repo: Path, head_sha: str) -> Iterator[Path]:
+def _immutable_diff_source(repo: Path, base_sha: str, head_sha: str) -> Iterator[Path]:
     """Borrow object bytes in fresh storage, excluding source configuration."""
     marker = repo / ".git"
     common = _source_git_dir(repo)[1] if marker.exists() or marker.is_symlink() else repo
@@ -107,6 +108,9 @@ def _immutable_diff_source(repo: Path, head_sha: str) -> Iterator[Path]:
             _git(view, "init", "--template=", "--object-format=" +
                  ("sha256" if len(head_sha) == 64 else "sha1"), ".")
             (view / ".git/objects/info/alternates").write_text(str(objects) + "\n")
+            # Both sides can expand into the patch, including deleted blobs.
+            _inventory(view, base_sha)
+            _inventory(view, head_sha)
             # Callers select head-tree attributes explicitly: a two-commit diff
             # does not use index attributes when this repository has no HEAD.
             yield view
@@ -119,7 +123,7 @@ def _regular(path: Path, *, limit: int) -> bytes:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise GitError("immutable source evidence must be a bounded regular file")
-            content = stream.read(limit + 1)
+            content = stream.read(info.st_size + 1)
         if len(content) > limit:
             raise GitError("immutable source evidence exceeds the supported size")
         return content
@@ -233,14 +237,18 @@ def validate_synthetic_history(
 
 
 def _inventory(repo: Path, head: str) -> list[tuple[str, str, str]]:
-    raw = process._run_git(repo, ["ls-tree", "-r", "-z", head], capture_bytes=True,
-                           timeout=30, error_context="immutable source inventory unavailable").stdout
+    raw = process._run_git(repo, ["ls-tree", "-r", "-z", "-l", head], capture_bytes=True,
+                           timeout=30, error_context="immutable source inventory unavailable",
+                           max_output_bytes=_MAX_SOURCE_BYTES).stdout
+    if raw.count(b"\0") > _MAX_FILES:
+        raise GitError("immutable source file count exceeds the supported size")
     result = []
+    total = 0
     for entry in raw.split(b"\0"):
         if not entry:
             continue
         identity, _, raw_name = entry.partition(b"\t")
-        mode, kind, oid = identity.decode().split()
+        mode, kind, oid, raw_size = identity.decode().split()
         try:
             name = raw_name.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -250,21 +258,19 @@ def _inventory(repo: Path, head: str) -> list[tuple[str, str, str]]:
             raise GitError("immutable source contains an unsafe path")
         if (mode, kind) not in {("100644", "blob"), ("100755", "blob"), ("120000", "blob"), ("160000", "commit")}:
             raise GitError("immutable source entry metadata is unsupported")
+        if kind == "blob":
+            size = int(raw_size)
+            total += size
+            if size > _MAX_BLOB_BYTES or total > _MAX_SOURCE_BYTES:
+                raise GitError("immutable source files exceed the supported size")
         result.append((mode, oid, name))
-    if len(result) > _MAX_FILES:
-        raise GitError("immutable source file count exceeds the supported size")
     return result
 
 
 def _materialize(repo: Path, source: Path, head: str) -> None:
-    total = 0
     for mode, oid, name in _inventory(repo, head):
         if mode == "160000":
             continue
-        size = int(_git(repo, "cat-file", "-s", oid))
-        total += size
-        if size > 8 * 1024 * 1024 or total > _MAX_SOURCE_BYTES:
-            raise GitError("immutable source files exceed the supported size")
         body = process._run_git(repo, ["cat-file", "blob", oid], capture_bytes=True, timeout=30,
                                 error_context="immutable source blob unavailable").stdout
         original = source / name
@@ -274,7 +280,7 @@ def _materialize(repo: Path, source: Path, head: str) -> None:
             if mode == "120000":
                 valid = confined and stat.S_ISLNK(info.st_mode) and os.fsencode(os.readlink(original)) == body
             else:
-                valid = (confined and stat.S_ISREG(info.st_mode) and _regular(original, limit=8 * 1024 * 1024) == body
+                valid = (confined and stat.S_ISREG(info.st_mode) and _regular(original, limit=_MAX_BLOB_BYTES) == body
                     and bool(info.st_mode & stat.S_IXUSR) == (mode == "100755"))
         except OSError as exc:
             raise GitError("immutable source checkout is unavailable") from exc

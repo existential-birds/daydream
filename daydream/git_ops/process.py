@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import re
+import selectors
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -140,12 +143,24 @@ def _retrying_subprocess(
     retries: int,
     scrub: Callable[[str], str] = str,
     suffix: str = "",
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run *argv*, retrying only timeouts; *scrub* redacts failure text, *suffix* labels the exhausted error."""
     program = argv[0]
     last_timeout: subprocess.TimeoutExpired | None = None
     for attempt in range(retries + 1):
         try:
+            if max_output_bytes is not None:
+                if input_data is not None or max_output_bytes < 0:
+                    raise GitError("bounded git capture requires no input and a nonnegative output limit")
+                bounded = _bounded_subprocess(argv, cwd=cwd, env=env, timeout=timeout, limit=max_output_bytes)
+                if text:
+                    return subprocess.CompletedProcess(
+                        bounded.args, bounded.returncode,
+                        io.TextIOWrapper(io.BytesIO(bounded.stdout)).read(),
+                        io.TextIOWrapper(io.BytesIO(bounded.stderr)).read(),
+                    )
+                return bounded
             return subprocess.run(  # noqa: S603 - arguments are not user-controlled
                 argv,
                 cwd=cwd,
@@ -173,6 +188,41 @@ def _retrying_subprocess(
     raise GitTimeoutError(f"{program} {display} timed out after {timeout}s{suffix}") from last_timeout
 
 
+def _bounded_subprocess(
+    argv: list[str], *, cwd: Path, env: Any | None, timeout: int | float, limit: int,
+) -> subprocess.CompletedProcess[bytes]:
+    """Drain both pipes within one byte/deadline budget, killing and reaping on refusal."""
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+        assert proc.stdout is not None and proc.stderr is not None
+        output = {proc.stdout.fileno(): bytearray(), proc.stderr.fileno(): bytearray()}
+        total = 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for descriptor in output:
+                    selector.register(descriptor, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fd, min(65536, limit - total + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        total += len(chunk)
+                        if total > limit:
+                            raise GitError(f"{argv[0]} output exceeds the supported size")
+                        output[key.fd].extend(chunk)
+                proc.wait(timeout=max(0, deadline - time.monotonic()))
+            return subprocess.CompletedProcess(argv, proc.returncode, bytes(output[proc.stdout.fileno()]),
+                                               bytes(output[proc.stderr.fileno()]))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
 @overload
 def _run_git(
     repo: Path,
@@ -185,6 +235,7 @@ def _run_git(
     input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
     error_context: str | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
 
@@ -201,6 +252,7 @@ def _run_git(
     input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
     error_context: str | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Text-capture variant (the default): decoded ``str`` stdout."""
 
@@ -216,6 +268,7 @@ def _run_git(
     input_bytes: bytes | None = None,
     env_cmd: Any | None = None,
     error_context: str | None = None,
+    max_output_bytes: int | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` from *repo*, returning its completed process without checking its exit code.
 
@@ -223,6 +276,8 @@ def _run_git(
     binary capture. Only timeouts are retried. Mutating callers pass
     ``retries=0`` to avoid repeating a partially completed command. Subprocess
     failures raise ``GitError``; exhausted timeouts raise ``GitTimeoutError``.
+    ``max_output_bytes`` bounds combined stdout/stderr while draining and requires
+    no input; refusal and timeout both kill and reap that invocation.
     """
     if input_text is not None and input_bytes is not None:
         raise GitError("git subprocess input must be text or bytes, not both")
@@ -250,6 +305,7 @@ def _run_git(
         timeout=timeout,
         retries=retries,
         suffix=f" ({retries + 1} attempts)",
+        max_output_bytes=max_output_bytes,
     )
     if error_context is not None:
         _require_ok(proc, error_context)

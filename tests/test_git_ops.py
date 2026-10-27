@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -962,6 +963,88 @@ def test_run_git_encodes_input_text_when_capturing_bytes(repo: Path) -> None:
     text_proc = git_process._run_git(repo, ["hash-object", "--stdin"], input_text="abc\n")
     assert bytes_proc.returncode == 0
     assert bytes_proc.stdout == text_proc.stdout.encode()
+
+
+def test_run_git_bounds_real_blob_capture_and_preserves_text_decoding(repo: Path) -> None:
+    """Immutable patches need a pipe limit; post-capture checks cannot constrain allocation.
+
+    Ordinary retry tests replace subprocess.run and cannot prove bounded draining
+    of real stdout, or preserve its text newline conversion alongside raw bytes.
+    """
+    body = b"first\r\nsecond\rthird\n" + b"x" * (512 * 1024)
+    write_and_stage(repo, "large.txt", body)
+    oid = _git(repo, "rev-parse", ":large.txt")
+    args = ["cat-file", "blob", oid]
+    with pytest.raises(GitError, match="output exceeds the supported size"):
+        git_process._run_git(repo, args, max_output_bytes=16 * 1024)
+    raw = git_process._run_git(repo, args, max_output_bytes=len(body), capture_bytes=True)
+    text = git_process._run_git(repo, args, max_output_bytes=len(body))
+    assert raw.stdout == body
+    assert text.stdout == body.decode().replace("\r\n", "\n").replace("\r", "\n")
+
+
+@pytest.mark.parametrize("binary", [True, False], ids=["canonical", "review"])
+def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, binary: bool,
+) -> None:
+    """Each tree fits while their replacement patch exceeds the independent capture limit.
+
+    Oversized-source rejection cannot exercise this path: it stops at inventory.
+    The prior helpers rejected only after buffering the complete textual patch.
+    """
+    from daydream.git_ops import immutable
+
+    write_and_stage(repo, "replace.txt", "a" * (3 * 1024 * 1024) + "\n")
+    base = _commit(repo, "old text within source bounds")
+    write_and_stage(repo, "replace.txt", "b" * (3 * 1024 * 1024) + "\n")
+    head = _commit(repo, "replacement text within source bounds")
+    monkeypatch.setattr(immutable, "_MAX_SOURCE_BYTES", 4 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(GitError, match="supported size"):
+            if binary:
+                immutable.canonical_diff_sha256(repo, base, head)
+            else:
+                immutable.immutable_review_diff(repo, base, head)
+    finally:
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize("mode", ["stdout-overflow", "stderr-overflow", "timeout", "nonzero"])
+def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    """Pipe refusal must stop its real producer; the run-based retry test cannot prove cleanup."""
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    started = tmp_path / "started"
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        f"with open({str(started)!r}, 'a') as stream: stream.write(str(os.getpid()) + '\\n')\n"
+        "mode = sys.argv[1]\n"
+        "if mode == 'nonzero':\n"
+        "    os.write(2, b'bounded failure diagnostic')\n"
+        "    sys.exit(7)\n"
+        "if mode.endswith('-overflow'):\n"
+        "    os.write(1 if mode.startswith('stdout') else 2, b'x' * 65536)\n"
+        "while True: time.sleep(1)\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.defpath)
+    expected = ("timed out" if mode == "timeout" else "bounded failure diagnostic" if mode == "nonzero"
+                else "output exceeds the supported size")
+    with pytest.raises(git_ops.GitTimeoutError if mode == "timeout" else GitError, match=expected):
+        git_process._run_git(tmp_path, [mode], timeout=0.3, retries=1, max_output_bytes=1024,
+                             error_context="bounded command failed")
+    pids = [int(value) for value in started.read_text().splitlines()]
+    assert len(pids) == (2 if mode == "timeout" else 1)
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 @pytest.mark.parametrize(
