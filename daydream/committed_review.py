@@ -479,7 +479,12 @@ async def _run_committed_review(
         )
         capture = _RunWriteCapture(session_id=run_id)
         artifacts = _RunArtifacts(session, owner, trajectory, capture, None, execution_input=execution_input)
-        diff = git_ops.committed_diff(captured_root, original.base_sha, original.head_sha)
+        if request.immutable_input is None:
+            diff = git_ops.committed_diff(captured_root, original.base_sha, original.head_sha)
+        else:
+            from daydream.git_ops.immutable import immutable_review_diff
+
+            diff = immutable_review_diff(captured_root, original.base_sha, original.head_sha)
         revision = AnalyzedRevision(
             original.head_sha, original.base_sha, hashlib.sha256(diff.encode()).hexdigest()
         ).to_dict()

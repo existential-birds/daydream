@@ -147,9 +147,13 @@ def build_committed_candidate(
         payload = claim["payload"]
         if payload["line"] is None:
             raise CandidateError("Harbor candidates require a concrete finding line", kind="unsupported_location")
+        title = _candidate_title(claim["title"]) or _candidate_title(payload["claim"])
+        body = [payload[key] for key in ("claim", "trigger", "consequence", "grounds")]
+        if claim["title"].strip() and title != claim["title"].strip():
+            body.insert(0, claim["title"])
         finding = {
-            "title": claim["title"],
-            "body": "\n\n".join(payload[key] for key in ("claim", "trigger", "consequence", "grounds")),
+            "title": title,
+            "body": "\n\n".join(body),
             "severity": None, "path": payload["file"], "start_line": payload["line"], "end_line": payload["line"],
         }
         try:

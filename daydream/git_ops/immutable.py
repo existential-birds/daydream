@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -60,14 +61,55 @@ def redaction_environment() -> Mapping[str, str]:
 
 def canonical_diff_sha256(repo: Path, base_sha: str, head_sha: str) -> str:
     """Hash the binary-safe compiler diff, separately from the decoded review key."""
-    raw = process._run_git(
-        repo, ["-c", "core.abbrev=40", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color",
-               "--src-prefix=a/", "--dst-prefix=b/", base_sha, head_sha, "--"],
-        capture_bytes=True, timeout=30, error_context="immutable canonical diff unavailable",
-    ).stdout
+    args = _diff_args(base_sha, head_sha)
+    with _immutable_diff_source(repo, head_sha) as view:
+        raw = process._run_git(
+            view, ["--attr-source=" + head_sha, "-c", "core.abbrev=40", "diff", "--binary", *args],
+            capture_bytes=True, timeout=30, error_context="immutable canonical diff unavailable",
+        ).stdout
     if len(raw) > _MAX_SOURCE_BYTES:
         raise GitError("immutable canonical diff exceeds the supported size")
     return hashlib.sha256(raw).hexdigest()
+
+
+def immutable_review_diff(repo: Path, base_sha: str, head_sha: str) -> str:
+    """Decode the review diff under the same captured-head attribute/config policy."""
+    args = _diff_args(base_sha, head_sha)
+    with _immutable_diff_source(repo, head_sha) as view:
+        diff = process._run_git(
+            view, ["--attr-source=" + head_sha, "diff", *args], timeout=30,
+            error_context="immutable review diff unavailable",
+        ).stdout
+    if len(diff.encode()) > _MAX_SOURCE_BYTES:
+        raise GitError("immutable review diff exceeds the supported size")
+    return diff
+
+
+def _diff_args(base_sha: str, head_sha: str) -> list[str]:
+    if not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) for sha in (base_sha, head_sha)):
+        raise GitError("immutable diff requires full commit IDs")
+    return ["--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+            base_sha, head_sha, "--"]
+
+
+@contextmanager
+def _immutable_diff_source(repo: Path, head_sha: str) -> Iterator[Path]:
+    """Borrow object bytes in fresh storage, excluding source configuration."""
+    marker = repo / ".git"
+    common = _source_git_dir(repo)[1] if marker.exists() or marker.is_symlink() else repo
+    objects = _object_store(common).resolve()
+    if "\n" in str(objects):
+        raise GitError("immutable object directory path is unsupported")
+    current = _CONTEXT.get()
+    with tempfile.TemporaryDirectory(prefix="daydream-immutable-diff-") as directory:
+        view = Path(directory).resolve()
+        with inert_git_context(view, None if current is None else current[1]):
+            _git(view, "init", "--template=", "--object-format=" +
+                 ("sha256" if len(head_sha) == 64 else "sha1"), ".")
+            (view / ".git/objects/info/alternates").write_text(str(objects) + "\n")
+            # Callers select head-tree attributes explicitly: a two-commit diff
+            # does not use index attributes when this repository has no HEAD.
+            yield view
 
 
 def _regular(path: Path, *, limit: int) -> bytes:
@@ -124,16 +166,23 @@ def _source_head(git_dir: Path, common: Path) -> str:
     return value
 
 
-def _copy_objects(common: Path, target: Path) -> None:
+def _object_store(common: Path) -> Path:
     objects = common / "objects"
     if not objects.is_dir() or objects.is_symlink():
         raise GitError("immutable source objects are unavailable")
     alternates = objects / "info" / "alternates"
     if alternates.exists() and _regular(alternates, limit=4096).strip():
         raise GitError("immutable source object alternates are unsupported")
+    return objects
+
+
+def _copy_objects(common: Path, target: Path) -> None:
+    objects = _object_store(common)
     total = count = 0
     for root, dirs, files in os.walk(objects, followlinks=False):
         parent = Path(root)
+        if parent == objects / "pack":
+            dirs[:] = [name for name in dirs if name != "multi-pack-index.d"]
         for name in dirs:
             if (parent / name).is_symlink():
                 raise GitError("immutable source object directories cannot be symlinks")
@@ -141,6 +190,11 @@ def _copy_objects(common: Path, target: Path) -> None:
             path = parent / name
             relative = path.relative_to(objects)
             if relative.parts[0] == "info":
+                continue
+            if len(relative.parts) == 2 and relative.parts[0] == "pack" and (
+                re.fullmatch(r"pack-[0-9a-f]+\.(bitmap|keep|mtimes|promisor)", name)
+                or name == "multi-pack-index" or re.fullmatch(r"multi-pack-index-[0-9a-f]+\.bitmap", name)
+            ):
                 continue
             if not (
                 len(relative.parts) == 2
@@ -279,9 +333,7 @@ def prepare_immutable_source(
             canonical_digest = canonical_diff_sha256(destination, local["comparison_base_sha"], local["head_sha"])
             if canonical_digest != local["canonical_diff_sha256"]:
                 raise GitError("immutable canonical diff digest mismatch")
-            from daydream.git_ops.source import committed_diff
-
-            diff = committed_diff(destination, local["comparison_base_sha"], local["head_sha"])
+            diff = immutable_review_diff(destination, local["comparison_base_sha"], local["head_sha"])
             if hashlib.sha256(diff.encode()).hexdigest() != local["review_diff_key"]:
                 raise GitError("immutable review diff identity mismatch")
             _materialize(destination, source, local["head_sha"])

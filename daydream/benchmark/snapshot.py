@@ -15,7 +15,11 @@ from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.git_ops import process as git_process
-from daydream.git_ops.immutable import canonical_diff_sha256 as canonical_diff_sha256, inert_git_context
+from daydream.git_ops.immutable import (
+    canonical_diff_sha256 as canonical_diff_sha256,
+    immutable_review_diff,
+    inert_git_context,
+)
 
 # Pinned synthetic-commit identity/timestamp so a bundle is byte-identical
 # across repeated builds (Spike Finding 1).
@@ -602,13 +606,13 @@ def validate_offline_clone(
                 got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
                 if got != expected:
                     raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-            if canonical_diff_sha256(clone_dir, "refs/remotes/origin/base", "refs/remotes/origin/head") != diff_sha256:
+            if canonical_diff_sha256(clone_dir, base_commit, head_commit) != diff_sha256:
                 raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
             return {
                 "comparison_base_sha": base_commit,
                 "head_sha": head_commit,
                 "review_diff_key": hashlib.sha256(
-                    git_ops.committed_diff(clone_dir, base_commit, head_commit).encode()).hexdigest(),
+                    immutable_review_diff(clone_dir, base_commit, head_commit).encode()).hexdigest(),
             }
     finally:
         shutil.rmtree(clone_dir, ignore_errors=True)

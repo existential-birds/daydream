@@ -457,7 +457,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert str(captured) in "".join(warning.replace("│", "").split())
         assert value["settings"]["profile_name"] == "pipeline-only"
         assert value["settings"]["profile_source"] == "explicit"
-        assert value["settings"]["limits"]["effective_investigation_s"] == 60
+        assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(60)
         defaults = build_default_profile().strategies
         assert value["settings"]["strategies"]["discovery"] == defaults["discovery.generic_fallback"].content
         assert value["settings"]["strategies"]["challenge"] == defaults["arbitration"].content.replace(
@@ -663,7 +663,7 @@ def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp
 
 def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> ImmutableReviewInput:
     """Capture independently computed original/local evidence for real Git journeys."""
-    from daydream.git_ops.immutable import canonical_diff_sha256
+    from daydream.git_ops.immutable import canonical_diff_sha256, immutable_review_diff
 
     head = git(repo, "rev-parse", "HEAD")
     requested = requested_base or git(repo, "rev-parse", "main")
@@ -677,12 +677,13 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
             "comparison_base_sha": comparison, "head_tree_sha": git(repo, "rev-parse", head + "^{tree}"),
             "comparison_tree_sha": git(repo, "rev-parse", comparison + "^{tree}"),
             "canonical_diff_sha256": canonical_diff_sha256(repo, comparison, head),
-            "review_diff_key": hashlib.sha256(git_ops.committed_diff(repo, comparison, head).encode()).hexdigest(),
+            "review_diff_key": hashlib.sha256(immutable_review_diff(repo, comparison, head).encode()).hexdigest(),
             "bundle_sha256": None},
     })
 
 
-@pytest.mark.parametrize("outcome", ["complete", "empty", "no-diff", "partial", "native-failure", "install-failure"])
+@pytest.mark.parametrize("outcome", ["complete", "attributes", "packed", "empty", "no-diff", "partial",
+                                    "native-failure", "install-failure"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
 ) -> None:
@@ -698,10 +699,16 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     from daydream.review_profile import ResolvedProfile
 
     repo = tmp_path / "source"
+    attributes = "api.py filter=hostile" + (" -diff" if outcome == "attributes" else "") + "\n"
     seed_feature_branch(
-        repo, base={"api.py": "VALUE = 1\n", ".gitattributes": "api.py filter=hostile\n"},
-        feature={"api.py": "VALUE = 0\n", ".gitattributes": "api.py filter=hostile\n"},
+        repo, base={"api.py": "VALUE = 1\n", ".gitattributes": attributes},
+        feature={"api.py": "VALUE = 0\n", ".gitattributes": attributes},
     )
+    if outcome == "packed":
+        git(repo, "repack", "-adb", "--write-bitmap-index")
+        git(repo, "multi-pack-index", "write")
+        pack = next((repo / ".git/objects/pack").glob("*.pack"))
+        pack.with_suffix(".keep").write_text("Retain this ordinary maintained pack.\n")
     if outcome == "no-diff":
         git(repo, "update-ref", "refs/heads/main", git(repo, "rev-parse", "HEAD"))
     else:
@@ -709,6 +716,14 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         tip = git(repo, "commit-tree", git(repo, "rev-parse", "main^{tree}"), "-p",
                   git(repo, "rev-parse", "main"), "-m", "advanced original base")
         git(repo, "update-ref", "refs/heads/main", tip)
+    if outcome == "attributes":
+        (repo / ".git/info/attributes").write_text("api.py diff\n")
+        git(repo, "config", "diff.context", "0")
+        git(repo, "config", "diff.algorithm", "histogram")
+        git(repo, "config", "diff.orderFile", str(tmp_path / "missing-order-file"))
+        ambient = tmp_path / "ambient-gitconfig"
+        ambient.write_text("[diff]\n\tcontext = 0\n\talgorithm = patience\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(ambient))
     identity = immutable_input_for(repo)
     envelope = identity.to_dict()
     marker = tmp_path / "forbidden-git-effect"
@@ -839,8 +854,10 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     value = result.to_dict()
     validate_committed_result(value)
     assert value["schema_version"] == 2 and value["immutable_input"] == envelope
-    assert result.complete == (outcome in {"complete", "empty", "no-diff"})
+    assert result.complete == (outcome in {"complete", "attributes", "packed", "empty", "no-diff"})
     assert len(seen) == (0 if outcome == "no-diff" else 1 if outcome == "empty" else 2)
+    if outcome == "attributes":
+        assert all(ref["side"] == "diff" for part in value["assignments"] for ref in part["source_refs"])
     exported_value = json.loads((policy.output_dir / "findings.json").read_text())
     assert exported_value["head_sha"] == envelope["provenance"]["head_sha"]
     assert exported_value["terminal_result"] == value["terminal_result"]
@@ -956,7 +973,7 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     """
     from daydream.benchmark.snapshot import build_bundle
     from daydream.git_ops import process
-    from daydream.git_ops.immutable import canonical_diff_sha256
+    from daydream.git_ops.immutable import canonical_diff_sha256, immutable_review_diff
     from daydream.hosted_review import HostedReviewPolicy
     from daydream.review_profile import ResolvedProfile
 
@@ -994,7 +1011,7 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
         "head_tree_sha": git(source, "rev-parse", head + "^{tree}"),
         "comparison_tree_sha": git(source, "rev-parse", base + "^{tree}"),
         "canonical_diff_sha256": canonical_diff_sha256(source, base, head),
-        "review_diff_key": hashlib.sha256(git_ops.committed_diff(source, base, head).encode()).hexdigest(),
+        "review_diff_key": hashlib.sha256(immutable_review_diff(source, base, head).encode()).hexdigest(),
         "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
     }
     identity = ImmutableReviewInput.from_dict({**original_input, "materialization": local})

@@ -51,7 +51,7 @@ def _environment(case: Path, repo: Path, root: Path, config: Path) -> dict[str, 
 
 @pytest.mark.parametrize("outcome", [
     "finding", "clean", "partial", "noninline", "bundle-tamper", "model-spelling",
-    "output-fault", "candidate-fault", "trajectory-fault",
+    "output-fault", "candidate-fault", "trajectory-fault", "long-title", "blank-title",
 ])
 async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
@@ -82,10 +82,12 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
 
     def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
         response = answer_review(request, empty=outcome == "clean", partial=outcome == "partial")
-        if outcome == "noninline":
-            for _, tool, arguments in response:
-                if tool == "structured_output" and arguments.get("claims"):
+        for _, tool, arguments in response:
+            if tool == "structured_output" and arguments.get("claims"):
+                if outcome == "noninline":
                     arguments["claims"][0]["payload"]["line"] = None
+                elif outcome in {"long-title", "blank-title"}:
+                    arguments["claims"][0]["title"] = "T" * 4096 if outcome == "long-title" else " \t\n"
         return response
 
     native_provider.choose = choose
@@ -125,7 +127,7 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
 
     monkeypatch.setattr(os, "replace", fail_install)
     rc = await entrypoint.main(environment)
-    assert rc == (0 if outcome in {"finding", "clean"} else 1)
+    assert rc == (0 if outcome in {"finding", "clean", "long-title", "blank-title"} else 1)
     assert attempts == []
     assert environment == original_environment and dict(os.environ) == parent_before
     assert git(repo, "remote") == ""
@@ -148,7 +150,8 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     assert '"repository": "o/r"' not in assigned and '"pr_repo": "o/r"' not in assigned
     assert "Fix cache" in prompts
     assert "forbidden-gh" not in prompts and "forbidden-judge" not in prompts
-    if outcome in {"finding", "clean", "partial", "noninline", "candidate-fault", "trajectory-fault"}:
+    if outcome in {"finding", "clean", "partial", "noninline", "candidate-fault", "trajectory-fault",
+                   "long-title", "blank-title"}:
         result_path, = (tmp_path / "logs").glob("committed-*/committed-review.json")
         result = json.loads(result_path.read_text())
         assert result["immutable_input"] == immutable
@@ -173,6 +176,12 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         assert (tmp_path / "logs/trajectory.json").is_file()
         if parsed:
             assert parsed[0].path == "feature.py" and parsed[0].start_line == 2
+            if outcome == "long-title":
+                assert len(parsed[0].title) == 500 and "T" * 4096 in parsed[0].body
+                assert result["findings"][0]["title"] == "T" * 4096
+            elif outcome == "blank-title":
+                assert parsed[0].title == result["findings"][0]["payload"]["claim"]
+                assert result["findings"][0]["title"] == " \t\n"
 
 
 async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(

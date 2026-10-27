@@ -287,6 +287,8 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: st
     construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
     default, so validate_offline_clone raises a digest mismatch."""
 
+    from daydream.git_ops.immutable import immutable_review_diff
+
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     _git(m, "config", "core.abbrev", "12")
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -298,7 +300,7 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: st
     review_clone = tmp_path / "review-identity"
     _git(tmp_path, "clone", "--no-checkout", str(bundle), str(review_clone))
     with inert_git_context(review_clone):
-        expected_review = hashlib.sha256(git_ops.committed_diff(
+        expected_review = hashlib.sha256(immutable_review_diff(
             review_clone, local["comparison_base_sha"], local["head_sha"]).encode()).hexdigest()
     assert local["review_diff_key"] == expected_review
     ambient_review = hashlib.sha256(git_ops.committed_diff(m, _SHA_BASE2, _SHA_HEAD).encode()).hexdigest()
@@ -559,6 +561,8 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     repo.mkdir()
     _git(repo, "init", "-b", "main")
     write_and_stage(repo, "readme.txt", "hello rich\n")
+    write_and_stage(repo, ".gitattributes", "*.dat -diff filter=hostile\n")
+    write_and_stage(repo, "record.dat", "old ordinary text\n")
     (repo / "run.sh").write_text("#!/bin/sh\necho hi\n")
     (repo / "run.sh").chmod(0o755)
     _git(repo, "add", "run.sh")
@@ -575,6 +579,7 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
         _git(repo, "rm", "alias.txt")
     (repo / "payload.bin").write_bytes(b"\x00\x01\x02\x03\x04\x05")
     _git(repo, "add", "payload.bin")
+    write_and_stage(repo, "record.dat", "new ordinary text\n")
     head_sha = seeded_commit(repo, "rich head")
     head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
 
@@ -583,7 +588,9 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     return str(bare), base_sha, head_sha, base_tree, head_tree
 
 
-def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: Path) -> None:
+def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=base, explicit_shas=[head])
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
@@ -591,13 +598,35 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
     assert sn.rev_parse(m, "refs/heads/base^{tree}") == base_tree
     assert sn.rev_parse(m, "refs/heads/head^{tree}") == head_tree
+    marker = tmp_path / "forbidden-git-effect"
+    order = tmp_path / "diff-order"
+    order.write_text("payload.bin\nrecord.dat\n")
+    global_config = tmp_path / "ambient-gitconfig"
+    global_config.write_text("[diff]\n\talgorithm = patience\n\tcontext = 0\n\trenames = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    _git(m, "config", "diff.orderFile", str(order))
+    _git(m, "config", "diff.external", f"touch '{marker}'")
+    (m / "info/attributes").write_text("*.dat diff\n")
     diff = sn.canonical_diff_sha256(m, base, head)
-    sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
+    local = sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
+    from daydream.git_ops.immutable import immutable_review_diff
+
     first = storage.sha256_file(bundle)
     sn.build_bundle(m, base, head, bundle)
     assert storage.sha256_file(bundle) == first
     clone = _clone_offline(bundle, tmp_path)
     try:
+        compiled_review = immutable_review_diff(clone, local["comparison_base_sha"], local["head_sha"])
+        assert "Binary files a/record.dat and b/record.dat differ" in compiled_review
+        assert hashlib.sha256(compiled_review.encode()).hexdigest() == local["review_diff_key"]
+        _git(clone, "checkout", "--detach", local["head_sha"])
+        _git(clone, "config", "filter.hostile.smudge", f"touch '{marker}'; cat")
+        _git(clone, "config", "filter.hostile.clean", f"touch '{marker}'; cat")
+        _git(clone, "config", "diff.orderFile", str(order))
+        (clone / ".git/info/attributes").write_text("*.dat diff\n")
+        assert sn.canonical_diff_sha256(clone, local["comparison_base_sha"], local["head_sha"]) == diff
+        assert immutable_review_diff(clone, local["comparison_base_sha"], local["head_sha"]) == compiled_review
+        assert not marker.exists()
         url = _git(Path(clone), "remote", "get-url", "origin")
         # the clone's only remote points at the local bundle artifact, so it is
         # fully offline-replayable with no GitHub/HTTPS network dependency
