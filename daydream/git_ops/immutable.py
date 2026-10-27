@@ -21,6 +21,7 @@ from pathlib import Path
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError
 from daydream.immutable_review import ImmutableReviewInput
+from daydream.repository_paths import git_observed_path_is_confined
 
 _CONTEXT: ContextVar[tuple[Path, dict[str, str]] | None] = ContextVar("immutable_git_context", default=None)
 _MAX_SOURCE_BYTES = 256 * 1024 * 1024
@@ -141,17 +142,20 @@ def _source_git_dir(source: Path) -> tuple[Path, Path]:
 
 
 def _source_head(git_dir: Path, common: Path) -> str:
-    value = _regular(git_dir / "HEAD", limit=4096).decode().strip()
+    # Git trims trailing ASCII whitespace without changing Unicode ref bytes.
+    value = _regular(git_dir / "HEAD", limit=4096).decode().rstrip(" \t\r\n\v\f")
     if value.startswith("ref: "):
         ref = value.removeprefix("ref: ")
-        if not re.fullmatch(r"refs/[A-Za-z0-9_./-]+", ref) or ".." in ref:
+        if (not ref.startswith("refs/") or re.search(r"[\x00-\x20\x7f\\]", ref)
+                or not git_observed_path_is_confined(common, ref)):
             raise GitError("immutable source HEAD reference is malformed")
         loose = common / ref
         if loose.exists():
             value = _regular(loose, limit=4096).decode().strip()
         else:
-            matches = [line.split()[0] for line in _regular(common / "packed-refs", limit=8 * 1024 * 1024)
-                       .decode().splitlines() if line.endswith(" " + ref)]
+            matches = [oid for oid, _, packed_ref in (
+                line.partition(" ") for line in _regular(common / "packed-refs", limit=8 * 1024 * 1024)
+                .decode().split("\n")) if packed_ref == ref]
             if len(matches) != 1:
                 raise GitError("immutable source HEAD reference is unavailable")
             value = matches[0]

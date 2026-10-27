@@ -685,7 +685,7 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
     })
 
 
-@pytest.mark.parametrize("outcome", ["complete", "attributes", "packed", "empty", "no-diff", "partial",
+@pytest.mark.parametrize("outcome", ["complete", "attributes", "legal-ref", "packed", "empty", "no-diff", "partial",
                                     "native-failure", "install-failure"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fake_gh: FakeGh, outcome: str,
@@ -704,11 +704,21 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         repo, base={"api.py": "VALUE = 1\n", ".gitattributes": attributes},
         feature={"api.py": "VALUE = 0\n", ".gitattributes": attributes},
     )
+    if outcome in {"legal-ref", "packed"}:
+        branch = "fix@2+%!/東京\u2028\u00a0"
+        git(repo, "check-ref-format", "refs/heads/" + branch)
+        git(repo, "branch", "-m", branch)
+        if outcome == "legal-ref":
+            head = git(repo, "rev-parse", "--verify", "HEAD")
+            (repo / ".git/HEAD").write_bytes(f"ref: refs/heads/{branch}\t \r\n".encode())
+            assert git(repo, "rev-parse", "--verify", "HEAD") == head
     if outcome == "packed":
         git(repo, "repack", "-adb", "--write-bitmap-index")
         git(repo, "multi-pack-index", "write")
         pack = next((repo / ".git/objects/pack").glob("*.pack"))
         pack.with_suffix(".keep").write_text("Retain this ordinary maintained pack.\n")
+        git(repo, "pack-refs", "--all")
+        assert not (repo / ".git/refs/heads" / branch).exists()
     if outcome == "no-diff":
         git(repo, "update-ref", "refs/heads/main", git(repo, "rev-parse", "HEAD"))
     else:
@@ -848,7 +858,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     value = result.to_dict()
     validate_committed_result(value)
     assert value["schema_version"] == 2 and value["immutable_input"] == envelope
-    assert result.complete == (outcome in {"complete", "attributes", "packed", "empty", "no-diff"})
+    assert result.complete == (outcome in {"complete", "attributes", "legal-ref", "packed", "empty", "no-diff"})
     assert len(seen) == (0 if outcome == "no-diff" else 1 if outcome == "empty" else 2)
     if outcome == "attributes":
         assert all(ref["side"] == "diff" for part in value["assignments"] for ref in part["source_refs"])
@@ -893,7 +903,8 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 @pytest.mark.parametrize("fault", ["version", "float-version", "unknown", "original", "head", "base", "tree",
                                     "review-key", "missing-object", "object-fifo", "raw-bytes",
                                     "object-hash", "symlink-parent", "source-size", "base-source-size",
-                                    "source-total-size", "authority"])
+                                    "source-total-size", "authority", "ref-absolute", "ref-traversal",
+                                    "ref-backslash", "ref-control", "ref-symlink", "ref-packed-suffix"])
 async def test_immutable_invalid_evidence_fails_before_native_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
@@ -974,6 +985,23 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     elif fault == "symlink-parent":
         (repo / "nested").rename(tmp_path / "outside-nested")
         (repo / "nested").symlink_to(tmp_path / "outside-nested", target_is_directory=True)
+    elif fault.startswith("ref-"):
+        head = value["materialization"]["head_sha"]
+        outside = tmp_path / "outside-ref"
+        outside.write_text(head + "\n")
+        ref = {"ref-absolute": str(outside), "ref-traversal": "refs/heads/../../../../outside-ref",
+               "ref-backslash": "refs/heads/back\\slash", "ref-control": "refs/heads/fea\tture"}.get(
+                   fault, "refs/heads/feature")
+        if fault == "ref-backslash":
+            (repo / ".git" / ref).write_text(head + "\n")
+        elif fault == "ref-symlink":
+            refs = repo / ".git/refs/heads"
+            refs.rename(tmp_path / "outside-refs")
+            refs.symlink_to(tmp_path / "outside-refs", target_is_directory=True)
+        elif fault == "ref-packed-suffix":
+            (repo / ".git" / ref).unlink()
+            (repo / ".git/packed-refs").write_text(f"{head} invalid {ref}\n")
+        (repo / ".git/HEAD").write_text("ref: " + ref + "\n")
     policy = replace(operator_policy, trusted_prepared_source=fault != "authority")
     attempts = []
 
@@ -982,7 +1010,8 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
         raise AssertionError("invalid evidence reached native work")
 
     monkeypatch.setattr(PiBackend, "validate_hosted_policy", native_work)
-    expected = {
+    expected = ("HEAD reference is unavailable" if fault == "ref-packed-suffix"
+                else "HEAD reference is malformed") if fault.startswith("ref-") else {
         "head": "checkout HEAD differs", "base": "does not match the local merge base",
         "tree": "tree identity mismatch",
         "review-key": "review diff identity mismatch",
