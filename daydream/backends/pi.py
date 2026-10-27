@@ -692,10 +692,10 @@ class PiBackend:
         if self._hosted_read_only:
             assert self._execution_input is not None
             if (self._execution_input.pi_agent_dir is None or not self._execution_input.pi_agent_dir.is_absolute()
-                    or self._execution_input.pi_provider != "nous"
-                    or self._model_override != "deepseek/deepseek-v4.1-flash"):
+                    or any(not isinstance(value, str) or not value.strip()
+                           for value in (self._execution_input.pi_provider, self._model_override))):
                 raise _unsupported_hosted_policy(
-                    "Hosted Pi requires an explicit isolated agent directory and nous/deepseek/deepseek-v4.1-flash")
+                    "Hosted Pi requires an explicit isolated agent directory and nonblank provider/model strings")
             agent_dir = agent_dir.resolve(strict=True)
             if agent_dir.is_relative_to(original_source) or original_source.is_relative_to(agent_dir):
                 raise _unsupported_hosted_policy("Hosted Pi operator configuration and source must be disjoint")

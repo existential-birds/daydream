@@ -495,7 +495,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
 
 @pytest.mark.parametrize("fault", [
-    "preparation", "backend", "provider", "model", "output-overlap", "missing-agent-dir", "file-agent-dir",
+    "preparation", "backend", "empty-provider", "blank-provider", "invalid-provider",
+    "empty-model", "blank-model", "invalid-model", "output-overlap", "missing-agent-dir", "file-agent-dir",
 ])
 async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
     review_inputs: StageInputFactory, fault: str,
@@ -506,6 +507,8 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     moved below worktree creation. No unsupported request may reach that effect.
     Missing/file configuration roots must produce the same actionable policy error,
     rather than escaping as raw filesystem errors during native context binding.
+    Blank/non-string selections must fail here even though arbitrary nonblank
+    identifiers are delegated to the isolated native configuration.
     """
     from dataclasses import replace
 
@@ -531,12 +534,15 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     )
     changes: dict[str, dict[str, Any]] = {
         "preparation": {"trusted_prepared_source": False}, "backend": {"backend": "claude"},
-        "provider": {"provider": "unapproved"}, "model": {"model": "unapproved"},
+        "empty-provider": {"provider": ""}, "blank-provider": {"provider": " \t\n"},
+        "invalid-provider": {"provider": None},
+        "empty-model": {"model": ""}, "blank-model": {"model": " \t\n"}, "invalid-model": {"model": 42},
         "output-overlap": {"output_dir": repo / "output"},
     }
     policy = replace(policy, **changes.get(fault, {}))
     before = git(repo, "worktree", "list", "--porcelain")
-    message = "agent_dir.*existing directory" if fault.endswith("agent-dir") else None
+    message = ("agent_dir.*existing directory" if fault.endswith("agent-dir")
+               else "nonblank.*provider and model strings" if fault.endswith(("provider", "model")) else None)
     with pytest.raises(UnsupportedHostedPolicy, match=message):
         await run_committed_review(CommittedReviewRequest(
             repo, review_inputs.revision["merge_base_sha"], hosted_policy=policy,

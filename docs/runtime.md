@@ -84,15 +84,20 @@ cannot supply hosted authority.
 
 | Supported hosted execution | Required value |
 |---|---|
-| Backend / provider / model | Pi / `nous` / `deepseek/deepseek-v4.1-flash` |
+| Backend | Native Pi |
+| Provider / model | Operator-selected nonblank strings supported by the isolated native configuration |
 | Native baseline | Official Pi 1.4.0 / Node 24.18.1 |
 | Model tools | Stock `read`, `find`, `ls`, `grep`; bounded `structured_output` admission |
 | Source preparation | Explicit `trusted_prepared_source=True` operator attestation |
 
 Prepare `agent_dir` separately from target and ambient user configuration. Only
 regular operator-approved native provider configuration, authentication and inert settings
-belong there. The approved registry must contain the exact provider/model ID;
-implicit fuzzy model substitution is rejected before provider work.
+belong there. The registry must contain the exact operator-selected provider/model
+IDs; identifiers are preserved without trimming or normalization, and implicit
+fuzzy model substitution is rejected before provider work. The hosted defaults
+and preferred example are `nous` / `deepseek/deepseek-v4.1-flash-1017`; these are
+configurable choices, not an allowlist. Invalid or blank selections are rejected
+before source preparation. Ordinary Pi defaults are unchanged.
 Resource settings/directories, system-prompt files and executable
 loader environment overrides are rejected. Native authentication and credential
 refresh remain native; Daydream never copies or changes persistent user credentials.

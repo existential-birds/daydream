@@ -42,7 +42,7 @@ class HostedReviewPolicy:
     trusted_prepared_source: bool = False
     backend: str = "pi"
     provider: str = "nous"
-    model: str = "deepseek/deepseek-v4.1-flash"
+    model: str = "deepseek/deepseek-v4.1-flash-1017"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
@@ -55,11 +55,14 @@ class HostedReviewPolicy:
                 "Git configuration, checkout hooks/filters and source staging before invoking this API. "
                 "Inert immutable input preparation is not supported by this entry point."
             )
-        if (self.backend, self.provider, self.model) != ("pi", "nous", "deepseek/deepseek-v4.1-flash"):
+        if self.backend != "pi":
             raise UnsupportedHostedPolicy(
-                "Hosted review supports only Pi / nous / deepseek/deepseek-v4.1-flash; "
+                "Hosted review supports only Pi; "
                 "select the supported operator policy without switching harnesses."
             )
+        if any(not isinstance(value, str) or not value.strip() for value in (self.provider, self.model)):
+            raise UnsupportedHostedPolicy(
+                "Hosted review requires nonblank operator-selected provider and model strings")
         roots = (source, self.agent_dir, self.output_dir, self.private_base)
         if any(not path.is_absolute() or path.resolve() != path for path in roots):
             raise UnsupportedHostedPolicy(

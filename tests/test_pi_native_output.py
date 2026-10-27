@@ -123,7 +123,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted",
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted", "hosted-alternate",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                                   "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"])
@@ -134,8 +134,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
 
     Blank, absent and explicit selections are compared with Pi itself;
     direct adapter journeys cannot detect host selection or shared-history bugs.
-    The hosted row additionally proves that native resource/context discovery and
-    attempted effects cannot broaden the operator policy across fresh challenges.
+    Hosted selections additionally prove that native resource/context discovery and
+    attempted effects cannot broaden the operator policy across retries and fresh
+    challenges. Both the preferred exact model and an unrelated provider/model
+    must reach native execution; an accepted constructor alone cannot prove this.
     Unsupported versions must retain the command and expected version in their
     mismatch diagnostic; a generic readiness rejection would hide the cause.
     Suffix-only model registries and invalid UTF-8 settings exercise readiness
@@ -145,6 +147,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     """
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
+    retried = case in {"hosted", "hosted-alternate"}
     defect = case == "defect" or hosted
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
@@ -206,21 +209,29 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         (repo / ".daydream").mkdir()
         (repo / ".daydream/diff.patch").write_text("prior public artifact\n")
         (repo / ".daydream.toml").write_text('backend = "claude"\nmodel = "target-forbidden-model"\n'
-            'review_profile = "hostile-missing-profile.toml"\n[phases.arbiter]\nbackend = "codex"\n')
-        expected_provider, expected_model = "nous", "deepseek/deepseek-v4.1-flash"
-        models_path.write_text(json.dumps({"providers": {"nous": {
-            **models["providers"]["output-fixture"], "apiKey": "$NOUS_API_KEY", "authHeader": True,
+            'review_profile = "hostile-missing-profile.toml"\n[phases.arbiter]\nbackend = "codex"\n'
+            'model = "phase-forbidden-model"\n')
+        expected_provider, expected_model = (
+            ("operator-fixture", "Operator/alternate-model-V2") if case == "hosted-alternate"
+            else ("nous", "deepseek/deepseek-v4.1-flash") if case == "hosted-model-fallback"
+            else ("nous", "deepseek/deepseek-v4.1-flash-1017")
+        )
+        credential_variable = "ALTERNATE_NATIVE_API_KEY" if case == "hosted-alternate" else "NOUS_API_KEY"
+        models_path.write_text(json.dumps({"providers": {expected_provider: {
+            **models["providers"]["output-fixture"], "apiKey": f"${credential_variable}", "authHeader": True,
             "models": [{**model,
                         "id": expected_model + "-1017" if case == "hosted-model-fallback" else expected_model}],
         }}}))
-        settings.write_text('{"defaultProjectTrust": "always", "retry": {"enabled": false, "maxRetries": 0}}')
+        settings.write_text(json.dumps({"defaultProvider": "operator-unselected-provider",
+            "defaultModel": "operator-unselected-model", "defaultProjectTrust": "always",
+            "retry": {"enabled": False, "maxRetries": 0}}))
         (native_provider.config / "trust.json").write_text(json.dumps({
             str(native_provider.config.resolve()): True, str(repo.resolve()): True}))
         operator_environment = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "operator-home"),
-                                "NOUS_API_KEY": "synthetic-hosted-credential",
+                                credential_variable: "synthetic-hosted-credential",
                                 "DAYDREAM_PI_RETRY_ATTEMPTS": "1", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0",
                                 "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0"}
-        if case == "hosted":
+        if retried:
             native_provider.errors[0] = "503 Service Unavailable"
         elif case in {"hosted-capability", "hosted-challenge-capability"}:
             assets = tmp_path / "unsupported-assets"
@@ -274,6 +285,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             output_dir=output_root, private_base=tmp_path / "hosted-private",
             profile=operator_profile,
             limits=ReviewLimits(90, 30, 30), trusted_prepared_source=True,
+            provider=expected_provider, model=expected_model,
         )
         # Both ancestor/global instruction files and ambient resources are hostile.
         (tmp_path / "AGENTS.md").write_text("HOSTILE_ANCESTOR_POLICY\n")
@@ -350,6 +362,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert assignment["profile"]["profile_name"] == operator_profile.name
             assert assignment["profile"]["profile_digest"] == operator_profile.digest
             assert assignment["profile"]["profile_source"] == "operator"
+            assert assignment["profile"]["hosted_policy"]["provider"] == expected_provider
+            assert assignment["profile"]["hosted_policy"]["model"] == expected_model
             assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
             marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
             assert marker in text and assignment["profile"]["strategies"][kind] == marker
@@ -408,8 +422,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     request = CommittedReviewRequest(
         repo, base, config=RunConfig(backend="codex" if hosted else "pi", output_mode="review", archive=False,
                                     run_eval=False, review_backend="claude" if hosted else None,
+                                    review_model="request-phase-forbidden-model" if hosted else None,
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
-                                    model="output-model:high" if case == "false-positive" else None),
+                                    model="request-forbidden-model" if hosted else
+                                    "output-model:high" if case == "false-positive" else None),
         limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy)
     unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                    "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
@@ -457,7 +473,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
     expected_kinds = ["discovery"] if empty else ["discovery", "challenge", *(["challenge"] if hosted else [])]
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
-    assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + int(hosted)
+    assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + int(retried)
     assert all(request["model"] == expected_model for request in native_provider.requests)
     if not hosted:
         assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
@@ -469,6 +485,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert value["settings"]["profile_name"] == operator_profile.name
         assert value["settings"]["profile_digest"] == operator_profile.digest
         assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(50)
+        assert value["settings"]["hosted_policy"]["provider"] == expected_provider
+        assert value["settings"]["hosted_policy"]["model"] == expected_model
     if case == "fallback":
         assert native_provider.authorizations == ["Bearer synthetic-implicit-fallback-alias"] * len(
             native_provider.requests)
@@ -515,7 +533,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert (repo / ".daydream/diff.patch").read_text() == "prior public artifact\n"
         assert not (repo / ".daydream/committed-review.json").exists()
     invocations = trajectory["extra"]["subtrajectories"]
-    expected_invocations = len(expected_kinds) + int(hosted)
+    expected_invocations = len(expected_kinds) + int(retried)
     assert len(invocations) == expected_invocations
     assert len({invocation["invocation_id"] for invocation in invocations}) == expected_invocations
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)

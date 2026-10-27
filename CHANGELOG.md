@@ -13,8 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   isolating configuration/resources, enforcing read/search and bounded submission
   grants, and delivering host-owned outputs without repository policy overrides
   ([#1420](https://github.com/existential-birds/daydream/issues/1420)). Requires
-  official Pi 1.4.0 / Node 24.18.1 and trusted host-prepared source; committed
-  result schema 1 and extension API 8 remain compatible.
+  official Pi 1.4.0 / Node 24.18.1 and trusted host-prepared source. Any exact
+  operator-selected provider/model supported by isolated native configuration is
+  accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
+  ordinary Pi defaults are unchanged. This compatible minor feature retains
+  committed result schema 1 and extension API 8.
 
 ### Fixed
 
