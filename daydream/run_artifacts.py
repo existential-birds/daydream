@@ -111,6 +111,7 @@ def _open_recorder(
     flow_kind: DaydreamRunFlow,
     run_artifacts: _RunArtifacts | None = None,
     allow_standalone: bool = False,
+    immutable_input: dict[str, object] | None = None,
 ) -> TrajectoryRecorder:
     """Open every flow's recorder with consistent identity, paths, and retention.
 
@@ -161,6 +162,7 @@ def _open_recorder(
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        immutable_input=immutable_input,
         backend_name=names.backend,
         review_backend_name=names.backend,
         fix_backend_name=names.fix,

@@ -6,9 +6,10 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-`--findings-out` uses schema version 2 with `terminal_result` version 1.
-Producer and poster must use the same reviewed revision. Diagram artifacts carry
-no review coverage; old/unknown schemas are rejected.
+Ordinary `--findings-out` uses schema version 2 with `terminal_result` version 1.
+Immutable PR exports use schema 3, retaining original PR provenance separately
+from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
+Diagram artifacts carry no review coverage; unsupported schemas are rejected.
 
 Completion requires positive success or host no-op evidence for every planned
 scope and required phase. Valid unfinished work is incomplete; unusable analysis
@@ -32,8 +33,10 @@ same published UTF-8 field accounting; trimming preserves every retained decisio
 Producer and poster versions must support this policy together. Larger plans can
 still exhaust these fixed bounds and retain truthful incomplete coverage.
 
-Commit-bound exports require a clean checkout and an independently trusted
-publication target. A moved PR head fails before export. Use a unique, initially
+Ordinary commit-bound capture requires a clean checkout and an initially matching
+live publication target. Later PR advancement does not invalidate captured analysis
+or its export. Immutable input performs no initial live lookup. Publication always
+requires an independently trusted target. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
 because a failed replacement may preserve an older complete artifact.
 
@@ -67,8 +70,9 @@ complete planned-work identity. Prior/competing bytes survive publication failur
 `CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
 and `capture_state` report installation and trajectory independently. Admission,
 native settlement/cleanup, completeness, output, capture and delivery are separate.
-Explicit unsupported exports fail before dispatch. CLI routing/default cutover and
-external delivery remain separate integration work; existing schemas stay unchanged.
+Explicit unsupported exports fail before dispatch. Immutable PR exports use the
+same artifact session as described below. Ordinary CLI routing/default cutover
+and external delivery remain separate integration work.
 
 ### Hosted operator policy
 
@@ -126,14 +130,102 @@ do not become model write grants. Recorded policy/configuration identities omit
 credentials and callback capabilities. This additive API retains committed result
 schema 1 and extension API 8; it is a minor feature addition.
 
-The preparation attestation is required **before Git worktree materialization**:
+For ordinary hosted committed input, the preparation attestation is required **before Git worktree materialization**:
 the operator must control/audit source Git configuration, checkout hooks and filters.
 Later raw-byte validation cannot prove inert preparation. This API does not safely
 prepare arbitrary local Git repositories. Read/search policy is not filesystem
 confinement or an egress firewall; stock readers can follow symlinks. The host owns
 infrastructure isolation, scoped credentials, staging, deadlines, concurrency and
-cleanup. Immutable input/materialization and strict PR exports remain #1421;
+cleanup. Use the immutable input contract below for inert source materialization;
 the 512-assignment limit and other-harness/CLI integration boundaries still apply.
+
+### Immutable PR inputs
+
+The same embedding API accepts
+`CommittedReviewRequest(..., hosted_policy=policy, immutable_input=input)` with
+`daydream.immutable_review.ImmutableReviewInput.from_dict(envelope)`. The trusted
+host supplies schema version 1; repository configuration cannot provide identity,
+source attestation or execution authority. The canonical envelope is frozen before
+model work and retained in schema-2 `committed-review.json`. Ordinary committed
+results remain schema 1. Both result versions retain the local analyzed revision,
+source references, complete planned-work binding and independent execution outcomes.
+
+```python
+from daydream.committed_review import CommittedReviewRequest, run_committed_review
+from daydream.immutable_review import ImmutableReviewInput
+
+identity = ImmutableReviewInput.from_dict(captured_envelope)
+result = await run_committed_review(CommittedReviewRequest(
+    source=prepared_checkout,
+    base=identity.to_dict()["materialization"]["requested_base_sha"],
+    hosted_policy=policy,
+    immutable_input=identity,
+    immutable_bundle=frozen_bundle,  # None for an exact object-only input
+))
+```
+
+`source` is the prepared checkout whose HEAD, raw bytes and modes are validated;
+`immutable_bundle` supplies the actual frozen bytes when `bundle_sha256` is set.
+The host's output directory receives `review-output.md`, `committed-review.json`,
+strict `findings.json` and trajectory evidence through the same artifact session.
+
+The envelope has two strict groups:
+
+| Group | Binding |
+|---|---|
+| `provenance` | Original `repository`, positive integer `pr_number`, `head_sha`, `requested_base_sha`, resolved `comparison_base_sha`, and bounded historical `title`, `body`, `context` |
+| `materialization` | `kind` (`exact` or `synthetic`), actual local head/requested-base/comparison commits, head/comparison trees, `canonical_diff_sha256`, `review_diff_key`, and optional `bundle_sha256` |
+
+`requested_base_sha` is the captured base tip; `comparison_base_sha` is the resolved
+comparison/merge base. They can differ. The canonical digest hashes binary-safe
+compiler diff bytes; `review_diff_key` hashes the decoded review diff. Neither
+digest substitutes for the other. Title is bounded to 512 UTF-8 bytes, body to
+8192 and context to 65536. Unsupported versions, sizes, plans, missing objects and
+inconsistent evidence are errors before dispatch, never successful empty reviews.
+The [inert Git owner](../daydream/git_ops/immutable.py) owns source limits:
+100,000 files, 8 MiB per blob, 256 MiB total source bytes and 2 GiB of object or
+bundle bytes. The committed program separately admits at most 512 assignment parts.
+
+Cloud supplies exact original local objects. Their commit identities, merge-base
+relationship, trees, raw checkout bytes and both diff identities must match.
+Harbor supplies the same envelope with `kind="synthetic"`: exactly two synthetic
+commits, a root base and its single-child head, preserving the attested comparison
+and head trees and canonical diff. The frozen bundle bytes must match their
+digest. Original commits need not be present for this projection. Trusted compiler
+evidence connects original provenance to those local objects; synthetic commits
+and admitted references retain their actual identities throughout review/export.
+
+The immutable Git owner creates independent storage and materializes raw blobs
+without executing target/ambient hooks, filters, configuration or checkout
+resources. Subsequent source, classification and artifact queries use that inert
+storage. This boundary is separate from contribution Git: commit, push and
+verification hooks remain mandatory. Host infrastructure isolation still applies.
+
+Immutable analysis and export use only captured/local evidence. They perform no
+GitHub discovery or credential resolution, including identity preflight, and never
+refresh a head, base, PR body or remote. PR advancement/closure cannot relabel or
+invalidate captured analysis. Trusted repository/PR/provenance stays on result and
+ATIF control surfaces; only the approved bounded historical context enters model
+assignments. Model-facing profile serialization never carries trusted provenance.
+
+Strict immutable findings schema 3 binds the outer original repository/PR/head to
+the envelope and typed coverage to its local head/comparison/diff key. Export does
+not grant publication authority. Its publisher must independently supply and
+validate repository, PR, original head, requested base and comparison SHA;
+`post-findings` adds `--base-sha` and `--comparison-sha` for these facts. Current
+openness, grants and publication eligibility belong to the external publisher.
+Valid partial findings, unresolved challenges and diagnostics survive failures;
+complete-empty still requires positive complete coverage or host no-diff evidence.
+An irreconcilable competing output raises the artifact owner's explicit recovery
+error while preserving the competing bytes and private sealed evidence. It cannot
+authorize a successful candidate or delivery.
+
+This is an additive minor feature under the current `0.y.z` policy. Immutable
+request 1, committed result 2 and findings 3 must be consumed together; ordinary
+result 1/findings 2 and extension API 8 retain their existing contracts. The bounded
+Harbor adapter consumes this API; ordinary CLI/bot migration (#1679), broader
+Harbor/native migration (#1639), and supported-default cutover (#1641) remain
+separately owned. This contract does not claim other-backend or large-plan parity.
 
 ## Pi host-tool lifetime and limits
 

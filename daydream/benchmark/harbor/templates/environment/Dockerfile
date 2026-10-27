@@ -25,6 +25,7 @@ RUN python -m pip install --no-cache-dir --no-deps /tmp/daydream-__DAYDREAM_VERS
 # __ENV_WHEEL_END__
 
 COPY repository.bundle /tmp/repository.bundle
+COPY immutable-request.json /opt/daydream-input/immutable-request.json
 RUN git clone --no-checkout /tmp/repository.bundle /workspace/repo \
     && git -C /workspace/repo branch base origin/base \
     && git -C /workspace/repo branch head origin/head \
@@ -32,6 +33,6 @@ RUN git clone --no-checkout /tmp/repository.bundle /workspace/repo \
     && git -C /workspace/repo rev-parse --verify head \
     && git -C /workspace/repo checkout head \
     && git -C /workspace/repo remote remove origin \
-    && rm /tmp/repository.bundle
+    && mv /tmp/repository.bundle /opt/daydream-input/repository.bundle
 
 WORKDIR /workspace/repo

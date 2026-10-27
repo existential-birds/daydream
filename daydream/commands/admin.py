@@ -174,6 +174,16 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         help="Event-derived repository slug the artifact must declare.",
     )
     parser.add_argument(
+        "--base-sha",
+        metavar="SHA",
+        help="Independently trusted requested base tip (required for immutable findings schema 3).",
+    )
+    parser.add_argument(
+        "--comparison-sha",
+        metavar="SHA",
+        help="Independently trusted original comparison base (required for immutable findings schema 3).",
+    )
+    parser.add_argument(
         "--bot-login",
         metavar="LOGIN",
         help="Bot login (App slug) for prior-finding author filtering. "
@@ -221,6 +231,8 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         head_sha=args.head_sha,
         repo=args.repo,
         console=console,
+        base_sha=args.base_sha,
+        comparison_sha=args.comparison_sha,
         bot_login=args.bot_login,
         approve_on_clean=approve, auth=git_ops.INHERIT_GITHUB_AUTH,
     )

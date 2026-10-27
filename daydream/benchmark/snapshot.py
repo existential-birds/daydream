@@ -15,6 +15,7 @@ from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.git_ops import process as git_process
+from daydream.git_ops.immutable import canonical_diff_sha256 as canonical_diff_sha256, inert_git_context
 
 # Pinned synthetic-commit identity/timestamp so a bundle is byte-identical
 # across repeated builds (Spike Finding 1).
@@ -443,21 +444,6 @@ def degenerate(base_tree: str, head_tree: str) -> str | None:
     return None
 
 
-def _canonical_diff_args(base: str, head: str) -> list[str]:
-    """The canonical diff argv: digest-pinned refs with full (non-abbreviated) SHAs."""
-    return ["-c", "core.abbrev=40", "diff", "--binary", base, head]
-
-
-def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
-    """sha256 of the canonical binary-safe diff between two commits."""
-    proc = git_process._run_git(
-        mirror_repo, _canonical_diff_args(base_sha, head_sha),
-        retries=0, capture_bytes=True,
-    )
-    git_process._require_ok(proc, f"git diff --binary {base_sha} {head_sha} failed")
-    return hashlib.sha256(proc.stdout).hexdigest()
-
-
 def _synthetic_env() -> dict[str, str]:
     return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
 
@@ -554,7 +540,7 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 
 def validate_offline_clone(
     bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
-) -> None:
+) -> dict[str, str]:
     """Clone with network disabled and verify the full portable fidelity contract. Require
     exactly origin/base and origin/head refs, exactly two reachable commits, a root
     base, head parented only on base, matching tree ids, and the canonical diff digest.
@@ -565,59 +551,67 @@ def validate_offline_clone(
 
     clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))
     try:
-        proc = git_process._run_git(
-            Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
-            retries=0, timeout=120,
-        )
-        git_process._require_ok(proc, f"offline clone of {bundle_path} failed")
-        refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        refs = set(refs_out.splitlines())
-        expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
-        if refs != expected_refs:
-            raise git_ops.GitError(
-                f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
-                f"got {sorted(refs)})"
+        with inert_git_context(Path(workdir).resolve()):
+            proc = git_process._run_git(
+                Path(workdir),
+                ["clone", "--template=", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
+                retries=0, timeout=120,
             )
-        count = _run_git_checked(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
-        if count != "2":
-            raise git_ops.GitError(
-                f"offline clone head ancestry must contain exactly two reachable commits "
-                f"(got {count})"
+            git_process._require_ok(proc, f"offline clone of {bundle_path} failed")
+            refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            refs = set(refs_out.splitlines())
+            expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
+            if refs != expected_refs:
+                raise git_ops.GitError(
+                    f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
+                    f"got {sorted(refs)})"
+                )
+            count = _run_git_checked(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
+            if count != "2":
+                raise git_ops.GitError(
+                    f"offline clone head ancestry must contain exactly two reachable commits "
+                    f"(got {count})"
+                )
+            parents_out = _run_git_checked(
+                clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
             )
-        parents_out = _run_git_checked(
-            clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
-        )
-        if len(parents_out.splitlines()) != 1:
-            raise git_ops.GitError(
-                f"offline clone base must be a root commit with no parent "
-                f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
+            if len(parents_out.splitlines()) != 1:
+                raise git_ops.GitError(
+                    f"offline clone base must be a root commit with no parent "
+                    f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
+                )
+            head_parent = _run_git_checked(
+                clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
             )
-        head_parent = _run_git_checked(
-            clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
-        )
-        base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
-        if head_parent != base_commit:
-            raise git_ops.GitError(
-                f"offline clone head's parent must be the base commit "
-                f"(expected {base_commit}, got {head_parent})"
-            )
-        for ref, expected in (
-            ("refs/remotes/origin/base", base_tree),
-            ("refs/remotes/origin/head", head_tree),
-        ):
-            got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
-            if got != expected:
-                raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-        diff = _run_git_checked(
-            clone_dir,
-            _canonical_diff_args("refs/remotes/origin/base", "refs/remotes/origin/head"),
-            capture_bytes=True,
-        )
-        if hashlib.sha256(diff).hexdigest() != diff_sha256:
-            raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
+            base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
+            if head_parent != base_commit:
+                raise git_ops.GitError(
+                    f"offline clone head's parent must be the base commit "
+                    f"(expected {base_commit}, got {head_parent})"
+                )
+            objects = _run_git_checked(
+                clone_dir, ["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"])
+            head_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head"])
+            commits = {line.split()[0] for line in objects.splitlines() if line.endswith(" commit")}
+            if commits != {base_commit, head_commit}:
+                raise git_ops.GitError("offline clone contains extra commit history")
+            for ref, expected in (
+                ("refs/remotes/origin/base", base_tree),
+                ("refs/remotes/origin/head", head_tree),
+            ):
+                got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
+                if got != expected:
+                    raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
+            if canonical_diff_sha256(clone_dir, "refs/remotes/origin/base", "refs/remotes/origin/head") != diff_sha256:
+                raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
+            return {
+                "comparison_base_sha": base_commit,
+                "head_sha": head_commit,
+                "review_diff_key": hashlib.sha256(
+                    git_ops.committed_diff(clone_dir, base_commit, head_commit).encode()).hexdigest(),
+            }
     finally:
         shutil.rmtree(clone_dir, ignore_errors=True)
-    return None
 
 
 def freeze_one(

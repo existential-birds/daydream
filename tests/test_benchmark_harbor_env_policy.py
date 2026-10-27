@@ -14,7 +14,7 @@ from daydream.benchmark.harbor.package import render_job_config, render_task_tom
 _PROBES = frozenset({"OPENAI_API_KEY", "DAYDREAM_UNRELATED_PROBE"})
 
 
-def _synthetic_parent(backend: str) -> dict[str, str]:
+def _synthetic_parent() -> dict[str, str]:
     parent = {name: f"value:{name}" for name in env_policy.declared_names() | _PROBES}
     parent.update(
         {
@@ -24,7 +24,7 @@ def _synthetic_parent(backend: str) -> dict[str, str]:
     )
     parent.update(
         {
-            "DAYDREAM_REVIEW_BACKEND": backend,
+            "DAYDREAM_REVIEW_BACKEND": "pi",
             "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
             "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
         }
@@ -32,38 +32,22 @@ def _synthetic_parent(backend: str) -> dict[str, str]:
     return parent
 
 
-_EXPECTED_HOST_KEEP: dict[str, frozenset[str]] = {"pi": frozenset({
-        "PATH", "HOME", "LANG", "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
-        "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
-        "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR", "DAYDREAM_REVIEW_ARTIFACT_PATH",
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH", "DAYDREAM_REVIEW_CASE_ID",
-        "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
-    }), "claude": frozenset({
-        "PATH", "HOME", "LANG", "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
-        "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
-        "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR", "DAYDREAM_REVIEW_ARTIFACT_PATH",
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH", "DAYDREAM_REVIEW_CASE_ID",
-        "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
-        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    }),
-}
+_EXPECTED_HOST_KEEP = frozenset({
+    "PATH", "HOME", "LANG", "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL", "DAYDREAM_REVIEW_API_KEY",
+    "DAYDREAM_REVIEW_BASE_URL", "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT",
+    "DAYDREAM_REVIEW_REPO_DIR", "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH",
+    "DAYDREAM_REVIEW_CASE_ID", "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
+    "DAYDREAM_REVIEW_IMMUTABLE_INPUT", "DAYDREAM_REVIEW_BUNDLE", "DAYDREAM_REVIEW_AGENT_DIR",
+})
 
-_EXPECTED_CONTAINER_KEEP: dict[str, frozenset[str]] = {"pi": frozenset({
-        "PATH", "HOME", "LANG", "PI_API_KEY", "HF_TOKEN",
-        "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR", "DAYDREAM_UNRELATED_PROBE",
-        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL",
-        "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR",
-        "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH",
-        "DAYDREAM_REVIEW_CASE_ID", "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
-    }), "claude": frozenset({"PATH", "HOME", "LANG", "HF_TOKEN",
-        "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR", "DAYDREAM_UNRELATED_PROBE",
-        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-        "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL",
-        "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR",
-        "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH",
-        "DAYDREAM_REVIEW_CASE_ID", "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF",
-    }),
-}
+_EXPECTED_CONTAINER_KEEP = frozenset({
+    "PATH", "HOME", "LANG", "PI_API_KEY", "HF_TOKEN", "DAYDREAM_TRAJECTORY_HUB_REPO", "DAYDREAM_ARCHIVE_DIR",
+    "DAYDREAM_UNRELATED_PROBE", "DAYDREAM_REVIEW_BACKEND", "DAYDREAM_REVIEW_MODEL",
+    "DAYDREAM_REVIEW_PROFILE_CANDIDATE", "DAYDREAM_REVIEW_EFFORT", "DAYDREAM_REVIEW_REPO_DIR",
+    "DAYDREAM_REVIEW_ARTIFACT_PATH", "DAYDREAM_REVIEW_TRAJECTORY_PATH", "DAYDREAM_REVIEW_CASE_ID",
+    "DAYDREAM_REVIEW_BASE_REF", "DAYDREAM_REVIEW_HEAD_REF", "DAYDREAM_REVIEW_IMMUTABLE_INPUT",
+    "DAYDREAM_REVIEW_BUNDLE", "DAYDREAM_REVIEW_AGENT_DIR",
+})
 
 
 def test_oracle_render_path_applies_no_policy_view() -> None:
@@ -71,22 +55,19 @@ def test_oracle_render_path_applies_no_policy_view() -> None:
     assert oracle["agents"] == [{"name": "oracle"}]
 
 
-@pytest.mark.parametrize("backend", ["pi", "claude"])
-def test_host_child_env_table(backend: str) -> None:
-    parent = _synthetic_parent(backend)
+def test_host_child_env_table() -> None:
+    parent = _synthetic_parent()
     before = dict(parent)
-    assert build_child_env(parent, backend=backend) == {name: parent[name] for name in _EXPECTED_HOST_KEEP[backend]}
+    assert build_child_env(parent) == {name: parent[name] for name in _EXPECTED_HOST_KEEP}
     assert parent == before
 
 
-@pytest.mark.parametrize("backend", ["pi", "claude"])
-def test_container_sanitised_env_table(backend: str) -> None:
-    parent = _synthetic_parent(backend)
+def test_container_sanitised_env_table() -> None:
+    parent = _synthetic_parent()
     before = dict(parent)
-    expected = {name: parent[name] for name in _EXPECTED_CONTAINER_KEEP[backend]}
-    if backend == "pi":
-        expected.update(PI_API_KEY="value:DAYDREAM_REVIEW_API_KEY", PI_PROVIDER="openrouter", PI_TELEMETRY="0")
-    assert _sanitize_reviewer_environment(parent, backend=backend) == expected
+    expected = {name: parent[name] for name in _EXPECTED_CONTAINER_KEEP}
+    expected.update(PI_API_KEY="value:DAYDREAM_REVIEW_API_KEY", PI_PROVIDER="openrouter", PI_TELEMETRY="0")
+    assert _sanitize_reviewer_environment(parent) == expected
     assert parent == before
 
 
@@ -143,7 +124,6 @@ def test_container_sanitiser_derives_its_sets_from_the_declaration(monkeypatch: 
     monkeypatch.setattr(env_policy, "CONTAINER", extended)
     sanitized = _sanitize_reviewer_environment(
         {"DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "DAYDREAM_REVIEW_API_KEY": "k", "PROBE_X": "leak"},
-        backend="pi",
     )
     assert "PROBE_X" not in sanitized
 

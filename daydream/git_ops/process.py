@@ -46,8 +46,10 @@ def _redact_sensitive_text(text: str) -> str:
     redacted = _APP_MANIFEST_CONVERSION_CODE_RE.sub(r"\1***\2", text)
     redacted = _GITHUB_TOKEN_RE.sub("***", redacted)
     redacted = _URL_USERINFO_RE.sub("://***@", redacted)
+    from daydream.git_ops.immutable import redaction_environment
+
     for key in ("GH_TOKEN", "GITHUB_TOKEN"):
-        token = os.environ.get(key)
+        token = redaction_environment().get(key)
         if token and len(token) >= 8:
             redacted = redacted.replace(token, "***")
     return redacted
@@ -237,6 +239,11 @@ def _run_git(
         raise GitError("git subprocess input must be text or bytes, not both")
     if input_bytes is not None and not capture_bytes:
         raise GitError("binary git subprocess input requires binary capture")
+    from daydream.git_ops.immutable import git_environment
+
+    inert_environment = git_environment(repo)
+    if inert_environment is not None:
+        env_cmd = inert_environment
     display = " ".join(args)
     proc = _retrying_subprocess(
         ["git", *args],

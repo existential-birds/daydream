@@ -73,6 +73,7 @@ async def fork_scope(
         session_id=parent.session_id,
         pr_number=parent.pr_number,
         pr_repo=parent.pr_repo,
+        immutable_input=parent.immutable_input,
         backend_name=parent.backend_name,
         review_backend_name=parent.review_backend_name,
         fix_backend_name=parent.fix_backend_name,

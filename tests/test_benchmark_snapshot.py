@@ -8,6 +8,7 @@ against the real object store. Only the import-gating tests (in
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from daydream.benchmark import snapshot, snapshot as sn, storage
 from daydream.benchmark.schema import case_id_for
 from daydream.benchmark.storage import recover_startup
 from daydream.git_ops import GitError, process as git_process
+from daydream.git_ops.immutable import inert_git_context
 from tests.harness.git_helpers import git as _git, seed_pr_origin, seeded_commit, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
 
@@ -290,7 +292,18 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: st
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+    local = sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+    assert local["comparison_base_sha"] == sn.rev_parse(m, "refs/heads/base")
+    assert local["head_sha"] == sn.rev_parse(m, "refs/heads/head")
+    review_clone = tmp_path / "review-identity"
+    _git(tmp_path, "clone", "--no-checkout", str(bundle), str(review_clone))
+    with inert_git_context(review_clone):
+        expected_review = hashlib.sha256(git_ops.committed_diff(
+            review_clone, local["comparison_base_sha"], local["head_sha"]).encode()).hexdigest()
+    assert local["review_diff_key"] == expected_review
+    ambient_review = hashlib.sha256(git_ops.committed_diff(m, _SHA_BASE2, _SHA_HEAD).encode()).hexdigest()
+    assert local["review_diff_key"] != ambient_review
+    assert local["review_diff_key"] != diff_sha
 
 def test_git_fetch_wires_command_scoped_credential_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

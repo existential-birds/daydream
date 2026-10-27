@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **review:** consume versioned immutable PR inputs offline through the committed
+  Pi API, with inert source materialization, distinct original/local identities,
+  strict findings export and independent publisher target checks
+  ([#1421](https://github.com/existential-birds/daydream/issues/1421)). The bounded
+  Harbor consumer uses frozen two-commit bundles and installs candidates only from
+  complete validated results; its packaged native baseline is Pi 1.4.0 / Node
+  24.18.1. This compatible minor feature adds immutable request 1, committed result
+  2 and findings 3 while preserving ordinary result 1/findings 2 and extension API 8.
 - **review:** add an explicit hosted operator policy for committed Pi reviews,
   isolating configuration/resources, enforcing read/search and bounded submission
   grants, and delivering host-owned outputs without repository policy overrides

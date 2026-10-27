@@ -1009,6 +1009,8 @@ def post_findings_from_artifact(
     head_sha: str,
     repo: str,
     console: Console,
+    base_sha: str | None = None,
+    comparison_sha: str | None = None,
     bot_login: str | None = None,
     approve_on_clean: bool = False,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
@@ -1019,6 +1021,7 @@ def post_findings_from_artifact(
     missing identity disables REST dedup. All current findings, including already posted
     matches, participate in the approval gate. Invalid optional diagrams are dropped;
     a standalone diagram artifact fails if its only deliverable is invalid.
+    Immutable artifacts also require independently trusted base/comparison SHAs.
     Return 0 for success/no new findings, 1 for rejected artifacts or GitHub failures."""
     # Late imports: ``findings`` and ``reconcile`` both import this module at
     # module level (one-way by design), so the poster flow resolves them at
@@ -1044,6 +1047,8 @@ def post_findings_from_artifact(
             expected_repo=repo,
             expected_pr_number=pr_number,
             expected_head_sha=head_sha,
+            expected_base_sha=base_sha,
+            expected_comparison_sha=comparison_sha,
         )
     except FindingsValidationError as exc:
         print_error(console, "Findings Artifact Rejected", str(exc))

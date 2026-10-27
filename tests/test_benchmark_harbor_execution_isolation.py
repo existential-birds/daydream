@@ -1,199 +1,212 @@
-"""Concurrent Harbor execution through real runners and artifact publication."""
-
+"""The actual frozen Harbor bundle enters the shared offline native review API."""
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import shutil
 import subprocess
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import runner
-from daydream.backends import AgentEvent
-from daydream.benchmark.harbor import entrypoint, verifier_core
-from tests.harness.git_helpers import commit, git, init_repo
-from tests.harness.stub_backend import StubBackend
+from daydream import github_app
+from daydream.benchmark.harbor import build, entrypoint, package as pkg, verifier_core
+from daydream.git_ops import process as git_process
+from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git
+from tests.harness.harbor_review import answer_review, assignment_from_request
+from tests.harness.native_pi import _NativeProvider
+from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
+from tests.test_pi_native_output import native_provider as native_provider
 
 
-def _review_repository(root: Path) -> Path:
-    repo = root / "repo"
-    repo.mkdir(parents=True)
-    (repo / "api.py").write_text("def hello():\n    return 'world'\n")
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "base")
-    git(repo, "branch", "base")
-    git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("def hello():\n    return 'universe'\n")
-    git(repo, "add", ".")
-    commit(repo, "change")
-    return repo
+def _compiled_case(tmp_path: Path, fake_gh: FakeGh) -> tuple[Path, Path, dict[str, Any]]:
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    wheel, _ = _stub_wheel(tmp_path)
+    pkg.build_harbor(ws, wheel=wheel)
+    case = ws / "harbor" / build.derive_task_key(case_id)
+    immutable = json.loads((case / "environment/immutable-request.json").read_text())
+    repo = tmp_path / "runtime-repo"
+    git(tmp_path, "clone", "--no-checkout", str(case / "environment/repository.bundle"), str(repo))
+    git(repo, "branch", "base", "origin/base")
+    git(repo, "checkout", "-b", "head", "origin/head")
+    git(repo, "remote", "remove", "origin")
+    return case, repo, immutable
+
+
+def _environment(case: Path, repo: Path, root: Path, config: Path) -> dict[str, str]:
+    return {
+        "PATH": os.environ["PATH"], "LANG": "C.UTF-8", "DAYDREAM_REVIEW_BACKEND": "pi",
+        "DAYDREAM_REVIEW_MODEL": "output-model", "DAYDREAM_REVIEW_API_KEY": "synthetic-loopback-only",
+        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api/v1", "DAYDREAM_REVIEW_REPO_DIR": str(repo),
+        "DAYDREAM_REVIEW_CASE_ID": case.name, "DAYDREAM_REVIEW_ARTIFACT_PATH": str(root / "review.json"),
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(root / "logs/trajectory.json"),
+        "DAYDREAM_REVIEW_IMMUTABLE_INPUT": str(case / "environment/immutable-request.json"),
+        "DAYDREAM_REVIEW_BUNDLE": str(case / "environment/repository.bundle"),
+        "DAYDREAM_REVIEW_AGENT_DIR": str(config),
+    }
+
+
+@pytest.mark.parametrize("outcome", [
+    "finding", "clean", "partial", "noninline", "bundle-tamper", "model-spelling",
+    "output-fault", "candidate-fault", "trajectory-fault",
+])
+async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
+    outcome: str, dataset_hub: Any, operator_dataset_sentinel: Path,
+) -> None:
+    """The old fake-runner journey reviewed another repo and allowed /user/uploads.
+
+    This owns the consumer boundary: actual compiled bundle, real native host tools,
+    trusted provenance confinement, truthful partial evidence and filesystem installs.
+    """
+    case, repo, immutable = _compiled_case(tmp_path, fake_gh)
+    models = json.loads((native_provider.config / "models.json").read_text())
+    models["providers"] = {"openrouter": models["providers"]["output-fixture"]}
+    (native_provider.config / "models.json").write_text(json.dumps(models))
+    environment = _environment(case, repo, tmp_path, native_provider.config)
+    profile = tmp_path / "candidate.toml"
+    profile.write_text('schema_version = 1\nname = "operator-harbor"\n[strategies."discovery.generic_fallback"]\n'
+                       'content = "HARBOR_OPERATOR_DISCOVERY"\nsource = "copied: isolation"\n'
+                       '[strategies.arbitration]\ncontent = "HARBOR_OPERATOR_CHALLENGE"\n'
+                       'source = "copied: isolation"\n')
+    environment["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] = str(profile)
+    if outcome == "model-spelling":
+        environment["DAYDREAM_REVIEW_MODEL"] = " output-model "
+    environment.update(GH_TOKEN="forbidden-gh", DAYDREAM_JUDGE_API_KEY="forbidden-judge", HF_TOKEN="forbidden-hub")
+    original_environment = dict(environment)
+    parent_before = dict(os.environ)
+    baseline_runs = {path.name: path.read_bytes() for path in (operator_dataset_sentinel / "runs").glob("*.jsonl")}
+
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        response = answer_review(request, empty=outcome == "clean", partial=outcome == "partial")
+        if outcome == "noninline":
+            for _, tool, arguments in response:
+                if tool == "structured_output" and arguments.get("claims"):
+                    arguments["claims"][0]["payload"]["line"] = None
+        return response
+
+    native_provider.choose = choose
+    attempts: list[str] = []
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        attempts.append("GitHub or credentials")
+        raise AssertionError("immutable Harbor must not resolve GitHub state or credentials")
+
+    real_run = subprocess.run
+
+    def no_gh(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(command, list) and Path(command[0]).name == "gh":
+            return forbidden()
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", no_gh)
+    monkeypatch.setattr(git_process, "_run_gh", forbidden)
+    monkeypatch.setattr(git_process, "_run_gh_async", forbidden)
+    for name in ("resolve_credentials", "resolve_user_identity", "resolve_run_identity"):
+        monkeypatch.setattr(github_app, name, forbidden)
+    artifact = tmp_path / "review.json"
+    artifact.write_bytes(b"prior candidate")
+    if outcome == "bundle-tamper":
+        with (case / "environment/repository.bundle").open("ab") as stream:
+            stream.write(b"tampered")
+    real_replace = os.replace
+
+    def fail_install(src: Any, dst: Any, *args: Any, **kwargs: Any) -> Any:
+        destination = Path(dst)
+        if (outcome == "candidate-fault" and destination == artifact
+            or outcome == "trajectory-fault" and destination == tmp_path / "logs/trajectory.json"
+            or outcome == "output-fault" and destination.name == "committed-review.json"
+        ):
+            raise OSError("injected filesystem installation failure")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", fail_install)
+    rc = await entrypoint.main(environment)
+    assert rc == (0 if outcome in {"finding", "clean"} else 1)
+    assert attempts == []
+    assert environment == original_environment and dict(os.environ) == parent_before
+    assert git(repo, "remote") == ""
+    assert not dataset_hub.commits
+    retained_runs = {path.name: path.read_bytes() for path in (operator_dataset_sentinel / "runs").glob("*.jsonl")}
+    assert retained_runs == baseline_runs
+    assert not (repo / ".daydream").exists() and not (repo / ".review-output.md").exists()
+    if outcome in {"bundle-tamper", "model-spelling"}:
+        assert native_provider.requests == []
+        assert artifact.read_bytes() == b"prior candidate"
+        return
+    assignments = [assignment_from_request(request) for request in native_provider.requests]
+    assert all(assignment["profile"]["profile_name"] == "operator-harbor" for assignment in assignments)
+    for assignment in assignments:
+        strategy = "HARBOR_OPERATOR_" + assignment["kind"].upper()
+        assert assignment["profile"]["strategies"][assignment["kind"]] == strategy
+    assigned = json.dumps(assignments)
+    prompts = json.dumps(native_provider.requests)
+    assert immutable["provenance"]["head_sha"] not in prompts and '"pr_number"' not in assigned
+    assert '"repository": "o/r"' not in assigned and '"pr_repo": "o/r"' not in assigned
+    assert "Fix cache" in prompts
+    assert "forbidden-gh" not in prompts and "forbidden-judge" not in prompts
+    if outcome in {"finding", "clean", "partial", "noninline", "candidate-fault", "trajectory-fault"}:
+        result_path, = (tmp_path / "logs").glob("committed-*/committed-review.json")
+        result = json.loads(result_path.read_text())
+        assert result["immutable_input"] == immutable
+        assert result["analyzed_revision"]["head_sha"] == immutable["materialization"]["head_sha"]
+        trajectory_path, = (tmp_path / "logs").glob("committed-*/trajectory.json")
+        trajectory = json.loads(trajectory_path.read_text())
+        assert trajectory["extra"]["pr_number"] == 101 and trajectory["extra"]["pr_repo"] == "o/r"
+        assert trajectory["extra"]["immutable_input"] == immutable
+        assert len(result["claims"]) == (0 if outcome == "clean" else 1)
+        if outcome == "partial":
+            assert result["terminal_result"]["analysis_state"] == "incomplete"
+            assert result["claims"][0]["disposition"] == "unresolved"
+        elif outcome == "noninline":
+            assert result["terminal_result"]["analysis_state"] == "complete"
+            assert result["findings"][0]["payload"]["line"] is None
+    if rc:
+        assert artifact.read_bytes() == b"prior candidate"
+    else:
+        published = json.loads(artifact.read_text())
+        parsed = verifier_core.validate_candidate_artifact(published)
+        assert len(parsed) == (0 if outcome == "clean" else 1)
+        assert (tmp_path / "logs/trajectory.json").is_file()
+        if parsed:
+            assert parsed[0].path == "feature.py" and parsed[0].start_line == 2
 
 
 async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, native_provider: _NativeProvider,
 ) -> None:
-    repositories = {name: _review_repository(tmp_path / name) for name in ("pi", "claude")}
-    environments: dict[str, dict[str, str]] = {}
-    for name, repo in repositories.items():
-        root = repo.parent
+    """Distinct operator contexts and sessions must survive concurrent native calls."""
+    case, first, _ = _compiled_case(tmp_path, fake_gh)
+    second = tmp_path / "second-repo"
+    shutil.copytree(first, second, symlinks=True)
+    model_config = json.loads((native_provider.config / "models.json").read_text())
+    model_config["providers"] = {"openrouter": model_config["providers"]["output-fixture"]}
+    environments: list[dict[str, str]] = []
+    for name, repo in (("first", first), ("second", second)):
+        root = tmp_path / name
+        root.mkdir()
+        config = root / "native"
+        config.mkdir()
+        (config / "models.json").write_text(json.dumps(model_config))
         profile = root / "profile.toml"
-        profile.write_text(
-            f'schema_version = 1\nname = "{name}-candidate"\n'
-            "[strategies.intent]\n"
-            f'content = "Understand the intent of these changes. PROFILE-{name}."\n'
-            'source = "copied: isolation-test"\n'
-        )
-        environments[name] = {
-            "PATH": os.environ["PATH"], "HOME": str(root / "home"), "LANG": "C.UTF-8", "DAYDREAM_REVIEW_BACKEND": name,
-            "DAYDREAM_REVIEW_MODEL": f"isolation-{name}-model", "DAYDREAM_REVIEW_REPO_DIR": str(repo),
-            "DAYDREAM_REVIEW_ARTIFACT_PATH": str(root / "review.json"),
-            "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(root / "trajectory.json"), "DAYDREAM_REVIEW_CASE_ID": f"case-{name}",
-            "DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(profile),
-            "DAYDREAM_PI_RETRY_ATTEMPTS": "1" if name == "pi" else "2", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0",
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0", "DAYDREAM_PI_FANOUT_CONCURRENCY": "2",
-            "DAYDREAM_FANOUT_CONCURRENCY": "3", "GH_TOKEN": f"forbidden-{name}-github-token",
-            "GH_HOST": f"forbidden-{name}.example", "DAYDREAM_JUDGE_API_KEY": f"forbidden-{name}-judge-key",
-            "ZAI_API_KEY": f"forbidden-{name}-zai-key", "NOUS_API_KEY": f"forbidden-{name}-nous-key",
-        }
-        if name == "pi":
-            environments[name].update({"DAYDREAM_REVIEW_API_KEY": "reviewer-pi-private-key",
-                    "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api/v1", "PI_THINKING": "high",
-                    "PI_CODING_AGENT_DIR": str(root / "pi-agent"),
-                }
-            )
-        else:
-            environments[name].update({"ANTHROPIC_API_KEY": "reviewer-claude-private-key",
-                    "ANTHROPIC_BASE_URL": "https://claude-review.example/v1",
-                }
-            )
-
-    monkeypatch.setenv("DAYDREAM_APP_ID", "not-an-integer")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "parent-private-app-key")
-    monkeypatch.setenv("GH_TOKEN", "parent-github-private-token")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "parent-anthropic-private-token")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "0")
-    parent_before = dict(os.environ)
-    caller_before = {name: dict(env) for name, env in environments.items()}
-    entered = {name: asyncio.Event() for name in repositories}
-    release = asyncio.Event()
-    failed_once: set[str] = set()
-    created: dict[str, list[Any]] = {name: [] for name in repositories}
-    prompts: dict[str, list[str]] = {name: [] for name in repositories}
-    github_environments: dict[Path, list[dict[str, str]]] = {}
-    real_subprocess_run = subprocess.run
-
-    def github_subprocess(args: list[str], *pargs: Any, **kwargs: Any) -> Any:
-        if args[0] != "gh":
-            return real_subprocess_run(args, *pargs, **kwargs)
-        assert args[1:3] == ["api", "/user"]
-        environment = kwargs["env"]
-        assert environment is not None
-        github_environments.setdefault(Path(kwargs["cwd"]), []).append(dict(environment))
-        return subprocess.CompletedProcess(args, 0, '{"login":"reviewer"}', "")
-
-    class RetryableError(Exception):
-        retryable = True
-
-    class ReviewBackend(StubBackend):
-        def __init__(self, name: str, model: str, execution: Any) -> None:
-            super().__init__(repositories[name], model=model)
-            self.name = name
-            self.execution = execution
-            self.retry_policy = execution.retry_policy
-            self.fanout_concurrency = execution.fanout_concurrency
-
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
-            assert cwd == repositories[self.name]
-            prompts[self.name].append(prompt)
-            entered[self.name].set()
-            await release.wait()
-            if self.name not in failed_once:
-                failed_once.add(self.name)
-                raise RetryableError("retry the owning review once")
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-    def create_backend(name: str, model: str | None = None, *, execution_input: Any = None, **kwargs: Any,
-    ) -> ReviewBackend:
-        assert execution_input is not None, "Harbor lost its explicit backend execution"
-        assert model == f"isolation-{name}-model"
-        backend = ReviewBackend(name, model, execution_input)
-        created[name].append(backend)
-        return backend
-
-    monkeypatch.setattr(subprocess, "run", github_subprocess)
-    monkeypatch.setattr(runner, "create_backend", create_backend)
-    results: dict[str, int] = {}
-
-    async def review(name: str) -> None:
-        results[name] = await entrypoint.main(environments[name])
-
-    async with asyncio.timeout(45):
-        async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(review("pi"))
-            tasks.create_task(review("claude"))
-            await asyncio.gather(*(event.wait() for event in entered.values()))
-            assert dict(os.environ) == parent_before
-            release.set()
-
-    assert results == {"pi": 0, "claude": 0}
-    assert failed_once == {"pi", "claude"}
-    assert environments == caller_before
-    assert dict(os.environ) == parent_before
-    forbidden = ("parent-private-app-key", "parent-github-private-token", "parent-anthropic-private-token",
-        "reviewer-pi-private-key", "reviewer-claude-private-key", "forbidden-pi-github-token",
-        "forbidden-claude-github-token", "forbidden-pi-judge-key", "forbidden-claude-judge-key", "forbidden-pi-zai-key",
-        "forbidden-pi-nous-key", "forbidden-claude-zai-key", "forbidden-claude-nous-key",
-    )
-    for name, repo in repositories.items():
-        assert created[name]
-        assert len({id(backend.execution) for backend in created[name]}) == 1
-        assert any(f"PROFILE-{name}" in prompt for prompt in prompts[name])
-        other = "claude" if name == "pi" else "pi"
-        assert all(f"PROFILE-{other}" not in prompt for prompt in prompts[name])
-        for backend in created[name]:
-            environment = backend.execution.child_environment()
-            assert environment["HOME"] == str(repo.parent / "home")
-            assert backend.fanout_concurrency == (2 if name == "pi" else 3)
-            expected_agent_dir = (repo.parent / "pi-agent" if name == "pi"
-                else repo.parent / "home" / ".pi" / "agent"
-            )
-            assert backend.execution.pi_agent_dir == expected_agent_dir
-            assert backend.retry_policy.attempts == (1 if name == "pi" else 2)
-            assert backend.retry_policy.base_delay_s == backend.retry_policy.max_delay_s == 0
-            if name == "pi":
-                assert backend.execution.pi_provider == "openrouter"
-                assert environment["PI_API_KEY"] == "reviewer-pi-private-key"
-                assert environment["PI_THINKING"] == "high"
-                assert environment["PI_CODING_AGENT_DIR"] == str(repo.parent / "pi-agent")
-                assert backend.execution.pi_thinking == "high"
-                assert "ZAI_API_KEY" not in environment and "NOUS_API_KEY" not in environment
-                assert not any(key.startswith("ANTHROPIC_") for key in environment)
-            else:
-                assert environment["ANTHROPIC_API_KEY"] == "reviewer-claude-private-key"
-                assert environment["ANTHROPIC_BASE_URL"] == "https://claude-review.example/v1"
-                assert "PI_API_KEY" not in environment
-                assert "PI_THINKING" not in environment and "PI_CODING_AGENT_DIR" not in environment
-                assert "ZAI_API_KEY" not in environment and "NOUS_API_KEY" not in environment
-        assert len(github_environments[repo]) == 1
-        for environment in github_environments[repo]:
-            assert environment["HOME"] == str(repo.parent / "home")
-            assert "GH_TOKEN" not in environment and "GH_HOST" not in environment
-            assert not any(key.startswith("DAYDREAM_APP_") for key in environment)
-            assert not any(key in environment for key in (
-                "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ZAI_API_KEY", "NOUS_API_KEY",
-            ))
-        artifact_path = repo.parent / "review.json"
-        trajectory_path = repo.parent / "trajectory.json"
-        artifact = json.loads(artifact_path.read_text())
-        assert artifact["case_id"] == f"case-{name}"
-        assert verifier_core.validate_candidate_artifact(artifact)
-        assert trajectory_path.is_file()
-        for path in (artifact_path, trajectory_path):
-            payload = path.read_text()
-            assert all(secret not in payload for secret in forbidden)
+        profile.write_text(f'schema_version = 1\nname = "{name}-candidate"\n')
+        environment = _environment(case, repo, root, config)
+        environment["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] = str(profile)
+        environments.append(environment)
+    native_provider.choose = answer_review
+    before = dict(os.environ)
+    assert await asyncio.gather(*(entrypoint.main(environment) for environment in environments)) == [0, 0]
+    assert dict(os.environ) == before
+    sessions: set[str] = set()
+    for name in ("first", "second"):
+        result_path, = (tmp_path / name / "logs").glob("committed-*/committed-review.json")
+        value = json.loads(result_path.read_text())
+        sessions.add(value["run_id"])
+        assert value["settings"]["profile_name"] == f"{name}-candidate"
+        assert (tmp_path / name / "review.json").is_file()
+    assert len(sessions) == 2
+    assert {assignment_from_request(request)["profile"]["profile_name"] for request in native_provider.requests} == {
+        "first-candidate", "second-candidate"}

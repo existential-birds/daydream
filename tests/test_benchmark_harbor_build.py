@@ -446,6 +446,18 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
     assert lock["cases"][key]["repository"] == "o/r"
     assert lock["cases"][key]["original_head_sha"] == head_sha
     assert lock["cases"][key]["bundle_sha256"] == storage.sha256_file(case / "environment" / "repository.bundle")
+    trusted = _load_json(case / "environment/immutable-request.json")
+    assert trusted["provenance"] == {
+        "repository": "o/r", "pr_number": 101, "head_sha": head_sha,
+        "requested_base_sha": raw["snapshot"]["requested_base_sha"],
+        "comparison_base_sha": raw["snapshot"]["original_base_sha"],
+        "title": "", "body": "", "context": build.bounded_pr_context(raw["pull_request"]),
+    }
+    assert trusted["materialization"]["head_sha"] == lock["cases"][key]["local_head_sha"]
+    assert trusted["materialization"]["head_sha"] != head_sha
+    assert trusted["materialization"]["head_tree_sha"] == raw["snapshot"]["head_tree_sha"]
+    assert trusted["materialization"]["canonical_diff_sha256"] == raw["snapshot"]["diff_sha256"]
+    assert "gold_sha256" not in json.dumps(trusted) and "curation" not in trusted
     assert lock["cases"][key]["files"]["tests/verifier_core.py"] == \
         lock["files"][f"{key}/tests/verifier_core.py"]
     assert not any("timestamp" in k or "created_at" in k for k in lock.keys())
@@ -513,7 +525,7 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    assert env_files == {"repository.bundle", "immutable-request.json", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
 
     toml = (ws / "harbor" / key / "task.toml").read_bytes()
@@ -628,10 +640,13 @@ def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-7f3c" not in outside
     assert instr.count("</historical_pr_context>") == 1
-    # no raw body in any other shipped file (instruction.md's bounded block is
-    # the sole allowed conduit and is validated separately above)
+    # The host-only typed request carries exactly the approved bounded block;
+    # all other shipped surfaces retain the leakage prohibition.
+    trusted = json.loads((ws / "harbor" / key / "environment/immutable-request.json").read_text())
+    assert trusted["provenance"]["context"] == build.bounded_pr_context(
+        storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["pull_request"])
     for rel, _ in lock["files"].items():
-        if rel.endswith("instruction.md"):
+        if rel.endswith(("instruction.md", "environment/immutable-request.json")):
             continue
         p = ws / "harbor" / rel
         if p.is_file() and rel.endswith((".md", ".json")):

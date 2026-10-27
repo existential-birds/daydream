@@ -13,21 +13,28 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
+from rich.console import Console
 
 from daydream.findings import write_findings_artifact
-from daydream.pr_review import parse_finding_markers, validate_diagram_payload
+from daydream.pr_review import parse_finding_markers, post_findings_from_artifact, validate_diagram_payload
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.review_result import findings_artifact, terminal_result
 from tests.harness.scripts import cli_main
+from tests.test_findings import immutable_findings_artifact
 from tests.test_review_result import large_attributed_terminal
 
 
-def _post_argv(artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,) -> list[str]:
+def _post_argv(
+    artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,
+    repo: str = 'o/r', base_sha: str | None = None, comparison_sha: str | None = None,
+) -> list[str]:
     """The ``post-findings`` argv for *artifact*; override only what a test varies."""
-    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", head_sha or "h" * 40, "--repo", "o/r",
+    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", head_sha or "h" * 40, "--repo", repo,
         *(["--target", str(target)] if target is not None else []),
+        *(['--base-sha', base_sha] if base_sha is not None else []),
+        *(['--comparison-sha', comparison_sha] if comparison_sha is not None else []),
     ]
 
 def test_post_findings_uses_two_explicit_checkout_configs_without_chdir(fake_gh: FakeGh, tmp_path: Path,) -> None:
@@ -214,6 +221,61 @@ def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh: FakeGh, ar
     rc = cli_main(_post_argv(artifact_on_disk, pr=8))  # event says 8
     assert rc == 1
     assert fake_gh.calls("POST") == []  # nothing posted, nothing resolved
+
+
+@pytest.mark.parametrize('target', ['repo', 'pr', 'head_sha', 'base_sha', 'comparison_sha',
+                                   'missing-base', 'missing-comparison'])
+def test_immutable_publisher_requires_all_independent_target_facts(
+    fake_gh: FakeGh, tmp_path: Path, target: str,
+) -> None:
+    """A schema-2 PR/head check does not protect immutable requested/comparison bases."""
+    path = tmp_path / 'immutable.json'
+    write_findings_artifact(path, immutable_findings_artifact([_inline_finding('Confirmed concern')]))
+    expected: dict[str, Any] = {'repo': 'o/r', 'pr': 7, 'head_sha': 'a' * 40,
+                               'base_sha': 'b' * 40, 'comparison_sha': 'c' * 40}
+    if target.startswith('missing-'):
+        expected.pop('base_sha' if target == 'missing-base' else 'comparison_sha')
+    else:
+        expected[target] = 8 if target == 'pr' else 'other/repository' if target == 'repo' else 'd' * 40
+    assert cli_main(_post_argv(path, **expected)) == 1
+    assert fake_gh.process_calls() == [], 'Rejected provenance must not reach even GitHub inventory reads'
+
+
+def test_immutable_library_publisher_rejects_boolean_pr_authority(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """CLI integer parsing hides Python's True == 1 alias from the library publisher boundary."""
+    path = tmp_path / 'immutable.json'
+    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')])
+    artifact['pr_number'] = artifact['immutable_input']['provenance']['pr_number'] = 1
+    write_findings_artifact(path, artifact)
+    assert post_findings_from_artifact(
+        tmp_path, path, pr_number=True, head_sha='a' * 40, repo='o/r', console=Console(),
+        base_sha='b' * 40, comparison_sha='c' * 40,
+    ) == 1
+    assert fake_gh.process_calls() == []
+
+
+@pytest.mark.parametrize('state', ['complete', 'incomplete'])
+def test_immutable_publisher_uses_original_head_and_retains_partial_coverage(
+    fake_gh: FakeGh, tmp_path: Path, state: str,
+) -> None:
+    """Synthetic source references must survive export while posting targets captured original A."""
+    path = tmp_path / 'immutable.json'
+    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')], state=state)
+    write_findings_artifact(path, artifact)
+    assert cli_main(_post_argv(path, head_sha='a' * 40, base_sha='b' * 40, comparison_sha='c' * 40)) == 0
+    posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
+    assert len(posts) == 1 and posts[0].payload['commit_id'] == 'a' * 40
+    assert posts[0].payload['event'] == 'COMMENT'
+    assert 'Confirmed concern' in posts[0].payload['comments'][0]['body']
+    body = posts[0].payload['body']
+    assert ('**Review incomplete.**' in body) == (state == 'incomplete')
+    if state == 'incomplete':
+        assert 'python: backend failure' in body
+    assert json.loads(path.read_text()) == artifact
+    assert artifact['terminal_result']['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0][
+        'revision'] == '1' * 40
 
 def test_malformed_artifact_aborts(fake_gh: FakeGh, tmp_path: Path) -> None:
     bad = tmp_path / "f.json"
