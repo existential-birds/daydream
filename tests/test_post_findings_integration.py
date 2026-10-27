@@ -15,8 +15,15 @@ from urllib.parse import quote
 import pytest
 from rich.console import Console
 
-from daydream.findings import write_findings_artifact
-from daydream.pr_review import parse_finding_markers, post_findings_from_artifact, validate_diagram_payload
+from daydream import git_ops
+from daydream.findings import build_findings_artifact, write_findings_artifact
+from daydream.pr_review import (
+    ParsedIssue,
+    PRInfo,
+    parse_finding_markers,
+    post_findings_from_artifact,
+    validate_diagram_payload,
+)
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
@@ -321,12 +328,33 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
+@pytest.mark.parametrize("severity", ["low", None, "omitted"])
+def test_post_findings_approve_when_all_matched_and_clean_flag(
+    fake_gh: FakeGh, tmp_path: Path, git_repo: Path, severity: str | None,
+) -> None:
+    """Schema 2 serializes missing classification as required null, retaining approval eligibility."""
+    finding = _inline_finding("Nit", severity="low")
+    finding.pop("placement")
+    if severity == "omitted":
+        finding.pop("severity")
+    else:
+        finding["severity"] = severity
+    base = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "a.py").write_text("FIRST = 1\nSECOND = 2\nTHIRD = 3\n")
+    git(git_repo, "add", "a.py")
+    head = commit(git_repo, "add reviewed source")
+    data = build_findings_artifact(
+        git_repo, PRInfo(7, head, base, "main", "feature", "o", "r", ""), [ParsedIssue(**finding)],
+        run_info=None, terminal_result=terminal_result(head_sha=head), snapshot_diff=git_ops.diff(git_repo, base, head),
+    )
+    assert data["findings"][0]["severity"] == (None if severity == "omitted" else severity)
+    artifact = tmp_path / "f.json"
+    write_findings_artifact(artifact, data)
+    argv = _post_argv(artifact, head_sha=head, target=git_repo) + ["--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    assert cli_main(_post_argv(artifact) + ["--bot-login", "daydream"]) == 0
+    assert cli_main(argv) == 0
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    code = cli_main(argv + ["--approve-on-clean"])
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
@@ -673,19 +701,35 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     assert posts[0].payload["body"].startswith("Actionable comments posted: 1\n\n")
     assert "```mermaid" not in posts[0].payload["body"]
 
-def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "f.json",
-        [_inline_finding("Old high finding"),
-            _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low",),
-        ],
-    )
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_post_findings_matched_blocking_finding_prevents_approval(
+    fake_gh: FakeGh, tmp_path: Path, schema_version: int,
+) -> None:
+    """Deduplication must retain blockers without reposting the matched findings."""
+    retained = _inline_finding("Retained concern")
+    if schema_version == 3:
+        retained["severity"] = None
+    findings = [retained,
+        _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low"),
+    ]
+    artifact = tmp_path / "f.json"
+    data = immutable_findings_artifact(findings) if schema_version == 3 else findings_artifact(findings)
+    write_findings_artifact(artifact, data)
+    argv = _post_argv(artifact, head_sha="a" * 40 if schema_version == 3 else None,
+                      base_sha="b" * 40 if schema_version == 3 else None,
+                      comparison_sha="c" * 40 if schema_version == 3 else None)
+    argv += ["--approve-on-clean", "--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
-    assert code == 0
+    assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
+    assert [parse_finding_markers(comment["body"]) for comment in posts[0].payload["comments"]] == [["b" * 64]]
+    assert "Retained concern" not in json.dumps(posts[0].payload)
     assert "no high/medium findings" not in posts[0].payload["body"]
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64, "b" * 64], thread_ids=["RT_1", "RT_2"], viewer_did_author=True)
+    assert cli_main(argv) == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 @pytest.mark.parametrize("run_info", ["Artifact-owned run details", None])
 def test_artifact_post_never_acquires_live_trajectory_details(

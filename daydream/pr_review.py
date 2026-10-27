@@ -1024,7 +1024,11 @@ def post_findings_from_artifact(
     # Late imports: ``findings`` and ``reconcile`` both import this module at
     # module level (one-way by design), so the poster flow resolves them at
     # call time — the same no-cycle pattern as ``daydream.deep.orchestrator``.
-    from daydream.findings import FindingsValidationError, load_findings_artifact
+    from daydream.findings import (
+        IMMUTABLE_FINDINGS_SCHEMA_VERSION,
+        FindingsValidationError,
+        load_findings_artifact,
+    )
     from daydream.reconcile import fetch_prior_findings, partition, resolve_threads
 
     # Resolve the effective bot login in ONE place (here), so both the CLI
@@ -1135,7 +1139,8 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        _finding_blocks_approval(
+        (artifact.schema_version == IMMUTABLE_FINDINGS_SCHEMA_VERSION and finding.severity is None)
+        or _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
             finding.severity_off_vocabulary,

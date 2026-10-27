@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **review:** block approval for immutable findings with missing severity,
+  including findings already posted on the PR, while preserving complete-empty
+  approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities

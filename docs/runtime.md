@@ -24,6 +24,13 @@ failure reasons. Incomplete/failed results can post COMMENT notices but cannot
 approve or resolve stale threads. Cache/resume must validate the same identities
 and current typed target attribution; missing/damaged proofs restart review.
 
+Approval requires explicit opt-in and no blocking severity among all retained
+findings, including deduplication matches. Immutable schema-3 findings without
+severity block approval; new findings post as COMMENT, while an all-matched review
+may post nothing. Complete-empty immutable reviews remain eligible for approval
+when coverage and warning checks permit it. Ordinary schema-2 omitted-severity
+behavior and classified-severity policy are unchanged.
+
 Retained source attribution has an 8 MiB run allocation, with the existing
 512-decision/256 KiB per-scope and four-reference/8192-byte per-decision bounds.
 Admission, restore, and terminal validation enforce the same allocation atomically.

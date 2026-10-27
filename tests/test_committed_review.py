@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
 from daydream.backends import MetricsEvent, TextEvent
@@ -28,6 +29,7 @@ from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
+from daydream.pr_review import parse_finding_markers, post_findings_from_artifact
 from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
@@ -35,6 +37,7 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
     git,
@@ -685,7 +688,7 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
 @pytest.mark.parametrize("outcome", ["complete", "attributes", "packed", "empty", "no-diff", "partial",
                                     "native-failure", "install-failure"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, outcome: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fake_gh: FakeGh, outcome: str,
 ) -> None:
     """Offline identity/export and inert preparation are absent from ordinary journey coverage.
 
@@ -741,10 +744,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         attempts.append("GitHub invocation or credential resolution")
         raise AssertionError(attempts[-1])
 
-    for owner, names in ((process, ("_run_gh", "_run_gh_async")),
-                         (github_app, ("resolve_run_identity", "resolve_user_identity", "resolve_credentials"))):
-        for name in names:
-            monkeypatch.setattr(owner, name, forbidden)
     environment_get = type(os.environ).get
 
     def no_github_credentials(self: Any, key: Any, default: Any = None) -> Any:
@@ -755,8 +754,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             attempts.append(f"credential read: {key}")
             raise AssertionError(attempts[-1])
         return environment_get(self, key, default)
-
-    monkeypatch.setattr(type(os.environ), "get", no_github_credentials)
 
     async def readiness(self: PiBackend) -> None:
         return None
@@ -813,35 +810,41 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     review_request = CommittedReviewRequest(
         repo, envelope["materialization"]["requested_base_sha"], hosted_policy=policy, immutable_input=identity,
     )
-    if outcome == "install-failure":
-        from daydream.artifact_visibility import ArtifactVisibilityError
-        from daydream.findings import load_findings_artifact
+    with monkeypatch.context() as analysis_boundaries:
+        for owner, names in ((process, ("_run_gh", "_run_gh_async")),
+                             (github_app, ("resolve_run_identity", "resolve_user_identity", "resolve_credentials"))):
+            for name in names:
+                analysis_boundaries.setattr(owner, name, forbidden)
+        analysis_boundaries.setattr(type(os.environ), "get", no_github_credentials)
+        if outcome == "install-failure":
+            from daydream.artifact_visibility import ArtifactVisibilityError
+            from daydream.findings import load_findings_artifact
 
-        with pytest.raises(ArtifactVisibilityError, match="explicit artifact destination changed during recovery"):
-            await run_committed_review(review_request)
-        assert injected and attempts == [] and not marker.exists()
-        assert (policy.output_dir / "findings.json").read_bytes() == b"competing bytes"
-        frozen, = (policy.private_base / "runtime").glob("*/runs/*/frozen")
-        retained, = frozen.glob(".explicit/*/committed-review.json")
-        value = json.loads(retained.read_text())
-        validate_committed_result(value)
-        assert value["immutable_input"] == envelope
-        assert value["terminal_result"]["analysis_state"] == "complete" and len(value["findings"]) == 1
-        report, = frozen.glob(".explicit/*/review-output.md")
-        assert "Captured zero" in report.read_text()
-        findings, = frozen.glob(".explicit/*/findings.json")
-        exported = load_findings_artifact(
-            findings, expected_repo="captured/repository", expected_pr_number=1421,
-            expected_head_sha=envelope["provenance"]["head_sha"],
-            expected_base_sha=envelope["provenance"]["requested_base_sha"],
-            expected_comparison_sha=envelope["provenance"]["comparison_base_sha"],
-        )
-        assert exported.terminal_result == value["terminal_result"]
-        assert list((policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
-        assert not (repo / ".daydream").exists()
-        return
-    result = await run_committed_review(review_request)
-    assert attempts == [] and not marker.exists()
+            with pytest.raises(ArtifactVisibilityError, match="explicit artifact destination changed during recovery"):
+                await run_committed_review(review_request)
+            assert injected and attempts == [] and not marker.exists()
+            assert (policy.output_dir / "findings.json").read_bytes() == b"competing bytes"
+            frozen, = (policy.private_base / "runtime").glob("*/runs/*/frozen")
+            retained, = frozen.glob(".explicit/*/committed-review.json")
+            value = json.loads(retained.read_text())
+            validate_committed_result(value)
+            assert value["immutable_input"] == envelope
+            assert value["terminal_result"]["analysis_state"] == "complete" and len(value["findings"]) == 1
+            report, = frozen.glob(".explicit/*/review-output.md")
+            assert "Captured zero" in report.read_text()
+            findings, = frozen.glob(".explicit/*/findings.json")
+            exported = load_findings_artifact(
+                findings, expected_repo="captured/repository", expected_pr_number=1421,
+                expected_head_sha=envelope["provenance"]["head_sha"],
+                expected_base_sha=envelope["provenance"]["requested_base_sha"],
+                expected_comparison_sha=envelope["provenance"]["comparison_base_sha"],
+            )
+            assert exported.terminal_result == value["terminal_result"]
+            assert list((policy.private_base / "runtime").glob("*/unreconciled/publish-*"))
+            assert not (repo / ".daydream").exists()
+            return
+        result = await run_committed_review(review_request)
+    assert attempts == [] and fake_gh.process_calls() == [] and not marker.exists()
     value = result.to_dict()
     validate_committed_result(value)
     assert value["schema_version"] == 2 and value["immutable_input"] == envelope
@@ -860,6 +863,31 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         assert value["terminal_result"]["analysis_state"] == "incomplete"
         assert len(value["claims"]) == 1
     assert not (repo / ".daydream").exists()
+    if outcome in {"complete", "empty"}:
+        assert exported_value["schema_version"] == 3
+        assert [finding["severity"] for finding in exported_value["findings"]] == (
+            [None] if outcome == "complete" else []
+        )
+        assert post_findings_from_artifact(
+            tmp_path, policy.output_dir / "findings.json", pr_number=1421, repo="captured/repository",
+            head_sha=envelope["provenance"]["head_sha"], console=Console(),
+            base_sha=envelope["provenance"]["requested_base_sha"],
+            comparison_sha=envelope["provenance"]["comparison_base_sha"],
+            bot_login="daydream", approve_on_clean=True,
+        ) == 0
+        posts = fake_gh.calls("POST", "/repos/captured/repository/pulls/1421/reviews")
+        assert len(posts) == 1
+        payload = posts[0].payload
+        assert payload["event"] == ("COMMENT" if outcome == "complete" else "APPROVE")
+        file_comments = fake_gh.calls("POST", "/repos/captured/repository/pulls/1421/comments")
+        assert len(file_comments) == (1 if outcome == "complete" else 0)
+        if outcome == "complete":
+            comment = file_comments[0].payload
+            assert (comment["path"], comment["subject_type"], comment["commit_id"]) == (
+                "api.py", "file", envelope["provenance"]["head_sha"],
+            )
+            assert "Captured zero" in comment["body"] and "Captured zero reaches division." in comment["body"]
+            assert parse_finding_markers(comment["body"]) == [exported_value["findings"][0]["fingerprint"]]
 
 
 @pytest.mark.parametrize("fault", ["version", "float-version", "unknown", "original", "head", "base", "tree",
