@@ -1044,15 +1044,13 @@ def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
 def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
-    """Pipe refusal must stop its real producer; the run-based retry test cannot prove cleanup."""
+    """Reap every real launch, including timeouts before the child reaches its own code."""
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
-    started = tmp_path / "started"
     shim = shim_dir / "git"
     shim.write_text(
         f"#!{sys.executable}\n"
         "import os, sys, time\n"
-        f"with open({str(started)!r}, 'a') as stream: stream.write(str(os.getpid()) + '\\n')\n"
         "mode = sys.argv[1]\n"
         "if mode == 'nonzero':\n"
         "    os.write(2, b'bounded failure diagnostic')\n"
@@ -1062,17 +1060,26 @@ def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
         "while True: time.sleep(1)\n"
     )
     shim.chmod(0o755)
+    processes: list[subprocess.Popen[Any]] = []
+    real_popen = subprocess.Popen
+
+    def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
     monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.defpath)
     expected = ("timed out" if mode == "timeout" else "bounded failure diagnostic" if mode == "nonzero"
                 else "output exceeds the supported size")
     with pytest.raises(git_ops.GitTimeoutError if mode == "timeout" else GitError, match=expected):
         git_process._run_git(tmp_path, [mode], timeout=0.3, retries=1, max_output_bytes=1024,
                              error_context="bounded command failed")
-    pids = [int(value) for value in started.read_text().splitlines()]
-    assert len(pids) == (2 if mode == "timeout" else 1)
-    for pid in pids:
+    assert len(processes) == (2 if mode == "timeout" else 1)
+    for process in processes:
+        assert process.returncode is not None
         with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+            os.kill(process.pid, 0)
 
 
 @pytest.mark.parametrize(
