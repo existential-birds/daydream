@@ -126,7 +126,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 @pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
-                                  "hosted-model-fallback", "hosted-settings-encoding"])
+                                  "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -140,6 +140,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     mismatch diagnostic; a generic readiness rejection would hide the cause.
     Suffix-only model registries and invalid UTF-8 settings exercise readiness
     faults that the exact-model, valid-JSON success path cannot detect.
+    An explicit operator loader override must be rejected before its preload can
+    execute; hostile ambient loader settings alone only prove environment isolation.
     """
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
@@ -242,6 +244,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             (native_provider.config / "auth.json").symlink_to(target_auth)
         elif case == "hosted-settings-encoding":
             settings.write_bytes(b"\xff")
+        elif case == "hosted-loader-override":
+            operator_environment["NODE_OPTIONS"] = f"--import={tmp_path / 'ambient-pi/preload.mjs'}"
         if case.startswith("hosted-unsupported"):
             executable_name = "node" if case.endswith("node") else "pi"
             executable = shutil.which(executable_name)
@@ -408,7 +412,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                     model="output-model:high" if case == "false-positive" else None),
         limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy)
     unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
-                   "hosted-model-fallback", "hosted-settings-encoding"}
+                   "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
     if case.startswith("hosted-unsupported") or case in unsupported:
         from daydream.hosted_review import UnsupportedHostedPolicy
 
@@ -416,12 +420,15 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             "hosted-model-fallback": "Hosted Pi model selection",
             "hosted-unsupported-pi": "pi did not report 1[.]4[.]0",
             "hosted-unsupported-node": "node did not report v24[.]18[.]1",
+            "hosted-loader-override": "Hosted Pi environment must not contain executable loader overrides",
         }.get(case, "Hosted|hosted")
         with pytest.raises(UnsupportedHostedPolicy, match=message):
             await run_committed_review(request)
         assert len(native_provider.requests) == (4 if case == "hosted-challenge-capability" else 0)
         assert not forbidden_marker.exists()
         assert (repo / ".review-output.md").read_text() == "prior public report\n"
+        if case == "hosted-loader-override":
+            assert not output_root.exists() and not (tmp_path / "hosted-private").exists()
         if case in {"hosted-capability", "hosted-challenge-capability"}:
             partial = json.loads((output_root / "committed-review.json").read_text())
             validate_committed_result(partial)
