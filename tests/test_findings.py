@@ -62,7 +62,7 @@ def immutable_findings_artifact(
                        'title': 'Historical PR title', 'body': 'Historical PR body', 'context': ''},
         'materialization': {'kind': 'synthetic', 'head_sha': '1' * 40, 'requested_base_sha': '2' * 40,
                             'comparison_base_sha': '2' * 40, 'head_tree_sha': '3' * 40,
-                            'comparison_tree_sha': '4' * 40, 'canonical_diff_sha256': '5' * 64,
+                            'comparison_tree_sha': '4' * 40,
                             'review_diff_key': '6' * 64, 'bundle_sha256': '7' * 64},
     }
     terminal = terminal_result(state, head_sha=immutable['materialization']['head_sha'])
@@ -116,7 +116,7 @@ def test_immutable_export_places_against_local_source_without_relabeling_it(
 def test_immutable_handoff_rejects_mixed_identities_before_replacing_prior_output(
     tmp_path: Path, field: str,
 ) -> None:
-    """The ordinary same-head guard cannot bind synthetic source or compiler/review digests."""
+    """The ordinary same-head guard cannot bind synthetic source or the execution diff."""
     artifact = immutable_findings_artifact()
     if field == 'outer-head':
         artifact['head_sha'] = 'd' * 40
@@ -128,8 +128,7 @@ def test_immutable_handoff_rejects_mixed_identities_before_replacing_prior_outpu
     else:
         revision = artifact['terminal_result']['analyzed_revision']
         key = {'local-head': 'head_sha', 'comparison': 'merge_base_sha', 'diff-key': 'diff_key'}[field]
-        revision[key] = artifact['immutable_input']['materialization']['canonical_diff_sha256'] if (
-            field == 'diff-key') else 'd' * 40
+        revision[key] = 'd' * (64 if field == 'diff-key' else 40)
     path = tmp_path / 'prior.json'
     path.write_bytes(b'prior completed output')
     with pytest.raises(FindingsValidationError):

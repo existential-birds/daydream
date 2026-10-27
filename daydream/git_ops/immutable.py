@@ -60,20 +60,8 @@ def redaction_environment() -> Mapping[str, str]:
     return os.environ if current is None else current[1]
 
 
-def canonical_diff_sha256(repo: Path, base_sha: str, head_sha: str) -> str:
-    """Hash the binary-safe compiler diff, separately from the decoded review key."""
-    args = _diff_args(base_sha, head_sha)
-    with _immutable_diff_source(repo, base_sha, head_sha) as view:
-        raw = process._run_git(
-            view, ["--attr-source=" + head_sha, "-c", "core.abbrev=40", "diff", "--binary", *args],
-            capture_bytes=True, timeout=30, error_context="immutable canonical diff unavailable",
-            max_output_bytes=_MAX_SOURCE_BYTES,
-        ).stdout
-    return hashlib.sha256(raw).hexdigest()
-
-
 def immutable_review_diff(repo: Path, base_sha: str, head_sha: str) -> str:
-    """Decode the review diff under the same captured-head attribute/config policy."""
+    """Decode the review diff using captured-head attributes and inert configuration."""
     args = _diff_args(base_sha, head_sha)
     with _immutable_diff_source(repo, base_sha, head_sha) as view:
         diff = process._run_git(
@@ -340,9 +328,6 @@ def prepare_immutable_source(
                     raise GitError("immutable source tree identity mismatch")
             if local["kind"] == "synthetic":
                 validate_synthetic_history(destination, local["comparison_base_sha"], local["head_sha"])
-            canonical_digest = canonical_diff_sha256(destination, local["comparison_base_sha"], local["head_sha"])
-            if canonical_digest != local["canonical_diff_sha256"]:
-                raise GitError("immutable canonical diff digest mismatch")
             diff = immutable_review_diff(destination, local["comparison_base_sha"], local["head_sha"])
             if hashlib.sha256(diff.encode()).hexdigest() != local["review_diff_key"]:
                 raise GitError("immutable review diff identity mismatch")

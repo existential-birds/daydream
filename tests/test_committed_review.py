@@ -664,7 +664,7 @@ def test_committed_diff_uses_raw_commit_endpoints_despite_local_diff_drivers(tmp
 
 def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> ImmutableReviewInput:
     """Capture independently computed original/local evidence for real Git journeys."""
-    from daydream.git_ops.immutable import canonical_diff_sha256, immutable_review_diff
+    from daydream.git_ops.immutable import immutable_review_diff
 
     head = git(repo, "rev-parse", "HEAD")
     requested = requested_base or git(repo, "rev-parse", "main")
@@ -677,7 +677,6 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
         "materialization": {"kind": "exact", "head_sha": head, "requested_base_sha": requested,
             "comparison_base_sha": comparison, "head_tree_sha": git(repo, "rev-parse", head + "^{tree}"),
             "comparison_tree_sha": git(repo, "rev-parse", comparison + "^{tree}"),
-            "canonical_diff_sha256": canonical_diff_sha256(repo, comparison, head),
             "review_diff_key": hashlib.sha256(immutable_review_diff(repo, comparison, head).encode()).hexdigest(),
             "bundle_sha256": None},
     })
@@ -864,7 +863,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
 
 @pytest.mark.parametrize("fault", ["version", "float-version", "unknown", "original", "head", "base", "tree",
-                                    "canonical", "review-key", "missing-object", "object-fifo", "raw-bytes",
+                                    "review-key", "missing-object", "object-fifo", "raw-bytes",
                                     "object-hash", "symlink-parent", "source-size", "base-source-size",
                                     "source-total-size", "authority"])
 async def test_immutable_invalid_evidence_fails_before_native_work(
@@ -920,12 +919,12 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
         with pytest.raises(ValueError, match="immutable"):
             ImmutableReviewInput.from_dict(value)
         return
-    if fault in {"head", "base", "tree", "canonical", "review-key"}:
+    if fault in {"head", "base", "tree", "review-key"}:
         key = {"head": "head_sha", "base": "comparison_base_sha", "tree": "head_tree_sha",
-               "canonical": "canonical_diff_sha256", "review-key": "review_diff_key"}[fault]
+               "review-key": "review_diff_key"}[fault]
         value["materialization"][key] = (
             value["materialization"]["head_sha"] if fault == "base"
-            else "a" * (64 if fault in {"canonical", "review-key"} else 40)
+            else "a" * (64 if fault == "review-key" else 40)
         )
         if fault in {"head", "base"}:
             value["provenance"][key] = value["materialization"][key]
@@ -958,7 +957,7 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     expected = {
         "head": "checkout HEAD differs", "base": "does not match the local merge base",
         "tree": "tree identity mismatch",
-        "canonical": "canonical diff digest mismatch", "review-key": "review diff identity mismatch",
+        "review-key": "review diff identity mismatch",
         "missing-object": "source validation failed", "object-hash": "source validation failed",
         "object-fifo": "bounded regular file", "raw-bytes": "checkout differs from captured raw",
         "symlink-parent": "checkout differs from captured raw", "source-size": "files exceed the supported size",
@@ -993,7 +992,7 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     """
     from daydream.benchmark.snapshot import build_bundle
     from daydream.git_ops import process
-    from daydream.git_ops.immutable import canonical_diff_sha256, immutable_review_diff
+    from daydream.git_ops.immutable import immutable_review_diff
     original = tmp_path / "original"
     seed_feature_branch(original, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
     original_input = immutable_input_for(original).to_dict()
@@ -1027,7 +1026,6 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
         "kind": "synthetic", "head_sha": head, "requested_base_sha": base, "comparison_base_sha": base,
         "head_tree_sha": git(source, "rev-parse", head + "^{tree}"),
         "comparison_tree_sha": git(source, "rev-parse", base + "^{tree}"),
-        "canonical_diff_sha256": canonical_diff_sha256(source, base, head),
         "review_diff_key": hashlib.sha256(immutable_review_diff(source, base, head).encode()).hexdigest(),
         "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
     }

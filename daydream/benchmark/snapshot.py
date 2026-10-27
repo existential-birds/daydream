@@ -15,7 +15,6 @@ from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.git_ops import process as git_process
 from daydream.git_ops.immutable import (
-    canonical_diff_sha256 as canonical_diff_sha256,
     immutable_review_diff,
     inert_git_context,
     validate_synthetic_history,
@@ -510,11 +509,11 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 
 
 def validate_offline_clone(
-    bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
+    bundle_path: Path, base_tree: str, head_tree: str, workdir: Path
 ) -> dict[str, str]:
     """Clone with network disabled and verify the full portable fidelity contract. Require
     exactly origin/base and origin/head refs, exactly two reachable commits, a root
-    base, head parented only on base, matching tree ids, and the canonical diff digest.
+    base, head parented only on base, and matching tree ids.
     Any mismatch or clone error raises GitError.
     """
     bundle_path = Path(bundle_path).resolve()
@@ -551,8 +550,6 @@ def validate_offline_clone(
                 got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
                 if got != expected:
                     raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-            if canonical_diff_sha256(clone_dir, base_commit, head_commit) != diff_sha256:
-                raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
             return {
                 "comparison_base_sha": base_commit,
                 "head_sha": head_commit,
@@ -673,16 +670,15 @@ def freeze_one(
                 f"snapshot contains {len(extra_paths)} path(s) outside PR inventory: {preview}{suffix}",
             )
 
-    # 7) canonical diff + deterministic bundle + offline validation.
+    # 7) deterministic bundle + offline validation.
     #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
     #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
     #    written only by the caller's journaled Transaction commit.
     scratch_bundle = root / "cache" / "freeze-scratch" / f"{case_id}.bundle"
     try:
-        diff_sha = canonical_diff_sha256(m, base, head_sha)
         build_bundle(m, base, head_sha, scratch_bundle)
         bundle_sha = storage.sha256_file(scratch_bundle)
-        validate_offline_clone(scratch_bundle, base_tree, head_tree, diff_sha, workdir=root / "cache")
+        validate_offline_clone(scratch_bundle, base_tree, head_tree, workdir=root / "cache")
         bundle_bytes = scratch_bundle.read_bytes()
     except (git_ops.GitError, OSError) as exc:
         # A raw file-I/O error (storage.sha256_file / read_bytes) is likewise a
@@ -703,7 +699,6 @@ def freeze_one(
         "original_head_sha": head_sha,
         "base_tree_sha": base_tree,
         "head_tree_sha": head_tree,
-        "diff_sha256": diff_sha,
         "bundle_file": bundle_rel,
         "bundle_sha256": bundle_sha,
         "error": None,

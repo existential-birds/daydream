@@ -32,7 +32,6 @@ IMMUTABLE_REVIEW_INPUT_SCHEMA = strict_object({
         **{key: _SHA for key in (
             "head_sha", "requested_base_sha", "comparison_base_sha", "head_tree_sha", "comparison_tree_sha",
         )},
-        "canonical_diff_sha256": _DIGEST,
         "review_diff_key": _DIGEST,
         "bundle_sha256": {"anyOf": [_DIGEST, {"type": "null"}]},
     }),

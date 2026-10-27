@@ -106,7 +106,6 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     sn.build_bundle(m, base_sha, head_sha, bundle_path)
     base_tree_sha = sn.rev_parse(m, f"{base_sha}^{{tree}}")
     head_tree_sha = sn.rev_parse(m, f"{head_sha}^{{tree}}")
-    diff_sha256 = sn.canonical_diff_sha256(m, base_sha, head_sha)
     bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
 
     pr_meta = PullRequestMeta(
@@ -145,7 +144,7 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
         snapshot=SnapshotReady(
             status="ready", base_resolution="merge_base_v1", policy="final_pr_head", requested_head="final",
             original_base_sha=base_sha, requested_base_sha=base_sha, original_head_sha=head_sha,
-            base_tree_sha=base_tree_sha, head_tree_sha=head_tree_sha, diff_sha256=diff_sha256, bundle_file=bundle_rel,
+            base_tree_sha=base_tree_sha, head_tree_sha=head_tree_sha, bundle_file=bundle_rel,
             bundle_sha256=bundle_sha256, error=None,
         ), source=CaseSource(import_file=import_file, import_sha256=import_sha256),
         curation=Curation.model_validate(curation), candidates=[],

@@ -18,7 +18,7 @@ from daydream.benchmark.harbor import build, verifier_core as vc
 from daydream.benchmark.harbor.build import CompileError, compile_workspace
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
-from daydream.benchmark.workspace import init_workspace
+from daydream.benchmark.workspace import init_workspace, validate_workspace
 from daydream.pr_review import FINDING_MARKER_RE, finding_marker
 from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
@@ -361,7 +361,17 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
     key, clean_key, excluded_key = map(build.derive_task_key, (case_id, clean_id, excluded_id))
     case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert case_doc["curation"]["gold_mode"] == "mixed"
+    # Existing approved cases may retain a digest from an older diff renderer.
+    # It is metadata only: validate/compile must preserve the case and approval.
+    case_doc["snapshot"]["diff_sha256"] = "0" * 64
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    case_path.write_text(yaml.safe_dump(case_doc, sort_keys=False))
+    saved_case = case_path.read_bytes()
+    assert validate_workspace(ws) == (0, "ready")
     lock = build.compile_workspace(ws)
+    assert case_path.read_bytes() == saved_case
+    fresh_case = storage.load_yaml_strict(ws / "cases" / f"{clean_id}.yaml")
+    assert "diff_sha256" not in fresh_case["snapshot"]
     before = _harbor_tree_bytes(ws)
     assert set(lock["cases"]) == {key, clean_key}
     assert list(lock["cases"]) == sorted((key, clean_key))
@@ -415,7 +425,9 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
     assert trusted["materialization"]["head_sha"] == lock["cases"][key]["local_head_sha"]
     assert trusted["materialization"]["head_sha"] != head_sha
     assert trusted["materialization"]["head_tree_sha"] == raw["snapshot"]["head_tree_sha"]
-    assert trusted["materialization"]["canonical_diff_sha256"] == raw["snapshot"]["diff_sha256"]
+    assert "canonical_diff_sha256" not in trusted["materialization"]
+    assert "canonical_diff_sha256" not in lock["cases"][key]
+    assert trusted["materialization"]["review_diff_key"] == lock["cases"][key]["review_diff_key"]
     assert "gold_sha256" not in json.dumps(trusted) and "curation" not in trusted
     assert lock["cases"][key]["files"]["tests/verifier_core.py"] == \
         lock["files"][f"{key}/tests/verifier_core.py"]

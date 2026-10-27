@@ -174,15 +174,16 @@ The envelope has two strict groups:
 | Group | Binding |
 |---|---|
 | `provenance` | Original `repository`, positive integer `pr_number`, `head_sha`, `requested_base_sha`, resolved `comparison_base_sha`, and bounded historical `title`, `body`, `context` |
-| `materialization` | `kind` (`exact` or `synthetic`), actual local head/requested-base/comparison commits, head/comparison trees, `canonical_diff_sha256`, `review_diff_key`, and optional `bundle_sha256` |
+| `materialization` | `kind` (`exact` or `synthetic`), actual local head/requested-base/comparison commits, head/comparison trees, current execution `review_diff_key`, and optional `bundle_sha256` |
 
 `requested_base_sha` is the captured base tip; `comparison_base_sha` is the resolved
-comparison/merge base. They can differ. The canonical digest hashes binary-safe
-compiler diff bytes; `review_diff_key` hashes the decoded review diff. Neither
-digest substitutes for the other. Compute them with `canonical_diff_sha256` and
-`immutable_review_diff` from the inert Git owner: both use an independent Git view
-with the captured head's tracked attributes, ignoring ambient/local configuration
-and `.git/info/attributes`. Title is bounded to 512 UTF-8 bytes, body to
+comparison/merge base. They can differ. Validated commits and trees establish
+source identity. Compute `review_diff_key` from `immutable_review_diff` for the
+current execution; it binds the patch actually reviewed, without requiring a
+saved rendered-diff checksum to survive Daydream upgrades. The inert Git owner
+uses an independent Git view with the captured head's tracked attributes,
+ignoring ambient/local configuration and `.git/info/attributes`.
+Title is bounded to 512 UTF-8 bytes, body to
 8192 and context to 65536. Unsupported versions, sizes, plans, missing objects and
 inconsistent evidence are errors before dispatch, never successful empty reviews.
 The [inert Git owner](../daydream/git_ops/immutable.py) owns source limits:
@@ -192,10 +193,10 @@ expansion; each diff capture stops at 256 MiB of subprocess output. The committe
 program separately admits at most 512 assignment parts.
 
 Cloud supplies exact original local objects. Their commit identities, merge-base
-relationship, trees, raw checkout bytes and both diff identities must match.
+relationship, trees, raw checkout bytes and current execution diff key must match.
 Harbor supplies the same envelope with `kind="synthetic"`: exactly two synthetic
 commits, a root base and its single-child head, preserving the attested comparison
-and head trees and canonical diff. The frozen bundle bytes must match their
+and head trees. The frozen bundle bytes must match their
 digest. Original commits need not be present for this projection. Trusted compiler
 evidence connects original provenance to those local objects; synthetic commits
 and admitted references retain their actual identities throughout review/export.

@@ -47,7 +47,10 @@ compiled lock, candidate, model/backend, judge, and scoring identities.
 The bounded Pi reviewer consumes the shared
 [immutable PR embedding API](runtime.md#immutable-pr-inputs), using official Pi
 1.4.0 and Node 24.18.1. Compilation preserves exactly two synthetic commits with
-the original comparison/head trees and canonical diff. Trusted runtime metadata
+the original comparison/head trees. Validated Git objects establish saved source
+identity; the current execution computes its own review diff key. Legacy saved
+`snapshot.diff_sha256` is accepted as ignored metadata, and new snapshots omit it.
+Bundle and exported-artifact checksums still bind their exact bytes. Trusted runtime metadata
 delivers only the immutable provenance/materialization subset and frozen bundle;
 the full lock, gold and verifier metadata remain private. Original repository/PR
 identity is retained in result/ATIF metadata, while source references identify the

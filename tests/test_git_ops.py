@@ -983,14 +983,13 @@ def test_run_git_bounds_real_blob_capture_and_preserves_text_decoding(repo: Path
     assert text.stdout == body.decode().replace("\r\n", "\n").replace("\r", "\n")
 
 
-@pytest.mark.parametrize("binary", [True, False], ids=["canonical", "review"])
 def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, binary: bool,
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each tree fits while their replacement patch exceeds the independent capture limit.
 
     Oversized-source rejection cannot exercise this path: it stops at inventory.
-    The prior helpers rejected only after buffering the complete textual patch.
+    The prior helper rejected only after buffering the complete textual patch.
     """
     from daydream.git_ops import immutable
 
@@ -1002,10 +1001,7 @@ def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
     tracemalloc.start()
     try:
         with pytest.raises(GitError, match="supported size"):
-            if binary:
-                immutable.canonical_diff_sha256(repo, base, head)
-            else:
-                immutable.immutable_review_diff(repo, base, head)
+            immutable.immutable_review_diff(repo, base, head)
     finally:
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()

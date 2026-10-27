@@ -627,7 +627,7 @@ def _compile_case(
 
     try:
         local = validate_offline_clone(
-            bundle_dst, snapshot["base_tree_sha"], snapshot["head_tree_sha"], snapshot["diff_sha256"],
+            bundle_dst, snapshot["base_tree_sha"], snapshot["head_tree_sha"],
             workdir=case_stage / "environment",
         )
     except (KeyError, git_ops.GitError) as exc:
@@ -646,7 +646,7 @@ def _compile_case(
             "kind": "synthetic", "head_sha": local["head_sha"],
             "requested_base_sha": local["comparison_base_sha"], "comparison_base_sha": local["comparison_base_sha"],
             "head_tree_sha": snapshot["head_tree_sha"], "comparison_tree_sha": snapshot["base_tree_sha"],
-            "canonical_diff_sha256": snapshot["diff_sha256"], "review_diff_key": local["review_diff_key"],
+            "review_diff_key": local["review_diff_key"],
             "bundle_sha256": bundle_sha256,
         },
     })
@@ -718,7 +718,6 @@ def _compile_case(
         "original_head_sha": snapshot.get("original_head_sha"),
         "base_tree_sha": snapshot["base_tree_sha"],
         "head_tree_sha": snapshot["head_tree_sha"],
-        "canonical_diff_sha256": snapshot["diff_sha256"],
         "local_base_sha": local["comparison_base_sha"],
         "local_head_sha": local["head_sha"],
         "review_diff_key": local["review_diff_key"],
