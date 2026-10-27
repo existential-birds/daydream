@@ -15,6 +15,7 @@ from typing import Any
 class _NativeProvider:
     config: Path
     requests: list[dict[str, Any]] = field(default_factory=list)
+    headers: list[dict[str, str]] = field(default_factory=list)
     authorizations: list[str | None] = field(default_factory=list)
     turns: list[list[tuple[str, str, dict[str, Any]]]] = field(default_factory=list)
     choose: Callable[[dict[str, Any]], list[tuple[str, str, dict[str, Any]]]] | None = None
@@ -33,6 +34,7 @@ def native_provider_server(fixture: _NativeProvider) -> Iterator[str]:
         def do_POST(self) -> None:
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             fixture.requests.append(request)
+            fixture.headers.append({key.lower(): value for key, value in self.headers.items()})
             fixture.authorizations.append(self.headers.get("Authorization"))
             index = len(fixture.requests) - 1
             if index in fixture.errors:

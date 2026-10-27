@@ -983,6 +983,38 @@ def test_run_git_bounds_real_blob_capture_and_preserves_text_decoding(repo: Path
     assert text.stdout == body.decode().replace("\r\n", "\n").replace("\r", "\n")
 
 
+def test_immutable_diff_refuses_to_replay_completed_setup_after_timeout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed init can lose its response; preparation must fail without replaying it.
+
+    Generic mutation wrappers never enter the immutable owner's temporary Git
+    setup, and ordinary diff coverage cannot expose timeout recovery behavior.
+    """
+    from daydream.git_ops import immutable
+
+    head = _git(repo, "rev-parse", "HEAD")
+    before = _repository_identity(repo)
+    original_run = subprocess.run
+    initialized: list[Path] = []
+
+    def completed_init_timeout(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        result = original_run(argv, **kwargs)
+        if argv[:2] == ["git", "init"]:
+            prepared = Path(kwargs["cwd"])
+            assert (prepared / ".git/config").is_file()
+            initialized.append(prepared)
+            if len(initialized) == 1:
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+        return result
+
+    monkeypatch.setattr(subprocess, "run", completed_init_timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        immutable.immutable_review_diff(repo, head, head)
+    assert len(initialized) == 1 and not initialized[0].exists()
+    assert _repository_identity(repo) == before
+
+
 def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
     repo: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

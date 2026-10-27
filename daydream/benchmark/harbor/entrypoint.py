@@ -207,7 +207,9 @@ async def main(environment: Mapping[str, str]) -> int:
         # Native receives process controls and its selected provider credential only.
         # Trusted provenance paths and operator control-plane metadata stay on host.
         native = parsed.execution.child_environment()
-        native = {key: native[key] for key in ("PATH", "LANG", "PI_API_KEY", "PI_THINKING") if key in native}
+        native = {
+            key: native[key] for key in ("PATH", "LANG", "PI_API_KEY", "PI_THINKING", "PI_TELEMETRY") if key in native
+        }
         policy = HostedReviewPolicy(
             agent_dir=agent_dir.resolve(), environment=native, output_dir=output_dir.resolve(),
             private_base=private_base.resolve(), profile=profile, trusted_prepared_source=True,

@@ -205,7 +205,8 @@ def _copy_objects(common: Path, target: Path) -> None:
             destination.write_bytes(body)
 
 
-def _git(repo: Path, *args: str, retries: int = process._GIT_TIMEOUT_RETRIES) -> str:
+def _git(repo: Path, *args: str, retries: int = 0) -> str:
+    """Run once unless a read-only caller explicitly opts into timeout retries."""
     return process._run_git(
         repo, list(args), timeout=30, retries=retries, error_context="immutable source validation failed",
     ).stdout.strip()

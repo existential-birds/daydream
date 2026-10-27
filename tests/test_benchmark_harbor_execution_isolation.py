@@ -48,11 +48,11 @@ def _environment(case: Path, repo: Path, root: Path, config: Path) -> dict[str, 
 
 @pytest.mark.parametrize("outcome", [
     "finding", "clean", "partial", "noninline", "bundle-tamper", "model-spelling",
-    "output-fault", "candidate-fault", "trajectory-fault", "long-title", "blank-title",
+    "output-fault", "candidate-fault", "trajectory-fault", "long-title", "blank-title", "oversized-body",
 ])
 async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
-    outcome: str, dataset_hub: Any, operator_dataset_sentinel: Path,
+    outcome: str, dataset_hub: Any, operator_dataset_sentinel: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The old fake-runner journey reviewed another repo and allowed /user/uploads.
 
@@ -85,6 +85,12 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
                     arguments["claims"][0]["payload"]["line"] = None
                 elif outcome in {"long-title", "blank-title"}:
                     arguments["claims"][0]["title"] = "T" * 4096 if outcome == "long-title" else " \t\n"
+                elif outcome == "oversized-body":
+                    arguments["claims"][0]["title"] = "T" * 4096
+                    arguments["claims"][0]["payload"].update({
+                        key: character * 4096
+                        for key, character in zip(("claim", "trigger", "consequence", "grounds"), "界果因証")
+                    })
         return response
 
     native_provider.choose = choose
@@ -120,6 +126,10 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         assert artifact.read_bytes() == b"prior candidate"
         return
     assignments = [assignment_from_request(request) for request in native_provider.requests]
+    if outcome == "finding":
+        assert native_provider.headers
+        assert all(not {"http-referer", "x-openrouter-title", "x-openrouter-categories"} & headers.keys()
+                   for headers in native_provider.headers)
     assert all(assignment["profile"]["profile_name"] == "operator-harbor" for assignment in assignments)
     for assignment in assignments:
         strategy = "HARBOR_OPERATOR_" + assignment["kind"].upper()
@@ -131,7 +141,7 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     assert "Fix cache" in prompts
     assert "forbidden-gh" not in prompts and "forbidden-judge" not in prompts
     if outcome in {"finding", "clean", "partial", "noninline", "candidate-fault", "trajectory-fault",
-                   "long-title", "blank-title"}:
+                   "long-title", "blank-title", "oversized-body"}:
         result_path, = (tmp_path / "logs").glob("committed-*/committed-review.json")
         result = json.loads(result_path.read_text())
         assert result["immutable_input"] == immutable
@@ -147,6 +157,12 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         elif outcome == "noninline":
             assert result["terminal_result"]["analysis_state"] == "complete"
             assert result["findings"][0]["payload"]["line"] is None
+        elif outcome == "oversized-body":
+            assert "cannot project committed finding: body exceeds 8 KiB" in capsys.readouterr().err
+            assert result["terminal_result"]["analysis_state"] == "complete"
+            assert result["findings"][0]["title"] == "T" * 4096
+            for key, character in zip(("claim", "trigger", "consequence", "grounds"), "界果因証"):
+                assert result["findings"][0]["payload"][key] == character * 4096
     if rc:
         assert artifact.read_bytes() == b"prior candidate"
     else:
