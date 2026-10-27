@@ -37,11 +37,12 @@ from daydream.committed_review_model import (
 from daydream.committed_review_output import write_committed_review_output
 from daydream.deep.detection import StackAssignment
 from daydream.host_tools import _MAX_RESULT_BYTES, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.json_utils import canonical_json
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
-from daydream.review_profile import build_default_profile, resolve_from_runconfig
+from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
     AnalyzedRevision,
     PlannedScope,
@@ -67,12 +68,16 @@ class CommittedReviewRequest:
     base: str
     config: RunConfig = field(default_factory=lambda: RunConfig(backend="pi", output_mode="review"))
     limits: ReviewLimits = field(default_factory=ReviewLimits)
+    hosted_policy: HostedReviewPolicy | None = None
 
 
 class Review:
     """Only writer of live assignments, semantic revisions and challenge evidence."""
 
-    def __init__(self, inputs: StageInputFactory, run_id: str, *, deadline: float) -> None:
+    def __init__(
+        self, inputs: StageInputFactory, run_id: str, *, deadline: float,
+        allowed_tools: frozenset[str] | None = None,
+    ) -> None:
         population = sum(len(batch) for batch in inputs.assignment_batches)
         if population > COMMITTED_ASSIGNMENT_LIMIT:
             raise ValueError(
@@ -80,6 +85,7 @@ class Review:
                 f"the captured plan has {population}"
             )
         self.inputs, self.run_id, self.deadline = inputs, run_id, deadline
+        self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part for batch in inputs.assignment_batches for part in batch])
         self._targets: list[dict[str, Any]] = []
         self._claims: dict[str, dict[str, Any]] = {}
@@ -208,7 +214,9 @@ class Review:
             self._discovered |= kind == "discovery"
             return canonical
 
-        binding = HostToolBinding(deadline=min(deadline, self.deadline), accept=accept)
+        binding = HostToolBinding(
+            deadline=min(deadline, self.deadline), accept=accept, allowed_tools=self._allowed_tools,
+        )
         binding.configure_schema(schema)
         self._binding = binding
         return binding, schema
@@ -297,10 +305,24 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
     from daydream.config_file import load_file_config
     from daydream.run_artifacts import _open_recorder, _RunArtifacts, _RunWriteCapture
 
-    config = deepcopy(request.config)
     source = request.source.resolve(strict=True)
-    config.target = str(source)
-    config.file_config = config.file_config or load_file_config(source)
+    hosted = request.hosted_policy
+    if hosted is None:
+        config = deepcopy(request.config)
+        execution_input = BackendExecutionInput.from_environment(dict(os.environ), backend="pi")
+        config.target = str(source)
+        if config.file_config is None:
+            config.file_config = load_file_config(source)
+    else:
+        from daydream.config_file import DaydreamFileConfig
+
+        execution_input = hosted.execution_input(source)
+        config = RunConfig(
+            target=str(source), backend=hosted.backend, model=hosted.model, output_mode="review",
+            reasoning_effort=execution_input.pi_thinking or "high", file_config=DaydreamFileConfig(),
+            review_profile=ResolvedProfile(deepcopy(hosted.profile.profile), "operator"),
+            archive=False, run_eval=False, non_interactive=True,
+        )
     if config.flow_name or config.output_mode not in {"review", "comment"}:
         raise ValueError("committed review requires review-only policy without a custom flow")
     if (
@@ -310,7 +332,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         raise ValueError(
             "committed review uses its run-owned bundle; external export routes belong to entry integration"
         )
-    limits = request.limits
+    limits = request.limits if hosted is None else hosted.limits
     if (
         any(
             type(t) not in {int, float} or not math.isfinite(t) or t <= 0
@@ -323,7 +345,6 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         raise ValueError("tool allowance must preserve both discovery and challenge submission capacity")
     profile = config.review_profile = config.review_profile or resolve_from_runconfig(config)
     strategies = build_default_profile().strategies | profile.profile.strategies
-    execution_input = BackendExecutionInput.from_environment(dict(os.environ), backend="pi")
     backends: dict[str, PiBackend] = {}
     settings: dict[str, Any] = {
         "profile_name": profile.name,
@@ -343,13 +364,23 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
             ),
         },
     }
+    if hosted is not None:
+        settings["hosted_policy"] = {
+            "name": "pi-read-only-v1", "backend": hosted.backend, "provider": hosted.provider,
+            "model": hosted.model, "tools": sorted(HOSTED_PI_TOOLS),
+            "trusted_prepared_source": True,
+        }
     for kind, phase in [("discovery", "review"), ("challenge", "arbiter")]:
         backend = _resolve_backend(config, phase, cwd=source, execution_input=execution_input)
         if not isinstance(backend, PiBackend):
             raise ValueError("committed review currently requires native Pi for discovery and challenge")
         backends[kind] = backend
         settings["native_contexts"][kind] = {"backend": "pi", **backend.bind_review_context(source), "phase": phase}
-    owner = resolve_private_workspace_owner(source, locations=private_root_locations())
+        if hosted is not None:
+            await backend.validate_hosted_policy()
+    owner = resolve_private_workspace_owner(
+        source, locations=private_root_locations(base=None if hosted is None else hosted.private_base),
+    )
     context = RunContext(InteractionPolicy(interactive=False, quiet=config.quiet))
     async with AsyncExitStack() as lifetime:
         original = await lifetime.enter_async_context(open_workspace(
@@ -364,11 +395,27 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         git_ops.validate_committed_worktree(captured_root, original.head_sha)
         lifetime.enter_context(bind_run_context(context))
         session = await lifetime.enter_async_context(open_artifact_session(work, session_id=run_id, owner=owner))
-        session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
-        session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
-        trajectory = session.register_trajectory_output(None)
+        report_path, result_path = session.review_output, session.daydream_dir / "committed-review.json"
+        if hosted is None:
+            session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
+            session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
+        else:
+            # All paired/deferred routes share one host-created parent. Register
+            # it before the live trajectory can create it during recording.
+            hosted.output_dir.mkdir(mode=0o700)
+            report_route = session.register_destination(
+                hosted.output_dir / "review-output.md", label=OutputLabel.FINDINGS_OUTPUT,
+            )
+            result_route = session.register_destination(
+                hosted.output_dir / "committed-review.json", label=OutputLabel.FINDINGS_OUTPUT,
+            )
+            assert report_route.write_path is not None and result_route.write_path is not None
+            report_path, result_path = report_route.write_path, result_route.write_path
+        trajectory = session.register_trajectory_output(
+            None if hosted is None else hosted.output_dir / "trajectory.json",
+        )
         capture = _RunWriteCapture(session_id=run_id)
-        artifacts = _RunArtifacts(session, owner, trajectory, capture, None)
+        artifacts = _RunArtifacts(session, owner, trajectory, capture, None, execution_input=execution_input)
         diff = git_ops.committed_diff(captured_root, original.base_sha, original.head_sha)
         revision = AnalyzedRevision(
             original.head_sha, original.base_sha, hashlib.sha256(diff.encode()).hexdigest()
@@ -396,7 +443,9 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
             protected_finalization_s=limits.finalization_s,
         )
         budget = ReviewInvestigationBudget(limits, review_deadline)
-        review = Review(inputs, run_id, deadline=review_deadline)
+        review = Review(
+            inputs, run_id, deadline=review_deadline, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
+        )
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
             flow_kind=DaydreamRunFlow.CUSTOM, run_artifacts=artifacts,
@@ -406,6 +455,7 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
             source_kind=profile.source_kind, digest=profile.digest,
         )
         cancellation: asyncio.CancelledError | None = None
+        unsupported: UnsupportedHostedPolicy | None = None
         try:
             async with recorder:
                 if files:
@@ -430,6 +480,10 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
             # Recorder exit retains interrupted native evidence before
             # finalization. The caller still receives its cancellation.
             cancellation = exc
+        except UnsupportedHostedPolicy as exc:
+            # Preserve already admitted work and independent output/capture
+            # outcomes before surfacing the actionable support blocker.
+            unsupported = exc
         finally:
             for backend in backends.values():
                 with anyio.CancelScope(shield=True):
@@ -455,12 +509,14 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                 with anyio.CancelScope(shield=True):
                     if clock.monotonic() >= finish:
                         raise TimeoutError("finalization allowance exhausted before output staging")
-                    write_committed_review_output(session, payload)
+                    write_committed_review_output(session, payload, report_path=report_path, result_path=result_path)
                     selected = capture.final or capture.partial
                     frozen = session.freeze(selected) if selected is not None else session.freeze_unproduced()
                     if clock.monotonic() >= finish:
                         raise TimeoutError("finalization allowance exhausted before installation")
-                    session.finalize_frozen(frozen, disposition=ArtifactDisposition.PARTIAL_EVIDENCE)
+                    session.finalize_frozen(
+                        frozen, disposition=ArtifactDisposition.PARTIAL_EVIDENCE, publish_public=hosted is None,
+                    )
                     installed = True
             except Exception as exc:
                 output_error = type(exc).__name__
@@ -470,6 +526,8 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
                 # Successful publication must precede session teardown;
                 # a failed installation leaves prior public bytes intact.
                 raise cancellation
+            if unsupported is not None:
+                raise unsupported
 
 
 def _remove_capture(source: Path, captured_root: Path) -> None:
@@ -543,6 +601,9 @@ async def _dispatch(
             reason = ReasonCode.MISSING_OUTPUT.value
     except asyncio.CancelledError:
         reason = ReasonCode.INTERRUPTION.value
+        raise
+    except UnsupportedHostedPolicy:
+        reason = ReasonCode.BACKEND_FAILURE.value
         raise
     except Exception as exc:
         reason = reason_for_exception(exc).value

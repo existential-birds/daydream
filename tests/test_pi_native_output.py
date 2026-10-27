@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -123,7 +123,10 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback"])
+@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted", "hosted-alternate",
+                                  "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
+                                  "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
+                                  "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -131,19 +134,32 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
 
     Blank, absent and explicit selections are compared with Pi itself;
     direct adapter journeys cannot detect host selection or shared-history bugs.
+    Hosted selections additionally prove that native resource/context discovery and
+    attempted effects cannot broaden the operator policy across retries and fresh
+    challenges. Both the preferred exact model and an unrelated provider/model
+    must reach native execution; an accepted constructor alone cannot prove this.
+    Unsupported versions must retain the command and expected version in their
+    mismatch diagnostic; a generic readiness rejection would hide the cause.
+    Suffix-only model registries and invalid UTF-8 settings exercise readiness
+    faults that the exact-model, valid-JSON success path cannot detect.
+    An explicit operator loader override must be rejected before its preload can
+    execute; hostile ambient loader settings alone only prove environment isolation.
     """
     empty = case in {"empty", "fallback"}
+    hosted = case.startswith("hosted")
+    retried = case in {"hosted", "hosted-alternate"}
+    defect = case == "defect" or hosted
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
-    captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if case == "defect" else
+    captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if defect else
                 "def ratio(total, count):\n    return 0 if count == 0 else total / count\n")
     context = "Review the committed ratio implementation carefully.\n"
     head = seed_feature_branch(repo, base={"ratio.py": original, "AGENTS.md": context},
                                feature={"ratio.py": captured, "AGENTS.md": context})
     base = git(repo, "rev-parse", "main")
     working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
-               if case == "defect" else captured)
-    if case == "defect":
+               if defect else captured)
+    if defect:
         (repo / "ratio.py").write_text(working)
         (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     settings = native_provider.config / "settings.json"
@@ -182,8 +198,129 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             "apiKey": "$NOUS_API_KEY", "authHeader": True, "models": [{**model, "id": expected_model}]}}
         monkeypatch.setenv("PI_API_KEY", "synthetic-implicit-fallback-alias")
     models_path.write_text(json.dumps(models))
+    hosted_policy = None
+    output_root = repo
+    forbidden_marker = tmp_path / "forbidden-native-effect"
+    if hosted:
+        from daydream.hosted_review import HostedReviewPolicy
+        from daydream.review_profile import ResolvedProfile, build_default_profile
+
+        (repo / ".review-output.md").write_text("prior public report\n")
+        (repo / ".daydream").mkdir()
+        (repo / ".daydream/diff.patch").write_text("prior public artifact\n")
+        (repo / ".daydream.toml").write_text('backend = "claude"\nmodel = "target-forbidden-model"\n'
+            'review_profile = "hostile-missing-profile.toml"\n[phases.arbiter]\nbackend = "codex"\n'
+            'model = "phase-forbidden-model"\n')
+        expected_provider, expected_model = (
+            ("operator-fixture", "Operator/alternate-model-V2") if case == "hosted-alternate"
+            else ("nous", "deepseek/deepseek-v4.1-flash") if case == "hosted-model-fallback"
+            else ("nous", "deepseek/deepseek-v4.1-flash-1017")
+        )
+        credential_variable = "ALTERNATE_NATIVE_API_KEY" if case == "hosted-alternate" else "NOUS_API_KEY"
+        models_path.write_text(json.dumps({"providers": {expected_provider: {
+            **models["providers"]["output-fixture"], "apiKey": f"${credential_variable}", "authHeader": True,
+            "models": [{**model,
+                        "id": expected_model + "-1017" if case == "hosted-model-fallback" else expected_model}],
+        }}}))
+        settings.write_text(json.dumps({"defaultProvider": "operator-unselected-provider",
+            "defaultModel": "operator-unselected-model", "defaultProjectTrust": "always",
+            "retry": {"enabled": False, "maxRetries": 0}}))
+        (native_provider.config / "trust.json").write_text(json.dumps({
+            str(native_provider.config.resolve()): True, str(repo.resolve()): True}))
+        operator_environment = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "operator-home"),
+                                credential_variable: "synthetic-hosted-credential",
+                                "DAYDREAM_PI_RETRY_ATTEMPTS": "1", "DAYDREAM_PI_RETRY_BASE_DELAY_S": "0",
+                                "DAYDREAM_PI_RETRY_MAX_DELAY_S": "0"}
+        if retried:
+            native_provider.errors[0] = "503 Service Unavailable"
+        elif case in {"hosted-capability", "hosted-challenge-capability"}:
+            assets = tmp_path / "unsupported-assets"
+            assets.mkdir()
+            packaged = files("daydream.backends")
+            for name in ("pi_structured_output.ts", "pi_host_tools.ts"):
+                source = packaged.joinpath(name).read_text()
+                if name == "pi_host_tools.ts":
+                    if case == "hosted-capability":
+                        source = source.replace("export default function (pi: ExtensionAPI) {",
+                            "export default function (pi: ExtensionAPI) {\n  (pi as any).getAllTools = undefined;")
+                    else:
+                        source = source.replace('packet = JSON.parse(readFileSync(fd).toString("utf8"));',
+                            'packet = JSON.parse(readFileSync(fd).toString("utf8"));\n'
+                            '      if ("verdicts" in packet.schema.properties) (pi as any).getAllTools = undefined;')
+                (assets / name).write_text(source)
+            monkeypatch.setattr("daydream.backends.pi.files", lambda _: assets)
+        elif case == "hosted-config-link":
+            target_auth = repo / ".pi/auth.json"
+            target_auth.write_text("{}")
+            (native_provider.config / "auth.json").symlink_to(target_auth)
+        elif case == "hosted-settings-encoding":
+            settings.write_bytes(b"\xff")
+        elif case == "hosted-loader-override":
+            operator_environment["NODE_OPTIONS"] = f"--import={tmp_path / 'ambient-pi/preload.mjs'}"
+        if case.startswith("hosted-unsupported"):
+            executable_name = "node" if case.endswith("node") else "pi"
+            executable = shutil.which(executable_name)
+            assert executable is not None
+            shim_dir = tmp_path / "unsupported-bin"
+            shim_dir.mkdir()
+            shim = shim_dir / executable_name
+            unsupported_version = "v23.0.0" if executable_name == "node" else "1.3.0"
+            shim.write_text(f"#!{sys.executable}\nimport os, sys\n"
+                f"if sys.argv[1:] == ['--version']:\n print({unsupported_version!r})\n"
+                f"else:\n os.execv({executable!r}, [{executable!r}, *sys.argv[1:]])\n")
+            shim.chmod(0o700)
+            operator_environment["PATH"] = f"{shim_dir}{os.pathsep}{operator_environment['PATH']}"
+        output_root = tmp_path / "hosted-output"
+        profile = build_default_profile()
+        strategies = dict(profile.strategies)
+        for key, marker in (("discovery.generic_fallback", "HOSTED_OPERATOR_DISCOVERY_POLICY"),
+                            ("arbitration", "HOSTED_OPERATOR_CHALLENGE_POLICY")):
+            strategies[key] = replace(strategies[key], content=marker)
+        operator_profile = ResolvedProfile(profile=replace(
+            profile, name="hosted-native-operator", strategies=strategies,
+            pipeline=replace(profile.pipeline, reviewer_investigation_budget_s=60, review_wall_budget_s=80)),
+            source_kind="operator")
+        hosted_policy = HostedReviewPolicy(
+            agent_dir=native_provider.config, environment=operator_environment,
+            output_dir=output_root, private_base=tmp_path / "hosted-private",
+            profile=operator_profile,
+            limits=ReviewLimits(90, 30, 30), trusted_prepared_source=True,
+            provider=expected_provider, model=expected_model,
+        )
+        # Both ancestor/global instruction files and ambient resources are hostile.
+        (tmp_path / "AGENTS.md").write_text("HOSTILE_ANCESTOR_POLICY\n")
+        ambient = tmp_path / "ambient-pi"
+        (ambient / "extensions").mkdir(parents=True)
+        extension = ("import { writeFileSync } from 'node:fs';\n"
+                     f"writeFileSync({json.dumps(str(forbidden_marker))}, 'resource executed');\n"
+                     "export default function () {}\n")
+        (ambient / "extensions/hostile.ts").write_text(extension)
+        (ambient / "AGENTS.md").write_text("HOSTILE_GLOBAL_POLICY\n")
+        (ambient / "trust.json").write_text(json.dumps({str(repo.resolve()): True}))
+        (ambient / "settings.json").write_text(json.dumps({
+            "defaultProjectTrust": "always", "defaultProvider": "ambient-forbidden-provider",
+            "defaultModel": "ambient-forbidden-model", "packages": [str(ambient / "package")],
+        }))
+        package = ambient / "package"
+        package.mkdir()
+        (package / "package.json").write_text(json.dumps({"name": "hostile-local-package", "version": "1.0.0",
+                                                         "pi": {"extensions": ["extension.ts"]}}))
+        (package / "extension.ts").write_text(extension)
+        if case == "hosted-resources":
+            settings.write_text(json.dumps({"packages": [str(package)]}))
+        preload = ambient / "preload.mjs"
+        preload.write_text(extension.removesuffix("export default function () {}\n"))
+        project_settings.write_text(json.dumps({"defaultProjectTrust": "always",
+            "defaultProvider": "target-forbidden-provider", "defaultModel": "target-forbidden-model",
+            "packages": [str(package)], "extensions": [str(package / "extension.ts")]}))
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(ambient))
+        monkeypatch.setenv("PI_PROVIDER", "ambient-forbidden-provider")
+        monkeypatch.setenv("PI_THINKING", "off")
+        monkeypatch.setenv("NOUS_API_KEY", "ambient-forbidden-credential")
+        monkeypatch.setenv("NODE_OPTIONS", f"--import={preload}")
     config_bytes = {path: path.read_bytes() for path in (settings, project_settings, models_path)}
-    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    if not hosted:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
     # Compare with the ordinary CLI, including its implicit default-provider authentication.
     arguments = ["pi", "--mode", "json", "--no-session", "--no-skills", "--no-extensions", "--no-tools",
                  "--no-context-files"]
@@ -192,10 +329,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     control_env = os.environ.copy()
     if case == "fallback":
         control_env["NOUS_API_KEY"] = "synthetic-implicit-fallback-alias"
-    control = await asyncio.to_thread(subprocess.run, [*arguments, "-p", "Return the empty result."],
-                                      cwd=repo, env=control_env, capture_output=True, timeout=30)
-    assert control.returncode == 0, control.stderr.decode()
-    assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
+    if not hosted:
+        control = await asyncio.to_thread(subprocess.run, [*arguments, "-p", "Return the empty result."],
+                                          cwd=repo, env=control_env, capture_output=True, timeout=30)
+        assert control.returncode == 0, control.stderr.decode()
+        assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
     native_provider.requests.clear()
     native_provider.authorizations.clear()
     assignments_seen: list[dict[str, Any]] = []
@@ -203,7 +341,15 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     counterevidence = "The captured count == 0 guard returns zero before division; the proposed trigger cannot fail."
 
     def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
-        assert context.strip() in json.dumps(request["messages"])
+        if hosted:
+            systems = json.dumps([message for message in request["messages"]
+                                  if message["role"] in {"system", "developer"}])
+            assert context.strip() not in systems
+            assert "HOSTILE_ANCESTOR_POLICY" not in systems and "HOSTILE_GLOBAL_POLICY" not in systems
+            assert {tool["function"]["name"] for tool in request["tools"]} == {
+                "read", "grep", "find", "ls", "structured_output"}
+        else:
+            assert context.strip() in json.dumps(request["messages"])
         assert "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
         users = [message for message in request["messages"] if message["role"] == "user"]
         assert len(users) == 1
@@ -212,13 +358,39 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assignment = json.loads(text.split("\nCommitted review assignment:\n", 1)[1].split(
             "\nEnd committed review assignment.\n", 1)[0])
         kind = assignment["kind"]
+        if hosted:
+            assert assignment["profile"]["profile_name"] == operator_profile.name
+            assert assignment["profile"]["profile_digest"] == operator_profile.digest
+            assert assignment["profile"]["profile_source"] == "operator"
+            assert assignment["profile"]["hosted_policy"]["provider"] == expected_provider
+            assert assignment["profile"]["hosted_policy"]["model"] == expected_model
+            assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
+            marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
+            assert marker in text and assignment["profile"]["strategies"][kind] == marker
+        revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
+        call_kind = f"{kind}-{revision}" if hosted else kind
         tools = [message for message in request["messages"] if message["role"] == "tool"]
         if not tools:
             assignments_seen.append(assignment)
             histories[kind] = request["messages"]
-            return [(f"{kind}-read", "read", {"path": "ratio.py"})]
-        assert len(tools) == 1 and tools[0]["tool_call_id"] == f"{kind}-read"
-        assert tools[0]["content"] == captured
+            if hosted:
+                assert not any(message["role"] in {"assistant", "tool"} for message in request["messages"])
+                return [(f"{call_kind}-bash", "bash", {"command": f"touch {forbidden_marker}"}),
+                        (f"{call_kind}-write", "write", {"path": str(forbidden_marker), "content": "forbidden"}),
+                        (f"{call_kind}-edit", "edit", {"path": "ratio.py", "oldText": captured, "newText": "MUTATED"}),
+                        (f"{call_kind}-ungranted", "publish_review", {"path": str(forbidden_marker)})]
+            return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
+        if hosted and not any(tool["tool_call_id"] == f"{call_kind}-read" for tool in tools):
+            assert len(tools) == 4
+            assert all("not found" in tool["content"].lower() or "denied" in tool["content"].lower() for tool in tools)
+            return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
+        read_result, = [tool for tool in tools if tool["tool_call_id"] == f"{call_kind}-read"]
+        assert read_result["content"] == captured
+        if hosted and not any(tool["tool_call_id"] == f"{call_kind}-forbidden-domain" for tool in tools):
+            return [(f"{call_kind}-forbidden-domain", "structured_output", {"write_path": str(forbidden_marker)})]
+        if hosted:
+            rejection, = [tool for tool in tools if tool["tool_call_id"] == f"{call_kind}-forbidden-domain"]
+            assert rejection["content"].startswith('Validation failed for tool "structured_output":')
         refs_by_target = {part["target_id"]: [{"source_id": next(
             option["source_id"] for option in part["source_options"] if option["side"] == "new"),
             "source_range": None, "basis": "supplied_diff"}] for part in assignment["assignments"]}
@@ -226,10 +398,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         if kind == "discovery":
             claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Division can fail", "payload": {
                 "claim": "The changed denominator divides by zero.",
-                "trigger": "Call ratio(5, 1)." if case == "defect" else "Call ratio(5, 0).",
+                "trigger": "Call ratio(5, 1)." if defect else "Call ratio(5, 0).",
                 "consequence": "A normal input raises ZeroDivisionError.",
                 "grounds": "Investigator is confident and considers its investigation complete.",
-                "file": "ratio.py", "line": None if case == "defect" else 2, "evidence_refs": refs}}
+                "file": "ratio.py", "line": None if defect else 2, "evidence_refs": refs}}
             payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",
                                     "evidence_refs": target_refs} for target_id, target_refs in refs_by_target.items()],
                        "claims": [] if empty else [claim]}
@@ -237,16 +409,61 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert kind == "challenge" and len(assignment["claims"]) == 1
             claim = assignment["claims"][0]
             payload = {"verdicts": [{"uid": claim["uid"], "revision": claim["revision"],
-                "verdict": "confirmed" if case == "defect" else "rejected",
-                "grounds": "At count=1 the captured denominator is zero." if case == "defect" else counterevidence,
+                "verdict": "confirmed" if defect else "rejected",
+                "grounds": "At count=1 the captured denominator is zero." if defect else counterevidence,
                 "evidence_refs": refs}], "claims": []}
-        return [(f"{kind}-submit", "structured_output", payload)]
+            if hosted and claim["revision"] == 1:
+                payload["claims"] = [{key: claim[key] for key in ("uid", "revision", "source_uids", "title")} | {
+                    "payload": {**claim["payload"], "grounds": "Captured denominator count-1 is zero at count=1.",
+                                "evidence_refs": refs}}]
+        return [(f"{call_kind}-submit", "structured_output", payload)]
 
     native_provider.choose = choose
-    result = await run_committed_review(CommittedReviewRequest(
-        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False,
-                                    model="output-model:high" if case == "false-positive" else None),
-        limits=ReviewLimits(90, 12, 12)))
+    request = CommittedReviewRequest(
+        repo, base, config=RunConfig(backend="codex" if hosted else "pi", output_mode="review", archive=False,
+                                    run_eval=False, review_backend="claude" if hosted else None,
+                                    review_model="request-phase-forbidden-model" if hosted else None,
+                                    review_profile_path="hostile-missing-profile.toml" if hosted else None,
+                                    model="request-forbidden-model" if hosted else
+                                    "output-model:high" if case == "false-positive" else None),
+        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy)
+    unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
+                   "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
+    if case.startswith("hosted-unsupported") or case in unsupported:
+        from daydream.hosted_review import UnsupportedHostedPolicy
+
+        message = {
+            "hosted-model-fallback": "Hosted Pi model selection",
+            "hosted-unsupported-pi": "pi did not report 1[.]4[.]0",
+            "hosted-unsupported-node": "node did not report v24[.]18[.]1",
+            "hosted-loader-override": "Hosted Pi environment must not contain executable loader overrides",
+        }.get(case, "Hosted|hosted")
+        with pytest.raises(UnsupportedHostedPolicy, match=message):
+            await run_committed_review(request)
+        assert len(native_provider.requests) == (4 if case == "hosted-challenge-capability" else 0)
+        assert not forbidden_marker.exists()
+        assert (repo / ".review-output.md").read_text() == "prior public report\n"
+        if case == "hosted-loader-override":
+            assert not output_root.exists() and not (tmp_path / "hosted-private").exists()
+        if case in {"hosted-capability", "hosted-challenge-capability"}:
+            partial = json.loads((output_root / "committed-review.json").read_text())
+            validate_committed_result(partial)
+            assert partial["terminal_result"]["analysis_state"] == (
+                "incomplete" if case == "hosted-challenge-capability" else "failed")
+            assert any(execution["reason"] == "backend_failure" for execution in partial["execution"])
+            if case == "hosted-challenge-capability":
+                assert [assignment["kind"] for assignment in assignments_seen] == ["discovery"]
+                assert partial["analyzed_revision"] == assignments_seen[0]["analyzed_revision"]
+                assert partial["run_id"] == assignments_seen[0]["run_id"]
+                assert partial["assignments"] == assignments_seen[0]["assignments"]
+                report = (output_root / "review-output.md").read_text()
+                identities = (partial["planned_work_id"], partial["run_id"], head, base)
+                assert all(identity in report for identity in identities)
+                claim, = partial["claims"]
+                assert claim["revision"] == 1 and claim["disposition"] == "unresolved"
+                assert claim["payload"]["file"] == "ratio.py" and claim["challenge_evidence"] == []
+        return
+    result = await run_committed_review(request)
     assert result.complete and result.output_installed and result.capture_state == "complete"
     value = result.to_dict()
     validate_committed_result(value)
@@ -254,11 +471,22 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert value["analyzed_revision"]["merge_base_sha"] == base
     assert value["terminal_result"]["analysis_state"] == "complete"
     assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
-    expected_kinds = ["discovery"] if empty else ["discovery", "challenge"]
+    expected_kinds = ["discovery"] if empty else ["discovery", "challenge", *(["challenge"] if hosted else [])]
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
-    assert len(native_provider.requests) == 2 * len(expected_kinds)
+    assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + int(retried)
     assert all(request["model"] == expected_model for request in native_provider.requests)
-    assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
+    if not hosted:
+        assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
+    else:
+        assert native_provider.authorizations == ["Bearer synthetic-hosted-credential"] * len(native_provider.requests)
+        assert all({tool["function"]["name"] for tool in request["tools"]} == {
+            "read", "grep", "find", "ls", "structured_output"} for request in native_provider.requests)
+        assert not forbidden_marker.exists()
+        assert value["settings"]["profile_name"] == operator_profile.name
+        assert value["settings"]["profile_digest"] == operator_profile.digest
+        assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(50)
+        assert value["settings"]["hosted_policy"]["provider"] == expected_provider
+        assert value["settings"]["hosted_policy"]["model"] == expected_model
     if case == "fallback":
         assert native_provider.authorizations == ["Bearer synthetic-implicit-fallback-alias"] * len(
             native_provider.requests)
@@ -267,31 +495,47 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert "discovery-read" not in json.dumps(histories["challenge"])
         assert assignments_seen[1]["captured_root"] == assignments_seen[0]["captured_root"]
         claim = value["claims"][0]
-        assert claim["source_uids"] == [] and claim["revision"] == 1
-        assert claim["payload"]["line"] == (None if case == "defect" else 2)
-        assert claim["disposition"] == ("confirmed" if case == "defect" else "rejected")
+        assert claim["source_uids"] == [] and claim["revision"] == (2 if hosted else 1)
+        assert claim["payload"]["line"] == (None if defect else 2)
+        assert claim["disposition"] == ("confirmed" if defect else "rejected")
         assert claim["challenge_evidence"][0]["revision"] == 1
-        assert len(value["findings"]) == int(case == "defect")
+        if hosted:
+            assert [evidence["revision"] for evidence in claim["challenge_evidence"]] == [1, 2]
+        assert len(value["findings"]) == int(defect)
         if case == "false-positive":
             assert claim["challenge_evidence"][0]["grounds"] == counterevidence
     else:
         assert value["claims"] == value["findings"] == []
-    assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
-    report = (repo / ".review-output.md").read_text()
+    result_path = output_root / ("committed-review.json" if hosted else ".daydream/committed-review.json")
+    assert json.loads(result_path.read_text()) == value
+    report = (output_root / ("review-output.md" if hosted else ".review-output.md")).read_text()
     assert head in report and base in report and value["planned_work_id"] in report
     assert ("Division can fail" in report) == (not empty)
     if not empty:
-        line_suffix = "" if case == "defect" else ":<code>2</code>"
+        line_suffix = "" if defect else ":<code>2</code>"
         assert f"Location: <code>ratio.py</code>{line_suffix}." in report
     if case == "false-positive":
         assert counterevidence in report and "Rejected concerns" in report
-    trajectory = json.loads((repo / ".daydream/runs" / value["run_id"] / "trajectory.json").read_text())
+    trajectory_path = (output_root / "trajectory.json" if hosted else
+                       output_root / ".daydream/runs" / value["run_id"] / "trajectory.json")
+    trajectory = json.loads(trajectory_path.read_text())
+    if hosted:
+        assert trajectory["extra"]["profile_name"] == operator_profile.name
+        assert trajectory["extra"]["profile_digest"] == operator_profile.digest
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    assert [call["tool_call_id"] for call in calls] == [
-        f"{kind}-{action}" for kind in expected_kinds for action in ("read", "submit")]
+    if not hosted:
+        assert [call["tool_call_id"] for call in calls] == [
+            f"{kind}-{action}" for kind in expected_kinds for action in ("read", "submit")]
+    else:
+        assert {"discovery-0-read", "challenge-1-read", "challenge-2-read"} <= {
+            call["tool_call_id"] for call in calls}
+        assert (repo / ".review-output.md").read_text() == "prior public report\n"
+        assert (repo / ".daydream/diff.patch").read_text() == "prior public artifact\n"
+        assert not (repo / ".daydream/committed-review.json").exists()
     invocations = trajectory["extra"]["subtrajectories"]
-    assert len(invocations) == len(expected_kinds)
-    assert len({invocation["invocation_id"] for invocation in invocations}) == len(expected_kinds)
+    expected_invocations = len(expected_kinds) + int(retried)
+    assert len(invocations) == expected_invocations
+    assert len({invocation["invocation_id"] for invocation in invocations}) == expected_invocations
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
     generations = [generation for invocation in invocations
                    for generation in invocation["generation_lifecycle"]["drafts"]]
@@ -301,7 +545,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                for execution in value["execution"])
     assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
     assert (repo / "AGENTS.md").read_text() == (
-        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if case == "defect" else context)
+        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect else context)
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 

@@ -30,7 +30,8 @@ export default async function (pi: ExtensionAPI) {
       throw new Error("Captured source root unavailable");
     }
     const sdk = await import("@earendil-works/pi-coding-agent");
-    const contextFiles = sdk.loadProjectContextFiles({ cwd: packet.source_root, agentDir: sdk.getAgentDir() });
+    const contextFiles = packet.hosted_read_only === true ? []
+      : sdk.loadProjectContextFiles({ cwd: packet.source_root, agentDir: sdk.getAgentDir() });
     pi.on("session_start", () => {
       for (const tool of sdk.createReadOnlyTools(packet.source_root, {
         read: { autoResizeImages: pi.getSettings().images?.autoResize ?? true },

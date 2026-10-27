@@ -82,11 +82,17 @@ async def test_large_review_can_complete_after_old_time_and_tool_caps(tmp_path: 
     assert result == FINDINGS
     assert reason is None
 
-async def test_checkpoint_survives_hung_stream_without_finalizer(tmp_path: Path) -> None:
+async def test_checkpoint_survives_hung_stream_without_finalizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock().install(monkeypatch)
     async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         yield TextEvent(text='{"findings": ["confirmed defect"]}')
         yield TurnEndEvent()
         yield TextEvent(text="unfinished speculation")
+        # Spend the host deadline only after the checkpoint is admitted; the
+        # real AnyIO watchdog must still cancel this eventless hung stream.
+        clock.advance(0.02)
         await anyio.sleep_forever()
     backend = ScriptedBackend(responder=responder)
     with anyio.fail_after(2):
