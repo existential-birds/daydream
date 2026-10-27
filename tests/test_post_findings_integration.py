@@ -812,15 +812,10 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
 
 
-@pytest.mark.parametrize('version', [
-    99,
-])
-def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path, version: int) -> None:
+def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path) -> None:
     path = _write_artifact(tmp_path / "unknown.json", [_inline_finding("Legacy nit", severity="low")])
     data = json.loads(path.read_text())
-    data["schema_version"] = version
-    if version == 1:
-        data.pop("terminal_result")
+    data["schema_version"] = 99
     path.write_text(json.dumps(data))
     assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 1
     assert fake_gh.calls("POST") == []

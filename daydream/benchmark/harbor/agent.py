@@ -29,15 +29,12 @@ class AgentError(Exception):
 
 def _supported_backend(extra_env: Mapping[str, str]) -> str:
     """Return the validated ``DAYDREAM_REVIEW_BACKEND`` or raise :class:`AgentError`."""
-    backend = (extra_env.get(env_policy.BACKEND_ENV) or "pi").strip().lower()
-    from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+    from daydream.benchmark.harbor.entrypoint import EntrypointError, require_supported_backend
 
-    if backend not in _SUPPORTED_BACKENDS:
-        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
-        raise AgentError(
-            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
-        )
-    return backend
+    try:
+        return require_supported_backend({env_policy.BACKEND_ENV: extra_env.get(env_policy.BACKEND_ENV) or "pi"})
+    except EntrypointError as exc:
+        raise AgentError(str(exc)) from exc
 
 
 def _require_exec_ok(result: Any, label: str) -> None:
@@ -135,14 +132,10 @@ def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
     Judge, GitHub, Hub, archive and unselected native credentials stay excluded.
     """
     host = env_policy.HOST
-    child = {
+    return {
         key: value
         for key, value in dict(parent_env).items()
-        if any(key.startswith(prefix) for prefix in host.keep_prefixes) or key in host.required_process_vars
+        if (key.startswith(host.keep_prefixes) or key in host.required_process_vars)
+        and key not in host.banned_vars
+        and not key.startswith(tuple(host.banned_prefixes))
     }
-    for banned in host.banned_vars:
-        child.pop(banned, None)
-    for prefix in host.banned_prefixes:
-        for key in [k for k in child if k.startswith(prefix)]:
-            child.pop(key, None)
-    return child

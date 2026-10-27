@@ -9,6 +9,7 @@ import os
 import tempfile
 import zlib
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,10 +24,11 @@ from daydream.committed_review_model import planned_work_id, validate_committed_
 from daydream.deep.detection import StackAssignment
 from daydream.git_ops.source import FrozenSourceRejected
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.review_budget import ReviewLimits
-from daydream.review_profile import build_default_profile
+from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
@@ -42,6 +44,18 @@ from tests.harness.git_helpers import (
     write_and_stage,
 )
 from tests.harness.trajectory import root_trajectory
+
+
+@pytest.fixture
+def operator_policy(tmp_path: Path) -> HostedReviewPolicy:
+    """Nominal isolated authority; each journey owns its faults and explicit budgets."""
+    operator = tmp_path / "operator"
+    operator.mkdir()
+    return HostedReviewPolicy(
+        agent_dir=operator, environment={"PATH": os.environ["PATH"]}, output_dir=tmp_path / "output",
+        private_base=tmp_path / "private", profile=ResolvedProfile(build_default_profile(), "operator"),
+        trusted_prepared_source=True,
+    )
 
 
 @pytest.fixture
@@ -329,9 +343,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     output_root = repo
     hosted_policy = None
     if challenge.startswith("hosted-"):
-        from daydream.hosted_review import HostedReviewPolicy
-        from daydream.review_profile import ResolvedProfile
-
         operator = repo.parent / "operator"
         operator.mkdir()
         output_root = repo.parent / "hosted-output"
@@ -502,7 +513,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     "empty-model", "blank-model", "invalid-model", "output-overlap", "missing-agent-dir", "file-agent-dir",
 ])
 async def test_hosted_policy_refuses_unsupported_authority_before_source_preparation(
-    review_inputs: StageInputFactory, fault: str,
+    review_inputs: StageInputFactory, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
     """Hosted admission owns preparation authority; ordinary native tests cannot prove it.
 
@@ -513,28 +524,17 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
     Blank/non-string selections must fail here even though arbitrary nonblank
     identifiers are delegated to the isolated native configuration.
     """
-    from dataclasses import replace
-
-    from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
-    from daydream.review_profile import ResolvedProfile
-
     repo = review_inputs.work.source
     marker = repo.parent / "checkout-executed"
     hook = repo / ".git/hooks/post-checkout"
     hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
     hook.chmod(0o755)
-    operator = repo.parent / "operator"
-    operator.mkdir()
+    policy = operator_policy
     if fault == "missing-agent-dir":
-        operator.rmdir()
+        policy.agent_dir.rmdir()
     elif fault == "file-agent-dir":
-        operator.rmdir()
-        operator.write_text("not a configuration directory")
-    policy = HostedReviewPolicy(
-        agent_dir=operator, environment={"PATH": os.environ["PATH"]},
-        output_dir=repo.parent / "hosted-output", private_base=repo.parent / "hosted-private",
-        profile=ResolvedProfile(build_default_profile(), "operator"), trusted_prepared_source=True,
-    )
+        policy.agent_dir.rmdir()
+        policy.agent_dir.write_text("not a configuration directory")
     changes: dict[str, dict[str, Any]] = {
         "preparation": {"trusted_prepared_source": False}, "backend": {"backend": "claude"},
         "empty-provider": {"provider": ""}, "blank-provider": {"provider": " \t\n"},
@@ -685,7 +685,7 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
 @pytest.mark.parametrize("outcome", ["complete", "attributes", "packed", "empty", "no-diff", "partial",
                                     "native-failure", "install-failure"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, outcome: str,
 ) -> None:
     """Offline identity/export and inert preparation are absent from ordinary journey coverage.
 
@@ -695,9 +695,6 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     """
     from daydream import github_app
     from daydream.git_ops import process
-    from daydream.hosted_review import HostedReviewPolicy
-    from daydream.review_profile import ResolvedProfile
-
     repo = tmp_path / "source"
     attributes = "api.py filter=hostile" + (" -diff" if outcome == "attributes" else "") + "\n"
     seed_feature_branch(
@@ -737,13 +734,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     (tmp_path / "malformed-global").write_text("this is not valid Git configuration\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "malformed-global"))
     monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "missing-git-exec"))
-    operator = tmp_path / "operator"
-    operator.mkdir()
-    policy = HostedReviewPolicy(
-        agent_dir=operator, environment={"PATH": os.environ["PATH"]}, output_dir=tmp_path / "output",
-        private_base=tmp_path / "private", profile=ResolvedProfile(build_default_profile(), "operator"),
-        limits=ReviewLimits(60, 10, 10), trusted_prepared_source=True,
-    )
+    policy = replace(operator_policy, limits=ReviewLimits(60, 10, 10))
     attempts: list[str] = []
 
     def forbidden(*args: Any, **kwargs: Any) -> Any:
@@ -875,16 +866,14 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
                                     "canonical", "review-key", "missing-object", "object-fifo", "raw-bytes",
                                     "object-hash", "symlink-parent", "source-size", "authority"])
 async def test_immutable_invalid_evidence_fails_before_native_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
     """Real object/checkout disagreement must refuse analysis, never become complete-empty.
 
     Ordinary sealed-result tests validate a produced plan; they cannot catch
     invalid immutable compilation evidence before that plan exists.
     """
-    from daydream.hosted_review import HostedReviewPolicy
     from daydream.immutable_review import ImmutableReviewInput
-    from daydream.review_profile import ResolvedProfile
 
     repo = tmp_path / "source"
     seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
@@ -935,11 +924,7 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
     elif fault == "symlink-parent":
         (repo / "nested").rename(tmp_path / "outside-nested")
         (repo / "nested").symlink_to(tmp_path / "outside-nested", target_is_directory=True)
-    operator = tmp_path / "operator"
-    operator.mkdir()
-    policy = HostedReviewPolicy(agent_dir=operator, environment={"PATH": os.environ["PATH"]},
-        output_dir=tmp_path / "output", private_base=tmp_path / "private",
-        profile=ResolvedProfile(build_default_profile(), "operator"), trusted_prepared_source=fault != "authority")
+    policy = replace(operator_policy, trusted_prepared_source=fault != "authority")
     attempts = []
 
     async def native_work(self: PiBackend) -> None:
@@ -964,7 +949,7 @@ async def test_immutable_invalid_evidence_fails_before_native_work(
 
 @pytest.mark.parametrize("fault", ["topology", "extra-history"])
 async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fault: str,
 ) -> None:
     """A correctly hashed two-ref bundle can still expose unintended history.
 
@@ -974,9 +959,6 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
     from daydream.benchmark.snapshot import build_bundle
     from daydream.git_ops import process
     from daydream.git_ops.immutable import canonical_diff_sha256, immutable_review_diff
-    from daydream.hosted_review import HostedReviewPolicy
-    from daydream.review_profile import ResolvedProfile
-
     original = tmp_path / "original"
     seed_feature_branch(original, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
     original_input = immutable_input_for(original).to_dict()
@@ -1015,11 +997,7 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
         "bundle_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
     }
     identity = ImmutableReviewInput.from_dict({**original_input, "materialization": local})
-    operator = tmp_path / "operator"
-    operator.mkdir()
-    policy = HostedReviewPolicy(agent_dir=operator, environment={"PATH": os.environ["PATH"]},
-        output_dir=tmp_path / "output", private_base=tmp_path / "private",
-        profile=ResolvedProfile(build_default_profile(), "operator"), trusted_prepared_source=True)
+    policy = operator_policy
     attempts = []
 
     async def native_work(self: PiBackend) -> None:

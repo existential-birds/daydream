@@ -103,11 +103,6 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str
         candidate.build_candidate_artifact("case-key", [finding])
     assert rejected.value.kind == "invalid_finding"
 
-def test_entrypoint_backend_fail_closed() -> None:
-    with pytest.raises(entrypoint.EntrypointError) as exc:
-        entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": "codex"})
-    assert "pi" in str(exc.value)
-
 def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
     for value in ("codex", "opencode"):
         with pytest.raises(entrypoint.EntrypointError) as exc:
@@ -216,22 +211,15 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
     assert ctx.n_output_tokens == 800
     assert ctx.cost_usd == 0.42
 
-def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contents", [None, "not json at all"], ids=["absent", "malformed"])
+def test_populate_context_unavailable_trajectory_leaves_metrics_unset(tmp_path: Path, contents: str | None) -> None:
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    agent = DaydreamReviewAgent(logs_dir=tmp_path)  # no agent/trajectory.json
-    ctx = AgentContext()
-    agent.populate_context_post_run(ctx)
-    assert ctx.is_empty()  # metrics stay unset; no fabricated values
-
-def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
-    pytest.importorskip("harbor")
-    from harbor.models.agent.context import AgentContext
-
-    traj_dir = tmp_path / "agent"
-    traj_dir.mkdir(parents=True)
-    (traj_dir / "trajectory.json").write_text("not json at all")
+    if contents is not None:
+        traj_dir = tmp_path / "agent"
+        traj_dir.mkdir(parents=True)
+        (traj_dir / "trajectory.json").write_text(contents)
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
     ctx = AgentContext()
     agent.populate_context_post_run(ctx)

@@ -6,13 +6,9 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
-from daydream import github_app
 from daydream.benchmark.harbor import entrypoint, verifier_core
-from daydream.git_ops import process
-from tests.harness.harbor_review import answer_review, assignment_from_request
+from tests.harness.harbor_review import answer_review, assignment_from_request, forbid_github
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 
 
@@ -20,25 +16,7 @@ def main() -> None:
     config = Path("/tmp/isolated-pi")
     config.mkdir()
     fixture = _NativeProvider(config, choose=answer_review)
-    attempts: list[str] = []
-
-    def forbidden(*args: Any, **kwargs: Any) -> Any:
-        attempts.append("GitHub or credential resolution")
-        raise AssertionError("immutable packaged review attempted GitHub access")
-
-    original_run = subprocess.run
-
-    def no_gh(command: Any, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(command, list) and Path(command[0]).name == "gh":
-            return forbidden()
-        return original_run(command, *args, **kwargs)
-
-    process._run_gh = forbidden
-    process._run_gh_async = forbidden
-    github_app.resolve_credentials = forbidden
-    github_app.resolve_user_identity = forbidden
-    github_app.resolve_run_identity = forbidden
-    with patch.object(subprocess, "run", no_gh), native_provider_server(fixture) as url:
+    with forbid_github() as attempts, native_provider_server(fixture) as url:
         (config / "models.json").write_text(json.dumps({"providers": {"openrouter": {
             "baseUrl": f"{url}/v1", "api": "openai-completions", "apiKey": "synthetic-loopback-only",
             "models": [{"id": "output-model", "reasoning": False, "input": ["text"],

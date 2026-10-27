@@ -66,8 +66,6 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
-
 
 @bind_resolved_run_context
 async def post_review_to_pr_from_report(
@@ -1120,7 +1118,7 @@ def post_findings_from_artifact(
     for finding in artifact.findings:
         if finding.fingerprint not in new_fingerprints:
             continue
-        issue = _issue_from_artifact_finding(finding)
+        issue = ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})
         if finding.placement == "inline" and finding.line is not None:
             classified.inline.append(_inline_comment(issue, finding.line, renderers))
             classified.inline_issues.append(issue)
@@ -1155,8 +1153,7 @@ def post_findings_from_artifact(
 
     from daydream.review_reporting import render_github_review_context, render_review_run_id
 
-    review_summary = (render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
-                      if artifact.kind == 'review' else '')
+    review_summary = render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
     run_info = artifact.run_info if artifact.run_info is not None else render_run_info(())
     run_id = render_review_run_id(artifact.terminal_result)
     if run_id:
@@ -1193,8 +1190,3 @@ def post_findings_from_artifact(
         return 1
     print_success(console, f"Posted review: {result.review_url}")
     return 0
-
-
-def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
-    """Restore validated issue fields; artifact placement requires no local PR Git objects."""
-    return ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})

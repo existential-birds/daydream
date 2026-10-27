@@ -5,18 +5,15 @@ import asyncio
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import github_app
 from daydream.benchmark.harbor import build, entrypoint, package as pkg, verifier_core
-from daydream.git_ops import process as git_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
-from tests.harness.harbor_review import answer_review, assignment_from_request
+from tests.harness.harbor_review import answer_review, assignment_from_request, forbid_github
 from tests.harness.native_pi import _NativeProvider
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 from tests.test_pi_native_output import native_provider as native_provider
@@ -91,24 +88,6 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         return response
 
     native_provider.choose = choose
-    attempts: list[str] = []
-
-    def forbidden(*args: Any, **kwargs: Any) -> Any:
-        attempts.append("GitHub or credentials")
-        raise AssertionError("immutable Harbor must not resolve GitHub state or credentials")
-
-    real_run = subprocess.run
-
-    def no_gh(command: Any, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(command, list) and Path(command[0]).name == "gh":
-            return forbidden()
-        return real_run(command, *args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", no_gh)
-    monkeypatch.setattr(git_process, "_run_gh", forbidden)
-    monkeypatch.setattr(git_process, "_run_gh_async", forbidden)
-    for name in ("resolve_credentials", "resolve_user_identity", "resolve_run_identity"):
-        monkeypatch.setattr(github_app, name, forbidden)
     artifact = tmp_path / "review.json"
     artifact.write_bytes(b"prior candidate")
     if outcome == "bundle-tamper":
@@ -126,7 +105,8 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", fail_install)
-    rc = await entrypoint.main(environment)
+    with forbid_github() as attempts:
+        rc = await entrypoint.main(environment)
     assert rc == (0 if outcome in {"finding", "clean", "long-title", "blank-title"} else 1)
     assert attempts == []
     assert environment == original_environment and dict(os.environ) == parent_before

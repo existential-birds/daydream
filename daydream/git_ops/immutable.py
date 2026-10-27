@@ -213,10 +213,23 @@ def _copy_objects(common: Path, target: Path) -> None:
             destination.write_bytes(body)
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, retries: int = process._GIT_TIMEOUT_RETRIES) -> str:
     return process._run_git(
-        repo, list(args), timeout=30, error_context="immutable source validation failed",
+        repo, list(args), timeout=30, retries=retries, error_context="immutable source validation failed",
     ).stdout.strip()
+
+
+def validate_synthetic_history(
+    repo: Path, base: str, head: str, *, retries: int = process._GIT_TIMEOUT_RETRIES,
+) -> None:
+    """Require a root base, its single-child head, and no other commit objects."""
+    if (_git(repo, "rev-list", "--parents", "-n", "1", base, retries=retries) != base
+            or _git(repo, "rev-list", "--parents", "-n", "1", head, retries=retries) != head + " " + base):
+        raise GitError("immutable synthetic projection requires exactly two commits")
+    objects = _git(repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)",
+                   retries=retries)
+    if {line.split()[0] for line in objects.splitlines() if line.endswith(" commit")} != {base, head}:
+        raise GitError("immutable synthetic bundle contains extra commit history")
 
 
 def _inventory(repo: Path, head: str) -> list[tuple[str, str, str]]:
@@ -320,16 +333,7 @@ def prepare_immutable_source(
                 if _git(destination, "rev-parse", local[commit] + "^{tree}") != local[tree]:
                     raise GitError("immutable source tree identity mismatch")
             if local["kind"] == "synthetic":
-                base, head = local["comparison_base_sha"], local["head_sha"]
-                if (_git(destination, "rev-list", "--parents", "-n", "1", base) != base
-                        or _git(destination, "rev-list", "--parents", "-n", "1", head) != head + " " + base
-                        or _git(destination, "rev-list", "--count", head) != "2"):
-                    raise GitError("immutable synthetic projection requires exactly two commits")
-                objects = _git(
-                    destination, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)",
-                )
-                if {line.split()[0] for line in objects.splitlines() if line.endswith(" commit")} != {base, head}:
-                    raise GitError("immutable synthetic bundle contains extra commit history")
+                validate_synthetic_history(destination, local["comparison_base_sha"], local["head_sha"])
             canonical_digest = canonical_diff_sha256(destination, local["comparison_base_sha"], local["head_sha"])
             if canonical_digest != local["canonical_diff_sha256"]:
                 raise GitError("immutable canonical diff digest mismatch")

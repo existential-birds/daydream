@@ -22,17 +22,9 @@ from daydream.benchmark.workspace import init_workspace
 from daydream.pr_review import FINDING_MARKER_RE, finding_marker
 from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _seed_git, init_repo, seed_pr_origin
+from tests.harness.git_helpers import seed_pr_origin
 
 REPO = Path(__file__).resolve().parents[1]
-
-# Bundle-seed env: only the dates travel in ``env``; identity and other
-# config must come from the live ``os.environ`` at call time, because
-# ``git()`` merges ``{**os.environ, **env}`` with ``env`` later — an
-# import-time ``os.environ`` snapshot would shadow call-time
-# ``GIT_CONFIG_*`` entries added by tests after import.
-_BUNDLE_ENV: dict[str, str] = {"GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
-
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
     """A canned GitHub PR-header response for *number*."""
@@ -195,39 +187,6 @@ def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
         if p.is_file():
             out[str(p.relative_to(base))] = p.read_bytes()
     return out
-
-
-def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
-    """Build a real base/head repo + bare mirror + build_bundle."""
-    src = tmp_path / "src"
-    src.mkdir()
-    _seed_git(src, "init", "-q", env=_BUNDLE_ENV)
-    _seed_git(src, "config", "user.email", "t@t", env=_BUNDLE_ENV)
-    _seed_git(src, "config", "user.name", "t", env=_BUNDLE_ENV)
-    (src / "f.py").write_text("x=1\n")
-    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
-    _seed_git(src, "commit", "-qm", "base", env=_BUNDLE_ENV)
-    base = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
-    (src / "f.py").write_text("x=2\n")
-    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
-    _seed_git(src, "commit", "-qm", "head", env=_BUNDLE_ENV)
-    head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
-    m = snapshot.ensure_mirror(tmp_path)
-    _seed_git(src, "push", str(m), f"{base}:refs/heads/base", f"{head}:refs/heads/head", env=_BUNDLE_ENV)
-    bundle = tmp_path / "b.bundle"
-    snapshot.build_bundle(m, base, head, bundle)
-    return m, bundle.read_bytes()
-
-
-def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "env-shadow"
-    init_repo(repo)
-    index = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-    monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", "user.email")
-    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", "call-time@example.com")
-    monkeypatch.setenv("GIT_CONFIG_COUNT", str(index + 1))
-
-    assert _seed_git(repo, "config", "--get", "user.email", env=_BUNDLE_ENV) == "call-time@example.com"
 
 
 def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
@@ -798,16 +757,6 @@ def test_leakage_scan_rejects_clean_readme() -> None:
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
     assert "clean_attested" in str(rejected.value)
-
-
-def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
-    m, _ = _seed_bare_bundle(tmp_path)
-    bp = tmp_path / "bad.bundle"
-    _seed_git(m, "update-ref", "refs/heads/extra", "refs/heads/base")
-    _seed_git(m, "bundle", "create", str(bp), "refs/heads/base", "refs/heads/head", "refs/heads/extra", env=_BUNDLE_ENV)
-    with pytest.raises(CompileError) as rejected:
-        build.validate_bundle_inventory(bp)
-    assert "ref" in str(rejected.value)
 
 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(

@@ -2,7 +2,40 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+
+@contextmanager
+def forbid_github() -> Iterator[list[str]]:
+    """Count forbidden lookups even when the reviewer catches their exceptions."""
+    from daydream import github_app
+    from daydream.git_ops import process
+
+    attempts: list[str] = []
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        attempts.append("GitHub or credential resolution")
+        raise AssertionError("immutable Harbor review attempted GitHub access")
+
+    original_run = subprocess.run
+
+    def no_gh(command: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(command, list) and Path(command[0]).name == "gh":
+            return forbidden()
+        return original_run(command, *args, **kwargs)
+
+    with ExitStack() as patches:
+        for owner, names in ((process, ("_run_gh", "_run_gh_async")),
+                             (github_app, ("resolve_credentials", "resolve_user_identity", "resolve_run_identity"))):
+            for name in names:
+                patches.enter_context(patch.object(owner, name, forbidden))
+        patches.enter_context(patch.object(subprocess, "run", no_gh))
+        yield attempts
 
 
 def assignment_from_request(request: dict[str, Any]) -> dict[str, Any]:

@@ -359,25 +359,27 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -
     base_commit = _git(m, "commit-tree", base_tree, "-m", "snapshot base", env=synth_env)
     head_commit = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "snapshot head", env=synth_env)
 
-    # (c) extra ref: a third ref in the bundle -> for-each-ref sees 3.
+    # Advertised tags/custom refs may disappear from cloned remote refs. Point
+    # them at the existing base so extra commit history cannot mask this guard.
     extra_ref_bundle = tmp_path / "snapshots" / "extra-ref.bundle"
-    extra = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "extra", env=synth_env)
-    _git(m, "update-ref", "refs/heads/extra", extra)
-    _git(m, "bundle", "create", str(extra_ref_bundle), "refs/heads/base", "refs/heads/head", "refs/heads/extra")
-    with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+    for extra_ref in ("refs/heads/extra", "refs/tags/extra", "refs/custom/extra"):
+        _git(m, "update-ref", extra_ref, base_commit)
+        _git(m, "bundle", "create", str(extra_ref_bundle), "refs/heads/base", "refs/heads/head", extra_ref)
+        with pytest.raises(git_ops.GitError, match="refs"):
+            sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+        _git(m, "update-ref", "-d", extra_ref)
 
     # (c) extra reachable commit (no extra ref): head parented on an extra
-    # commit parented on base -> rev-list --count origin/head == 3.
+    # commit parented on base, violating the exact root/child topology.
     extra_commit_bundle = tmp_path / "snapshots" / "extra-commit.bundle"
     extra_commit = _git(m, "commit-tree", base_tree, "-p", base_commit, "-m", "extra", env=synth_env)
     head_tampered = _git(m, "commit-tree", head_tree, "-p", extra_commit, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", head_tampered)
     _git(m, "bundle", "create", str(extra_commit_bundle), "refs/heads/base", "refs/heads/head")
-    with pytest.raises(git_ops.GitError, match="exactly two reachable commits"):
+    with pytest.raises(git_ops.GitError, match="exactly two commits"):
         sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
 
-    # (c) wrong parent: head with NO parent -> GitError (head^ fails, count 1).
+    # (c) wrong parent: head with NO parent violates the single-child topology.
     wrong_parent_bundle = tmp_path / "snapshots" / "wrong-parent.bundle"
     parentless_head = _git(m, "commit-tree", head_tree, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", parentless_head)

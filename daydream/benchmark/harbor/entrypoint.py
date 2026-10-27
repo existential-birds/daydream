@@ -118,17 +118,9 @@ def _sanitize_reviewer_environment(environment: Mapping[str, str]) -> dict[str, 
     for alias in container.control_plane_aliases:
         sanitized.pop(alias, None)
 
-    api_key = (source.get(env_policy.API_KEY_ENV) or "").strip()
-    base_url = (source.get(env_policy.BASE_URL_ENV) or "").strip()
-    if not base_url:
-        raise EntrypointError(
-            "missing required environment variable 'DAYDREAM_REVIEW_BASE_URL'"
-        )
+    base_url = _required_env(source, env_policy.BASE_URL_ENV)
     _require_openrouter_endpoint(base_url)
-    if not api_key:
-        raise EntrypointError(
-            "missing required environment variable 'DAYDREAM_REVIEW_API_KEY'"
-        )
+    api_key = _required_env(source, env_policy.API_KEY_ENV)
     sanitized["PI_PROVIDER"] = "openrouter"
     sanitized[env_policy.PI_API_KEY_ENV] = api_key
     sanitized["PI_TELEMETRY"] = "0"

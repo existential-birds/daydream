@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daydream import git_ops, severity
-from daydream.benchmark import schema, snapshot, storage, workspace
+from daydream.benchmark import schema, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.prompt_budget import truncate_utf8_to_budget
@@ -469,24 +469,6 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     return None
 
 
-# bundle archive-inventory check
-
-
-def validate_bundle_inventory(bundle_path: Path) -> None:
-    """Structurally validate a compiled bundle: exactly base/head, no credential URL."""
-    heads = snapshot.bundle_heads(bundle_path)
-    if heads != {"refs/heads/base", "refs/heads/head"}:
-        raise CompileError(
-            f"bundle {bundle_path} exposes refs {sorted(heads)}; "
-            "expected exactly refs/heads/base and refs/heads/head"
-        )
-    raw = bundle_path.read_bytes().decode("utf-8", errors="replace")
-    m = _AUTHENTICATED_URL_PATTERN.search(raw)
-    if m is not None:
-        raise CompileError(f"bundle {bundle_path} contains a credential-bearing URL")
-    return None
-
-
 # case compilation + lock + atomic swap
 
 _CASE_README = (
@@ -639,7 +621,8 @@ def _compile_case(
         raise CompileError(
             f"case {case_id} bundle sha mismatch (wanted {expected}, got {bundle_sha256})"
         )
-    validate_bundle_inventory(bundle_dst)
+    if _AUTHENTICATED_URL_PATTERN.search(bundle_dst.read_bytes().decode("utf-8", errors="replace")) is not None:
+        raise CompileError(f"bundle {bundle_dst} contains a credential-bearing URL")
     from daydream.benchmark.snapshot import validate_offline_clone
 
     try:

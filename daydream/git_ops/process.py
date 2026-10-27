@@ -100,23 +100,12 @@ def _gh_int_env(name: str, default: int, *, is_valid: Callable[[int], bool], inv
     try:
         value = int(raw)
     except ValueError:
-        _logger.warning(
-            "%s=%r is not a valid integer; using default %d",
-            name,
-            raw,
-            default,
-        )
-        return default
-    if not is_valid(value):
-        _logger.warning(
-            "%s=%r %s; using default %d",
-            name,
-            raw,
-            invalid_msg,
-            default,
-        )
-        return default
-    return value
+        invalid_msg = "is not a valid integer"
+    else:
+        if is_valid(value):
+            return value
+    _logger.warning("%s=%r %s; using default %d", name, raw, invalid_msg, default)
+    return default
 
 
 def _gh_timeout() -> int:

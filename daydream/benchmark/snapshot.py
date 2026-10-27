@@ -8,9 +8,8 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
+from typing import AbstractSet, Any, Literal, NamedTuple, cast
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -19,6 +18,7 @@ from daydream.git_ops.immutable import (
     canonical_diff_sha256 as canonical_diff_sha256,
     immutable_review_diff,
     inert_git_context,
+    validate_synthetic_history,
 )
 
 # Pinned synthetic-commit identity/timestamp so a bundle is byte-identical
@@ -452,50 +452,17 @@ def _synthetic_env() -> dict[str, str]:
     return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
 
 
-@overload
 def _run_git_checked(
     repo: Path | str,
     args: list[str],
     *,
     env_cmd: dict[str, str] | None = None,
     timeout: int = 30,
-    capture_bytes: Literal[False] = False,
-) -> str: ...
-
-
-@overload
-def _run_git_checked(
-    repo: Path | str,
-    args: list[str],
-    *,
-    env_cmd: dict[str, str] | None = None,
-    timeout: int = 30,
-    capture_bytes: Literal[True],
-) -> bytes: ...
-
-
-def _run_git_checked(
-    repo: Path | str,
-    args: list[str],
-    *,
-    env_cmd: dict[str, str] | None = None,
-    timeout: int = 30,
-    capture_bytes: bool = False,
-) -> str | bytes:
+) -> str:
     """Run git and raise GitError on a non-zero exit."""
     repo = Path(repo)
-    proc: subprocess.CompletedProcess[bytes] | subprocess.CompletedProcess[str]
-    if capture_bytes:
-        proc = git_process._run_git(
-            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=True
-        )
-    else:
-        proc = git_process._run_git(
-            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=False
-        )
+    proc = git_process._run_git(repo, args, env_cmd=env_cmd, retries=0, timeout=timeout)
     git_process._require_ok(proc, f"git {' '.join(args)} failed")
-    if capture_bytes:
-        return proc.stdout
     return proc.stdout.strip()
 
 
@@ -553,6 +520,10 @@ def validate_offline_clone(
     bundle_path = Path(bundle_path).resolve()
     import tempfile
 
+    with inert_git_context(bundle_path.parent):
+        heads = bundle_heads(bundle_path)
+    if heads != {"refs/heads/base", "refs/heads/head"}:
+        raise git_ops.GitError(f"bundle exposes unexpected refs {sorted(heads)}; expected exactly base and head")
     clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))
     try:
         with inert_git_context(Path(workdir).resolve()):
@@ -570,35 +541,9 @@ def validate_offline_clone(
                     f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
                     f"got {sorted(refs)})"
                 )
-            count = _run_git_checked(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
-            if count != "2":
-                raise git_ops.GitError(
-                    f"offline clone head ancestry must contain exactly two reachable commits "
-                    f"(got {count})"
-                )
-            parents_out = _run_git_checked(
-                clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
-            )
-            if len(parents_out.splitlines()) != 1:
-                raise git_ops.GitError(
-                    f"offline clone base must be a root commit with no parent "
-                    f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
-                )
-            head_parent = _run_git_checked(
-                clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
-            )
             base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
-            if head_parent != base_commit:
-                raise git_ops.GitError(
-                    f"offline clone head's parent must be the base commit "
-                    f"(expected {base_commit}, got {head_parent})"
-                )
-            objects = _run_git_checked(
-                clone_dir, ["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"])
             head_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head"])
-            commits = {line.split()[0] for line in objects.splitlines() if line.endswith(" commit")}
-            if commits != {base_commit, head_commit}:
-                raise git_ops.GitError("offline clone contains extra commit history")
+            validate_synthetic_history(clone_dir, base_commit, head_commit, retries=0)
             for ref, expected in (
                 ("refs/remotes/origin/base", base_tree),
                 ("refs/remotes/origin/head", head_tree),
