@@ -4,13 +4,14 @@ import json
 import math
 import os
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
 
 from daydream import _tree_sitter_safety as safety
-from daydream.artifact_visibility import ArtifactEvidenceProvenance
+from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactVisibilityError
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval import quality as quality_mod
@@ -24,7 +25,7 @@ from daydream.eval.analyzer import (
     analyze_shipped_duplication,
 )
 from daydream.eval.quality import _quality_python_parser
-from daydream.git_ops import GitError
+from daydream.git_ops import GitError, search_files
 from daydream.trajectory import (
     DaydreamPhase,
     RunWriteSnapshot,
@@ -530,6 +531,37 @@ def test_quality_git_inventory_failure_never_recurses(
         analyze_quality(git_repo / ".daydream")
 
 
+@pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
+def test_quality_reattests_workspace_after_git_inventory(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
+) -> None:
+    """Losing the root between real Git enumeration and reads cannot produce measured empty quality."""
+    (git_repo / "app.py").write_bytes(b"ORIGINAL = 1\n")
+    moved = tmp_path / "moved-source"
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "app.py").write_bytes(b"REPLACEMENT = 2\n")
+    inventory = search_files
+
+    def enumerate_then_change(*args: Any, **kwargs: Any) -> list[str]:
+        paths = inventory(*args, **kwargs)
+        git_repo.rename(moved)
+        if source_state == "replacement":
+            replacement.rename(git_repo)
+        elif source_state == "symlink":
+            git_repo.symlink_to(replacement, target_is_directory=True)
+        return paths
+
+    monkeypatch.setattr(quality_mod, "search_files", enumerate_then_change)
+    with pytest.raises(ArtifactVisibilityError):
+        analyze_quality(tmp_path / "frozen/.daydream", code_workspace=git_repo)
+    assert (moved / "app.py").read_bytes() == b"ORIGINAL = 1\n"
+    retained = git_repo if source_state == "replacement" else replacement
+    assert (retained / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
+    if source_state == "missing":
+        assert not git_repo.exists()
+
+
 def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Path,) -> None:
     """Analyze one package before/after source edits, independently of its frozen review root.
 
@@ -788,6 +820,35 @@ def test_quality_candidate_empty_set_returns_empty_without_enumeration(tmp_path:
     assert result["verbosity"] is None
 
 
+@pytest.mark.parametrize("candidate_paths", [None, set()], ids=["whole-workspace", "empty-candidates"])
+@pytest.mark.parametrize("workspace_kind", ["missing", "file", "symlink", "symlink-ancestor"])
+def test_quality_refuses_unavailable_or_unsafe_code_workspace(
+    tmp_path: Path, workspace_kind: str, candidate_paths: set[str] | None,
+) -> None:
+    """An empty selection cannot turn a missing or redirected source into healthy quality.
+
+    Existing empty-workspace tests use real directories and miss this root/ancestry boundary.
+    """
+    workspace = tmp_path / "workspace"
+    if workspace_kind == "file":
+        workspace.write_text("not a checkout")
+    elif workspace_kind.startswith("symlink"):
+        actual = _quality_workspace(tmp_path, {"app.py": "VALUE = 1\n"}, name="actual")
+        workspace.symlink_to(actual, target_is_directory=True)
+        if workspace_kind == "symlink-ancestor":
+            (actual / "nested").mkdir()
+            workspace /= "nested"
+
+    with pytest.raises(ArtifactVisibilityError, match="quality code workspace") as caught:
+        analyze_quality(tmp_path / "frozen/.daydream", candidate_paths=candidate_paths, code_workspace=workspace)
+
+    if workspace_kind == "missing":
+        assert type(caught.value).__name__ == "ArtifactSourceUnavailableError"
+        assert isinstance(caught.value.__cause__, FileNotFoundError)
+    else:
+        assert type(caught.value) is ArtifactVisibilityError
+
+
 def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
     result = _quality(tmp_path,
         {
@@ -945,27 +1006,64 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 
 
-def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("unavailable", ["tree-sitter", "removed-source", "git-metadata-during-inventory"])
+def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str,
 ) -> None:
-    """#1087: a known-bad install degrades only the quality section of
-    analyze_session -- the rest of the evaluation (and evaluation.json)
-    survives instead of the typed escape dropping the whole run.
-    """
+    """Unavailable native/source inputs preserve frozen-only analysis rather than dropping the run."""
 
-    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
-    daydream_dir = ws / ".daydream"
-    snapshot = run_snapshot("quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
+    daydream_dir, deep = _deep_dirs(tmp_path / "frozen")
+    seed_shipped_items(deep, high=1, med=0)
+    (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
+    root = _root_trajectory("quality-unavailable")
+    root["final_metrics"] = {"total_cost_usd": 0.5}
+    root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
+    child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
+    snapshot = _snapshot(root, child)
+    validate_code_workspace = None
+    if unavailable == "tree-sitter":
+        monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    elif unavailable == "removed-source":
+        ws.rename(tmp_path / "removed-source")
+    else:
+        from daydream.artifacts.filesystem import _validate_directory_identity
 
-    result = analyze_session(daydream_dir, write_snapshot=snapshot)
+        git(ws, "init")
+        metadata = (ws / ".git").stat()
+        validate_code_workspace = partial(
+            _validate_directory_identity, ws / ".git", device=metadata.st_dev, inode=metadata.st_ino,
+            label="code Git metadata",
+        )
+        inventory = search_files
+
+        def enumerate_then_remove_git(*args: Any, **kwargs: Any) -> list[str]:
+            paths = inventory(*args, **kwargs)
+            (ws / ".git").rename(tmp_path / "removed-git")
+            return paths
+
+        monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
+
+    result = analyze_session(
+        daydream_dir, write_snapshot=snapshot, code_workspace=ws, validate_code_workspace=validate_code_workspace,
+    )
 
     quality = result["quality"]
     assert quality["unavailable"] is True
     assert quality["error"]
+    assert quality["erosion"] is quality["verbosity"] is None
     assert quality["per_file"] == {}
     assert quality["scoped_files"] == 0
-    assert result["session_id"] == "quality-bad"
-    assert result["trajectory_count"] == 1
+    assert quality["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
+    assert result["session_id"] == "quality-unavailable"
+    assert result["trajectory_count"] == 2
+    assert result["cost"]["total_cost_usd"] == 0.5
+    assert result["findings"]["total"] == 1
+    assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+    assert result["routing"]["profile"] == "forensic"
+    assert result["training_signals"]["total_trajectories"] == result["training_signals"]["clean_for_training"] == 1
+    if unavailable == "removed-source":
+        assert not ws.exists()
 
 
 # Seed the exact production artifact shapes for location and duplication analysis.

@@ -46,6 +46,7 @@ from daydream.artifacts.models import (
     ArtifactEvidenceProvenance as ArtifactEvidenceProvenance,
     ArtifactLayout as ArtifactLayout,
     ArtifactManifestEntry as ArtifactManifestEntry,
+    ArtifactSourceUnavailableError as ArtifactSourceUnavailableError,
     ArtifactTreeSnapshot as ArtifactTreeSnapshot,
     ArtifactVisibilityError as ArtifactVisibilityError,
     ArtifactWorkspaceIdentity as ArtifactWorkspaceIdentity,
@@ -95,12 +96,20 @@ class ArtifactSession:
         *,
         lock_fd: int,
         repo_fd: int,
+        source_fd: int,
+        git_directory_fds: tuple[int, ...],
         canonical_entries: tuple[ArtifactManifestEntry, ...],
         detach_transaction: Path,
     ) -> None:
         self.layout = layout
         self._lock_fd = lock_fd
         self._repo_fd = repo_fd
+        self._source_fd = source_fd
+        source_metadata = os.fstat(source_fd)
+        self._source_identity = filesystem._SourceIdentity(
+            layout.source, source_metadata.st_dev, source_metadata.st_ino
+        )
+        self._git_directory_fds = git_directory_fds
         self._canonical_entries = canonical_entries
         self._detach_transaction = detach_transaction
         self._state = _SessionState.ACTIVE
@@ -209,17 +218,37 @@ class ArtifactSession:
     def _route_repo(self, repo: Path) -> None:
         self._require_active()
         declared = filesystem._absolute_lexical(repo)
+        if declared != self.layout.repo:
+            raise ArtifactVisibilityError("requested repo does not match active artifact session")
+        self.validate_repo()
+
+    def validate_repo(self) -> None:
+        """Reattest the held model checkout, including after private evidence freezes."""
         try:
-            canonical, metadata = filesystem._declared_directory_metadata(declared, label="artifact repo")
             held = os.fstat(self._repo_fd)
+            filesystem._validate_directory_identity(
+                self.layout.repo, device=held.st_dev, inode=held.st_ino, label="artifact repo"
+            )
+        except ArtifactSourceUnavailableError:
+            raise
         except (OSError, ArtifactVisibilityError) as exc:
             raise ArtifactVisibilityError("requested repo does not match active artifact session") from exc
-        if (
-            declared != self.layout.repo
-            or canonical != self.layout.repo
-            or (metadata.st_dev, metadata.st_ino) != (held.st_dev, held.st_ino)
-        ):
-            raise ArtifactVisibilityError("requested repo does not match active artifact session")
+
+    def validate_source(self) -> None:
+        """Reattest the original publication source independently of the model repo."""
+        self._source_identity.validate()
+
+    def validate_code_workspace(self) -> None:
+        """Require the captured checkout and Git metadata for live code evaluation."""
+        self.validate_repo()
+        directories = (self.layout.repo_git_dir, self.layout.git_common_dir)
+        if any(path == self.layout.source or self.layout.source in path.parents for path in directories):
+            self.validate_source()
+        for path, descriptor in zip(directories, self._git_directory_fds, strict=True):
+            held = os.fstat(descriptor)
+            filesystem._validate_directory_identity(
+                path, device=held.st_dev, inode=held.st_ino, label="artifact code workspace Git directory"
+            )
 
     def _validate_destination(
         self,
@@ -417,6 +446,7 @@ class ArtifactSession:
                 record_id=record.record_id,
                 remove_directories=not dump,
                 changed_message="explicit artifact destination changed during detach",
+                source_identity=self._source_identity,
             )
 
     def _records(self) -> list[_DestinationRecord]:
@@ -574,6 +604,7 @@ class ArtifactSession:
         """Undo the two destination captures a failed paired registration made."""
         captured = self._records()[initial:]
         if captured:
+            self.validate_source()
             restore_stage = publication._create_source_stage(
                 self.layout.source,
                 self._detach_transaction.name,
@@ -582,7 +613,8 @@ class ArtifactSession:
             )
             try:
                 publication._restore_destination_records(
-                    self.layout.source, self._detach_transaction, captured, restore_stage
+                    self.layout.source, self._detach_transaction, captured, restore_stage,
+                    source_identity=self._source_identity,
                 )
             finally:
                 publication._retire_source_stage(
@@ -797,6 +829,7 @@ class ArtifactSession:
             raise ArtifactVisibilityError("frozen artifact destination identity mismatch")
         if filesystem.manifest_tree(snapshot.root) != snapshot.manifest:
             raise ArtifactVisibilityError("frozen artifact snapshot changed before publication")
+        self.validate_source()
         if disposition is ArtifactDisposition.ROLLBACK:
             self._restore_prior()
             self._retire_late_paths()
@@ -818,6 +851,8 @@ class ArtifactSession:
             workspace_key=self.layout.workspace_key,
             session_id=self.layout.session_id,
             kind="publish",
+            source=self.layout.source,
+            source_fd=self._source_fd,
         )
         mark = partial(
             transactions._write_transition,
@@ -898,7 +933,10 @@ class ArtifactSession:
         (transaction / "public-backup").mkdir()
         _fsync_directory(transaction)
         mark(state=_Transition.PUBLISH_BACKED_UP)
-        publication._replace_public_from_tree(self.layout.source, public_stage, public_entries)
+        self.validate_source()
+        publication._replace_public_from_tree(
+            self.layout.source, public_stage, public_entries, source_identity=self._source_identity
+        )
         for index, record in enumerate(publish_records):
             if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
                 continue
@@ -910,7 +948,9 @@ class ArtifactSession:
                 transaction=transaction,
                 workspace_key=self.layout.workspace_key,
                 source=self.layout.source,
+                source_identity=self._source_identity,
             )
+        self.validate_source()
         mark(state=_Transition.PUBLISH_INSTALLED)
         canonical = self.layout.state_root / "canonical"
         os.replace(canonical, transaction / "old-canonical")
@@ -919,6 +959,7 @@ class ArtifactSession:
         filesystem._atomic_json(
             self.layout.state_root / "canonical-manifest.json", filesystem._manifest_payload(public_entries)
         )
+        self.validate_source()
         mark(state=_Transition.PUBLISH_VERIFIED)
         self._canonical_entries = public_entries
         transactions._retire_transaction(
@@ -942,6 +983,7 @@ class ArtifactSession:
             # earlier attempt (``finalize_frozen`` and session close both call
             # this). There is nothing left to restore from.
             return
+        self.validate_source()
         canonical = state_root / "canonical"
         publication._reset_source_stage(
             self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
@@ -957,13 +999,19 @@ class ArtifactSession:
         destination_errors: list[Exception] = []
         public_errors: list[Exception] = []
         try:
-            publication._restore_destination_records(self.layout.source, transaction, self._records(), source_stage)
+            self.validate_source()
+            publication._restore_destination_records(
+                self.layout.source, transaction, self._records(), source_stage, source_identity=self._source_identity
+            )
         except Exception as exc:
             destination_errors.append(exc)
         try:
             projection = source_stage / "public"
             filesystem._copy_tree(canonical, projection, self._canonical_entries)
-            publication._replace_public_from_tree(self.layout.source, projection, self._canonical_entries)
+            self.validate_source()
+            publication._replace_public_from_tree(
+                self.layout.source, projection, self._canonical_entries, source_identity=self._source_identity
+            )
         except Exception as exc:
             public_errors.append(exc)
         try:
@@ -995,6 +1043,9 @@ class ArtifactSession:
         fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         os.close(self._lock_fd)
         os.close(self._repo_fd)
+        os.close(self._source_fd)
+        for descriptor in self._git_directory_fds:
+            os.close(descriptor)
 
 
 def _routing_session(
@@ -1127,6 +1178,14 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
     with ExitStack() as held:
         repo_fd = filesystem._open_directory_descriptor(identity.repo, label="artifact repo")
         held.callback(os.close, repo_fd)
+        source_fd = filesystem._open_directory_descriptor(source, label="artifact source")
+        held.callback(os.close, source_fd)
+        git_directory_descriptors: list[int] = []
+        for path in (identity.repo_git_dir, identity.git_common_dir):
+            descriptor = filesystem._open_directory_descriptor(path, label="artifact code workspace Git directory")
+            held.callback(os.close, descriptor)
+            git_directory_descriptors.append(descriptor)
+        git_directory_fds = tuple(git_directory_descriptors)
         try:
             collisions = git_ops.tracked_artifact_collisions(source)
         except git_ops.GitError as exc:
@@ -1152,6 +1211,10 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         held.callback(fcntl.flock, lock_fd, fcntl.LOCK_UN)
         transaction: Path | None = None
         try:
+            source_metadata = os.fstat(source_fd)
+            filesystem._validate_directory_identity(
+                source, device=source_metadata.st_dev, inode=source_metadata.st_ino, label="artifact source"
+            )
             transactions._recover_transactions(state_root, source)
             validated_canonical_entries = publication._validated_canonical_entries(state_root)
             validated_public_entries = publication._validate_public_tree(
@@ -1174,7 +1237,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             transaction = transactions_root / transaction_id
             transaction.mkdir(mode=0o700)
             transactions._write_transaction_owner(
-                transaction, workspace_key=workspace_key, session_id=session_id, kind="detach"
+                transaction, workspace_key=workspace_key, session_id=session_id, kind="detach",
+                source=source, source_fd=source_fd,
             )
             mark = partial(
                 transactions._write_transition,
@@ -1224,6 +1288,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                     workspace_key=workspace_key,
                     purpose="detach-public",
                     stage_parent=source.parent,
+                    source_identity=transactions._validate_source_identity(transaction, source),
                 )
             mark(state=_Transition.DETACHED)
             layout = ArtifactLayout(
@@ -1249,6 +1314,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         layout,
         lock_fd=lock_fd,
         repo_fd=repo_fd,
+        source_fd=source_fd,
+        git_directory_fds=git_directory_fds,
         canonical_entries=canonical_entries,
         detach_transaction=transaction,
     )
@@ -1259,6 +1326,7 @@ def _close_artifact_session(session: ArtifactSession) -> None:
     primary: BaseException | None = None
     try:
         if session._state == "publishing":
+            session.validate_source()
             transactions._recover_transactions(session.layout.state_root, session.layout.source)
         elif session._state not in ("published", "closed"):
             session._restore_prior()

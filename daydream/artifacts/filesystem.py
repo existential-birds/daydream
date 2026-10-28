@@ -7,12 +7,18 @@ import json
 import os
 import stat
 import unicodedata
-from collections.abc import Sequence
-from dataclasses import asdict
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from daydream.artifacts.models import _SCHEMA_VERSION, ArtifactManifestEntry, ArtifactVisibilityError
+from daydream.artifacts.models import (
+    _SCHEMA_VERSION,
+    ArtifactManifestEntry,
+    ArtifactSourceUnavailableError,
+    ArtifactVisibilityError,
+)
 from daydream.json_utils import _fsync_directory, atomic_write_bytes
 
 
@@ -66,13 +72,15 @@ def _declared_directory_metadata(path: Path, *, label: str) -> tuple[Path, os.st
     """Resolve a declared directory, returning it with its own no-follow metadata."""
     declared = _absolute_lexical(path)
     declared_metadata: os.stat_result | None = None
-    for index, component in enumerate((declared, *declared.parents)):
+    for index, component in reversed(tuple(enumerate((declared, *declared.parents)))):
         try:
             metadata = component.lstat()
         except OSError as exc:
             raise ArtifactVisibilityError(f"{label} is not an accessible directory") from exc
         if stat.S_ISLNK(metadata.st_mode):
             raise ArtifactVisibilityError(f"{label} ancestry must not contain a symlink")
+        if index != 0 and not stat.S_ISDIR(metadata.st_mode):
+            raise ArtifactVisibilityError(f"{label} ancestry must be a real directory")
         if index == 0:
             if not stat.S_ISDIR(metadata.st_mode):
                 raise ArtifactVisibilityError(f"{label} must be a real directory, not a symlink")
@@ -86,6 +94,74 @@ def _declared_directory_metadata(path: Path, *, label: str) -> tuple[Path, os.st
 
 def _declared_directory(path: Path, *, label: str) -> Path:
     return _declared_directory_metadata(path, label=label)[0]
+
+
+def _available_directory_metadata(path: Path, *, label: str) -> tuple[Path, os.stat_result]:
+    """Inspect a safe directory while distinguishing unavailable filesystem access."""
+    try:
+        return _declared_directory_metadata(path, label=label)
+    except ArtifactVisibilityError as exc:
+        if isinstance(exc.__cause__, (FileNotFoundError, PermissionError)):
+            raise ArtifactSourceUnavailableError(f"{label} is unavailable") from exc.__cause__
+        raise
+
+
+def _validate_directory_identity(path: Path, *, device: int, inode: int, label: str) -> None:
+    """Reattest a captured directory without adopting aliases or replacement trees."""
+    canonical, metadata = _available_directory_metadata(path, label=label)
+    if canonical != path or (metadata.st_dev, metadata.st_ino) != (device, inode):
+        raise ArtifactVisibilityError(f"{label} directory identity changed")
+
+
+@dataclass(frozen=True)
+class _SourceIdentity:
+    """Captured source identity with no-follow, descriptor-anchored mutation parents."""
+
+    path: Path
+    device: int
+    inode: int
+
+    def validate(self) -> None:
+        _validate_directory_identity(self.path, device=self.device, inode=self.inode, label="artifact source")
+
+    @contextmanager
+    def parent_descriptor(self, target: Path) -> Iterator[int]:
+        """Pin a target's parent so pathname replacement cannot redirect a syscall."""
+        self.validate()
+        inside_source = self.path in target.parents
+        root = self.path if inside_source else _declared_directory(target.parent, label="artifact output parent")
+        descriptor = _open_directory_descriptor(root, label="artifact output parent")
+        try:
+            if inside_source:
+                metadata = os.fstat(descriptor)
+                if (metadata.st_dev, metadata.st_ino) != (self.device, self.inode):
+                    raise ArtifactVisibilityError("artifact source directory identity changed")
+                for component in target.parent.relative_to(self.path).parts:
+                    child = os.open(
+                        component, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=descriptor,
+                    )
+                    os.close(descriptor)
+                    descriptor = child
+            self.validate()
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def mkdir(self, target: Path, *, mode: int, exist_ok: bool = False) -> None:
+        with self.parent_descriptor(target) as descriptor:
+            try:
+                os.mkdir(target.name, mode=mode, dir_fd=descriptor)
+            except FileExistsError:
+                metadata = os.stat(target.name, dir_fd=descriptor, follow_symlinks=False)
+                if not exist_ok or not stat.S_ISDIR(metadata.st_mode):
+                    raise
+            os.fsync(descriptor)
+
+    def rmdir(self, target: Path) -> None:
+        with self.parent_descriptor(target) as descriptor:
+            os.rmdir(target.name, dir_fd=descriptor)
+            os.fsync(descriptor)
 
 
 def _open_directory_descriptor(path: Path, *, label: str) -> int:
@@ -490,14 +566,20 @@ def _copy_regular_entry(
     *,
     changed_message: str = "artifact file changed during destination staging",
     preserve_times: bool = False,
+    create_parents: bool = True,
+    destination_fd: int | None = None,
 ) -> None:
     """Attest bytes before exclusively creating and fsyncing a manifested file."""
     metadata = source.lstat()
     content = _read_regular(source, metadata)
     if len(content) != entry.size or hashlib.sha256(content).hexdigest() != entry.sha256:
         raise ArtifactVisibilityError(changed_message)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, entry.mode)
+    if create_parents:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        target if destination_fd is None else target.name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL, entry.mode, dir_fd=destination_fd,
+    )
     with os.fdopen(descriptor, "wb") as stream:
         stream.write(content)
         stream.flush()

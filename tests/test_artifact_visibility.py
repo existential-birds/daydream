@@ -1297,6 +1297,10 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(sourc
     _atomic_json(transaction / "journal.json",
         {"schema_version": 1, "transaction_id": "malicious", "session_id": "prior", "state": "DETACH_STAGED"},
     )
+    metadata = source.lstat()
+    _atomic_json(transaction / "source-identity.json", {
+        "schema_version": 1, "source": str(source), "device": metadata.st_dev, "inode": metadata.st_ino,
+    })
 
     with pytest.raises(ArtifactVisibilityError, match="manifest"):
         async with open_artifact_session(_work(source), session_id="blocked"):
@@ -1305,14 +1309,43 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(sourc
     assert stage_canary.read_bytes() == b"stage must remain unchanged"
 
 
-async def test_bound_routing_rejects_same_spelling_repository_replacements(tmp_path: Path) -> None:
+async def test_bound_routing_rejects_same_spelling_repository_replacements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     container = tmp_path / "container"
     source = container / "source"
     _init_repo(source)
     work = _work(source)
 
     async with open_artifact_session(work, session_id="repo-replacement") as session:
+        original_lstat = Path.lstat
+        denied = PermissionError("source inspection denied")
+
+        def deny_source(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+            if path == source:
+                raise denied
+            return original_lstat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "lstat", deny_source)
+            for resolver in (artifact_dir_for, review_output_path_for):
+                with pytest.raises(ArtifactVisibilityError) as unavailable:
+                    resolver(source, session=session)
+                assert type(unavailable.value).__name__ == "ArtifactSourceUnavailableError"
+                assert unavailable.value.__cause__ is denied
         moved = tmp_path / "held-source"
+        source.rename(moved)
+        try:
+            for resolver in (artifact_dir_for, review_output_path_for):
+                with pytest.raises(ArtifactVisibilityError) as missing:
+                    resolver(source, session=session)
+                assert type(missing.value).__name__ == "ArtifactSourceUnavailableError"
+                assert isinstance(missing.value.__cause__, FileNotFoundError)
+                with pytest.raises(ArtifactVisibilityError, match="active artifact session") as foreign:
+                    resolver(tmp_path / "foreign-missing", session=session)
+                assert type(foreign.value) is ArtifactVisibilityError
+        finally:
+            moved.rename(source)
         source.rename(moved)
         source.write_bytes(b"replacement file")
         try:
@@ -1341,12 +1374,227 @@ async def test_bound_routing_rejects_same_spelling_repository_replacements(tmp_p
             for resolver in (artifact_dir_for, review_output_path_for):
                 with pytest.raises(ArtifactVisibilityError, match="active artifact session"):
                     resolver(source, session=session)
+            moved_source = moved_container / "source"
+            missing_source = moved_container / "missing-source"
+            moved_source.rename(missing_source)
+            try:
+                with pytest.raises(ArtifactVisibilityError, match="active artifact session") as unsafe:
+                    artifact_dir_for(source, session=session)
+                assert type(unsafe.value) is ArtifactVisibilityError
+            finally:
+                missing_source.rename(moved_source)
         finally:
             container.unlink()
             moved_container.rename(container)
 
         assert not session.layout.public_daydream_dir.exists()
         assert not session.layout.public_review_output.exists()
+
+
+@pytest.mark.parametrize("disposition", ["complete", "rollback"])
+@pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
+async def test_frozen_finalization_preserves_evidence_when_public_source_is_lost(
+    tmp_path: Path, source: Path, disposition: str, source_state: str,
+) -> None:
+    """A surviving model worktree cannot authorize writes to a lost public source.
+
+    Routing replacement coverage restores the original before exit, missing the
+    publication/rollback and replay paths that can otherwise adopt another tree.
+    """
+    (source / ".review-output.md").write_bytes(b"prior report only\n")
+    baseline = _manifest(source)
+    (model_repo,) = _worktrees(source, "model-repo")
+    work = _work(source, repo=model_repo)
+    owner = _owner(source)
+    primary = RuntimeError("retain the body failure")
+    held_source = tmp_path / "held-source"
+    caught: BaseException | None = None
+    try:
+        async with open_artifact_session(work, session_id="lost-public-source", owner=owner) as session:
+            source.rename(held_source)
+            if source_state != "missing":
+                replacement = source if source_state == "replacement" else tmp_path / "symlink-target"
+                _init_repo(replacement)
+                if source_state == "symlink":
+                    source.symlink_to(replacement, target_is_directory=True)
+                replacement_manifest = _manifest(replacement)
+                replacement_git = _git(replacement, "status", "--porcelain=v1", "--untracked-files=all")
+            assert artifact_dir_for(model_repo, session=session) == session.daydream_dir
+            # Freezing is private and must retain the original run independently.
+            frozen = _freeze_run(session, "lost-public-source")
+            frozen_manifest = artifact_filesystem.manifest_tree(frozen.root)
+            with pytest.raises(ArtifactVisibilityError) as quality_unavailable:
+                session.validate_code_workspace()
+            assert (type(quality_unavailable.value).__name__ == "ArtifactSourceUnavailableError") == (
+                source_state == "missing"
+            )
+            with pytest.raises(ArtifactVisibilityError) as refused:
+                _publish(session, frozen, artifact_visibility.ArtifactDisposition(disposition))
+            if source_state == "missing":
+                assert type(refused.value).__name__ == "ArtifactSourceUnavailableError"
+                assert isinstance(refused.value.__cause__, FileNotFoundError)
+            else:
+                assert type(refused.value).__name__ != "ArtifactSourceUnavailableError"
+            raise primary
+    except BaseException as exc:
+        caught = exc
+    assert caught is primary
+    assert any("artifact recovery retained" in note for note in primary.__notes__)
+    assert artifact_filesystem.manifest_tree(frozen.root) == frozen_manifest
+    assert (frozen.root / ".review-output.md").read_bytes() == b"prior report only\n"
+    assert _manifest(owner.artifact_state_root / "canonical") == baseline
+    assert (session._detach_transaction / "journal.json").is_file()
+    if source_state == "missing":
+        assert not source.exists() and not source.is_symlink()
+    else:
+        assert _manifest(replacement) == replacement_manifest
+        assert _git(replacement, "status", "--porcelain=v1", "--untracked-files=all") == replacement_git
+        # A new session must not replay the old transaction into the replacement.
+        if source_state == "replacement":
+            with pytest.raises(ArtifactVisibilityError, match="identity"):
+                async with open_artifact_session(_work(source), session_id="replacement-recovery", owner=owner):
+                    pass
+            assert _manifest(replacement) == replacement_manifest
+    assert (session._detach_transaction / "journal.json").is_file()
+
+
+async def test_code_workspace_with_external_git_metadata_survives_public_source_loss(tmp_path: Path) -> None:
+    """An intact operational tree and its external Git owner still support quality.
+
+    The missing public source remains a publication failure; requiring it for
+    unrelated Git metadata would incorrectly discard available live analysis.
+    """
+    primary, source = tmp_path / "primary", tmp_path / "linked-source"
+    _init_repo(primary)
+    _git(primary, "worktree", "add", "--detach", str(source), "HEAD")
+    (model_repo,) = _worktrees(source, "model-repo")
+    work, owner = _work(source, repo=model_repo), _owner(source)
+    with pytest.raises(ArtifactVisibilityError) as close_failure:
+        async with open_artifact_session(work, session_id="external-git-source-loss", owner=owner) as session:
+            source.rename(tmp_path / "held-source")
+            assert artifact_dir_for(model_repo, session=session) == session.daydream_dir
+            session.validate_code_workspace()
+            assert _git(model_repo, "ls-files") == "source.txt"
+            with pytest.raises(ArtifactVisibilityError) as unavailable:
+                session.validate_source()
+            assert type(unavailable.value).__name__ == "ArtifactSourceUnavailableError"
+    assert type(close_failure.value).__name__ == "ArtifactSourceUnavailableError"
+    assert isinstance(close_failure.value.__cause__, FileNotFoundError)
+    assert not source.exists()
+
+
+async def test_failed_detach_never_recreates_missing_report_only_source(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-clobber report restore used to mkdir a vanished source checkout.
+
+    Directory-containing baselines fail earlier and hide that file-only path.
+    Inject loss after the real public-entry transfer and retain its journal.
+    """
+    (source / ".review-output.md").write_bytes(b"prior report only\n")
+    baseline = _manifest(source)
+    owner = _owner(source)
+    work = _work(source)
+    primary = RuntimeError("detach interrupted after source loss")
+    moved = tmp_path / "held-source"
+
+    def lose_source(_path: Path, _moved: Path) -> None:
+        source.rename(moved)
+        raise primary
+
+    monkeypatch.setattr(artifact_transfer, "_transfer_post_observer", lose_source)
+    with pytest.raises(RuntimeError) as caught:
+        async with open_artifact_session(work, session_id="detach-source-loss", owner=owner):
+            pass
+    assert caught.value is primary
+    assert not source.exists() and not source.is_symlink()
+    assert _manifest(owner.artifact_state_root / "canonical") == baseline
+    transactions = tuple((owner.artifact_state_root / "transactions").iterdir())
+    assert len(transactions) == 1 and (transactions[0] / "journal.json").is_file()
+    assert any("artifact recovery retained" in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize("source_state", ["replacement", "symlink"])
+@pytest.mark.parametrize(
+    "loss_after", ["public-syscall", "public-directory", "public-verification", "deferred-syscall"]
+)
+async def test_publication_rechecks_source_between_public_and_deferred_installs(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, source_state: str, loss_after: str,
+) -> None:
+    """Source loss between real installs cannot redirect the next artifact write.
+
+    Session-entry checks miss a replacement after the public directory install,
+    or after the report install but before a source-internal deferred export.
+    """
+    expected = _seed_public_artifacts(source)
+    owner = _owner(source)
+    primary = RuntimeError("retain publication body failure")
+    replacement = source if source_state == "replacement" else tmp_path / "symlink-target"
+    lost = False
+    original_replace, original_link, original_read = os.replace, os.link, artifact_filesystem._read_regular
+    publication_error: ArtifactVisibilityError | None = None
+
+    def lose_source(target: Path) -> None:
+        nonlocal lost
+        name = {"public-verification": ".review-output.md", "deferred-syscall": "findings.json"}.get(
+            loss_after, ".daydream"
+        )
+        trigger = source / name
+        if lost or target != trigger:
+            return
+        lost = True
+        source.rename(tmp_path / "held-source")
+        _init_repo(replacement)
+        if source_state == "symlink":
+            source.symlink_to(replacement, target_is_directory=True)
+
+    def replace_then_lose(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        target = Path(dst)
+        if "dst_dir_fd" in kwargs:
+            target = source / target
+        if loss_after == "public-syscall":
+            lose_source(target)
+        original_replace(src, dst, *args, **kwargs)
+        if loss_after == "public-directory":
+            lose_source(target)
+
+    def read_then_lose(path: Path, metadata: os.stat_result) -> bytes:
+        content = original_read(path, metadata)
+        if loss_after == "public-verification":
+            lose_source(path)
+        return content
+
+    def link_then_lose(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        if loss_after == "deferred-syscall":
+            target = Path(dst)
+            if "dst_dir_fd" in kwargs:
+                target = source / target
+            lose_source(target)
+        original_link(src, dst, *args, **kwargs)
+
+    with pytest.raises(RuntimeError) as caught:
+        async with open_artifact_session(_work(source), session_id="loss-between-installs", owner=owner) as session:
+            output = session.register_destination(source / "findings.json", label=OutputLabel.FINDINGS_OUTPUT)
+            assert output.write_path is not None
+            output.write_path.parent.mkdir(parents=True)
+            output.write_path.write_bytes(b"frozen findings\n")
+            frozen = _freeze_run(session, "loss-between-installs")
+            monkeypatch.setattr(os, "replace", replace_then_lose)
+            monkeypatch.setattr(os, "link", link_then_lose)
+            monkeypatch.setattr(artifact_filesystem, "_read_regular", read_then_lose)
+            try:
+                _publish(session, frozen)
+            except ArtifactVisibilityError as exc:
+                publication_error = exc
+            raise primary
+    assert caught.value is primary and lost
+    assert _manifest(replacement) == ()
+    assert not (replacement / "findings.json").exists()
+    assert publication_error is not None
+    assert _git(replacement, "status", "--porcelain=v1", "--untracked-files=all") == ""
+    assert _manifest(owner.artifact_state_root / "canonical") == expected
+    assert (frozen.root / ".explicit" / "0000" / "findings.json").read_bytes() == b"frozen findings\n"
+    assert len(tuple((owner.artifact_state_root / "transactions").glob("*/journal.json"))) == 2
 
 
 async def test_destination_collision_matrix_rejects_all_private_model_and_git_roots(tmp_path: Path, source: Path,
@@ -1542,10 +1790,18 @@ async def test_recoverable_detach_failure_restores_before_unlock_and_preserves_p
 @pytest.mark.parametrize(
     ("transition", "exception_kind"), [("PUBLISH_BACKED_UP", "cancel"), ("PUBLISH_INSTALLED", "keyboard")],
 )
+@pytest.mark.parametrize("source_loss", [False, True])
 async def test_recoverable_publication_failure_reconciles_before_unlock(
-    source: Path, monkeypatch: pytest.MonkeyPatch, transition: str, exception_kind: str,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
+    transition: str, exception_kind: str, source_loss: bool,
 ) -> None:
+    """Recovery preserves its primary failure and cannot replay into a new checkout.
+
+    Existing durable-transition recovery kept the original source alive, missing
+    a replacement between installation and recovery with identical path spelling.
+    """
     expected = _seed_public_artifacts(source)
+    owner = _owner(source)
     session_id = f"recover-{transition.lower()}"
     payload = _payload(session_id)
     primary: BaseException = (anyio.get_cancelled_exc_class()()
@@ -1555,6 +1811,9 @@ async def test_recoverable_publication_failure_reconciles_before_unlock(
 
     def fail_at_transition(state: str) -> None:
         if state == transition:
+            if source_loss:
+                source.rename(tmp_path / "held-source")
+                _init_repo(source)
             raise primary
 
     caught: BaseException | None = None
@@ -1566,6 +1825,23 @@ async def test_recoverable_publication_failure_reconciles_before_unlock(
     except BaseException as exc:
         caught = exc
     assert caught is primary
+    if source_loss:
+        assert _manifest(source) == ()
+        assert (source / "source.txt").read_bytes() == b"source canary\n"
+        assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
+        assert _manifest(owner.artifact_state_root / "canonical") == expected
+        assert (frozen.root / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
+        journals = tuple((owner.artifact_state_root / "transactions").glob("*/journal.json"))
+        assert len(journals) == 2
+        assert any("artifact recovery retained" in note for note in primary.__notes__)
+        monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
+        with pytest.raises(ArtifactVisibilityError, match="identity"):
+            async with open_artifact_session(_work(source), session_id=f"after-{session_id}", owner=owner):
+                pass
+        assert all(journal.is_file() for journal in journals)
+        assert _manifest(source) == ()
+        assert _git(source, "status", "--porcelain=v1", "--untracked-files=all") == ""
+        return
     if transition == "PUBLISH_INSTALLED":
         assert (source / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
     else:
@@ -2690,14 +2966,18 @@ async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
         def __getattr__(self, name: str) -> Any:
             return getattr(real_os, name)
 
-        def replace(self, source_path: Any, destination_path: Any) -> None:
-            if Path(destination_path) == target:
+        def replace(self, source_path: Any, destination_path: Any, **kwargs: Any) -> None:
+            if Path(destination_path) == target or (
+                kwargs.get("dst_dir_fd") is not None and Path(destination_path) == Path(target.name)
+            ):
                 target.write_bytes(second)
                 self.injected = True
-            real_os.replace(source_path, destination_path)
+            real_os.replace(source_path, destination_path, **kwargs)
 
         def link(self, source_path: Any, destination_path: Any, **kwargs: Any) -> None:
-            if Path(destination_path) == target:
+            if Path(destination_path) == target or (
+                kwargs.get("dst_dir_fd") is not None and Path(destination_path) == Path(target.name)
+            ):
                 target.write_bytes(second)
                 self.injected = True
             real_os.link(source_path, destination_path, **kwargs)

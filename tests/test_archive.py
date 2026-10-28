@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,7 +38,7 @@ from daydream.artifact_visibility import (
     ArtifactTreeSnapshot,
     RoutedDestination,
 )
-from daydream.artifacts.filesystem import manifest_tree
+from daydream.artifacts.filesystem import _validate_directory_identity, manifest_tree
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.artifacts import DeepArtifact
 from daydream.remote_ci import (
@@ -1284,18 +1285,149 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
     )
 
 
+@pytest.mark.parametrize("failure", [
+    "raised", "error-result", "malformed-result", "empty-result", "wrong-session", "missing-section", "wrong-quality",
+    "empty-quality", "invalid-unavailable",
+    pytest.param((("findings",), {}), id="empty-findings"),
+    pytest.param((("findings", "total"), "not-a-count"), id="finding-total-string"),
+    pytest.param((("findings", "total"), True), id="finding-total-bool"),
+    pytest.param((("findings", "total"), None), id="finding-total-null"),
+    pytest.param((("findings", "shipped_duplication"), {}), id="missing-duplicate-count"),
+    pytest.param((("findings", "shipped_duplication", "near_duplicate_pairs"), "unknown"), id="duplicate-count-string"),
+    pytest.param((("findings", "shipped_duplication", "near_duplicate_pairs"), -1), id="duplicate-count-negative"),
+    pytest.param((("timing",), {}), id="missing-wall-time"),
+    pytest.param((("timing", "total_wall_clock_seconds"), "unknown"), id="wall-time-string"),
+    pytest.param((("timing", "total_wall_clock_seconds"), float("nan")), id="wall-time-nan"),
+    pytest.param((("location",), {}), id="missing-location-rate"),
+    pytest.param((("location", "in_hunk_rate"), "unknown"), id="location-rate-string"),
+    pytest.param((("location", "in_hunk_rate"), 2.0), id="location-rate-out-of-range"),
+    pytest.param((("derived",), {}), id="missing-cost-per-finding"),
+    pytest.param((("derived", "cost_per_finding_usd"), "unknown"), id="cost-per-finding-string"),
+    pytest.param((("derived", "cost_per_finding_usd"), float("inf")), id="cost-per-finding-infinite"),
+])
 def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | tuple[tuple[str, ...], Any],
 ) -> None:
     """The host finalizer cannot infer success from the legacy fail-open wrapper."""
     session_id = "strict-session"
     arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),)
-    monkeypatch.setattr("daydream.eval.analyzer.analyze_session",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("eval failed")),
-    )
+    from daydream.eval.analyzer import analyze_session
+
+    def fail_evaluation(*args: Any, **kwargs: Any) -> Any:
+        if failure == "raised":
+            raise RuntimeError("eval failed")
+        if failure == "error-result":
+            return {"error": "no trajectory"}
+        if failure == "malformed-result":
+            return None
+        if failure == "empty-result":
+            return {}
+        evaluation = analyze_session(*args, **kwargs)
+        if isinstance(failure, tuple):
+            path, value = failure
+            section = evaluation
+            for key in path[:-1]:
+                section = section[key]
+            section[path[-1]] = value
+            return evaluation
+        if failure == "wrong-session":
+            evaluation["session_id"] = "another-session"
+        elif failure == "missing-section":
+            del evaluation["quality"]
+        elif failure == "empty-quality":
+            evaluation["quality"] = {}
+        elif failure == "invalid-unavailable":
+            evaluation["quality"]["erosion"] = 0.0
+        else:
+            evaluation["quality"] = None
+        return evaluation
+
+    monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
     with pytest.raises(ArchiveFinalizationError, match="evaluation"):
         finalize_archive_run(**arguments)
     assert not (get_archive_dir() / "runs" / session_id).exists()
+    assert not (get_archive_dir() / "index.db").exists()
+
+
+def test_strict_archive_keeps_frozen_analysis_without_live_code(tmp_path: Path, archive_dir: Path) -> None:
+    """Source loss cannot drop valid frozen evidence or fabricate measured empty quality."""
+    session_id = "source-unavailable"
+    arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
+    frozen = arguments["artifacts"]
+    trajectory = arguments["run"].trajectories.documents[0].json_bytes
+    source = arguments["artifact_provenance"].public_source
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n")
+    source.rename(tmp_path / "removed-source")
+
+    finalize_archive_run(**arguments)
+
+    archived = archive_dir / "runs" / session_id
+    assert (archived / "trajectory.json").read_bytes() == trajectory
+    assert manifest_tree(frozen.root) == frozen.manifest
+    evaluation = json.loads((archived / "evaluation.json").read_bytes())
+    assert evaluation["session_id"] == session_id
+    assert evaluation["quality"]["unavailable"] is True
+    assert evaluation["quality"]["erosion"] is evaluation["quality"]["verbosity"] is None
+    manifest = json.loads((archived / "manifest.json").read_bytes())
+    assert manifest["metrics"]["erosion"] is manifest["metrics"]["verbosity"] is None
+    assert not source.exists()
+    with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
+        assert connection.execute("SELECT session_id, erosion, verbosity FROM runs").fetchall() == [
+            (session_id, None, None),
+        ]
+
+
+@pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
+def test_strict_archive_reattests_live_workspace_before_quality(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
+) -> None:
+    """A source changed during a real frozen-artifact read cannot evade the initial Git check."""
+    session_id = "late-source-change"
+    receipt = tmp_path / "frozen/.daydream/deep/merged-items.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text('{"items": [{"confidence": "HIGH"}]}')
+    arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
+    source = arguments["artifact_provenance"].public_source
+    source.mkdir()
+    metadata = source.stat()
+    arguments["validate_code_workspace"] = partial(
+        _validate_directory_identity, source, device=metadata.st_dev, inode=metadata.st_ino, label="code workspace",
+    )
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    marker = replacement / "app.py"
+    marker.write_bytes(b"VALUE = 'replacement code'\n")
+    original_read = Path.read_text
+    moved = tmp_path / "moved-source"
+
+    def read_then_change(path: Path, *args: Any, **kwargs: Any) -> str:
+        content = original_read(path, *args, **kwargs)
+        if path == receipt and not moved.exists():
+            source.rename(moved)
+            if source_state == "replacement":
+                replacement.rename(source)
+            elif source_state == "symlink":
+                source.symlink_to(replacement, target_is_directory=True)
+        return content
+
+    monkeypatch.setattr(Path, "read_text", read_then_change)
+    archived = archive_dir / "runs" / session_id
+    if source_state == "missing":
+        finalize_archive_run(**arguments)
+        evaluation = json.loads((archived / "evaluation.json").read_bytes())
+        assert evaluation["findings"]["total"] == 1
+        assert evaluation["quality"]["unavailable"] is True
+        assert not source.exists()
+    else:
+        with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+            finalize_archive_run(**arguments)
+        assert not archived.exists()
+        assert not (archive_dir / "index.db").exists()
+    assert moved.is_dir()
+    retained_marker = source / marker.name if source_state == "replacement" else marker
+    assert retained_marker.read_bytes() == b"VALUE = 'replacement code'\n"
+    assert receipt.read_bytes() == b'{"items": [{"confidence": "HIGH"}]}'
 
 
 @pytest.mark.parametrize("mutate", [False, True])
@@ -1311,11 +1443,13 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
     arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),)
     public_source = tmp_path / "source"
     public_source.mkdir()
+    from daydream.eval.analyzer import analyze_session
 
-    def mutate_frozen_receipt(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    def mutate_frozen_receipt(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        evaluation = analyze_session(*args, **kwargs)
         if mutate:
             receipt.write_text(json.dumps({"session_id": session_id, "passed": False}), encoding="utf-8",)
-        return {"quality": {"scoped_files": 0}}
+        return evaluation
 
     monkeypatch.setattr("daydream.eval.analyzer.analyze_session", mutate_frozen_receipt,)
 

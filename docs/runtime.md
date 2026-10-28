@@ -23,6 +23,10 @@ merge base, diff key, and scope inventory. Preserve admitted partial findings an
 failure reasons. Incomplete/failed results can post COMMENT notices but cannot
 approve or resolve stale threads. Cache/resume must validate the same identities
 and current typed target attribution; missing/damaged proofs restart review.
+If the expected source becomes unavailable, terminal export retains validated
+findings and coverage using the bound captured diff, with conservative file/body
+placement instead of live-source line resolution. This does not resume review
+or establish completeness.
 
 Approval requires explicit opt-in and no blocking severity among all retained
 findings, including deduplication matches. Immutable schema-3 findings without
@@ -331,9 +335,31 @@ See [repair jobs](extensions.md#repair-jobs-test-step).
 Use the run's single artifact owner/session. Live artifacts are private; finalized
 `.daydream/` and `.review-output.md` belong to the source checkout even when work
 runs in an operational worktree. Join writers before freezing evidence. Tracked
-artifact paths cause refusal; competing bytes survive conflicts. Output-publication
-failure restores prior checkout artifacts. Optional archive, evaluation, index,
+artifact paths cause refusal; competing bytes survive conflicts. When the source
+identity remains valid, output-publication failure restores prior checkout artifacts.
+Optional archive, evaluation, index,
 or upload failure preserves completed review outputs and emits safe diagnostics.
+An unavailable expected checkout is distinct from a foreign path, symlink,
+wrong filesystem type, or replacement directory. Publication and restoration
+require the original source directory identity, independently of any surviving
+operational worktree. When restoration is unsafe, retain canonical baselines,
+frozen bytes, transaction journals and conflict bytes; never recreate the source
+or install into its replacement. Recovery requires the transaction's captured
+source identity; pending older journals without that proof are preserved and
+refused rather than adopted or migrated.
+Ephemeral cleanup verifies the original source and holds its Git common directory
+through subprocess dispatch; inherited Git routing cannot select replacement
+metadata. Unsafe cleanup retains the operational worktree and warns without
+replacing a primary failure.
+
+Finalization reports local JSONL capture, configured upload, archive/evaluation,
+and public installation separately. Later failure cannot revoke a successful
+capture receipt or imply successful public installation. Valid frozen analysis
+can be archived with explicitly unavailable live-source quality (null metrics
+and an unavailable diagnostic); a valid operational workspace can still supply
+quality independently of public-source availability. Genuine evaluation or
+integrity failures continue to abort atomic archive installation. Body failures
+and cancellation remain primary when finalization also fails.
 
 Pass generated model inputs through exact sanctioned paths or bounded inline
 contents; private storage is discovery isolation, not an OS sandbox. Never broaden

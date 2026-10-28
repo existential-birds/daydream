@@ -652,11 +652,17 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None
+    output_parent = review.output.parent.stat()
     link, stage, allocate = os.link, json_utils._stage_bytes, tempfile.mkstemp
     injected: list[bool] = []
     staging_findings = False
     def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
-        if Path(destination) == review.output and not injected:
+        parent_fd = kwargs.get('dst_dir_fd')
+        anchored_output = False
+        if parent_fd is not None and Path(destination) == Path(review.output.name):
+            parent = os.fstat(parent_fd)
+            anchored_output = (parent.st_dev, parent.st_ino) == (output_parent.st_dev, output_parent.st_ino)
+        if (Path(destination) == review.output or anchored_output) and not injected:
             injected.append(True)
             raise OSError('public install failed')
         link(source, destination, **kwargs)
@@ -733,11 +739,12 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert 'review_context' not in data
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation', 'source-loss', 'source-loss-salvage'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
-    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    show = git_ops.show
+    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': [], 'export': None}
     staging_coverage = False
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
@@ -747,6 +754,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         staging_coverage = path.name == 'review-coverage.json'
         if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
+        if b'"terminal_result"' in content:
+            state['export'] = (path, content)
         try:
             return stage(path, content, **kwargs)
         finally:
@@ -765,21 +774,35 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             state['rejected'] = True
             return '{"issues": "invalid"}'
         return text
+    def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
+        if fault.startswith('source-loss') and state['failed']:
+            pytest.fail('terminal export attempted to read live Git after source loss')
+        return show(target, *args, **kwargs)
     def response(prompt: str) -> Any:
         trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
-                   'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication'}[fault]
+                   'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication',
+                   'source-loss': 'supervisor adjudication',
+                   'source-loss-salvage': 'supervisor adjudication'}[fault]
         if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
             state['failed'] = True
             if fault == 'salvage':
                 assert json.loads(state['merged'].read_text())['items']
                 state['merged'].unlink()
+            if fault.startswith('source-loss'):
+                state['admitted'] = json.loads(state['merged'].read_text())['items'][0]
+                if fault == 'source-loss-salvage':
+                    state['merged'].unlink()
+                review.repo.rename(review.tmp / 'removed-source')
             return [error]
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
     review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
-    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
-                                       review_by_stack={'structure': [record()]}, responder=response)
+    review.patch.setattr(git_ops, 'show', retained_source_only)
+    stack = 'python' if fault == 'source-loss' else 'structure'
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=fault != 'source-loss',
+                                       review_by_stack={stack: [record()]}, responder=response)
+    review.backend.merge_echo_records = True
     if fault == 'fix':
         assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
         saved_path = review.repo / '.daydream/deep/review-coverage.json'
@@ -790,8 +813,40 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert 'pipeline' not in saved['required_phases']
         return
     with pytest.raises(RuntimeError) as raised:
-        await review.run()
+        await review.run(dataset_capture=fault.startswith('source-loss'),
+                         dataset_store_path=review.tmp / 'records')
     assert raised.value is error
+    if fault.startswith('source-loss'):
+        assert not review.repo.exists()
+        assert not review.output.exists()
+        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
+        findings = raw[0]['findings']['value']
+        assert len(findings['items']) == 1
+        assert findings['items'][0]['description'] == 'Grounded defect'
+        assert findings['items'][0]['item_uid'] == state['admitted']['item_uid']
+        assert findings['items'][0]['source_uids'] == state['admitted']['source_uids']
+        coverage = findings['terminal_coverage']
+        assert coverage['run_id'] == raw[0]['run_id']
+        assert coverage['analyzed_revision']['head_sha'] == review.pr.head_sha
+        assert coverage['analyzed_revision']['merge_base_sha'] == review.pr.base_sha
+        assert coverage['analyzed_revision']['diff_key'] == raw[0]['original_task']['value']['diff_sha256']
+        assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
+        assert state['export'] is not None, 'validated terminal findings were not installed privately'
+        export_path, exported_bytes = state['export']
+        assert export_path.read_bytes() == exported_bytes
+        exported = json.loads(exported_bytes)
+        assert len(exported['findings']) == 1 and exported['findings'][0]['title'] == 'Grounded defect'
+        assert exported['findings'][0]['placement'] == 'file' and exported['findings'][0]['line'] is None
+        result = exported['terminal_result']
+        assert result['stack_outcomes'] == coverage['stack_outcomes']
+        assert result['run_id'] == coverage['run_id']
+        assert result['analyzed_revision'] == coverage['analyzed_revision']
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'incomplete', True)
+        assert any('secondary base failure' in note for note in error.__notes__)
+        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
+        return
     if fault == 'coverage':
         assert state['writes'] and not review.output.exists()
         assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)

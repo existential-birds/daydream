@@ -38,6 +38,7 @@ from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
 from daydream.cli import _signal_handler
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
+from daydream.dataset import LocalRecordStore
 from daydream.deep.artifacts import (
     DeepArtifact,
     diff_key,
@@ -64,6 +65,7 @@ from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
+from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.review_result import terminal_result
@@ -367,6 +369,8 @@ def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
     ("none", 0), ("destination", 0), ("evaluation", 3),
     ("identity", 0), ("frozen_tree", 0), ("dump_publication", 0),
     ("dataset-file", 0), ("dataset-symlink", 0), ("dataset-runtime-owned", 0),
+    ("source-missing", 0), ("source-replaced", 0), ("source-symlink", 0),
+    ("source-missing-worktree", 0), ("source-replaced-worktree", 0), ("source-replaced-capture-worktree", 0),
 ])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
@@ -374,8 +378,13 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
 ) -> None:
     from daydream.archive import finalize_archive_run
     from daydream.eval.analyzer import analyze_session
+    from tests.test_artifact_visibility import _Entry, _manifest, _walk_entry
 
-    repo = _feature_repo(tmp_path)
+    force_worktree = failure_mode.endswith("-worktree")
+    repo = _feature_repo(tmp_path, remote=force_worktree)
+    source_loss = failure_mode.startswith("source-")
+    original_head = _git(repo, "rev-parse", "HEAD")
+    original_diff = git_ops.diff(repo, "main")
     _write_probe_flow(ext_dir, "artifact-probe", exit_code=exit_code)
     backend = _ControlledBackend("block")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
@@ -430,15 +439,56 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     (repo / ".review-output.md").write_text("prior review")
     config = RunConfig(
         target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
-        run_eval=failure_mode in ("none", "evaluation", "frozen_tree"), dump_artifacts=str(dump),
-        archive=True, non_interactive=True, dataset_capture=failure_mode.startswith("dataset"),
+        run_eval=source_loss or failure_mode in ("none", "evaluation", "frozen_tree"), dump_artifacts=str(dump),
+        archive=True, non_interactive=True, dataset_capture=source_loss or failure_mode.startswith("dataset"),
         dataset_store_path=store_path,
+        force_worktree=force_worktree,
     )
     result: list[int] = []
     frozen_trajectory: bytes | None = None
     active_progress = ""
     async def invoke() -> None:
         result.append(await _run_private(config, tmp_path))
+    replacement_root: Path
+    replacement_before: tuple[_Entry, ...]
+    replacement_git: tuple[str, str]
+    replacement_git_entries: list[_Entry]
+    capture_dispatched = False
+    real_run = subprocess.run
+
+    def lose_source() -> None:
+        nonlocal replacement_root, replacement_before, replacement_git, replacement_git_entries
+        repo.rename(tmp_path / "removed-source")
+        if failure_mode.startswith("source-replaced"):
+            _init_repo(repo)
+            (repo / "replacement.txt").write_bytes(b"replacement checkout\x00\xff")
+            _git(repo, "add", "replacement.txt")
+            _commit(repo, "replacement")
+            if force_worktree:
+                # The operational root survives while its Git pointer resolves to foreign metadata.
+                assert backend.cwd is not None and backend.cwd != repo
+                shutil.copytree(tmp_path / "removed-source" / ".git" / "worktrees", repo / ".git" / "worktrees")
+                copied_git_dir = Path(_git(backend.cwd, "rev-parse", "--absolute-git-dir"))
+                replacement_head = _git(repo, "rev-parse", "HEAD")
+                copied_git_dir.joinpath("HEAD").write_text(replacement_head + "\n")
+                assert _git(backend.cwd, "rev-parse", "HEAD") == replacement_head != original_head
+        elif failure_mode == "source-symlink":
+            repo.symlink_to(tmp_path / "removed-source", target_is_directory=True)
+        replacement_root = repo if failure_mode.startswith("source-replaced") else tmp_path / "removed-source"
+        replacement_before = _manifest(replacement_root)
+        replacement_git = (_git(replacement_root, "rev-parse", "HEAD"),
+                           _git(replacement_root, "status", "--porcelain"))
+        replacement_git_entries = []
+        _walk_entry(replacement_root, replacement_root / ".git", replacement_git_entries)
+
+    def replace_before_capture(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        nonlocal capture_dispatched
+        if (not capture_dispatched and args == ["git", "rev-parse", "HEAD"] and kwargs.get("cwd") == backend.cwd
+                and list((tmp_path / "private" / "runtime").glob("*/runs/*/frozen/.daydream/diff.patch"))):
+            capture_dispatched = True
+            lose_source()
+        return real_run(args, **kwargs)
+
     with anyio.fail_after(20):
         async with anyio.create_task_group() as group:
             group.start_soon(invoke)
@@ -450,6 +500,11 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 replacement = external_trajectory.with_name("replacement.tmp")
                 replacement.write_text("concurrent replacement\n", encoding="utf-8")
                 os.replace(replacement, external_trajectory)
+            if source_loss:
+                if failure_mode == "source-replaced-capture-worktree":
+                    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_before_capture)
+                else:
+                    lose_source()
             backend.release.set()
             if failure_mode == "none":
                 try:
@@ -470,11 +525,52 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                     frozen_trajectory = live_trajectories[0].read_bytes()
                 finally:
                     evaluation_release.set()
+    assert capture_dispatched is (failure_mode == "source-replaced-capture-worktree")
     captured = capsys.readouterr()
     progress = active_progress + captured.err
     assert not re.search(r"Finalization(?: started|:| complete| failed| finished)", captured.out)
     assert "\x1b[" not in progress and "\r" not in progress
     assert str(tmp_path / "private") not in progress
+    if source_loss:
+        assert result == [1]
+        assert "Finalization complete" not in progress
+        raw = read_records(LocalRecordStore(store_path)).runs
+        assert len(raw) == 1
+        assert raw[0]["final_state"]["value"]["head_sha"] is None
+        documents = raw[0]["trajectories"]["value"]["documents"]
+        assert all(document["session_id"] == raw[0]["run_id"] for document in documents)
+        frozen = list((tmp_path / "private" / "runtime").glob("*/runs/*/frozen/.daydream/diff.patch"))
+        assert len(frozen) == 1 and frozen[0].read_text() == original_diff
+        assert _manifest(replacement_root) == replacement_before
+        retained_git_entries: list[_Entry] = []
+        _walk_entry(replacement_root, replacement_root / ".git", retained_git_entries)
+        assert retained_git_entries == replacement_git_entries
+        if force_worktree:
+            assert backend.cwd is not None and backend.cwd.is_dir()
+            assert "Worktree cleanup skipped: original source is unavailable or changed." in captured.out
+        assert (_git(replacement_root, "rev-parse", "HEAD"),
+                _git(replacement_root, "status", "--porcelain")) == replacement_git
+        if failure_mode.startswith("source-missing"):
+            assert not repo.exists() and not repo.is_symlink()
+            archived = list((archive_dir / "runs").glob("[!.]*"))
+            assert len(archived) == 1
+            evaluation = json.loads((archived[0] / "evaluation.json").read_text())
+            assert evaluation["quality"]["unavailable"] is True
+            assert evaluation["quality"]["erosion"] is evaluation["quality"]["verbosity"] is None
+            assert json.loads((archived[0] / "manifest.json").read_text())["git"]["head_sha"] == original_head
+            assert "Archive/evaluation: retained" in progress
+            assert "artifact source is unavailable" in captured.out.lower()
+        else:
+            assert repo.is_symlink() is (failure_mode == "source-symlink")
+            if failure_mode.startswith("source-replaced"):
+                assert (repo / "replacement.txt").read_bytes() == b"replacement checkout\x00\xff"
+        assert "Local JSONL capture: retained" in progress
+        assert "Public publication: failed" in progress or "Public publication: not attempted" in progress
+        assert "Run data could not be persisted" not in captured.out
+        assert json.loads(external_trajectory.read_text()) == documents[0]
+        assert (dump / "prior.txt").read_text() == "prior dump"
+        assert list((tmp_path / "private" / "runtime").glob("*/transactions/*/journal.json"))
+        return
     if failure_mode in ("destination", "identity", "frozen_tree", "dump_publication"):
         assert re.search(r"Finalization failed after \d+\.\ds", progress)
     elif failure_mode == "evaluation" or failure_mode.startswith("dataset"):
@@ -525,10 +621,12 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert manifest["session_id"] == public_run.name
     assert manifest["archive_status"] == "complete"
 
+@pytest.mark.parametrize("cleanup_replacement", ["none", "source", "git"])
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path,
+    cleanup_replacement: Literal["none", "source", "git"],
 ) -> None:
-    """Root/fork provenance is stable source identity, not the deleted model cwd."""
+    """Cleanup and root/fork provenance stay with the captured repository through dispatch races."""
     repo = _feature_repo(tmp_path, remote=True)
     approved_head = _git(repo, "rev-parse", "HEAD")
     ext_dir.write_module(
@@ -549,6 +647,31 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
     )
     backend = _ControlledBackend()
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    from tests.test_artifact_visibility import _Entry, _walk_entry
+    real_run = subprocess.run
+    removed_source = tmp_path / "removed-source"
+    replacement_entries: list[_Entry] = []
+    cleanup_dispatched = False
+
+    def replace_before_dispatch(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        nonlocal cleanup_dispatched
+        if cleanup_replacement != "none" and "worktree" in args and "remove" in args and not cleanup_dispatched:
+            cleanup_dispatched = True
+            if cleanup_replacement == "source":
+                repo.rename(removed_source)
+                original_git = removed_source / ".git"
+            else:
+                original_git = tmp_path / "removed-git"
+                (repo / ".git").rename(original_git)
+            _init_repo(repo)
+            (repo / "replacement.txt").write_bytes(b"replacement checkout\x00\xff")
+            _git(repo, "add", "replacement.txt")
+            _commit(repo, "replacement")
+            shutil.copytree(original_git / "worktrees", repo / ".git" / "worktrees")
+            _walk_entry(repo, repo / ".git", replacement_entries)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_before_dispatch)
     result = await _run_private(
         RunConfig(
             target=str(repo), base="main", flow_name="source-probe", force_worktree=True, run_eval=True, archive=True,
@@ -558,8 +681,15 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
     assert result == 0
     assert backend.cwd is not None
     assert backend.cwd != repo.resolve()
-    assert not backend.cwd.exists()
-    public_run_dir, run_dir = _assert_one_published_run(repo, archive_dir)
+    assert cleanup_dispatched is (cleanup_replacement != "none")
+    if cleanup_replacement != "none":
+        retained_entries: list[_Entry] = []
+        _walk_entry(repo, repo / ".git", retained_entries)
+        assert retained_entries == replacement_entries
+        assert (repo / "replacement.txt").read_bytes() == b"replacement checkout\x00\xff"
+    assert backend.cwd.exists() is (cleanup_replacement != "none")
+    public_source = removed_source if cleanup_replacement == "source" else repo
+    public_run_dir, run_dir = _assert_one_published_run(public_source, archive_dir)
     payloads = [
         json.loads(path.read_text())
         for path in (run_dir / "trajectory.json", *sorted((run_dir / "trajectories").glob("*.json")))

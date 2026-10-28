@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
+from daydream.artifacts.filesystem import _available_directory_metadata, _validate_directory_identity
 from daydream.generated_files import is_generated_file
 from daydream.git_ops import is_git_workspace, search_files
 from daydream.repository_paths import git_observed_path_is_confined
@@ -636,9 +637,14 @@ def analyze_quality(
     standalone directories use recursive scope. Failed parses
     stay in scoped_files but are absent from every metric/index. Zero denominators
     yield None ratios. Refuse unsafe tree-sitter versions even for empty scope.
+    The workspace must remain the same real directory with no symlink ancestry;
+    only missing or permission-denied roots are classified as source unavailability.
     """
     daydream_dir = Path(daydream_dir)
     workspace = daydream_dir.parent if code_workspace is None else code_workspace
+    canonical_workspace, workspace_metadata = _available_directory_metadata(
+        workspace, label="quality code workspace",
+    )
 
     # Single shared choke point for every native-analysis entry point (mirrors
     # ``detect_affected_files``): a known-bad installed tree-sitter raises
@@ -651,6 +657,10 @@ def analyze_quality(
     # An explicitly empty candidate set is a zero-count empty report: never
     # walk (or parse) the workspace (issue #457).
     if candidate_paths is not None and not candidate_paths:
+        _validate_directory_identity(
+            canonical_workspace, device=workspace_metadata.st_dev, inode=workspace_metadata.st_ino,
+            label="quality code workspace",
+        )
         return {
             "erosion": None,
             "verbosity": None,
@@ -701,6 +711,10 @@ def analyze_quality(
 
     per_file, total_mass, high_mass, total_flagged, total_loc = _aggregate_per_file(
         candidates, parsed, parsed_lines, cross_file_flagged
+    )
+    _validate_directory_identity(
+        canonical_workspace, device=workspace_metadata.st_dev, inode=workspace_metadata.st_ino,
+        label="quality code workspace",
     )
 
     return {

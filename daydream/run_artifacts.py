@@ -1,5 +1,7 @@
 """Capture run identity, own recorder writes, and finalize immutable evidence."""
 
+from __future__ import annotations
+
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -89,6 +91,7 @@ class _RunArtifacts:
     capture: _RunWriteCapture
     dump: RoutedDestination | None
     execution_input: BackendExecutionInput | None = field(default=None, kw_only=True, repr=False, compare=False)
+    outcomes: _FinalizationOutcomes = field(default_factory=lambda: _FinalizationOutcomes(), init=False)
 
     def write_trajectory_document(
         self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
@@ -101,6 +104,25 @@ class _RunArtifacts:
                 f"trajectory {status} output failed ({type(exc).__name__})"
             )
             raise
+
+
+@dataclass
+class _FinalizationOutcomes:
+    """Independent host receipts, retained even when a later stage raises."""
+
+    capture: str = "not requested"
+    upload: str = "not requested"
+    archive: str = "not requested"
+    publication: str = "not attempted"
+
+    @property
+    def successful(self) -> bool:
+        return "failed" not in (self.capture, self.upload, self.archive, self.publication)
+
+    def report(self, progress: Callable[[str], None]) -> None:
+        for name, status in (("Local JSONL capture", self.capture), ("Configured upload", self.upload),
+                             ("Archive/evaluation", self.archive), ("Public publication", self.publication)):
+            progress(f"{name}: {status}")
 
 
 def _open_recorder(
@@ -330,7 +352,7 @@ def _finalize_run_artifacts(
     run_artifacts: _RunArtifacts, *, selected: RunWriteSnapshot | None, config: RunConfig,
     work: WorkContext, successful: bool, interrupted: bool = False,
     progress: Callable[[str], None],
-) -> bool:
+) -> _FinalizationOutcomes:
     """Freeze once, collect optional data, and publish the joined runtime outputs."""
     from daydream.archive import (
         ArchiveFinalizationError,
@@ -340,22 +362,31 @@ def _finalize_run_artifacts(
     )
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
+    outcomes = run_artifacts.outcomes
+    if config.dataset_capture:
+        outcomes.capture = "not attempted"
+        if config.trajectory_hub_repo:
+            outcomes.upload = "not attempted"
+    if config.archive or config.dump_artifacts:
+        outcomes.archive = "not attempted"
     progress("Freezing run evidence")
     if selected is None:
         snapshot = run_artifacts.session.freeze_unproduced()
-        collected = _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
-                                     work=work, successful=successful, interrupted=interrupted, progress=progress)
+        _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
+                         work=work, successful=successful, interrupted=interrupted, progress=progress)
         progress("Restoring run outputs")
+        outcomes.publication = "failed"
         run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
-        return collected
+        outcomes.publication = "restored prior outputs"
+        return outcomes
     if run_artifacts.capture.run_flow is None:
         raise ArtifactVisibilityError("run flow provenance was not retained")
     identity = run_artifacts.capture.manifest_identity
     if identity is None:
         raise ArtifactVisibilityError("manifest run identity was not captured")
     snapshot = run_artifacts.session.freeze(selected)
-    collected = _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
-                                 work=work, successful=successful, interrupted=interrupted, progress=progress)
+    _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
+                     work=work, successful=successful, interrupted=interrupted, progress=progress)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
     )
@@ -365,45 +396,54 @@ def _finalize_run_artifacts(
         else run_artifacts.session.finalization_merge_path(run_artifacts.dump, snapshot=snapshot)
     )
     try:
+        if config.archive or config.dump_artifacts:
+            outcomes.archive = "failed"
         finalize_archive_run(
             run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
             artifact_provenance=run_artifacts.session.provenance, config=config,
             work=work, dump_path=dump_path, progress=progress,
+            validate_code_workspace=run_artifacts.session.validate_code_workspace,
         )
     except (ArchiveIntegrityError, ArchivePublicationError) as exc:
         raise ArtifactVisibilityError(str(exc)) from exc
     except ArchiveFinalizationError as exc:
         # Exception text can include credentials, repository content, or private
         # runtime paths. Collection diagnostics report only the error category.
-        print_error(console, "Data Collection", f"Run data could not be persisted ({type(exc).__name__}).")
-        collected = False
+        print_error(console, "Data Collection", f"Archive/evaluation failed ({type(exc).__name__}).")
         if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
             dump_path.rmdir()
+    else:
+        if config.archive or config.dump_artifacts:
+            outcomes.archive = "retained"
     disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
     progress("Publishing run outputs")
+    outcomes.publication = "failed"
     run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
-    return collected
+    outcomes.publication = "installed"
+    return outcomes
 
 
 def _capture_dataset(
     run_artifacts: _RunArtifacts, *, snapshot: ArtifactTreeSnapshot, selected: RunWriteSnapshot | None,
     config: RunConfig, work: WorkContext, successful: bool, interrupted: bool,
     progress: Callable[[str], None],
-) -> bool:
+) -> None:
     """Keep dataset failures optional while retaining frozen integrity gates."""
     if not config.dataset_capture:
-        return True
+        return
     from daydream.archive.bundle import _validate_frozen_artifacts
     from daydream.archive.errors import ArchiveIntegrityError
     from daydream.dataset_capture import capture_run_record
 
-    collected = True
+    outcomes = run_artifacts.outcomes
+    outcomes.capture = "failed"
     progress("Capturing run data")
     try:
         _validate_frozen_artifacts(snapshot)
         try:
             capture_run_record(
-                artifacts=snapshot, selected=selected, original_task=run_artifacts.capture.original_task,
+                artifacts=snapshot, artifact_session=run_artifacts.session, selected=selected,
+                original_task=run_artifacts.capture.original_task,
                 identity=run_artifacts.capture.manifest_identity, config=config, work=work,
                 outcome="interrupted" if interrupted else "success" if successful else "failed",
                 forbidden_store_roots=(run_artifacts.owner.artifact_state_root.parent,
@@ -411,9 +451,10 @@ def _capture_dataset(
             )
         except Exception as exc:
             print_error(console, "Data Collection", f"Run evidence could not be persisted ({type(exc).__name__}).")
-            collected = False
         else:
+            outcomes.capture = "retained"
             if config.trajectory_hub_repo:
+                outcomes.upload = "failed"
                 progress("Uploading run data")
                 try:
                     from daydream.dataset import LocalRecordStore
@@ -423,11 +464,10 @@ def _capture_dataset(
                     status = DatasetUploader(store, config.trajectory_hub_repo).upload()
                     if status.failed or status.error:
                         print_error(console, "Data Collection", "Run evidence remains queued after an upload failure.")
-                        collected = False
+                    else:
+                        outcomes.upload = "uploaded"
                 except Exception as exc:
                     print_error(console, "Data Collection", f"Run evidence upload failed ({type(exc).__name__}).")
-                    collected = False
         _validate_frozen_artifacts(snapshot)
     except ArchiveIntegrityError as exc:
         raise ArtifactVisibilityError(str(exc)) from exc
-    return collected

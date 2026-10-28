@@ -6,6 +6,7 @@ All Git operations pass through git_ops.
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import shutil
 import stat
@@ -25,6 +26,7 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
     validate_private_workspace_owner,
 )
+from daydream.artifacts import filesystem
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
 
@@ -115,7 +117,8 @@ async def open_workspace(
 
     Ephemeral runs fetch first: a branch selects origin/<branch>, otherwise HEAD.
     The base defaults to an open PR's base, then the repository default branch.
-    Ignored support files are copied unless skip_tests; cleanup runs on every exit.
+    Ignored support files are copied unless skip_tests. Ephemeral cleanup requires
+    the original source directory; unsafe source changes retain the worktree.
 
     Validate/resolve the source's private owner before any mutation. Unborn Improve
     requires explicit opt-in, a symbolic HEAD, and no branch/base/ephemeral override.
@@ -130,6 +133,8 @@ async def open_workspace(
     else:
         validate_private_workspace_owner(private_owner, source=source)
     source = private_owner.source
+    _, source_metadata = filesystem._declared_directory_metadata(source, label="workspace source")
+    source_identity = filesystem._SourceIdentity(source, source_metadata.st_dev, source_metadata.st_ino)
     reject_public_operational_storage(source)
 
     if allow_unborn and git_ops.is_unborn_head(source):
@@ -158,9 +163,18 @@ async def open_workspace(
 
     run_id = _make_run_id()
     worktree_path: Path | None = None
+    git_directory_fd: int | None = None
 
     try:
         if is_ephemeral:
+            git_directory_fd = filesystem._open_directory_descriptor(
+                private_owner.git_common_dir, label="workspace Git directory",
+            )
+            metadata = os.fstat(git_directory_fd)
+            filesystem._validate_directory_identity(
+                private_owner.git_common_dir, device=metadata.st_dev, inode=metadata.st_ino,
+                label="workspace Git directory",
+            )
             assert resolved_ref is not None  # narrows for the type-checker
             assert operational_root is not None
             worktree_path = operational_root / run_id
@@ -201,14 +215,29 @@ async def open_workspace(
 
         yield ctx
     finally:
-        if worktree_path is not None:
-            try:
-                git_ops.worktree_remove(source, worktree_path, force=True)
-            except GitError as exc:
+        try:
+            if worktree_path is not None:
+                assert git_directory_fd is not None
                 from daydream.agent import console
                 from daydream.ui import print_warning
 
-                print_warning(console, f"Failed to remove ephemeral worktree {worktree_path}: {exc}")
+                try:
+                    source_identity.validate()
+                    metadata = os.fstat(git_directory_fd)
+                    filesystem._validate_directory_identity(
+                        private_owner.git_common_dir, device=metadata.st_dev, inode=metadata.st_ino,
+                        label="workspace Git directory",
+                    )
+                except ArtifactVisibilityError:
+                    print_warning(console, "Worktree cleanup skipped: original source is unavailable or changed.")
+                else:
+                    try:
+                        git_ops.worktree_remove(source, worktree_path, force=True, git_directory_fd=git_directory_fd)
+                    except GitError:
+                        print_warning(console, "Worktree cleanup failed; the operational worktree was retained.")
+        finally:
+            if git_directory_fd is not None:
+                os.close(git_directory_fd)
 
 
 @dataclass(frozen=True)

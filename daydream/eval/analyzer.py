@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
 )
-from daydream.artifact_visibility import ArtifactEvidenceProvenance
+from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactSourceUnavailableError
 from daydream.deep.records import record_issues_or_empty
 from daydream.deep.routing_record import read_routing_record
 from daydream.eval.quality import _QUALITY_CALIBRATION, analyze_quality as analyze_quality
@@ -779,12 +780,13 @@ def analyze_session(
     write_snapshot: RunWriteSnapshot,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
     code_workspace: Path | None = None,
+    validate_code_workspace: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Combine trajectory, findings, timing, routing, training, and quality analysis.
 
     The immutable write snapshot supplies trajectory bytes and lifecycle timing. Artifact provenance supplies the
-    public display path; only quality reads the live code_workspace. Unsafe tree-sitter
-    versions mark quality unavailable while preserving the remaining evaluation.
+    public display path; only quality reads the live code_workspace. Unavailable code
+    or unsafe tree-sitter versions preserve the remaining frozen-only evaluation.
     """
     daydream_dir = Path(daydream_dir)
     display_daydream_dir = (
@@ -818,16 +820,15 @@ def analyze_session(
             current_session(), "daydream.step.quality-analysis", "step",
             {"daydream.step": "quality-analysis", "daydream.phase": "quality-analysis"},
         ) as observed:
+            if validate_code_workspace is not None:
+                validate_code_workspace()
             quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
+            if validate_code_workspace is not None:
+                validate_code_workspace()
             observed.finish()
-    except TreeSitterBadVersionError as exc:
-        # issue #1087: a known-bad tree-sitter install refuses native analysis
-        # (assert_tree_sitter_safe at analyze_quality entry). Degrade only the
-        # quality section -- the rest of the evaluation is pure Python and
-        # stays valid, so the archive still writes evaluation.json instead
-        # of failing the whole run. The explicit marker records why
-        # the section is empty, mirroring the quality gate's fail-open
-        # "unavailable" contract.
+    except (ArtifactSourceUnavailableError, TreeSitterBadVersionError) as exc:
+        # Frozen evidence remains valid when live quality cannot be measured.
+        # Other Git, analyzer, and workspace safety failures still propagate.
         quality = {
             "erosion": None,
             "verbosity": None,

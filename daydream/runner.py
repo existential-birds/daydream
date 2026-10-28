@@ -572,7 +572,7 @@ async def _run_workspace(
                         )
                         with anyio.CancelScope(shield=True):
                             with step_scope("artifact-finalization", stack=dispatch_config.stack) as observed:
-                                collected = await anyio.to_thread.run_sync(finalize)
+                                outcomes = await anyio.to_thread.run_sync(finalize)
                                 observed.finish()
                     except BaseException as exc:
                         print_error(
@@ -586,13 +586,15 @@ async def _run_workspace(
                         )
                     else:
                         elapsed = time.monotonic() - started
-                        if finalization_error is not None or not collected:
+                        if finalization_error is not None or not outcomes.successful:
                             print_error(
                                 progress_console, "Finalization",
                                 f"Finalization finished with errors after {elapsed:.1f}s.",
                             )
                         else:
                             print_success(progress_console, f"Finalization complete after {elapsed:.1f}s.")
+                    finally:
+                        run_artifacts.outcomes.report(progress)
 
                 if primary is not None:
                     if isinstance(primary, SystemExit) and primary.code == 2 and capture.validation_error is not None:
@@ -767,6 +769,7 @@ def _write_findings_for_parsed(
     captured_pr: "pr_review.PRInfo",
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
+    frozen_only: bool = False,
     review_context: dict[str, Any] | None = None,
 ) -> int:
     """Write the artifact for the PR identity the caller captured at run start.
@@ -789,6 +792,7 @@ def _write_findings_for_parsed(
         auth=auth,
         terminal_result=terminal_result,
         snapshot_diff=snapshot_diff,
+        frozen_only=frozen_only,
         review_context=review_context,
     )
     out_path = Path(config.findings_out)

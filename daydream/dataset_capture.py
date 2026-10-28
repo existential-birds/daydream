@@ -22,7 +22,7 @@ from daydream.timeutil import now_iso_utc
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION, ScoringInputs, score_trajectory
 
 if TYPE_CHECKING:
-    from daydream.artifact_visibility import ArtifactTreeSnapshot
+    from daydream.artifact_visibility import ArtifactSession, ArtifactTreeSnapshot
     from daydream.run_artifacts import _RunArtifacts
     from daydream.run_config import RunConfig
     from daydream.run_snapshot import ManifestRunIdentity
@@ -86,7 +86,7 @@ def collect_verification(
 
 
 def capture_run_record(
-    *, artifacts: ArtifactTreeSnapshot, selected: RunWriteSnapshot | None,
+    *, artifacts: ArtifactTreeSnapshot, artifact_session: ArtifactSession, selected: RunWriteSnapshot | None,
     original_task: dict[str, Any] | None, identity: ManifestRunIdentity | None,
     config: RunConfig, work: WorkContext, outcome: Literal["success", "failed", "interrupted"],
     forbidden_store_roots: tuple[Path, ...] = (),
@@ -172,9 +172,13 @@ def capture_run_record(
     has_scoring = bool(claims or merged is not None or review_text is not None or scoring_inputs.verifier_verdicts
                        or not scoring_inputs.format_valid)
     scoring = capture_scoring(scoring_inputs, review_text)
+    from daydream.artifact_visibility import ArtifactVisibilityError
+
     try:
+        artifact_session.validate_code_workspace()
         final_head = git_ops.head_sha(work.repo)
-    except git_ops.GitError:
+        artifact_session.validate_code_workspace()
+    except (ArtifactVisibilityError, git_ops.GitError):
         final_head = None
     provenance = {"producer": capture_executable_provenance().to_dict(),
                   "repository_context": {"branch": work.head_branch, "base_branch": work.base_branch,

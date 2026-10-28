@@ -214,6 +214,7 @@ def build_findings_artifact(
     review_context: dict[str, Any] | None = None,
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
+    frozen_only: bool = False,
     immutable_input: dict[str, Any] | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
@@ -230,6 +231,9 @@ def build_findings_artifact(
         raise FindingsValidationError('review requires terminal_result; diagram forbids code coverage')
     if kind == 'review' and snapshot_diff is None:
         raise FindingsValidationError('review requires the captured snapshot diff')
+    if frozen_only and (terminal_result is None or snapshot_diff is None
+            or hashlib.sha256(snapshot_diff.encode()).hexdigest() != terminal_result['analyzed_revision']['diff_key']):
+        raise FindingsValidationError('frozen findings placement requires the bound snapshot diff')
     artifact: dict[str, Any] = {
         "schema_version": IMMUTABLE_FINDINGS_SCHEMA_VERSION if immutable_input is not None else FINDINGS_SCHEMA_VERSION,
         "repo": f"{pr.owner}/{pr.repo}",
@@ -248,8 +252,8 @@ def build_findings_artifact(
         _validate_artifact(artifact)
         local = immutable_input['materialization']
         pr = replace(pr, head_sha=local['head_sha'], base_sha=local['comparison_base_sha'])
-    placement_options = {"snapshot_diff": snapshot_diff} if snapshot_diff is not None else {}
-    classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers, **placement_options)
+    classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers,
+                                    snapshot_diff=snapshot_diff, frozen_only=frozen_only)
     findings = [
         _finding_dict(issue, placement="inline", line=entry.line)
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)

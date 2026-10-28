@@ -12,6 +12,7 @@ from daydream.artifacts.models import (
     _REVIEW_OUTPUT,
     _SCHEMA_VERSION,
     ArtifactManifestEntry,
+    ArtifactSourceUnavailableError,
     ArtifactVisibilityError,
     _ExternalEntryLifecycle,
     _TerminalState,
@@ -196,7 +197,13 @@ def _write_transaction_owner(
     workspace_key: str,
     session_id: str,
     kind: Literal["detach", "publish"],
+    source: Path,
+    source_fd: int,
 ) -> None:
+    metadata = os.fstat(source_fd)
+    filesystem._validate_directory_identity(
+        source, device=metadata.st_dev, inode=metadata.st_ino, label="artifact source"
+    )
     filesystem._atomic_json(
         transaction / "transaction-owner.json",
         {
@@ -207,6 +214,35 @@ def _write_transaction_owner(
             "kind": kind,
         },
     )
+    filesystem._atomic_json(
+        transaction / "source-identity.json",
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "source": str(source),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+        },
+    )
+
+
+def _validate_source_identity(transaction: Path, source: Path) -> filesystem._SourceIdentity:
+    """Replay only against the original checkout, never a new tree at its path."""
+    try:
+        payload = filesystem._load_json(transaction / "source-identity.json")
+    except ArtifactVisibilityError as exc:
+        raise ArtifactVisibilityError("artifact transaction source identity manifest is unavailable") from exc
+    if (
+        set(payload) != {"schema_version", "source", "device", "inode"}
+        or type(payload["schema_version"]) is not int
+        or payload["schema_version"] != _SCHEMA_VERSION
+        or payload["source"] != str(source)
+        or type(payload["device"]) is not int
+        or type(payload["inode"]) is not int
+    ):
+        raise ArtifactVisibilityError("artifact transaction source identity manifest is malformed")
+    identity = filesystem._SourceIdentity(source, payload["device"], payload["inode"])
+    identity.validate()
+    return identity
 
 
 def _load_transaction_owner(transaction: Path, state_root: Path) -> dict[str, object]:
@@ -250,6 +286,9 @@ def _transaction_context(error: Exception, state_root: Path, transaction: Path, 
     if isinstance(error, _NamedTransactionError):
         return error
     suffix = f" (artifact transaction {transaction.name} in workspace {state_root}{detail})"
+    if isinstance(error, ArtifactSourceUnavailableError):
+        error.add_note(suffix.strip())
+        return error
     contextual = _NamedTransactionError(f"{error}{suffix}")
     contextual.__cause__ = error
     return contextual
@@ -275,6 +314,7 @@ def _clear_failed_restore(state_root: Path, source: Path, transaction: Path, err
     """
     if _transaction_holds_conflict(transaction):
         return _transaction_context(error, state_root, transaction)
+    _validate_source_identity(transaction, source)
     publication._reset_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
     preserved = _quarantine_transaction(state_root, transaction)
     return _transaction_context(
@@ -293,7 +333,8 @@ def _reconcile_failed_detach(state_root: Path, source: Path, transaction: Path) 
     entries = filesystem._parse_manifest(canonical_manifest)
     if filesystem.manifest_tree(canonical) != entries:
         raise ArtifactVisibilityError("canonical artifact recovery copy is corrupt")
-    conflicts = publication._restore_manifest_noclobber(source, canonical, entries)
+    source_identity = _validate_source_identity(transaction, source)
+    conflicts = publication._restore_manifest_noclobber(source, canonical, entries, source_identity=source_identity)
     conflict_registry = transaction / "conflicts.json"
     if conflicts or conflict_registry.exists() or conflict_registry.is_symlink():
         raise ArtifactVisibilityError("artifact recovery retained a concurrent replacement conflict")
@@ -314,6 +355,7 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         journal = transaction / "journal.json"
         if not journal.is_file():
             publishing = _load_transaction_owner(transaction, state_root)["kind"] == "publish"
+            _validate_source_identity(transaction, source)
             source_stage = publication._source_stage_path(source, transaction.name, "publish") if publishing else None
             if source_stage is not None and (source_stage.exists() or source_stage.is_symlink()):
                 publication._retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
@@ -334,7 +376,10 @@ def _recover_transactions(state_root: Path, source: Path) -> None:
         try:
             _recover_transaction(state_root, source, transaction, state, session_id, completed_sessions)
         except Exception as exc:
-            raise _transaction_context(exc, state_root, transaction) from exc
+            contextual = _transaction_context(exc, state_root, transaction)
+            if contextual is exc:
+                raise
+            raise contextual from exc
 
 
 def _recover_transaction(
@@ -351,6 +396,7 @@ def _recover_transaction(
     if session_id in completed_sessions and not state.is_publish:
         _retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
         return
+    source_identity = _validate_source_identity(transaction, source)
     canonical = state_root / "canonical"
     canonical_manifest = state_root / "canonical-manifest.json"
     transaction_manifest = transaction / "manifest.json"
@@ -416,6 +462,7 @@ def _recover_transaction(
         if filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT)) != canonical_entries:
             raise ArtifactVisibilityError("verified public artifact recovery copy is corrupt")
     else:
+        _validate_source_identity(transaction, source)
         public_entries = filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT))
         allowed = [canonical_entries]
         if published_entries is not None:
@@ -440,6 +487,7 @@ def _recover_transaction(
                 workspace_key=state_root.name,
                 purpose="recover-public",
                 stage_parent=source.parent,
+                source_identity=source_identity,
             )
         publication._reset_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
         restore_stage = publication._create_source_stage(
@@ -447,7 +495,8 @@ def _recover_transaction(
         )
         public_stage = restore_stage / "public"
         filesystem._copy_tree(canonical, public_stage, canonical_entries)
-        publication._replace_public_from_tree(source, public_stage, canonical_entries)
+        _validate_source_identity(transaction, source)
+        publication._replace_public_from_tree(source, public_stage, canonical_entries, source_identity=source_identity)
     if state in (_Transition.PUBLISH_INSTALLED, _Transition.PUBLISH_VERIFIED):
         for record in destination_records:
             if filesystem.manifest_tree(Path(record.base), (record.relative,)) != record.published:
@@ -456,7 +505,10 @@ def _recover_transaction(
         assert restore_stage is not None
         if destination_records:
             try:
-                publication._restore_destination_records(source, transaction, destination_records, restore_stage)
+                _validate_source_identity(transaction, source)
+                publication._restore_destination_records(
+                    source, transaction, destination_records, restore_stage, source_identity=source_identity
+                )
             except Exception as exc:
                 raise _clear_failed_restore(state_root, source, transaction, exc) from exc
         publication._retire_source_stage(source, transaction.name, "restore", workspace_key=state_root.name)
@@ -468,6 +520,7 @@ def _recover_transaction(
             publication._retire_source_stage(source, transaction.name, "publish", workspace_key=state_root.name)
         elif state is not _Transition.PUBLISH_VERIFIED:
             raise ArtifactVisibilityError("artifact publication stage is missing")
+    source_identity.validate()
     _retire_transaction(
         state_root,
         transaction,

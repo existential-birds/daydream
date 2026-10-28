@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 from collections.abc import Callable
@@ -15,10 +16,11 @@ from daydream.archive.errors import (
     ArchiveIntegrityError,
     ArchivePublicationError,
 )
-from daydream.archive.git_context import capture_git_context
+from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
 from daydream.archive.pipeline import _manifest_state
+from daydream.artifacts.models import ArtifactSourceUnavailableError
 from daydream.observability.runtime import current_session
 from daydream.observability.spans import SpanScope
 from daydream.run_snapshot import ArchiveRunSnapshot
@@ -64,6 +66,66 @@ def _discard_or_note(path: Path, exc: BaseException, stage: str, *, recreate: bo
         )
 
 
+def _validate_evaluation(
+    evaluation: dict[str, Any], *, session_id: str, trajectory_count: int, display_path: Path,
+) -> None:
+    """Require a complete analyzer result bound to the archive's selected evidence."""
+    sections = (
+        "agent", "cost", "timing", "tools", "findings", "location", "routing", "training_signals", "quality", "derived",
+    )
+    if (
+        not isinstance(evaluation, dict)
+        or "error" in evaluation
+        or evaluation.get("session_id") != session_id
+        or type(evaluation.get("trajectory_count")) is not int
+        or evaluation["trajectory_count"] != trajectory_count
+        or evaluation.get("daydream_dir") != str(display_path)
+        or "latency_profile" not in evaluation
+        or evaluation["latency_profile"] is not None and not isinstance(evaluation["latency_profile"], str)
+        or any(not isinstance(evaluation.get(section), dict) for section in sections)
+    ):
+        raise ValueError("evaluation returned a malformed or unbound result")
+    findings = evaluation["findings"]
+    duplicates = findings.get("shipped_duplication")
+    if not isinstance(duplicates, dict):
+        raise ValueError("evaluation returned malformed finding metrics")
+    for section, key, nullable in ((findings, "total", False), (duplicates, "near_duplicate_pairs", True)):
+        value = section.get(key)
+        if (
+            key not in section or value is None and not nullable
+            or value is not None and (type(value) is not int or not 0 <= value < 2**63)
+        ):
+            raise ValueError("evaluation returned a malformed count")
+    quality = evaluation["quality"]
+    # Validate the nullable numeric outcomes consumed by the manifest/index.
+    metrics = (
+        (evaluation["timing"], "total_wall_clock_seconds", None),
+        (evaluation["location"], "in_hunk_rate", 1),
+        (quality, "erosion", 1), (quality, "verbosity", 1),
+        (evaluation["derived"], "cost_per_finding_usd", None),
+    )
+    for section, key, maximum in metrics:
+        value = section.get(key)
+        if key not in section or value is not None and (
+            type(value) not in (int, float) or not math.isfinite(value) or value < 0
+            or maximum is not None and value > maximum
+        ):
+            raise ValueError("evaluation returned a malformed metric")
+    if (
+        not isinstance(quality.get("per_file"), dict)
+        or not isinstance(quality.get("calibration"), dict)
+        or type(quality.get("scoped_files")) is not int
+        or quality["scoped_files"] < 0
+        or "unavailable" in quality and type(quality["unavailable"]) is not bool
+        or quality.get("unavailable") is True and (
+            quality["erosion"] is not None or quality["verbosity"] is not None
+            or quality["per_file"] or quality["scoped_files"] != 0
+            or not isinstance(quality.get("error"), str) or not quality["error"].strip()
+        )
+    ):
+        raise ValueError("evaluation returned malformed quality")
+
+
 def finalize_archive_run(
     *,
     run: ArchiveRunSnapshot,
@@ -73,6 +135,7 @@ def finalize_archive_run(
     work: WorkContext | None,
     dump_path: Path | None = None,
     progress: Callable[[str], None] | None = None,
+    validate_code_workspace: Callable[[], None] | None = None,
 ) -> None:
     """Strictly archive one immutable run or raise a closed typed error."""
     recorder_provenance = run.recorder_provenance
@@ -116,7 +179,16 @@ def finalize_archive_run(
             run_dir=assembly_dir,
         )
         target_dir = artifacts.root
-        git_ctx = capture_git_context(work.repo if work is not None else target_dir)
+        try:
+            if validate_code_workspace is not None:
+                validate_code_workspace()
+        except ArtifactSourceUnavailableError:
+            git_ctx = GitContext(
+                branch=work.head_branch if work is not None else None,
+                head_sha=work.head_sha if work is not None else None,
+            )
+        else:
+            git_ctx = capture_git_context(work.repo if work is not None else target_dir)
         if work is not None:
             git_ctx.base_branch = work.base_branch
             if git_ctx.base_sha is None:
@@ -140,10 +212,15 @@ def finalize_archive_run(
                         write_snapshot=write_snapshot,
                         artifact_provenance=artifact_provenance,
                         code_workspace=work.repo if work is not None else artifact_provenance.public_source,
+                        validate_code_workspace=validate_code_workspace,
                     )
-                    if "error" in evaluation:
-                        raise ValueError("evaluation returned an incomplete result")
+                    _validate_evaluation(
+                        evaluation, session_id=session_id, trajectory_count=len(write_snapshot.documents),
+                        display_path=artifact_provenance.public_daydream_dir,
+                    )
                     observed.finish()
+                if evaluation.get("quality", {}).get("unavailable") and progress is not None:
+                    progress("Live-source quality unavailable; frozen analysis retained")
             except Exception as exc:
                 _validate_frozen_artifacts(artifacts)
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc

@@ -50,6 +50,16 @@ from tests.harness.git_helpers import (
 from tests.harness.trajectory import root_trajectory
 
 
+def _matches_link_destination(destination: Any, target: Path, *, dir_fd: int | None) -> bool:
+    """Select the requested output, including installs anchored to its real parent."""
+    if Path(destination) == target:
+        return True
+    if dir_fd is None or Path(destination) != Path(target.name):
+        return False
+    parent, expected = os.fstat(dir_fd), target.parent.stat()
+    return (parent.st_dev, parent.st_ino) == (expected.st_dev, expected.st_ino)
+
+
 @pytest.fixture
 def operator_policy(tmp_path: Path) -> HostedReviewPolicy:
     """Nominal isolated authority; each journey owns its faults and explicit budgets."""
@@ -380,7 +390,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                 "committed-review.json" if challenge == "hosted-bundle-install"
                 else "review-output.md" if hosted_policy is not None else ".review-output.md"
             )
-            if Path(destination) == output_root / output_name:
+            if _matches_link_destination(destination, output_root / output_name, dir_fd=kwargs.get("dst_dir_fd")):
                 injected = True
                 raise OSError("new current report cannot install")
             real_link(source, destination, **kwargs)
@@ -475,6 +485,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         len(decision["evidence_refs"]) == 1
         for scope in value["terminal_result"]["stack_outcomes"] for decision in scope["target_decisions"]
     )
+    if output_failure:
+        assert injected
     assert result.output_installed is (not output_failure)
     assert result.capture_state == "complete"
     if challenge == "exhausted":
@@ -494,7 +506,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             "{arbiter_input_path}", "the captured-source claim inventory below"
         )
     if output_failure:
-        assert injected and result.output_error is not None
+        assert result.output_error is not None
         assert not (repo / ".daydream/committed-review.json").exists()
         assert not (repo / ".review-output.md").exists()
         if hosted_policy is not None:
@@ -939,9 +951,12 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
 
     def fail_install(source: Any, destination: Any, **kwargs: Any) -> None:
         nonlocal injected
-        if outcome == "install-failure" and Path(destination) == policy.output_dir / "findings.json":
+        target = policy.output_dir / "findings.json"
+        if outcome == "install-failure" and _matches_link_destination(
+            destination, target, dir_fd=kwargs.get("dst_dir_fd")
+        ):
             injected = True
-            Path(destination).write_bytes(b"competing bytes")
+            target.write_bytes(b"competing bytes")
             raise FileExistsError("competing output")
         real_link(source, destination, **kwargs)
 
