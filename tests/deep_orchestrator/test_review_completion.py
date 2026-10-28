@@ -27,7 +27,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
@@ -739,8 +739,13 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert 'review_context' not in data
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation', 'source-loss', 'source-loss-salvage'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation', 'source-loss', 'source-loss-salvage',
+                                  'source-loss-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
+    force_worktree = fault.endswith('-worktree')
+    if force_worktree:
+        git(review.repo, 'remote', 'add', 'origin', str(bare_remote(review.tmp / 'origin.git')))
+        git(review.repo, 'push', 'origin', 'main')
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
     show = git_ops.show
@@ -782,7 +787,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
                    'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication',
                    'source-loss': 'supervisor adjudication',
-                   'source-loss-salvage': 'supervisor adjudication'}[fault]
+                   'source-loss-salvage': 'supervisor adjudication',
+                   'source-loss-worktree': 'supervisor adjudication'}[fault]
         if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
             state['failed'] = True
             if fault == 'salvage':
@@ -799,8 +805,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
     review.patch.setattr(git_ops, 'show', retained_source_only)
-    stack = 'python' if fault == 'source-loss' else 'structure'
-    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=fault != 'source-loss',
+    stack = 'python' if fault in {'source-loss', 'source-loss-worktree'} else 'structure'
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=stack != 'python',
                                        review_by_stack={stack: [record()]}, responder=response)
     review.backend.merge_echo_records = True
     if fault == 'fix':
@@ -814,10 +820,16 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         return
     with pytest.raises(RuntimeError) as raised:
         await review.run(dataset_capture=fault.startswith('source-loss'),
-                         dataset_store_path=review.tmp / 'records')
+                         dataset_store_path=review.tmp / 'records', force_worktree=force_worktree)
     assert raised.value is error
     if fault.startswith('source-loss'):
         assert not review.repo.exists()
+        if force_worktree:
+            operational = {call['cwd'] for call in review.backend.calls if 'cwd' in call}
+            assert operational and all(path != review.repo and path.is_dir() for path in operational)
+            for path in operational:
+                with pytest.raises(git_ops.GitError):
+                    git_ops.head_sha(path)
         assert not review.output.exists()
         raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
         assert len(raw) == 1 and raw[0]['outcome'] == 'failed'

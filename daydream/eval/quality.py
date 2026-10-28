@@ -11,7 +11,7 @@ from typing import Any, Iterator
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.artifacts.filesystem import _available_directory_metadata, _validate_directory_identity
 from daydream.generated_files import is_generated_file
-from daydream.git_ops import is_git_workspace, search_files
+from daydream.git_ops import GitError, is_git_workspace, search_files
 from daydream.repository_paths import git_observed_path_is_confined
 
 # Quality metrics (issue #316) ----------------------------------------------
@@ -681,20 +681,27 @@ def analyze_quality(
     parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
     candidates: list[tuple[Path, str]] = []
-    for path, rel, source in _scoped_python_files(workspace):
-        # Eligibility and parsing share these bytes. Exact relative candidate
-        # matches restrict reporting, while every valid peer supplies clones.
-        candidate = candidate_paths is None or rel in candidate_paths
-        if candidate:
-            candidates.append((path, rel))
-        result = _parse_python_source(source)
-        if result is None:
-            continue
-        root, lines = result
-        file_lines.append((path, lines))
-        if candidate:
-            parsed[path] = root
-            parsed_lines[path] = lines
+    try:
+        for path, rel, source in _scoped_python_files(workspace):
+            # Eligibility and parsing share these bytes. Exact relative candidate
+            # matches restrict reporting, while every valid peer supplies clones.
+            candidate = candidate_paths is None or rel in candidate_paths
+            if candidate:
+                candidates.append((path, rel))
+            result = _parse_python_source(source)
+            if result is None:
+                continue
+            root, lines = result
+            file_lines.append((path, lines))
+            if candidate:
+                parsed[path] = root
+                parsed_lines[path] = lines
+    except GitError:
+        _validate_directory_identity(
+            canonical_workspace, device=workspace_metadata.st_dev, inode=workspace_metadata.st_ino,
+            label="quality code workspace",
+        )
+        raise
 
     # Cross-file clone pass over the index (parsed candidates + raw peers):
     # find blocks duplicated verbatim across >=2 files, then feed each target's

@@ -140,7 +140,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     frozen_only = False
     if ctx.artifacts is not None:
         try:
-            ctx.artifacts.validate_repo()
+            ctx.artifacts.validate_code_workspace()
         except ArtifactSourceUnavailableError:
             frozen_only = True
     return _write_findings_for_parsed(

@@ -532,10 +532,11 @@ def test_quality_git_inventory_failure_never_recurses(
 
 
 @pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
+@pytest.mark.parametrize("change_at", ["before-inventory", "after-inventory"])
 def test_quality_reattests_workspace_after_git_inventory(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str, change_at: str,
 ) -> None:
-    """Losing the root between real Git enumeration and reads cannot produce measured empty quality."""
+    """Root changes around real Git inventory remain unavailable or unsafe, without widening scope."""
     (git_repo / "app.py").write_bytes(b"ORIGINAL = 1\n")
     moved = tmp_path / "moved-source"
     replacement = tmp_path / "replacement"
@@ -544,17 +545,21 @@ def test_quality_reattests_workspace_after_git_inventory(
     inventory = search_files
 
     def enumerate_then_change(*args: Any, **kwargs: Any) -> list[str]:
-        paths = inventory(*args, **kwargs)
+        paths = inventory(*args, **kwargs) if change_at == "after-inventory" else []
         git_repo.rename(moved)
         if source_state == "replacement":
             replacement.rename(git_repo)
         elif source_state == "symlink":
             git_repo.symlink_to(replacement, target_is_directory=True)
-        return paths
+        return paths if change_at == "after-inventory" else inventory(*args, **kwargs)
 
     monkeypatch.setattr(quality_mod, "search_files", enumerate_then_change)
-    with pytest.raises(ArtifactVisibilityError):
+    with pytest.raises(ArtifactVisibilityError) as caught:
         analyze_quality(tmp_path / "frozen/.daydream", code_workspace=git_repo)
+    if source_state == "missing":
+        assert type(caught.value).__name__ == "ArtifactSourceUnavailableError"
+    else:
+        assert type(caught.value) is ArtifactVisibilityError
     assert (moved / "app.py").read_bytes() == b"ORIGINAL = 1\n"
     retained = git_repo if source_state == "replacement" else replacement
     assert (retained / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
@@ -1006,7 +1011,9 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 
 
-@pytest.mark.parametrize("unavailable", ["tree-sitter", "removed-source", "git-metadata-during-inventory"])
+@pytest.mark.parametrize("unavailable", [
+    "tree-sitter", "removed-source", "git-metadata-during-inventory", "git-metadata-before-inventory",
+])
 def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str,
 ) -> None:
@@ -1038,9 +1045,9 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
         inventory = search_files
 
         def enumerate_then_remove_git(*args: Any, **kwargs: Any) -> list[str]:
-            paths = inventory(*args, **kwargs)
+            paths = inventory(*args, **kwargs) if unavailable == "git-metadata-during-inventory" else []
             (ws / ".git").rename(tmp_path / "removed-git")
-            return paths
+            return paths if unavailable == "git-metadata-during-inventory" else inventory(*args, **kwargs)
 
         monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
 

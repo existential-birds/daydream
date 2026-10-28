@@ -1287,7 +1287,7 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
 
 @pytest.mark.parametrize("failure", [
     "raised", "error-result", "malformed-result", "empty-result", "wrong-session", "missing-section", "wrong-quality",
-    "empty-quality", "invalid-unavailable",
+    "empty-quality", "invalid-unavailable", "corrupt-git-index",
     pytest.param((("findings",), {}), id="empty-findings"),
     pytest.param((("findings", "total"), "not-a-count"), id="finding-total-string"),
     pytest.param((("findings", "total"), True), id="finding-total-bool"),
@@ -1312,6 +1312,19 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
     session_id = "strict-session"
     arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),)
     from daydream.eval.analyzer import analyze_session
+
+    if failure == "corrupt-git-index":
+        from tests.harness.git_helpers import git
+
+        source = arguments["artifact_provenance"].public_source
+        source.mkdir()
+        git(source, "init")
+        metadata = (source / ".git").stat()
+        arguments["validate_code_workspace"] = partial(
+            _validate_directory_identity, source / ".git", device=metadata.st_dev, inode=metadata.st_ino,
+            label="code Git metadata",
+        )
+        (source / ".git/index").write_bytes(b"corrupt-index")
 
     def fail_evaluation(*args: Any, **kwargs: Any) -> Any:
         if failure == "raised":
@@ -1343,13 +1356,20 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
         return evaluation
 
     monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
-    with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+    with pytest.raises(ArchiveFinalizationError, match="evaluation") as caught:
         finalize_archive_run(**arguments)
+    if failure == "corrupt-git-index":
+        from daydream.git_ops import GitError
+
+        assert isinstance(caught.value.__cause__, GitError)
     assert not (get_archive_dir() / "runs" / session_id).exists()
     assert not (get_archive_dir() / "index.db").exists()
 
 
-def test_strict_archive_keeps_frozen_analysis_without_live_code(tmp_path: Path, archive_dir: Path) -> None:
+@pytest.mark.parametrize("remove_at", ["before-finalization", "git-discovery", "git-inventory"])
+def test_strict_archive_keeps_frozen_analysis_without_live_code(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, remove_at: str,
+) -> None:
     """Source loss cannot drop valid frozen evidence or fabricate measured empty quality."""
     session_id = "source-unavailable"
     arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
@@ -1358,7 +1378,26 @@ def test_strict_archive_keeps_frozen_analysis_without_live_code(tmp_path: Path, 
     source = arguments["artifact_provenance"].public_source
     source.mkdir()
     (source / "app.py").write_text("VALUE = 1\n")
-    source.rename(tmp_path / "removed-source")
+    if remove_at == "before-finalization":
+        source.rename(tmp_path / "removed-source")
+    else:
+        from daydream.git_ops import process as git_process
+        from tests.harness.git_helpers import git
+
+        git(source, "init")
+        metadata = source.stat()
+        arguments["validate_code_workspace"] = partial(
+            _validate_directory_identity, source, device=metadata.st_dev, inode=metadata.st_ino, label="code workspace",
+        )
+        run_git = git_process._run_git
+        command = "rev-parse" if remove_at == "git-discovery" else "ls-files"
+
+        def remove_then_dispatch(repo: Path, args: Any, **kwargs: Any) -> Any:
+            if repo == source and args[0] == command:
+                source.rename(tmp_path / "removed-source")
+            return run_git(repo, args, **kwargs)
+
+        monkeypatch.setattr(git_process, "_run_git", remove_then_dispatch)
 
     finalize_archive_run(**arguments)
 

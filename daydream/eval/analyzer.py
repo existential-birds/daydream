@@ -16,6 +16,7 @@ from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactSou
 from daydream.deep.records import record_issues_or_empty
 from daydream.deep.routing_record import read_routing_record
 from daydream.eval.quality import _QUALITY_CALIBRATION, analyze_quality as analyze_quality
+from daydream.git_ops import GitError
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.observability.runtime import current_session
 from daydream.observability.spans import SpanScope
@@ -822,7 +823,14 @@ def analyze_session(
         ) as observed:
             if validate_code_workspace is not None:
                 validate_code_workspace()
-            quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
+            try:
+                quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
+            except GitError:
+                # Git can fail before the successful-analysis recheck. Only the
+                # held workspace authority may establish source unavailability.
+                if validate_code_workspace is not None:
+                    validate_code_workspace()
+                raise
             if validate_code_workspace is not None:
                 validate_code_workspace()
             observed.finish()
