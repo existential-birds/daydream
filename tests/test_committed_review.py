@@ -706,6 +706,113 @@ def immutable_input_for(repo: Path, *, requested_base: str | None = None) -> Imm
     })
 
 
+@pytest.mark.parametrize("route", ["copied", "bundle", "alternate"])
+@pytest.mark.parametrize("fault", ["count", "delta-size"])
+def test_immutable_object_population_bounds_precede_body_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, fault: str,
+) -> None:
+    """Compressed files cannot stand in for packed object count or reconstructed delta bytes."""
+    from daydream.git_ops import immutable
+
+    repo = tmp_path / "source"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    identity = immutable_input_for(repo)
+    payload = tmp_path / "payload"
+    oids = []
+    for index in range(3 if fault == "count" else 2):
+        payload.write_bytes((b"x" * (1280 * 1024) if fault == "delta-size" else b"tiny") + bytes([index]))
+        oid = git(repo, "hash-object", "-w", str(payload))
+        oids.append(oid)
+        git(repo, "update-ref", f"refs/tags/stored-{index}", oid)
+    git(repo, "-c", "pack.threads=1", "-c", "core.bigFileThreshold=1g", "repack", "-adf",
+        "--window=20", "--depth=10")
+    if fault == "delta-size":
+        index_path, = (repo / ".git/objects/pack").glob("*.idx")
+        rows = [row.split() for row in git(repo, "verify-pack", "-v", str(index_path)).splitlines()]
+        assert any(row[0] in oids and len(row) == 7 and int(row[2]) < 1024 for row in rows)
+        assert all(int(git(repo, "cat-file", "-s", oid)) == 1280 * 1024 + 1 for oid in oids)
+    bundle = None
+    if route == "bundle":
+        bundle = tmp_path / "captured.bundle"
+        git(repo, "bundle", "create", str(bundle), "--all")
+        value = identity.to_dict()
+        value["materialization"]["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        identity = ImmutableReviewInput.from_dict(value)
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
+    if fault == "count":
+        monkeypatch.setattr(immutable, "_MAX_FILES", 8)
+    with pytest.raises(git_ops.GitError, match="reconstructed object population exceeds the supported size"):
+        if route == "alternate":
+            value = identity.to_dict()["materialization"]
+            immutable.immutable_review_diff(repo, value["comparison_base_sha"], value["head_sha"])
+        else:
+            with immutable.prepare_immutable_source(repo, identity, tmp_path / "prepared", bundle=bundle):
+                pytest.fail("oversized object population reached source admission")
+    assert not (tmp_path / "prepared").exists()
+
+
+@pytest.mark.parametrize("fault", ["allocation", "ref-output"])
+def test_immutable_bundle_bounds_expansion_and_control_output_before_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Tiny compressed bundles must fail at the resource guard, rather than later source checks."""
+    from daydream.git_ops import immutable
+
+    repo = tmp_path / "source"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    identity = immutable_input_for(repo)
+    if fault == "allocation":
+        payload = tmp_path / "compressed-payload"
+        payload.write_bytes(b"x" * (3 * 1024 * 1024))
+        oid = git(repo, "hash-object", "-w", str(payload))
+        git(repo, "update-ref", "refs/tags/large", oid)
+    else:
+        head = git(repo, "rev-parse", "HEAD")
+        for index in range(100):
+            git(repo, "update-ref", f"refs/tags/extra-{index}", head)
+    bundle = tmp_path / "captured.bundle"
+    git(repo, "bundle", "create", str(bundle), "--all")
+    assert bundle.stat().st_size < 16 * 1024
+    value = identity.to_dict()
+    value["materialization"]["bundle_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    identity = ImmutableReviewInput.from_dict(value)
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
+    if fault == "ref-output":
+        monkeypatch.setattr(immutable, "_MAX_FILES", 8)
+    expected = "allocate 3145729 over limit 2097153" if fault == "allocation" else "output exceeds the supported size"
+    with pytest.raises(git_ops.GitError, match=expected), immutable.prepare_immutable_source(
+        repo, identity, tmp_path / "prepared", bundle=bundle,
+    ):
+        pytest.fail("unbounded bundle reached source admission")
+    assert not (tmp_path / "prepared").exists()
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_immutable_source_retains_the_documented_per_tree_blob_boundary(tmp_path: Path, offset: int) -> None:
+    """Admit 8 MiB source blobs and larger historical blobs outside the compared trees."""
+    from daydream.git_ops import immutable
+
+    repo = tmp_path / "source"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n"}, feature={"api.py": "VALUE = 0\n"})
+    body = b"\0" * (8 * 1024 * 1024 + offset)
+    if offset > 0:
+        payload = tmp_path / "historical-blob"
+        payload.write_bytes(body)
+        oid = git(repo, "hash-object", "-w", str(payload))
+        git(repo, "update-ref", "refs/tags/historical", oid)
+    else:
+        write_and_stage(repo, "boundary.bin", body)
+        commit(repo, "capture a supported source blob")
+    identity = immutable_input_for(repo)
+    with immutable.prepare_immutable_source(repo, identity, tmp_path / "prepared") as prepared:
+        if offset > 0:
+            assert git(prepared, "cat-file", "-s", oid) == str(len(body))
+            assert not (prepared / "boundary.bin").exists()
+        else:
+            assert (prepared / "boundary.bin").read_bytes() == body
+    assert not (tmp_path / "prepared").exists()
+
+
 @pytest.mark.parametrize("outcome", ["complete", "attributes", "legal-ref", "packed", "empty", "no-diff", "partial",
                                     "native-failure", "install-failure"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(

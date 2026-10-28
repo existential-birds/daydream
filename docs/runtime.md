@@ -194,10 +194,15 @@ Title is bounded to 512 UTF-8 bytes, body to
 8192 and context to 65536. Unsupported versions, sizes, plans, missing objects and
 inconsistent evidence are errors before dispatch, never successful empty reviews.
 The [inert Git owner](../daydream/git_ops/immutable.py) owns source limits:
-100,000 files, 8 MiB per blob, 256 MiB total source bytes per tree and 2 GiB of
-object or bundle bytes. Both comparison and head trees are checked before diff
-expansion; each diff capture stops at 256 MiB of subprocess output. The committed
-program separately admits at most 512 assignment parts.
+100,000 files and objects, 8 MiB per source blob and 256 MiB of source bytes per
+tree. Bundles and physical object stores, including metadata, are bounded at
+2 GiB; the aggregate reconstructed object population also stops at 2 GiB before
+fsck or tree reads. Git checks each allocation against 2 GiB plus one
+byte for object terminators; this is a per-allocation guard, not a total memory
+limit. Historical blobs retain the object-store limit. Both comparison and head
+trees are checked before diff expansion; each diff capture stops at 256 MiB of
+subprocess output. Control and blob captures are bounded while reading. The
+committed program separately admits at most 512 assignment parts.
 
 Cloud supplies exact original local objects. Their commit identities, merge-base
 relationship, trees, raw checkout bytes and current execution diff key must match.

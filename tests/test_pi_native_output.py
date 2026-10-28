@@ -382,6 +382,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         hook.chmod(0o755)
         git(repo, "config", "core.autocrlf", "true")
         git(repo, "config", "filter.hostile.smudge", f"touch '{forbidden_marker}'; cat")
+        (repo / ".git/info/attributes").write_text("ratio.py filter=hostile\n")
+        assert not forbidden_marker.exists()
+        git(repo, "cat-file", "--filters", "HEAD:ratio.py")
+        assert forbidden_marker.exists()
+        forbidden_marker.unlink()
     request = CommittedReviewRequest(
         repo, base, config=RunConfig(backend="codex" if hosted else "pi", output_mode="review", archive=False,
                                     run_eval=False, review_backend="claude" if hosted else None,

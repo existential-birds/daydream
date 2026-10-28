@@ -17,6 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import BinaryIO
 
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError
@@ -39,6 +40,8 @@ def inert_git_context(repo: Path, environment: Mapping[str, str] | None = None) 
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
         "GIT_ATTR_NOSYSTEM": "1",
+        # Git's checked allocations include a trailing NUL for object contents.
+        "GIT_ALLOC_LIMIT": str(_MAX_OBJECT_BYTES + 1),
     }
     token = _CONTEXT.set((repo.resolve(), env))
     try:
@@ -88,6 +91,8 @@ def _immutable_diff_source(repo: Path, base_sha: str, head_sha: str) -> Iterator
     marker = repo / ".git"
     common = _source_git_dir(repo)[1] if marker.exists() or marker.is_symlink() else repo
     objects = _object_store(common).resolve()
+    for _ in _object_files(common):
+        pass
     if "\n" in str(objects):
         raise GitError("immutable object directory path is unsupported")
     current = _CONTEXT.get()
@@ -97,6 +102,7 @@ def _immutable_diff_source(repo: Path, base_sha: str, head_sha: str) -> Iterator
             _git(view, "init", "--template=", "--object-format=" +
                  ("sha256" if len(head_sha) == 64 else "sha1"), ".")
             (view / ".git/objects/info/alternates").write_text(str(objects) + "\n")
+            _validate_object_population(view)
             # Both sides can expand into the patch, including deleted blobs.
             _inventory(view, base_sha)
             _inventory(view, head_sha)
@@ -105,19 +111,25 @@ def _immutable_diff_source(repo: Path, base_sha: str, head_sha: str) -> Iterator
             yield view
 
 
-def _regular(path: Path, *, limit: int) -> bytes:
+@contextmanager
+def _regular_file(path: Path, *, limit: int) -> Iterator[tuple[BinaryIO, int]]:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise GitError("immutable source evidence must be a bounded regular file")
-            content = stream.read(info.st_size + 1)
-        if len(content) > limit:
-            raise GitError("immutable source evidence exceeds the supported size")
-        return content
+            yield stream, info.st_size
     except OSError as exc:
         raise GitError("immutable source evidence is unavailable") from exc
+
+
+def _regular(path: Path, *, limit: int) -> bytes:
+    with _regular_file(path, limit=limit) as (stream, size):
+        content = stream.read(size + 1)
+    if len(content) > limit:
+        raise GitError("immutable source evidence exceeds the supported size")
+    return content
 
 
 def _source_git_dir(source: Path) -> tuple[Path, Path]:
@@ -172,20 +184,26 @@ def _object_store(common: Path) -> Path:
     return objects
 
 
-def _copy_objects(common: Path, target: Path) -> None:
+def _object_files(common: Path) -> Iterator[tuple[Path, Path]]:
+    """Bound the physical store, including metadata Git may read via alternates."""
     objects = _object_store(common)
     total = count = 0
     for root, dirs, files in os.walk(objects, followlinks=False):
         parent = Path(root)
-        if parent == objects / "pack":
-            dirs[:] = [name for name in dirs if name != "multi-pack-index.d"]
         for name in dirs:
             if (parent / name).is_symlink():
                 raise GitError("immutable source object directories cannot be symlinks")
         for name in files:
             path = parent / name
             relative = path.relative_to(objects)
+            with _regular_file(path, limit=_MAX_OBJECT_BYTES) as (_, size):
+                total += size
+            count += 1
+            if total > _MAX_OBJECT_BYTES or count > _MAX_FILES:
+                raise GitError("immutable source object population exceeds the supported size")
             if relative.parts[0] == "info":
+                continue
+            if relative.parts[:2] == ("pack", "multi-pack-index.d"):
                 continue
             if len(relative.parts) == 2 and relative.parts[0] == "pack" and (
                 re.fullmatch(r"pack-[0-9a-f]+\.(bitmap|keep|mtimes|promisor)", name)
@@ -199,21 +217,39 @@ def _copy_objects(common: Path, target: Path) -> None:
                      or relative.parts[0] == "pack" and re.fullmatch(r"pack-[0-9a-f]+\.(pack|idx|rev)", name))
             ):
                 raise GitError("immutable source object layout is unsupported")
-            body = _regular(path, limit=_MAX_OBJECT_BYTES)
-            total += len(body)
-            count += 1
-            if total > _MAX_OBJECT_BYTES or count > _MAX_FILES:
-                raise GitError("immutable source object population exceeds the supported size")
-            destination = target / relative
-            destination.parent.mkdir(exist_ok=True)
-            destination.write_bytes(body)
+            yield path, relative
+
+
+def _copy_objects(common: Path, target: Path) -> None:
+    for path, relative in _object_files(common):
+        body = _regular(path, limit=_MAX_OBJECT_BYTES)
+        destination = target / relative
+        destination.parent.mkdir(exist_ok=True)
+        destination.write_bytes(body)
 
 
 def _git(repo: Path, *args: str, retries: int = 0) -> str:
     """Run once unless a read-only caller explicitly opts into timeout retries."""
     return process._run_git(
         repo, list(args), timeout=30, retries=retries, error_context="immutable source validation failed",
+        max_output_bytes=_MAX_FILES * 96 + 4096,
     ).stdout.strip()
+
+
+def _validate_object_population(repo: Path) -> None:
+    """Inspect reconstructed sizes without asking Git to inflate object bodies."""
+    objects = _git(repo, "cat-file", "--batch-all-objects",
+                   "--batch-check=%(objectname) %(objecttype) %(objectsize)")
+    total = count = 0
+    for line in objects.splitlines():
+        fields = line.split(" ")
+        if (len(fields) != 3 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[0])
+                or fields[1] not in {"blob", "tree", "commit", "tag"} or not fields[2].isdecimal()):
+            raise GitError("immutable source object metadata is unsupported")
+        total += int(fields[2])
+        count += 1
+        if total > _MAX_OBJECT_BYTES or count > _MAX_FILES:
+            raise GitError("immutable source reconstructed object population exceeds the supported size")
 
 
 def validate_synthetic_history(
@@ -265,7 +301,10 @@ def _materialize(repo: Path, source: Path, head: str) -> None:
         if mode == "160000":
             continue
         body = process._run_git(repo, ["cat-file", "blob", oid], capture_bytes=True, timeout=30,
-                                error_context="immutable source blob unavailable").stdout
+                                error_context="immutable source blob unavailable",
+                                max_output_bytes=_MAX_BLOB_BYTES + 4096).stdout
+        if len(body) > _MAX_BLOB_BYTES:
+            raise GitError("immutable source files exceed the supported size")
         original = source / name
         try:
             info = original.lstat()
@@ -321,6 +360,9 @@ def prepare_immutable_source(
                     raise GitError("immutable synthetic bundle must advertise exactly base and head")
                 _git(destination, "bundle", "unbundle", str(frozen))
                 frozen.unlink()
+                for _ in _object_files(destination / ".git"):
+                    pass
+            _validate_object_population(destination)
             _git(destination, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling")
             for key in ("head_sha", "requested_base_sha", "comparison_base_sha"):
                 if _git(destination, "rev-parse", "--verify", local[key] + "^{commit}") != local[key]:

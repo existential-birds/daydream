@@ -995,7 +995,7 @@ def test_immutable_diff_refuses_to_replay_completed_setup_after_timeout(
 
     head = _git(repo, "rev-parse", "HEAD")
     before = _repository_identity(repo)
-    original_run = subprocess.run
+    original_run = git_process._bounded_subprocess
     initialized: list[Path] = []
 
     def completed_init_timeout(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
@@ -1008,11 +1008,54 @@ def test_immutable_diff_refuses_to_replay_completed_setup_after_timeout(
                 raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
         return result
 
-    monkeypatch.setattr(subprocess, "run", completed_init_timeout)
+    monkeypatch.setattr(git_process, "_bounded_subprocess", completed_init_timeout)
     with pytest.raises(git_ops.GitTimeoutError):
         immutable.immutable_review_diff(repo, head, head)
     assert len(initialized) == 1 and not initialized[0].exists()
     assert _repository_identity(repo) == before
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_inert_git_bounds_each_object_allocation_without_rejecting_its_trailing_nul(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offset: int,
+) -> None:
+    """A compressed object's allocation includes a NUL absent from its reported size."""
+    from daydream.git_ops import immutable
+
+    limit = 2 * 1024 * 1024
+    body = b"x" * (limit + offset)
+    write_and_stage(repo, "stored.bin", body)
+    oid = _git(repo, "rev-parse", ":stored.bin")
+    _git(repo, "update-ref", "refs/tags/stored", oid)
+    bundle = tmp_path / "stored.bundle"
+    _git(repo, "bundle", "create", str(bundle), "refs/tags/stored")
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", limit)
+    with immutable.inert_git_context(prepared):
+        immutable._git(prepared, "init", "--template=", ".")
+        if offset > 0:
+            with pytest.raises(GitError, match=f"allocate {len(body) + 1} over limit {limit + 1}"):
+                immutable._git(prepared, "bundle", "unbundle", str(bundle))
+        else:
+            immutable._git(prepared, "bundle", "unbundle", str(bundle))
+            assert immutable._git(prepared, "cat-file", "-s", oid) == str(len(body))
+
+
+def test_immutable_diff_bounds_physical_metadata_before_borrowing_objects(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alternates expose metadata skipped by object copying, including maintained sidecars."""
+    from daydream.git_ops import immutable
+
+    head = _git(repo, "rev-parse", "HEAD")
+    metadata = repo / ".git/objects/pack/multi-pack-index.d"
+    metadata.mkdir()
+    for name in ("first", "second"):
+        (metadata / name).write_bytes(b"x" * (1024 * 1024 + 1))
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
+    with pytest.raises(GitError, match="object population exceeds the supported size"):
+        immutable.immutable_review_diff(repo, head, head)
 
 
 def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(

@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **review:** bound compressed and reconstructed immutable object populations,
+  Git allocations and captured output before validating supplied source
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **benchmark:** reject missing or blank Harbor reviewer models before normal-run setup
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - **review:** offer compact, target-bound native source selectors while retaining
   canonical snapshot evidence and exact full-hash selector compatibility
   ([#1709](https://github.com/existential-birds/daydream/pull/1709)). Private
