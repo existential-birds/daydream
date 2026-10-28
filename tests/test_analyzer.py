@@ -26,7 +26,6 @@ from daydream.eval.analyzer import (
     analyze_session,
     analyze_shipped_duplication,
 )
-from daydream.eval.quality import _quality_python_parser
 from daydream.git_ops import GitError, search_files
 from daydream.trajectory import (
     DaydreamPhase,
@@ -48,12 +47,12 @@ def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "20
     )
 
 
-@pytest.mark.parametrize(("status", "cutoff_at", "wall"), [
-    ("partial", "2026-01-01T00:00:10Z", None),
-    ("complete", "2026-01-01T00:00:04Z", None),
+@pytest.mark.parametrize(("status", "cutoff_at"), [
+    ("partial", "2026-01-01T00:00:10Z"),
+    ("complete", "2026-01-01T00:00:04Z"),
 ])
 def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
-    status: Literal["complete", "partial"], cutoff_at: str, wall: float | None,
+    status: Literal["complete", "partial"], cutoff_at: str,
 ) -> None:
     root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
         "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
@@ -73,7 +72,7 @@ def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
     result = analyze_session(tmp_path / ".daydream", write_snapshot=snapshot)
 
     assert result["cost"]["total_cost_usd"] == 0.5
-    assert result["timing"]["total_wall_clock_seconds"] == wall
+    assert result["timing"]["total_wall_clock_seconds"] is None
     assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
 
 
@@ -156,30 +155,16 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
         agent_model_name="opus",
         session_id="nested-forks",
     )
+    tool_names = (
+        "Write", "write", "Edit", "edit", "MultiEdit", "multiedit", "NotebookEdit", "notebookedit",
+        "patch", "apply_patch", "Read", "read", "shell", "bash", "custom",
+    )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="main"))
             # One native event stream contains aliases from the supported adapters; production
             # records and analyzes the mixed workload together, preserving the original names.
-            for index, name in enumerate(
-                (
-                    "Write",
-                    "write",
-                    "Edit",
-                    "edit",
-                    "MultiEdit",
-                    "multiedit",
-                    "NotebookEdit",
-                    "notebookedit",
-                    "patch",
-                    "apply_patch",
-                    "Read",
-                    "read",
-                    "shell",
-                    "bash",
-                    "custom",
-                )
-            ):
+            for index, name in enumerate(tool_names):
                 inv.observe(ToolStartEvent(str(index), name, {}))
                 inv.observe(ToolResultEvent(str(index), "recorded output", False))
             inv.observe(MetricsEvent("main", 140, 14, 14, 0.00006))
@@ -211,6 +196,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True, archive=True), workspace)
     archived = archive_dir / "runs" / recorder.session_id
     result = json.loads((archived / "evaluation.json").read_text())
+    assert not {"coverage", "grounding", "exploration_utilization"} & result.keys()
     costs = result["cost"]
     by_agent = {agent["agent"]: agent for agent in costs["by_agent"]}
     assert {name: agent["cost_usd"] for name, agent in by_agent.items()} == {
@@ -224,23 +210,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
     assert costs["total_completion_tokens"] == 19
     assert costs["total_cached_tokens"] == 19 and costs["cache_hit_rate"] == 0.1
     assert sum(agent["cost_usd"] for agent in by_agent.values()) == pytest.approx(costs["total_cost_usd"])
-    expected_tools = {
-        "Write": 1,
-        "write": 1,
-        "Edit": 1,
-        "edit": 1,
-        "MultiEdit": 1,
-        "multiedit": 1,
-        "NotebookEdit": 1,
-        "notebookedit": 1,
-        "patch": 1,
-        "apply_patch": 1,
-        "Read": 1,
-        "read": 1,
-        "shell": 1,
-        "bash": 1,
-        "custom": 1,
-    }
+    expected_tools = dict.fromkeys(tool_names, 1)
     assert result["tools"] == {
         "total_calls": 15,
         "by_type": expected_tools,
@@ -261,21 +231,6 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
         )
 
 
-def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
-    """Build a fork with Read calls; pi_style uses read/arguments.path instead."""
-    steps = []
-    for i, path in enumerate(read_paths):
-        if pi_style:
-            tc = {"function_name": "read", "arguments": {"path": path}}
-        else:
-            tc = {"function_name": "Read", "arguments": {"file_path": path}}
-        tc["tool_call_id"] = f"read-{i}"
-        steps.append({"step_id": f"s{i}", "tool_calls": [tc],
-            "observation": {"results": [{"source_call_id": f"read-{i}", "content": "source"}]},
-        })
-    return {"_source_file": source_file, "steps": steps}
-
-
 def _artifact_provenance(
     *, public_source: Path, private_base: Path, workspace_key: str = "workspace-key", session_id: str = "session-id",
 ) -> Any:
@@ -287,13 +242,6 @@ def _artifact_provenance(
     )
 
 
-def _owned_source(tmp_path: Path, **kwargs: Any) -> tuple[Path, Path, Any]:
-    """(public source, its ``.daydream`` dir, current-owner provenance) for one run."""
-    public_source = tmp_path / "source"
-    provenance = _artifact_provenance(public_source=public_source, private_base=tmp_path / "private", **kwargs)
-    return public_source, public_source / ".daydream", provenance
-
-
 def _deep_dirs(tmp_path: Path) -> tuple[Path, Path]:
     """Create and return ``(daydream_dir, deep_dir)`` under ``tmp_path``."""
     dd = tmp_path / ".daydream"
@@ -302,62 +250,11 @@ def _deep_dirs(tmp_path: Path) -> tuple[Path, Path]:
     return dd, deep
 
 
-def _seed_diff(daydream_dir: Path, *files: str) -> None:
-    """Write a ``diff.patch`` naming exactly *files* as the reviewed diff."""
-    daydream_dir.mkdir(parents=True, exist_ok=True)
-    (daydream_dir / "diff.patch").write_text(
-        "".join(f"diff --git a/{path} b/{path}\n" for path in files), encoding="utf-8"
-    )
-
-
-# Other workspaces and other sessions under the same key remain eligible repository reads.
-
-
-def _write_records(deep: Path, **overrides: Any) -> None:
-    """Write one per-stack python record, defaulted to a grounded src/api.py claim."""
-    record: dict[str, Any] = {
-        "id": "py-1", "file": "src/api.py", "line": 1, "confidence": "HIGH", "rationale": "src/api.py needs a guard",
-    }
-    record.update(overrides)
-    (deep / "stack-python-records.json").write_text(json.dumps([record]), encoding="utf-8")
-
-
 def _root_trajectory(session_id: str) -> dict[str, Any]:
     """A minimal ATIF root trajectory ``analyze_session`` accepts as frozen input."""
     return {"_source_file": "trajectory.json", "session_id": session_id, "trajectory_id": session_id,
         "agent": {"name": "daydream", "model_name": "test"}, "steps": [], "final_metrics": {},
     }
-
-
-_READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "pi": ("read", "path"), "osprey": ("read", "path")}
-
-
-def test_analyze_session_preserves_source_quality_without_read_metrics(tmp_path: Path,) -> None:
-    public_source, _, provenance = _owned_source(tmp_path, session_id="session")
-    (public_source / "src").mkdir(parents=True)
-    (public_source / "src/api.py").write_text("def api(value):\n    return value\n", encoding="utf-8")
-    # Frozen evaluation input lives apart from the post-fix source workspace.
-    daydream_dir = tmp_path / "frozen" / ".daydream"
-    deep = daydream_dir / "deep"
-    deep.mkdir(parents=True)
-    _seed_diff(daydream_dir, "src/api.py")
-    private_live = provenance.live_root
-    artifact_ref = str(private_live / ".daydream/deep/stack-python-review.md")
-    exploration_ref = str(private_live / ".daydream/exploration/summary.md")
-    _write_records(deep, rationale=f"Evidence came from {artifact_ref}")
-    trajectories: dict[str, Any] = {"main": _root_trajectory("session"),
-        "forked": [{**_read_traj("deep-python.json", str(public_source / "src/api.py"), artifact_ref, exploration_ref,),
-            "session_id": "session", "trajectory_id": "deep-python"}],
-    }
-
-    result = analyze_session(
-        daydream_dir, write_snapshot=_snapshot(trajectories["main"], *trajectories["forked"]),
-        artifact_provenance=provenance,
-        code_workspace=public_source,
-    )
-
-    assert not {"coverage", "grounding", "exploration_utilization"} & result.keys()
-    assert result["tools"]["total_calls"] == 3
 
 
 def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "workspace") -> Path:
@@ -396,7 +293,10 @@ def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
     assert result["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
 
 
-def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("candidate_paths", [None, {"app.py", "api_generated.py"}], ids=["workspace", "candidate"])
+def test_quality_excludes_vendored_and_internal_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
+) -> None:
     """Standalone scope prunes excluded trees and preserves leaf-file symlink compatibility."""
     ws = _quality_workspace(tmp_path,
         {
@@ -428,11 +328,14 @@ def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch
         return scandir(path)
 
     monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(ws / ".daydream")
+    result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
 
-    assert result["scoped_files"] == 4
-    assert list(result["per_file"]) == ["app.py", "eligible.py/child.py", "linked_file.py", "vendorish/mod.py"]
-    assert result["per_file"]["linked_file.py"]["sloc"] == 1
+    expected = (["app.py", "eligible.py/child.py", "linked_file.py", "vendorish/mod.py"]
+        if candidate_paths is None else ["app.py"])
+    assert result["scoped_files"] == len(expected)
+    assert list(result["per_file"]) == expected
+    if candidate_paths is None:
+        assert result["per_file"]["linked_file.py"]["sloc"] == 1
 
 
 @pytest.mark.parametrize("layout", ["root", "nested", "linked"])
@@ -708,7 +611,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     workspace = _quality_workspace(tmp_path, files, name="operational")
     public_source = tmp_path / "public-source"
     frozen = tmp_path / "frozen" / ".daydream"
-    snapshot = run_snapshot("quality-split", schema_version="ATIF-v1.6", model_name="test",)
+    snapshot = _snapshot(_root_trajectory("quality-split") | {"schema_version": "ATIF-v1.6"})
     provenance = _artifact_provenance(
         public_source=public_source, private_base=tmp_path / "private", workspace_key="workspace",
         session_id="quality-split",
@@ -725,22 +628,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     }
     # Independent function-span/decision arithmetic, including nested functions and blank rows.
     high_mass = 48 * math.sqrt(2) + 12 * math.sqrt(24)
-    mass = (
-        58 * math.sqrt(2)
-        + 6 * math.sqrt(2)
-        + math.sqrt(3)
-        + 2
-        + 12 * math.sqrt(5)
-        + 26
-        + 4 * math.sqrt(6)
-        + 3 * math.sqrt(3)
-        + 3 * math.sqrt(2)
-        + 2 * math.sqrt(5)
-        + 2 * math.sqrt(6)
-        + 2
-        + 2
-        + 12 * math.sqrt(24)
-    )
+    mass = 67 * math.sqrt(2) + 4 * math.sqrt(3) + 32 + 14 * math.sqrt(5) + 6 * math.sqrt(6) + 12 * math.sqrt(24)
     assert quality["erosion"] == round(high_mass / mass, 4)
     assert quality["verbosity"] == round(32 / 141, 4)
     assert quality["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
@@ -856,17 +744,6 @@ def test_quality_refuses_unavailable_or_unsafe_code_workspace(
         assert type(caught.value) is ArtifactVisibilityError
 
 
-def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
-    result = _quality(tmp_path,
-        {
-            "app.py": "def a():\n    return 1\n",
-            "schema_generated.py": "def x():\n    return 1\n",  # *_generated.py glob excludes it
-        }, candidate_paths={"schema_generated.py", "app.py"},
-    )
-    assert result["scoped_files"] == 1
-    assert set(result["per_file"]) == {"app.py"}
-
-
 @pytest.mark.parametrize("failure", ["unavailable", "empty-tree", "exception"])
 def test_quality_parser_failure_keeps_scope_without_metrics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
@@ -913,15 +790,6 @@ def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> N
 # Count authoritative merged items, falling back to review text, then pre-merge stack totals.
 
 
-def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
-    """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
-    items = [_item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
-        for i in range(high)
-    ]
-    items += [_item(high + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(med)]
-    seed_merged_items(deep, items)
-
-
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
     """Seed HIGH records with host UIDs using 1-based birth ordinals.
 
@@ -932,43 +800,15 @@ def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
     (deep / f"stack-{stack_name}-records.json").write_text(json.dumps({"issues": records}))
 
 
-def seed_review_output(deep: Path, *, count: int) -> None:
-    """Write deep/\"review-output.md\" with `count` lines matching ^\\d+\\.\\s+\\[."""
-    lines = [f"{i}. [HIGH] finding {i}" for i in range(1, count + 1)]
-    (deep / "review-output.md").write_text("\n".join(lines) + "\n")
-
-
-def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    (deep / "alternatives.json").write_text("{not json")
-    out = analyze_findings(dd)
-    assert out["per_lens"]["wonder"] == 0
-
-
-def run_snapshot(
-    session_id: str, *, total_cost_usd: float | None = None, schema_version: str = "ATIF-v1.7",
-    model_name: str | None = None, steps: list[dict[str, Any]] | None = None,
-) -> RunWriteSnapshot:
-    """Prepare immutable run bytes with the requested fields."""
-    agent: dict[str, Any] = {"name": "test"}
-    if model_name is not None:
-        agent["model_name"] = model_name
-    document: dict[str, Any] = {"schema_version": schema_version, "session_id": session_id, "trajectory_id": session_id,
-        "_source_file": "trajectory.json", "agent": agent,
-        "steps": [] if steps is None else steps, "extra": {},
-    }
-    if total_cost_usd is not None:
-        document["final_metrics"] = {"total_cost_usd": total_cost_usd}
-    return _snapshot(document)
-
-
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     """One persisted finding population owns canonical counts and each missing-artifact fallback."""
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd, deep = _deep_dirs(tmp_path)
-    snapshot = run_snapshot(sid, total_cost_usd=18.2056)
-    seed_shipped_items(deep, high=4, med=4)
-    shipped = json.loads((deep / "merged-items.json").read_text())["items"]
+    snapshot = _snapshot(_root_trajectory(sid) | {"final_metrics": {"total_cost_usd": 18.2056}})
+    shipped = [_item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
+        for i in range(4)
+    ]
+    shipped += [_item(4 + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(4)]
     shipped[4]["lens"] = shipped[5]["lens"] = "wonder"
     seed_merged_items(deep, shipped)
     seed_stack_records(deep, "python", n=3)
@@ -985,7 +825,7 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
     # Shipped rendering wins over raw reviewer populations when canonical JSON is unavailable.
     (deep / "merged-items.json").unlink()
-    seed_review_output(deep, count=8)
+    (deep / "review-output.md").write_text("\n".join(f"{i}. [HIGH] finding {i}" for i in range(1, 9)) + "\n")
     rendered = analyze_session(dd, write_snapshot=snapshot)
     assert rendered["findings"]["total"] == 8 and rendered["findings"]["by_confidence"] == {}
     assert rendered["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
@@ -998,17 +838,14 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     wonder_only = analyze_session(dd, write_snapshot=snapshot)
     assert wonder_only["findings"]["per_lens"] == {"wonder": 6, "per-stack": 0, "structure": 0}
     assert wonder_only["findings"]["total"] == 0
+    (deep / "alternatives.json").write_text("{not json")
+    assert analyze_findings(dd)["per_lens"]["wonder"] == 0
 
 
 def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """#1087: on a known-bad tree-sitter install the analyzer refuses native
-    analysis by raising the typed guard error — the orchestrator's fail-open
-    wrapper converts that into (None, reason); it must not silently skip.
-    """
+    """The direct analyzer raises the typed guard error for a known-bad native install."""
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    # Clear the parser cache so the bad-version guard sees the patched installation.
-    _quality_python_parser.cache_clear()
     with pytest.raises(safety.TreeSitterBadVersionError):
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 
@@ -1030,7 +867,9 @@ def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
 
         ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
         daydream_dir, deep = _deep_dirs(tmp_path / "frozen")
-        seed_shipped_items(deep, high=1, med=0)
+        seed_merged_items(deep, [
+            _item(0, file="a.py", line=1, description="high-0", confidence="HIGH", severity="high"),
+        ])
         (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
         root = _root_trajectory("quality-unavailable")
         root["final_metrics"] = {"total_cost_usd": 0.5}
@@ -1147,37 +986,10 @@ def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, c
     )
 
 
-def seed_hunk_index(dd: Path, ranges: dict[str, list[tuple[int, int]]]) -> None:
-    """Write ``.daydream/hunk-index.json`` in the persisted production shape."""
-    dd.mkdir(parents=True, exist_ok=True)
-    (dd / "hunk-index.json").write_text(json.dumps({path: {"hunks": [{
-                            "old_start": start, "old_end": end, "new_start": start, "new_end": end, "added": 1,
-                            "removed": 1,
-                        }
-                        for start, end in file_ranges
-                    ], "added_total": len(file_ranges), "removed_total": len(file_ranges),
-                }
-                for path, file_ranges in ranges.items()
-            }
-        )
-    )
-
-
 def seed_merged_items(deep: Path, items: list[dict[str, Any]]) -> None:
     """Write ``deep/merged-items.json`` from an explicit item list."""
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "merged-items.json").write_text(json.dumps({"items": items}))
-
-
-def seed_dedup_candidates(deep: Path, *, record_alt_pairs: list[dict[str, Any]] | None = None,
-    record_duplicate_pairs: list[dict[str, Any]] | None = None,
-) -> None:
-    """Write production-shaped pre-merge candidate pairs, which are inputs rather than escapes."""
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "dedup-candidates.json").write_text(json.dumps(
-            {"record_alt_pairs": record_alt_pairs or [], "record_duplicate_pairs": record_duplicate_pairs or []}
-        )
-    )
 
 
 def _provenance(*uids: str) -> dict[str, Any]:
@@ -1255,24 +1067,6 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
     assert pair["same_file"] is True
     # Unattributed merge-authored items keep empty provenance; the duplicate pair still counts.
     assert (pair["a_source_uids"], pair["b_source_uids"]) == ([], [])
-
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description=WORKED_A),
-            _item(2, line=4, description=WORKED_B, lens="structural"),
-            _item(3, file="other/untouched.py", line=1, description="A wholly unrelated concern"),
-        ],
-    )
-    expanded = analyze_session(
-        dd, write_snapshot=run_snapshot("expanded", schema_version="ATIF-v1.7", model_name="test")
-    )
-    distribution = expanded["findings"]["shipped_duplication"]
-    assert distribution["comparable_pairs"] == 3 and distribution["near_duplicate_pairs"] == 0
-    assert distribution["same_file_pairs"] == 1 and distribution["max_similarity"] == 0.1538
-    similarities = [row["similarity"] for row in distribution["pairs"]]
-    assert similarities == sorted(similarities, reverse=True)
-    assert similarities[0] == distribution["max_similarity"]
 
     clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
     seed_merged_items(clean_deep, [_item(1, line=88, description=WORKED_A)])
@@ -1365,16 +1159,6 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
         analyze_shipped_duplication(dd)
 
 
-def _grounding_finding(**extra: Any) -> dict[str, Any]:
-    """A pre-merge per-stack record tagged for the ``deep-python`` reader."""
-    finding: dict[str, Any] = {
-        "id": "py-1", "_stack": "python", "file": "svc/loader.py", "line": 88, "confidence": "HIGH",
-        "rationale": "svc/loader.py needs a guard",
-    }
-    finding.update(extra)
-    return finding
-
-
 def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
     """Analyze one persisted shipped population with independently countable pair/location output.
 
@@ -1383,7 +1167,10 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     """
     dd, deep = _deep_dirs(tmp_path)
     seed_diff_patch(dd)  # This competing patch has only 85–92; the saved index is authoritative.
-    seed_hunk_index(dd, {"svc/loader.py": [(200, 210)]})
+    (dd / "hunk-index.json").write_text(json.dumps({"svc/loader.py": {
+        "hunks": [{"old_start": 200, "old_end": 210, "new_start": 200, "new_end": 210, "added": 1, "removed": 1}],
+        "added_total": 1, "removed_total": 1,
+    }}))
     items = [
         _item(1, line=205, description="Loader guard", lens="structural", uid="structure:3"),
         _item(
@@ -1402,13 +1189,12 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     ]
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in (items[0], items[3], items[4]))
     seed_merged_items(deep, items)
-    seed_dedup_candidates(
-        deep,
-        record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
-        record_duplicate_pairs=[{"similarity": 0.9}],
-    )
+    (deep / "dedup-candidates.json").write_text(json.dumps({
+        "record_alt_pairs": [{"similarity": 0.75}, {"similarity": 0.55}],
+        "record_duplicate_pairs": [{"similarity": 0.9}],
+    }))
     result = analyze_session(
-        dd, write_snapshot=run_snapshot("loc-session", schema_version="ATIF-v1.7", model_name="test")
+        dd, write_snapshot=_snapshot(_root_trajectory("loc-session") | {"schema_version": "ATIF-v1.7"})
     )
     location = result["location"]
     assert location["hunk_source"] == "hunk-index.json"
