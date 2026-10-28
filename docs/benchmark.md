@@ -43,6 +43,8 @@ compiled tasks and trajectories. The environment declaration is
 Only an explicit trusted control-plane candidate profile or packaged default is
 admitted; ambient and target repository profiles cannot alter it. Pin wheel,
 compiled lock, candidate, model/backend, judge, and scoring identities.
+Normal Harbor runs require an explicit, nonblank `DAYDREAM_REVIEW_MODEL` with the
+exact operator-selected OpenRouter model ID; its spelling is preserved unchanged.
 
 The bounded Pi reviewer consumes the shared
 [immutable PR embedding API](runtime.md#immutable-pr-inputs), using official Pi

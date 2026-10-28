@@ -48,6 +48,7 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,
     artifact.parent.mkdir(parents=True)
     rc = asyncio.run(entrypoint.main({
         "DAYDREAM_REVIEW_CASE_ID": "case-x", "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
+        "DAYDREAM_REVIEW_MODEL": "fixture-model",
         "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path), "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
         "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(bad),
     }))

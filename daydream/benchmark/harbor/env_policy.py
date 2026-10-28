@@ -58,6 +58,14 @@ PI_API_KEY_ENV = "PI_API_KEY"
 SKILLS_DIR_ENV = "DAYDREAM_SKILLS_DIR"
 
 
+def require_reviewer_model(environment: Mapping[str, str | None]) -> str:
+    """Require an explicit model while preserving the operator's exact identifier."""
+    model = environment.get(MODEL_ENV)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(f"{MODEL_ENV} must be a nonblank operator-selected model ID")
+    return model
+
+
 @dataclass(frozen=True)
 class HostChannel:
     """Names allowed, required, or excluded by the host child-env builder."""

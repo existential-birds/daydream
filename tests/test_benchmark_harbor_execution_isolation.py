@@ -48,6 +48,7 @@ def _environment(case: Path, repo: Path, root: Path, config: Path) -> dict[str, 
 
 @pytest.mark.parametrize("outcome", [
     "finding", "clean", "partial", "noninline", "bundle-tamper", "model-spelling",
+    "model-missing", "model-empty", "model-blank",
     "output-fault", "candidate-fault", "trajectory-fault", "long-title", "blank-title", "oversized-body",
 ])
 async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic(
@@ -72,6 +73,10 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     environment["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] = str(profile)
     if outcome == "model-spelling":
         environment["DAYDREAM_REVIEW_MODEL"] = " output-model "
+    elif outcome == "model-missing":
+        environment.pop("DAYDREAM_REVIEW_MODEL")
+    elif outcome in {"model-empty", "model-blank"}:
+        environment["DAYDREAM_REVIEW_MODEL"] = "" if outcome == "model-empty" else " \t "
     environment.update(GH_TOKEN="forbidden-gh", DAYDREAM_JUDGE_API_KEY="forbidden-judge", HF_TOKEN="forbidden-hub")
     original_environment = dict(environment)
     parent_before = dict(os.environ)
@@ -121,9 +126,12 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     retained_runs = {path.name: path.read_bytes() for path in (operator_dataset_sentinel / "runs").glob("*.jsonl")}
     assert retained_runs == baseline_runs
     assert not (repo / ".daydream").exists() and not (repo / ".review-output.md").exists()
-    if outcome in {"bundle-tamper", "model-spelling"}:
+    if outcome in {"bundle-tamper", "model-spelling", "model-missing", "model-empty", "model-blank"}:
         assert native_provider.requests == []
         assert artifact.read_bytes() == b"prior candidate"
+        if outcome in {"model-missing", "model-empty", "model-blank"}:
+            assert not (tmp_path / "logs").exists()
+            assert "DAYDREAM_REVIEW_MODEL" in capsys.readouterr().err
         return
     assignments = [assignment_from_request(request) for request in native_provider.requests]
     if outcome == "finding":

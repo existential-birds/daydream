@@ -59,7 +59,7 @@ class ParsedReviewerInput:
     """Validated container controls and opaque per-run execution inputs."""
 
     backend: str
-    model: str | None
+    model: str
     repo_dir: Path
     artifact_path: Path
     trajectory_path: Path
@@ -134,11 +134,12 @@ def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewer
     """Parse one Harbor container map without reading or mutating process state."""
     source = dict(environment)
     backend = require_supported_backend(source)
+    model = env_policy.require_reviewer_model(source)
     sanitized = _sanitize_reviewer_environment(source)
     backend_execution = BackendExecutionInput.from_environment(sanitized, backend=backend)
     return ParsedReviewerInput(
         backend=backend,
-        model=source.get(env_policy.MODEL_ENV),
+        model=model,
         repo_dir=Path(source.get(env_policy.REPO_DIR_ENV, _DEFAULT_REPO_DIR)),
         artifact_path=Path(source.get(env_policy.ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)),
         trajectory_path=Path(source.get(env_policy.TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))),
@@ -213,7 +214,7 @@ async def main(environment: Mapping[str, str]) -> int:
         policy = HostedReviewPolicy(
             agent_dir=agent_dir.resolve(), environment=native, output_dir=output_dir.resolve(),
             private_base=private_base.resolve(), profile=profile, trusted_prepared_source=True,
-            provider="openrouter", model=parsed.model or "",
+            provider="openrouter", model=parsed.model,
         )
         result = await run_committed_review(CommittedReviewRequest(
             source=parsed.repo_dir.resolve(), base=immutable.to_dict()["materialization"]["requested_base_sha"],

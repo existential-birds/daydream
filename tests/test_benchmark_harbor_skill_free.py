@@ -16,6 +16,7 @@ def test_parse_reviewer_environment_rejects_non_openrouter_endpoint() -> None:
     with pytest.raises(entrypoint.EntrypointError, match="openrouter.ai"):
         entrypoint.parse_reviewer_environment({
             "DAYDREAM_REVIEW_API_KEY": "key", "DAYDREAM_REVIEW_BASE_URL": "https://example.com/api",
+            "DAYDREAM_REVIEW_MODEL": "fixture-model",
         })
 
 def test_parse_reviewer_environment_refuses_unsupported_claude_before_credentials() -> None:
@@ -111,6 +112,8 @@ def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: 
 def test_entrypoint_env_has_no_skill_dirs() -> None:
     parsed = entrypoint.parse_reviewer_environment({
         "DAYDREAM_REVIEW_CASE_ID": "case-noskill", "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
+        "DAYDREAM_REVIEW_MODEL": " output-model ",
         "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "DAYDREAM_SKILLS_DIR": "/host/skills",
     })
     assert "DAYDREAM_SKILLS_DIR" not in parsed.execution.child_environment()
+    assert parsed.model == " output-model "

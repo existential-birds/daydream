@@ -23,7 +23,7 @@ from typing import Any, Callable
 import yaml
 
 from daydream.benchmark import storage
-from daydream.benchmark.harbor import calibrate, package, verifier_core
+from daydream.benchmark.harbor import calibrate, env_policy, package, verifier_core
 
 
 class RunError(Exception):
@@ -354,12 +354,19 @@ def _preflight(
     """Fail-closed preflight: collect every blocking failure (empty = pass).
 
     Checks, in order, without stopping at the first failure:
-      1. same-interpreter Harbor resolution + compiled-tree presence
-      2. judge/reviewer egress hosts vs the compiled network policy
-      3. telemetry/upload rejection (archive + uploads must be ``disabled``)
-      4. Docker allowlist support (no public-networking fallback)
+      1. explicit reviewer model for normal runs
+      2. same-interpreter Harbor resolution + compiled-tree presence
+      3. judge/reviewer egress hosts vs the compiled network policy
+      4. telemetry/upload rejection (archive + uploads must be ``disabled``)
+      5. Docker allowlist support (no public-networking fallback)
     """
     failures: list[str] = []
+
+    if not oracle:
+        try:
+            env_policy.require_reviewer_model(env)
+        except ValueError as exc:
+            failures.append(str(exc))
 
     try:
         package.resolve_harbor()

@@ -209,14 +209,18 @@ def _seed_verifier_reward(ws: Path, *, job_dir_name: str = "run-1", reward: floa
     return job_dir
 
 
-def _seed_passing_oracle_receipt(ws: Path, *, job_dir_name: str = "run-1",) -> tuple[Path, str]:
+def _seed_passing_oracle_receipt(
+    ws: Path, *, job_dir_name: str = "run-1", env: dict[str, Any] | None = None,
+) -> tuple[Path, str]:
     """Seed a matching compiled lock plus the receipt the gate accepts."""
 
     lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
     job_dir = _seed_verifier_reward(ws, job_dir_name=job_dir_name)
-    assert run_mod._write_oracle_receipt(ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env()) == 0
+    assert run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env() if env is None else env,
+    ) == 0
     return job_dir, lock_sha
 
 
@@ -334,7 +338,9 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
     ws = _ws(tmp_path)
     spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
 
-    code = run_mod.run_run(ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok)
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(DAYDREAM_REVIEW_MODEL=None), spawn=spawn, docker_ok=_docker_ok,
+    )
     assert code == 1
     assert not (ws / "harbor" / "oracle-receipt.json").exists()
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
@@ -343,16 +349,33 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
     assert ledger["runs"][0]["environments"][0]["trial_name"] == "case-abc"
     assert ledger["runs"][0]["environments"][0]["image_id"].startswith("hb__")
 
-def test_default_run_propagates_harbor_exit_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", [None, "", " \t ", " rm "])
+def test_default_run_requires_model_before_spend_and_preserves_harbor_exit_code(
+    tmp_path: Path, model: str | None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A valid receipt cannot allow a blank reviewer selection to start Harbor."""
     ws = _ws(tmp_path)
-    # seed a matching oracle receipt the gate will accept
-    _seed_passing_oracle_receipt(ws, job_dir_name="x")
+    environment = _env(DAYDREAM_REVIEW_MODEL=model)
+    if model is None:
+        environment.pop("DAYDREAM_REVIEW_MODEL")
+    _seed_passing_oracle_receipt(ws, job_dir_name="x", env=environment)
+    calls: list[dict[str, Any]] = []
 
     def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
+        calls.append(env)
         return {"returncode": 3}
 
-    code = run_mod.run_run(ws, oracle=False, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok)
-    assert code == 3  # Harbor's own exit code preserved
+    code = run_mod.run_run(ws, oracle=False, yes=True, env=environment, spawn=spawn, docker_ok=_docker_ok)
+    ledger_path = ws / "runtime/harbor.json"
+    if model is None or not model.strip():
+        assert code == 1
+        assert "DAYDREAM_REVIEW_MODEL" in capsys.readouterr().err
+        assert calls == []
+        assert not ledger_path.exists()
+    else:
+        assert code == 3  # Harbor's own exit code and exact operator selection survive.
+        assert calls[0]["DAYDREAM_REVIEW_MODEL"] == " rm "
+        assert json.loads(ledger_path.read_text())["runs"][0]["reviewer_model"] == " rm "
 
 def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
