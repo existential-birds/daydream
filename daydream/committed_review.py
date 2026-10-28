@@ -36,7 +36,13 @@ from daydream.committed_review_model import (
 )
 from daydream.committed_review_output import write_committed_review_output
 from daydream.deep.detection import StackAssignment
-from daydream.host_tools import _MAX_RESULT_BYTES, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import (
+    _MAX_RESULT_BYTES,
+    HostToolBinding,
+    HostToolCallBudgetExceeded,
+    HostToolFatal,
+    HostToolRejected,
+)
 from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
@@ -52,7 +58,6 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -637,7 +642,7 @@ async def _dispatch(
         "run_id": review.run_id,
         "analyzed_revision": review.inputs.revision,
         "captured_root": str(repo),
-        "assignments": [{**part, "source_options": source_options(part["source_refs"])} for part in review.assignments],
+        "assignments": deepcopy(review.assignments),
         "claims": review.pending() if kind == "challenge" else [],
         "profile": profile,
     }
@@ -687,7 +692,8 @@ async def _dispatch(
         reason = ReasonCode.BACKEND_FAILURE.value
         raise
     except Exception as exc:
-        reason = reason_for_exception(exc).value
+        reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION.value
+                  if isinstance(binding.fatal_error, HostToolCallBudgetExceeded) else reason_for_exception(exc).value)
     finally:
         binding.close_authority()
         review.execution.append(

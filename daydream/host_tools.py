@@ -65,6 +65,13 @@ class HostToolFatal(Exception):
         self.outcome: Literal["fatal", "indeterminate"] = "fatal" if preacceptance else "indeterminate"
 
 
+class HostToolCallBudgetExceeded(HostToolFatal):
+    """The binding's original native call allowance cannot authorize further work."""
+
+    def __init__(self, message: str, *, preacceptance: bool = True) -> None:
+        super().__init__(message, code="capacity_exhausted", preacceptance=preacceptance)
+
+
 def _valid_call_id(call_id: Any) -> bool:
     try:
         return isinstance(call_id, str) and 0 < len(call_id.encode("utf-8", errors="strict")) <= 512
@@ -232,8 +239,9 @@ class HostToolBinding:
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
         if self._call_limit is not None and self.calls >= self._call_limit:
-            fatal = HostToolFatal("Original cumulative tool allowance exhausted; no calls remain for correction",
-                                  code="capacity_exhausted", preacceptance=not self.possibly_accepted)
+            fatal = HostToolCallBudgetExceeded(
+                "Original cumulative tool allowance exhausted; no calls remain for correction. "
+                f"Rejected submission: {rejection}", preacceptance=not self.possibly_accepted)
             fatal.__cause__ = rejection
             return self.fail(fatal)
         return rejection
@@ -264,8 +272,10 @@ class HostToolBinding:
         self.calls += 1
         self._admitted.add(call_id)
         if self._call_limit is not None and self.calls > self._call_limit:
-            raise self._fatal("Original cumulative tool allowance exhausted; no further native calls are authorized",
-                              code="capacity_exhausted")
+            self.rejections += 1
+            raise self.fail(HostToolCallBudgetExceeded(
+                "Original cumulative tool allowance exhausted; no further native calls are authorized",
+                preacceptance=not self.possibly_accepted))
         if self._allowed_tools is not None and name not in self._allowed_tools:
             raise self._reject("This tool is not granted by the operator's read-only policy; use only granted tools",
                                code="permission_denied")

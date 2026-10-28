@@ -20,12 +20,12 @@ from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
 from daydream.backends import MetricsEvent, TextEvent
-from daydream.backends.pi import PiBackend
+from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
 from daydream.git_ops.source import FrozenSourceRejected
-from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
@@ -250,7 +250,8 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 
 @pytest.mark.parametrize(
     "challenge", [
-        "missing", "timeout", "accepted-then-failed", "exhausted", "setup", "output-install", "cancelled",
+        "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
+        "cancelled",
         "report-stage", "bundle-stage", "too-many-assignments", "hub-export", "hosted-output-install",
         "hosted-bundle-install",
     ]
@@ -264,7 +265,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
-    Distinct rows cover cancellation usage, protected allowances, pre-dispatch
+    Distinct rows cover cancellation usage, typed terminal quota, protected allowances, pre-dispatch
     refusals, pipeline-only strategy fallback, and real locked-worktree cleanup.
     Native journeys separately own transport/history/accounting.
     """
@@ -320,7 +321,21 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             else:
                 value = {"verdicts": [] if challenge == "missing" else [
                     _verdict(review_inputs, assignment["claims"][0])], "claims": []}
+                if challenge == "last-call-quota":
+                    for number in range(kwargs["tool_call_budget"] - 1):
+                        binding.admit(f"challenge-read-{number}", "read", {})
+                    value["verdicts"][0]["evidence_refs"][0]["source_id"] = "source:" + "0" * 64
             binding.admit("terminal", "structured_output", value, terminal=True)
+            if assignment["kind"] == "challenge" and challenge == "last-call-quota":
+                # Native transport can lose exception causes; the real binding's
+                # typed terminal outcome must survive into committed coverage.
+                with pytest.raises(HostToolCallBudgetExceeded) as rejected:
+                    binding.submit("terminal", value)
+                assert binding.fatal_error is rejected.value
+                assert binding.calls == kwargs["tool_call_budget"]
+                assert not binding.accepted and not binding.possibly_accepted
+                kwargs["investigation_budget"].observed_tool_starts += binding.calls
+                raise PiError("native terminal submission failed") from None
             accepted = binding.submit("terminal", value)
             kwargs["investigation_budget"].observed_tool_starts += binding.calls
             if assignment["kind"] == "challenge" and challenge == "accepted-then-failed":
@@ -501,6 +516,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert len(value["findings"]) == int(confirmed)
     assert value["claims"][0]["disposition"] == ("confirmed" if confirmed else "unresolved")
     assert value["execution"][0]["accepted"]
+    if challenge == "last-call-quota":
+        assert value["execution"][1]["reason"] == "host_tool_budget_exhaustion"
+        assert not value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
+        assert "host_tool_budget_exhaustion" in value["terminal_result"]["reason_codes"]
+        assert value["claims"][0]["challenge_evidence"] == []
+        assert all(not binding.authority_open and binding.cleanup_complete for binding in bindings)
     if challenge == "accepted-then-failed":
         assert value["execution"][1]["accepted"] and not value["execution"][1]["settled"]
         # Persisted success flags cannot erase the actual retained execution failure.
@@ -783,6 +804,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
         binding.configure_schema(kwargs["output_schema"])
         async with binding.session():
             part = assignment["assignments"][0]
+            assert part["source_options"][0]["source_id"] == "source:1"
             refs = [{"source_id": part["source_options"][0]["source_id"], "source_range": None,
                      "basis": "supplied_diff"}]
             if assignment["kind"] == "discovery":

@@ -15,7 +15,7 @@ from daydream import review_result
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
-from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     StagedBackend,
@@ -92,7 +92,7 @@ class NativeStageBackend(StagedBackend, PiBackend):
             binding.native_settled = True
 
 
-@pytest.mark.parametrize('fault', ['foreign-source', 'invalid-judgment', 'not-reviewed-reason',
+@pytest.mark.parametrize('fault', ['foreign-source', 'foreign-valid-source', 'invalid-judgment', 'not-reviewed-reason',
                                  'prior-admitted', 'handoff-bytes', 'foreign-contradiction',
                                  'duplicate-contradiction'])
 async def test_native_correction_admits_only_the_valid_whole_stage(
@@ -102,7 +102,8 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     from daydream.review_investigation import HANDOFF_MAX_BYTES, ReviewInvestigation
 
     triage = fault in {'foreign-contradiction', 'duplicate-contradiction'}
-    review = many_file_review(tmp_path, monkeypatch, count=9 if fault == 'prior-admitted' else 1, docs_count=0)
+    prior_admitted = fault in {'prior-admitted', 'foreign-valid-source'}
+    review = many_file_review(tmp_path, monkeypatch, count=9 if prior_admitted else 1, docs_count=0)
     backend = NativeStageBackend(review.repo)
     backend.fanout_concurrency = 1
     review.backend = backend
@@ -120,7 +121,7 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     @backend.script()
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         nonlocal checked
-        if (fault == 'prior-admitted' and not stage['progress']) or (triage and stage['stage'] == 'first_pass'):
+        if (prior_admitted and not stage['progress']) or (triage and stage['stage'] == 'first_pass'):
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             if triage:
                 output['candidates'].append(candidate())
@@ -165,6 +166,10 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
                 record(), description='Rejected defect'))]
         if fault == 'foreign-source':
             bad['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
+        elif fault == 'foreign-valid-source':
+            # This handle belongs to the already admitted api.py assignment,
+            # not this later target. A globally valid alias cannot widen scope.
+            bad['targets'][0]['evidence_refs'][0]['source_id'] = 'source:1'
         elif fault in {'invalid-judgment', 'prior-admitted'}:
             bad['candidates'][0]['grounds'] = ''
         elif fault == 'not-reviewed-reason':
@@ -182,7 +187,7 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
             assert retained_state() == before, 'rejected plans must preserve all admitted state and shared capacity'
             if fault == 'handoff-bytes':
                 assert investigation.assertion_failure_class == 'admission_failure'
-            if fault != 'prior-admitted' and not triage:
+            if not prior_admitted and not triage:
                 output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             yield ToolStartEvent(id='corrected-submit', name='structured_output', input=output)
             yield ToolResultEvent(id='corrected-submit', output='Submitted.', is_error=False)
@@ -205,7 +210,7 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     assert checked
     python_stages = [event['metadata'] for event in stage_ends(review, 'python')]
     assert all(item['admitted'] for item in python_stages)
-    corrected = python_stages[1 if fault == 'prior-admitted' or triage else 0]
+    corrected = python_stages[1 if prior_admitted or triage else 0]
     assert corrected['submission_starts'] == 2
     assert corrected['failed_submissions'] == 1
     assert corrected['successful_submissions'] == 1
@@ -228,8 +233,12 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
     assert rejected_result['extra']['is_error'] is True
     assert rejected_result['content'] and len(rejected_result['content'].encode()) <= 1024
     diagnostic = rejected_result['content']
-    if fault == 'foreign-source':
+    if fault in {'foreign-source', 'foreign-valid-source'}:
         assert 'targets[0]' in diagnostic and 'evidence_refs' in diagnostic and 'choose' in diagnostic
+        if fault == 'foreign-valid-source':
+            first = next(stage for stage in backend.stages if stage['scope_id'] == 'python')
+            assert first['source_options']['api.py'][0]['source_id'] == 'source:1'
+            assert 'source:1' in diagnostic and 'outside this target' in diagnostic
     elif fault in {'invalid-judgment', 'prior-admitted'}:
         assert 'candidates[0].grounds' in diagnostic and 'nonblank' in diagnostic and 'supply' in diagnostic
     elif fault == 'not-reviewed-reason':
@@ -242,6 +251,7 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
 
 
 @pytest.mark.parametrize('fault', ['corrupt-canonical', 'delete-canonical', 'target-capacity', 'handoff-capacity',
+                                 'last-call-handoff-capacity',
                                  'handoff-byte-capacity', 'triage-byte-capacity', 'triage-byte-correction',
                                  'closed-contradiction'])
 async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
@@ -306,8 +316,11 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             # can fit the shared allocation, even without evidence or prose.
             allocated = investigations['python'].coverage._target_decision_bytes
             monkeypatch.setattr(review_result, 'RUN_TARGET_DECISIONS_MAX_BYTES', sum(allocated.values()))
-        elif fault == 'handoff-capacity':
+        elif fault in {'handoff-capacity', 'last-call-handoff-capacity'}:
             monkeypatch.setattr(review_investigation, 'HANDOFF_MAX_ITEMS', 2)
+            if fault == 'last-call-handoff-capacity':
+                for index in range(stage['hard_tool_call_allowance'] - 1):
+                    yield from read_events(review.repo, 'api.py', event_id=f'last-call-read-{index}')
         elif triage:
             assert stage['stage'] == 'triage'
             output.update(notes='', supporting_files=[], candidates=[candidate(
@@ -373,6 +386,9 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert [item['admitted'] for item in metadata] == [True, correction]
     assert all(item['attempt'] == 1 for item in metadata)
+    if fault == 'last-call-handoff-capacity':
+        assert metadata[-1]['attempt_tool_starts'] == metadata[-1]['hard_tool_call_allowance']
+        assert metadata[-1]['failure_class'] == 'backend_failure'
     if contradiction:
         assert metadata[-1]['stop_reason'] == 'evidence_incomplete'
         assert metadata[-1]['submission_starts'] == metadata[-1]['failed_submissions'] == 1
@@ -432,7 +448,7 @@ async def test_native_stage_authority_order_preserves_truthful_retained_work(
 
 
 @pytest.mark.parametrize('late_work', ['read-and-submit', 'inline', 'new-triage', 'overrun', 'retry',
-                                     'parallel-open', 'parallel-open-only'])
+                                     'rejected-last-call', 'unicode-last-call', 'parallel-open', 'parallel-open-only'])
 async def test_prior_borrowing_preserves_later_native_stage_capacity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, late_work: str,
 ) -> None:
@@ -467,7 +483,7 @@ async def test_prior_borrowing_preserves_later_native_stage_capacity(
         first = not stage['progress']
         parallel = late_work.startswith('parallel-')
         reads = allowance - 2 if first else allowance + 1 if late_work == 'overrun' or parallel else (
-            allowance - 1 if late_work == 'retry' else 1)
+            allowance - 1 if late_work in {'retry', 'rejected-last-call', 'unicode-last-call'} else 1)
         if not first and late_work == 'inline' and stage['remaining_work']['stages'] > 1:
             reads = 0
         if parallel and not first:
@@ -483,6 +499,10 @@ async def test_prior_borrowing_preserves_later_native_stage_capacity(
                 yield from read_events(review.repo, stage['assigned_files'][0], event_id=f'read-{index}')
         if not first and late_work == 'retry':
             raise TransportFailure('provider disconnected after reads')
+        if not first and late_work == 'rejected-last-call':
+            output['targets'][0]['evidence_refs'][0]['source_id'] = 'source:' + '0' * 64
+        if not first and late_work == 'unicode-last-call':
+            output['notes'] = '\ud800'
         if first:
             output['candidates'] = ([] if late_work == 'parallel-open-only' else
                                     [candidate(disposition='confirmed', finding=record())])
@@ -521,6 +541,29 @@ async def test_prior_borrowing_preserves_later_native_stage_capacity(
         assert len(allowances) == 2
         assert metadata[-1]['attempt_tool_starts'] == allowances[-1] - 1
         assert metadata[-1]['admitted'] is False
+    elif late_work in {'rejected-last-call', 'unicode-last-call'}:
+        assert len(allowances) == 2
+        assert metadata[-1]['attempt_tool_starts'] == allowances[-1]
+        assert metadata[-1]['remaining_tool_calls'] > 0
+        assert metadata[-1]['admitted'] is False
+        assert metadata[-1]['failure_class'] == 'quantitative_exhaustion'
+        fatal = next(call['host_tools'].fatal_error for call in backend.calls
+                     if call.get('host_tools') is not None and call['host_tools'].fatal_error is not None)
+        assert isinstance(fatal, HostToolCallBudgetExceeded)
+        if late_work == 'unicode-last-call':
+            assert fatal.__cause__ is None
+        coverage = saved_coverage(review.repo / '.daydream/deep')
+        diagnostic = coverage.diagnostics['scopes']['python']
+        detail = 'outside this target' if late_work == 'rejected-last-call' else 'valid UTF-8'
+        assert 'no calls remain' in diagnostic and detail in diagnostic
+        root = read_trajectory(review.tmp / 'trajectory.json')
+        children = [read_trajectory(review.repo / '.daydream' / summary['sibling_trajectory_ref'])
+                    for summary in root['extra']['subtrajectories'] if summary.get('sibling_trajectory_ref')]
+        failures = [result for child in children for step in child['steps']
+                    for result in (step.get('observation') or {}).get('results', [])
+                    if result['source_call_id'] == 'submit' and result['extra']['is_error']]
+        failure, = failures
+        assert detail in failure['content'] and 'no calls remain' in failure['content']
     else:
         assert len(allowances) == 5
         assert all(item['admitted'] for item in metadata)

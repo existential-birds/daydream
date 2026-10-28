@@ -121,7 +121,7 @@ contradictions, unfinished targets, and isolated failures preserve their origina
 authority and incomplete coverage; later success cannot erase earlier failures.
 Final-turn output selection and native structured submission remain host-owned;
 malformed envelopes cannot recover nested fragments. Native Pi's private stage
-contract 13 uses selector submissions and one host-accepted canonical result after
+contract 14 uses selector submissions and one host-accepted canonical result after
 clean native settlement. Its model schema is distinct from retained canonical
 output; other backends retain their canonical reference schema. The private cache
 identity changes with this contract, while extension API 8 and persisted canonical
@@ -176,8 +176,13 @@ Ordinary unbound calls retain their supported version/configuration behavior.
 Improve still requires Claude's independent snapshot-root guard.
 
 Assigned `source_options` accompany all supplied parts and bounded deferred
-Structure catalogs. Models choose `{source_id, basis, source_range}` with null
-retaining the exact host identity, or supporting `{path, side, source_range, basis}`.
+Structure catalogs. Models copy compact `source:N` handles in
+`{source_id, basis, source_range}`, with null retaining the exact host identity,
+or select supporting `{path, side, source_range, basis}`. One deterministic map
+per captured review scope binds identical source identities to the same handle
+across that inventory's targets and stages. Admission accepts only exact handles
+belonging to the target's frozen inventory; existing exact `source:<SHA-256>`
+selectors remain compatible.
 The full frozen assignment inventory resolves IDs, including later parts;
 abbreviated prompt examples do not narrow authority. The host supplies revisions,
 hashes, rename paths, roles and fragment metadata, validating original canonical
@@ -203,7 +208,6 @@ must use `HostToolRejected` to certify a correctable preacceptance fault; arbitr
 `ValueError` does not certify that no mutation occurred. No released callback
 protocol needs migration.
 The superseded reader was unpublished PR machinery and has no released migration.
-Private stage/cache contract 13 invalidates incompatible cached stage results.
 Prompt overrides must preserve the supplied response schema; sanctioned inputs and
 real `diff_path` / adjacent `hunk-index.json` semantics retain their contracts.
 

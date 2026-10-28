@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **review:** offer compact, target-bound native source selectors while retaining
+  canonical snapshot evidence and exact full-hash selector compatibility
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)). Private
+  stage/cache contract 14 invalidates prior stage caches; extension API 8 is unchanged.
+- **review:** retain rejected submission details when the final native tool call
+  exhausts its allowance, and report tool-budget exhaustion while preserving
+  earlier admitted work ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - **review:** accept legal punctuation and Unicode in loose and packed symbolic
   HEAD refs during immutable source preparation while retaining path confinement
   ([#1709](https://github.com/existential-birds/daydream/pull/1709)).

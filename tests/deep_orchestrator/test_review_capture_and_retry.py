@@ -83,17 +83,22 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
 def part_identity(parts: list[dict[str, Any]]) -> str:
     """Validate raw selector bindings, then pin every field with stable Git/source identities."""
     normalized = copy.deepcopy(parts)
+    aliases: dict[str, str] = {}
     for part in normalized:
         for reference, option in zip(part['source_refs'], part['source_options'], strict=True):
             identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
+            digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                              separators=(',', ':')).encode()).hexdigest()
+            assert re.fullmatch(r'source:[1-9][0-9]*', option['source_id'])
+            assert aliases.setdefault(digest, option['source_id']) == option['source_id']
             assert option == {
-                'source_id': 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
-                                                                 separators=(',', ':')).encode()).hexdigest(),
+                'source_id': aliases[digest],
                 **{key: reference[key] for key in ('path', 'side', 'source_range')}, 'basis': 'supplied_diff',
             }
             reference['revision'] = identity['revision'] = reference['side']
             option['source_id'] = 'source:' + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                                                        separators=(',', ':')).encode()).hexdigest()
+    assert len(set(aliases.values())) == len(aliases)
     return hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':')).encode()).hexdigest()
 
@@ -314,6 +319,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     )
     review = staged_review(tmp_path, monkeypatch)
     attempts = 0
+    initial_options: list[dict[str, Any]] = []
 
     @review.backend.script('python', terminal=False)
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -323,6 +329,11 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             attempts += 1
             assert stage['attempt'] == attempts and stage['max_attempts'] == 2
             assert f'CUSTOM_ATTEMPT={attempts}' in review.backend.calls[-1]['prompt']
+            options = [option for part in stage['assignment_parts'] for option in part['source_options']]
+            if attempts == 1:
+                initial_options.extend(copy.deepcopy(options))
+            else:
+                assert options == initial_options
         for path in stage['assigned_files']:
             yield from read_events(review.repo, path, event_id=f'attempt-{attempts}-{path}')
         if not initial_assignment:

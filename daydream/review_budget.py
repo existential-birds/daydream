@@ -25,6 +25,7 @@ assigned reference. basis is supplied_diff, source_inspection or executed_check;
 _SELECTOR_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs with at most four source selectors. For reviewed work, select at
 least one assigned source_id from source_options or assignment_parts.source_options; not_reviewed may use [].
+Copy compact source_id handles exactly from source_options; do not reconstruct hashes or renumber handles per target.
 Assigned selectors contain source_id, basis and source_range. Set source_range=null to retain the exact supplied
 identity, including continuation fragments; an explicit range must be contained in the offered non-null range.
 Source IDs accompany supplied parts, including deferred Structure parts in the bounded supporting catalogs.

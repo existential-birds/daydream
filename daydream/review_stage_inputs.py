@@ -25,6 +25,8 @@ from daydream.review_source_refs import (
     canonicalize_source_selectors,
     lf_lines,
     part_source_mapping,
+    source_id,
+    source_options,
     validate_source_refs,
 )
 from daydream.workspace import WorkContext
@@ -88,6 +90,15 @@ class StageInputFactory:
         self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
         self.blocks = dict(iter_diff_blocks(self.full_diff))
         self.parts = self._parts()
+        # Scope-local handles stay fixed when later projections select only some parts.
+        self._source_aliases: dict[str, str] = {}
+        for part in self.parts:
+            for reference in part.assignment['source_refs']:
+                identifier = source_id(reference)
+                self._source_aliases.setdefault(identifier, f'source:{len(self._source_aliases) + 1}')
+        for part in self.parts:
+            part.assignment['source_options'] = source_options(
+                part.assignment['source_refs'], source_aliases=self._source_aliases)
         self.by_id = {part.assignment["target_id"]: part for part in self.parts}
         self.assignment_batches = self._batches()
         self.current_paths: dict[str, Path] = {}
@@ -155,7 +166,7 @@ class StageInputFactory:
         """Recheck the original canonical inputs immediately before resolving selectors."""
         self._revalidate_canonical()
         return canonicalize_source_selectors(selectors, expected_refs, revision=self.revision,
-            source_root=self.work.repo, require_assigned=require_assigned)
+            source_root=self.work.repo, require_assigned=require_assigned, source_aliases=self._source_aliases)
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}

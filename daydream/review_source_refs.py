@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -43,7 +43,7 @@ SOURCE_REFS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': SOURCE_REF_SCHEMA
 _BASIS = {'enum': ['supplied_diff', 'source_inspection', 'executed_check']}
 SOURCE_SELECTORS_SCHEMA = {'type': 'array', 'maxItems': 4, 'items': {'anyOf': [
     strict_object({
-        'source_id': {'type': 'string', 'pattern': '^source:[0-9a-f]{64}$'},
+        'source_id': {'type': 'string', 'pattern': '^source:(?:[1-9][0-9]*|[0-9a-f]{64})$', 'maxLength': 71},
         'basis': _BASIS, 'source_range': {'anyOf': [_RANGE, {'type': 'null'}]},
     }),
     strict_object({
@@ -64,16 +64,23 @@ def source_id(reference: dict[str, Any]) -> str:
     return 'source:' + _sha(json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(',', ':')))
 
 
-def source_options(references: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def source_options(references: Iterable[dict[str, Any]], *,
+                   source_aliases: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     """Describe every supplied source without asking a model to reproduce its mechanics."""
-    return [{'source_id': source_id(reference),
-             **{key: deepcopy(reference[key]) for key in ('path', 'side', 'source_range')},
-             'basis': 'supplied_diff'} for reference in references]
+    aliases = source_aliases or {}
+    options = []
+    for reference in references:
+        identifier = source_id(reference)
+        options.append({'source_id': aliases.get(identifier, identifier),
+                        **{key: deepcopy(reference[key]) for key in ('path', 'side', 'source_range')},
+                        'basis': 'supplied_diff'})
+    return options
 
 
 def canonicalize_source_selectors(
     selectors: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
     source_root: Path, require_assigned: bool = True,
+    source_aliases: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve a complete selection atomically against frozen assignment/Git identities.
 
@@ -95,8 +102,10 @@ def canonicalize_source_selectors(
         assigned: dict[str, dict[str, Any]] = {}
         for expected in expected_refs:
             identifier = source_id(expected)
-            if identifier in requested:
-                assigned[identifier] = expected
+            alias = source_aliases.get(identifier) if source_aliases is not None else None
+            for offered in (identifier, alias):
+                if offered is not None and offered in requested:
+                    assigned[offered] = expected
             if requested <= assigned.keys():
                 break
         if requested != assigned.keys():

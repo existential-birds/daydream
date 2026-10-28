@@ -17,7 +17,13 @@ from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.deep.sharding import file_change_bytes
-from daydream.host_tools import _MAX_RESULT_BYTES, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import (
+    _MAX_RESULT_BYTES,
+    HostToolBinding,
+    HostToolCallBudgetExceeded,
+    HostToolFatal,
+    HostToolRejected,
+)
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import (
@@ -51,12 +57,12 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import source_options, validate_source_refs
+from daydream.review_source_refs import validate_source_refs
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 13
+STAGED_REVIEW_CONTRACT = 14
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -312,14 +318,16 @@ class ReviewInvestigation:
             'hard_tool_call_allowance': self.budget.remaining_tool_calls,
             'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
 
-    def _reference_options(self, stage: str, targets: list[str]) -> dict[str, list[dict[str, Any]]]:
+    def _reference_options(self, stage: str, targets: list[str], *,
+                           selectors: bool = False) -> dict[str, list[dict[str, Any]]]:
         """Offer bounded source identities, never a claim that a source was read."""
+        field = 'source_options' if selectors else 'source_refs'
         if stage == 'integration':
             # Whole-change judgment can cite useful assigned work without a
             # mandatory reference for every file or an exhaustive registry.
-            choices = list(islice(self._expected_source_refs(stage, ''), 4))
+            choices = list(islice((option for part in self.assignments.values() for option in part[field]), 4))
             return {target: choices for target in targets}
-        return {target: self.assignments.get(target, {}).get('source_refs', []) for target in targets}
+        return {target: self.assignments.get(target, {}).get(field, []) for target in targets}
 
     def _expected_source_refs(self, stage: str, target: str) -> Iterable[dict[str, Any]]:
         """Prompt examples do not narrow the assigned whole-change identity."""
@@ -354,8 +362,7 @@ class ReviewInvestigation:
                                  if isinstance(backend, CodexBackend) else schema)
             if native_admission:
                 state['source_attribution'] = 'host_selectors'
-                state['source_options'] = {target: source_options(refs)
-                                           for target, refs in state['source_refs'].items()}
+                state['source_options'] = self._reference_options(stage, targets, selectors=True)
             state["response_contract"] = {"schema": submission_schema, "skeleton": {
                 "targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
                             for target in targets],
@@ -494,10 +501,13 @@ class ReviewInvestigation:
                     self.failure_diagnostic = (codex_lifecycle_diagnostic(exc)
                         or f"{type(exc).__name__}: review invocation failed ({self.reason}).")
                     if binding is not None and binding.fatal_error is not None:
+                        fatal = binding.fatal_error
                         self._continuable_failure = False
-                        self.failure_diagnostic = str(binding.fatal_error)
-                        if binding.fatal_error.code in {'input_unavailable', 'evidence_incomplete'}:
+                        self.failure_diagnostic = str(fatal)
+                        if fatal.code in {'input_unavailable', 'evidence_incomplete'}:
                             self.reason = 'evidence_incomplete'
+                        elif isinstance(fatal, HostToolCallBudgetExceeded):
+                            self.reason = 'tool_call_budget_exceeded'
                 else:
                     actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
                     syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None
