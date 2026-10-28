@@ -4,13 +4,14 @@ from __future__ import annotations
 import math
 import stat
 from bisect import bisect_right
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
+from daydream.artifacts.ownership import CodeWorkspace
 from daydream.generated_files import is_generated_file
-from daydream.git_ops import is_git_workspace, search_files
+from daydream.git_ops import search_files
 from daydream.repository_paths import git_observed_path_is_confined
 
 # Quality metrics (issue #316) ----------------------------------------------
@@ -130,7 +131,7 @@ def _count_decision_nodes(node: Any) -> int:
     )
 
 
-def _scoped_python_files(workspace: Path) -> Iterator[tuple[Path, str, bytes]]:
+def _scoped_python_files(workspace: Path, *, git_workspace: bool) -> Iterator[tuple[Path, str, bytes]]:
     """Yield eligible Python bytes from Git membership or standalone directory scope.
 
     Git discovery/inventory failures propagate rather than widening to recursive
@@ -138,7 +139,6 @@ def _scoped_python_files(workspace: Path) -> Iterator[tuple[Path, str, bytes]]:
     retain recursive discovery, exclusions, and leaf-file symlink compatibility;
     directory symlinks are never traversed and nonregular files are never read.
     """
-    git_workspace = is_git_workspace(workspace)
     if git_workspace:
         relatives = search_files(workspace, ["."])
     else:
@@ -626,7 +626,7 @@ def analyze_quality(
     daydream_dir: str | Path,
     candidate_paths: set[str] | None = None,
     *,
-    code_workspace: Path | None = None,
+    code_workspace: Path | CodeWorkspace | None = None,
 ) -> dict[str, Any]:
     """Measure scoped Python quality in code_workspace, defaulting to daydream_dir.parent.
 
@@ -636,9 +636,25 @@ def analyze_quality(
     standalone directories use recursive scope. Failed parses
     stay in scoped_files but are absent from every metric/index. Zero denominators
     yield None ratios. Refuse unsafe tree-sitter versions even for empty scope.
+    The workspace must remain the same real directory with no symlink ancestry;
+    only missing or permission-denied roots are classified as source unavailability.
     """
-    daydream_dir = Path(daydream_dir)
-    workspace = daydream_dir.parent if code_workspace is None else code_workspace
+    if isinstance(code_workspace, CodeWorkspace):
+        return code_workspace.run(partial(
+            _analyze_workspace_quality, code_workspace.path, candidate_paths,
+            git_workspace=code_workspace.is_git_workspace,
+        ))
+    workspace = Path(daydream_dir).parent if code_workspace is None else code_workspace
+    with CodeWorkspace.standalone(workspace) as authority:
+        return authority.run(partial(
+            _analyze_workspace_quality, authority.path, candidate_paths, git_workspace=authority.is_git_workspace,
+        ))
+
+
+def _analyze_workspace_quality(
+    workspace: Path, candidate_paths: set[str] | None, *, git_workspace: bool,
+) -> dict[str, Any]:
+    """Measure quality while the caller's workspace authority guards live reads."""
 
     # Single shared choke point for every native-analysis entry point (mirrors
     # ``detect_affected_files``): a known-bad installed tree-sitter raises
@@ -671,7 +687,7 @@ def analyze_quality(
     parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
     candidates: list[tuple[Path, str]] = []
-    for path, rel, source in _scoped_python_files(workspace):
+    for path, rel, source in _scoped_python_files(workspace, git_workspace=git_workspace):
         # Eligibility and parsing share these bytes. Exact relative candidate
         # matches restrict reporting, while every valid peer supplies clones.
         candidate = candidate_paths is None or rel in candidate_paths
@@ -702,7 +718,6 @@ def analyze_quality(
     per_file, total_mass, high_mass, total_flagged, total_loc = _aggregate_per_file(
         candidates, parsed, parsed_lines, cross_file_flagged
     )
-
     return {
         "erosion": round(high_mass / total_mass, 4) if total_mass > 0 else None,
         "verbosity": round(total_flagged / total_loc, 4) if total_loc > 0 else None,

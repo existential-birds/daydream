@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import replace
@@ -27,7 +28,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
@@ -652,11 +653,17 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None
+    output_parent = review.output.parent.stat()
     link, stage, allocate = os.link, json_utils._stage_bytes, tempfile.mkstemp
     injected: list[bool] = []
     staging_findings = False
     def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
-        if Path(destination) == review.output and not injected:
+        parent_fd = kwargs.get('dst_dir_fd')
+        anchored_output = False
+        if parent_fd is not None and Path(destination) == Path(review.output.name):
+            parent = os.fstat(parent_fd)
+            anchored_output = (parent.st_dev, parent.st_ino) == (output_parent.st_dev, output_parent.st_ino)
+        if (Path(destination) == review.output or anchored_output) and not injected:
             injected.append(True)
             raise OSError('public install failed')
         link(source, destination, **kwargs)
@@ -733,12 +740,38 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     assert 'review_context' not in data
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation', 'source-loss', 'source-loss-salvage',
+                                  'source-loss-worktree', 'source-loss-placement-worktree',
+                                  'placement-git-error-worktree', 'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
+    force_worktree = fault.endswith('-worktree')
+    if force_worktree:
+        git(review.repo, 'remote', 'add', 'origin', str(bare_remote(review.tmp / 'origin.git')))
+        git(review.repo, 'push', 'origin', 'main')
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
-    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    show = git_ops.show
+    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': [], 'export': None}
     staging_coverage = False
+    real_run = subprocess.run
+    placement_fault = 'placement' in fault
+    def fault_at_placement(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if (placement_fault and state['failed']
+                and args == ['git', 'diff', '--name-only', '-z', review.pr.base_sha, review.pr.head_sha]):
+            assert not state.get('dispatch_injected')
+            state['dispatch_injected'] = True
+            if fault == 'placement-git-error-worktree':
+                oid = review.pr.base_sha
+                (review.repo / '.git' / 'objects' / oid[:2] / oid[2:]).rename(review.tmp / 'removed-commit-object')
+            else:
+                review.repo.rename(review.tmp / 'removed-source')
+                if fault == 'placement-replacement-worktree':
+                    init_repo(review.repo)
+                    (review.repo / 'replacement.bin').write_bytes(b'replacement\x00\xff')
+                    from tests.test_artifact_visibility import _walk_entry
+                    state['replacement_git'] = []
+                    _walk_entry(review.repo, review.repo / '.git', state['replacement_git'])
+        return real_run(args, **kwargs)
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
         if fault == 'presentation' and state['failed'] and path.name == 'review-report-context.json':
@@ -747,6 +780,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         staging_coverage = path.name == 'review-coverage.json'
         if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
+        if b'"terminal_result"' in content:
+            state['export'] = (path, content)
         try:
             return stage(path, content, **kwargs)
         finally:
@@ -765,21 +800,35 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             state['rejected'] = True
             return '{"issues": "invalid"}'
         return text
+    def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
+        if fault.startswith('source-loss') and state['failed']:
+            pytest.fail('terminal export attempted to read live Git after source loss')
+        return show(target, *args, **kwargs)
     def response(prompt: str) -> Any:
-        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
-                   'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication'}[fault]
+        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue'}.get(
+            fault, 'supervisor adjudication')
         if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
             state['failed'] = True
             if fault == 'salvage':
                 assert json.loads(state['merged'].read_text())['items']
                 state['merged'].unlink()
+            if fault.startswith('source-loss'):
+                state['admitted'] = json.loads(state['merged'].read_text())['items'][0]
+                if fault == 'source-loss-salvage':
+                    state['merged'].unlink()
+                if fault != 'source-loss-placement-worktree':
+                    review.repo.rename(review.tmp / 'removed-source')
             return [error]
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
     review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
-    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
-                                       review_by_stack={'structure': [record()]}, responder=response)
+    review.patch.setattr(git_ops, 'show', retained_source_only)
+    review.patch.setattr('daydream.git_ops.process.subprocess.run', fault_at_placement)
+    stack = 'python' if force_worktree or fault == 'source-loss' else 'structure'
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=stack != 'python',
+                                       review_by_stack={stack: [record()]}, responder=response)
+    review.backend.merge_echo_records = True
     if fault == 'fix':
         assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
         saved_path = review.repo / '.daydream/deep/review-coverage.json'
@@ -790,8 +839,60 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert 'pipeline' not in saved['required_phases']
         return
     with pytest.raises(RuntimeError) as raised:
-        await review.run()
+        await review.run(dataset_capture=fault.startswith('source-loss'),
+                         dataset_store_path=review.tmp / 'records', force_worktree=force_worktree)
     assert raised.value is error
+    if placement_fault:
+        assert state.get('dispatch_injected')
+    if fault.startswith('placement-'):
+        assert state['export'] is None and not review.output.exists()
+        warning = collapse_panel_text(capsys)
+        diagnostic = 'ArtifactVisibilityError' if fault == 'placement-replacement-worktree' else 'GitError'
+        assert f'Terminal review finalization failed: {diagnostic}' in warning
+        if fault == 'placement-replacement-worktree':
+            from tests.test_artifact_visibility import _Entry, _walk_entry
+            after: list[_Entry] = []
+            _walk_entry(review.repo, review.repo / '.git', after)
+            assert after == state['replacement_git']
+            assert (review.repo / 'replacement.bin').read_bytes() == b'replacement\x00\xff'
+        return
+    if fault.startswith('source-loss'):
+        assert not review.repo.exists()
+        if force_worktree:
+            operational = {call['cwd'] for call in review.backend.calls if 'cwd' in call}
+            assert operational and all(path != review.repo and path.is_dir() for path in operational)
+            for path in operational:
+                with pytest.raises(git_ops.GitError):
+                    git_ops.head_sha(path)
+        assert not review.output.exists()
+        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
+        findings = raw[0]['findings']['value']
+        assert len(findings['items']) == 1
+        assert findings['items'][0]['description'] == 'Grounded defect'
+        assert findings['items'][0]['item_uid'] == state['admitted']['item_uid']
+        assert findings['items'][0]['source_uids'] == state['admitted']['source_uids']
+        coverage = findings['terminal_coverage']
+        assert coverage['run_id'] == raw[0]['run_id']
+        assert coverage['analyzed_revision']['head_sha'] == review.pr.head_sha
+        assert coverage['analyzed_revision']['merge_base_sha'] == review.pr.base_sha
+        assert coverage['analyzed_revision']['diff_key'] == raw[0]['original_task']['value']['diff_sha256']
+        assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
+        assert state['export'] is not None, 'validated terminal findings were not installed privately'
+        export_path, exported_bytes = state['export']
+        assert export_path.read_bytes() == exported_bytes
+        exported = json.loads(exported_bytes)
+        assert len(exported['findings']) == 1 and exported['findings'][0]['title'] == 'Grounded defect'
+        assert exported['findings'][0]['placement'] == 'file' and exported['findings'][0]['line'] is None
+        result = exported['terminal_result']
+        assert result['stack_outcomes'] == coverage['stack_outcomes']
+        assert result['run_id'] == coverage['run_id']
+        assert result['analyzed_revision'] == coverage['analyzed_revision']
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'incomplete', True)
+        assert any('secondary base failure' in note for note in error.__notes__)
+        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
+        return
     if fault == 'coverage':
         assert state['writes'] and not review.output.exists()
         assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)

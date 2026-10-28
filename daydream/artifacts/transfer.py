@@ -17,6 +17,7 @@ from daydream.artifacts.models import (
     ArtifactManifestEntry,
     ArtifactVisibilityError,
 )
+from daydream.artifacts.ownership import SourceOwnership
 from daydream.json_utils import _fsync_directory
 
 _transfer_observer: Any | None = None
@@ -261,6 +262,7 @@ def _transfer_entry(
     expected: ArtifactManifestEntry,
     transaction: Path,
     record_intent: bool = True,
+    source: SourceOwnership,
 ) -> None:
     moved = stage / "entries" / relative
     moved.parent.mkdir(parents=True, exist_ok=True)
@@ -273,8 +275,9 @@ def _transfer_entry(
     if observer is not None:
         observer(path, moved)
     try:
-        os.replace(path, moved)
-        _fsync_directory(path.parent)
+        with source.parent_descriptor(path) as parent_fd:
+            os.replace(path.name, moved, src_dir_fd=parent_fd)
+            os.fsync(parent_fd)
         _fsync_directory(moved.parent)
     except OSError as exc:
         raise ArtifactVisibilityError("artifact entry changed during ownership transfer") from exc
@@ -294,8 +297,9 @@ def _transfer_entry(
             stage=stage,
         )
         try:
-            os.link(moved, path, follow_symlinks=False)
-            _fsync_directory(path.parent)
+            with source.parent_descriptor(path) as parent_fd:
+                os.link(moved, path.name, dst_dir_fd=parent_fd, follow_symlinks=False)
+                os.fsync(parent_fd)
         except FileExistsError:
             pass
         except OSError as exc:
@@ -311,14 +315,16 @@ def _remove_manifested(
     transaction: Path,
     workspace_key: str,
     purpose: str,
-    stage_parent: Path,
     record_id: str = "public",
     remove_directories: bool = True,
     changed_message: str = "public artifacts changed during detach",
+    source: SourceOwnership,
 ) -> None:
     """Stage every manifested file out of ``root``, then drop its directories."""
     if filesystem.manifest_tree(root, names) != entries:
         raise ArtifactVisibilityError(changed_message)
+    source.validate()
+    stage_parent = source.path.parent if root == source.path or source.path in root.parents else root
     stage = _create_transfer_stage(
         stage_parent,
         transaction=transaction,
@@ -338,6 +344,7 @@ def _remove_manifested(
             expected=entry,
             transaction=transaction,
             record_intent=False,
+            source=source,
         )
     if remove_directories:
         for entry in filesystem._deepest_first_directories(entries):
@@ -346,7 +353,7 @@ def _remove_manifested(
                 metadata = target.lstat()
                 if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                     raise ArtifactVisibilityError("public artifact changed during removal")
-                target.rmdir()
+                source.rmdir(target)
             except ArtifactVisibilityError:
                 raise
             except OSError as exc:

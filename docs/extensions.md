@@ -247,7 +247,12 @@ and durable paths with session methods instead of reconstructing public paths.
 Generated model inputs require `prepare_sanctioned_inputs`, bound to exact files,
 backend/cwd/mode and unchanged bytes. Read [runtime contracts](runtime.md#artifacts-and-recovery)
 and [input transport](../daydream/prompt_budget.py) for limits. Standalone calls
-must opt in explicitly; production flows retain session ownership.
+must opt in explicitly; production flows retain session ownership. A workspace
+opened by the host carries its ownership authority through artifact-session close
+and worktree cleanup. Live-code consumers use `ctx.artifacts.code_workspace.run`
+for guarded operations; no separate path/identity or validation callback is needed.
+Existing session routing/validation methods and standalone analysis paths remain
+available under API 8.
 
 Pass `ctx.run_context` to agents/built-in phases. Use `confirm`/`choice` with safe
 defaults for unattended runs. GitHub helpers receive `ctx.github_execution.auth`

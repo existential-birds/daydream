@@ -3,20 +3,89 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from daydream.agent import run_agent
+from daydream.backends.pi import PiBackend, PiError
 from daydream.runner import run
+from daydream.trajectory import DaydreamPhase
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.test_review_completion import record
 from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.review_result import merge_result
 from tests.harness.stub_backend import review_stage_result, review_stage_state, silence
+from tests.harness.trajectory import make_recorder
 from tests.test_backend_pi import _capture_pi_subprocess
+
+
+@pytest.mark.parametrize("failure_kind", ["native-error", "process-exit"])
+async def test_pi_failure_records_redacted_process_tail_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_kind: str,
+) -> None:
+    """A real child preserves late stderr and distinguishes host cleanup from exit.
+
+    Mock process replays cannot prove late merged output is drained or that
+    exit/cleanup observations describe the actual process on both paths.
+    """
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    child = binary / "pi"
+    child.write_text(f"#!{sys.executable}\n" + '''
+import json, signal, sys, time
+def stop(*_):
+    print('late cleanup diagnostic', file=sys.stderr, flush=True)
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+for index in range(25):
+    print(f'early diagnostic {index}', file=sys.stderr)
+print('TOKEN=private-stderr-canary; ' + 'safe ' * 1000, file=sys.stderr, flush=True)
+print('-----BEGIN PRIVATE KEY-----', file=sys.stderr)
+for index in range(30):
+    print(f'private-pem-body-canary-{index}', file=sys.stderr)
+''' + ("print('-----END PRIVATE KEY-----', file=sys.stderr, flush=True)\n" if failure_kind == "native-error" else "")
+        + ('''print(json.dumps({'type': 'turn_end', 'message': {
+    'role': 'assistant', 'stopReason': 'error', 'errorMessage': 'terminated',
+    'usage': {'input': 10, 'output': 2, 'cost': {'total': 0.01}}}}), flush=True)
+time.sleep(300)
+''' if failure_kind == "native-error" else "raise SystemExit(7)\n"))
+    child.chmod(0o700)
+    monkeypatch.setenv("PATH", str(binary) + os.pathsep + os.environ["PATH"])
+    backend = PiBackend(model="fixture-model")
+    backend.retry_attempts = 0
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        with pytest.raises(PiError) as failure:
+            await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
+                            progress_callback=lambda _: None)
+    assert failure.value.category == ("STREAM_DROP" if failure_kind == "native-error" else "PROCESS_EXIT")
+    document = json.loads(recorder.path.read_text())
+    diagnostic = next(item for step in document["steps"]
+                      for item in step.get("extra", {}).get("backend_diagnostics", [])
+                      if item["code"] == "pi_process_failure")
+    metadata = diagnostic["metadata"]
+    assert metadata["process_running_at_cleanup"] is (failure_kind == "native-error")
+    assert metadata["process_returncode"] == (0 if failure_kind == "native-error" else 7)
+    assert len(metadata["diagnostic_tail"]) == 20 and metadata["diagnostic_tail_truncated"] is True
+    assert all(len(line) <= 1024 for line in metadata["diagnostic_tail"])
+    assert "private-pem-body-canary" not in json.dumps(document)
+    assert "private-stderr-canary" not in json.dumps(document)
+    assert any("[REDACTED_ENV_VAR]" in line for line in metadata["diagnostic_tail"])
+    assert any("[REDACTED_PEM_KEY]" in line for line in metadata["diagnostic_tail"])
+    if failure_kind == "native-error":
+        assert metadata["diagnostic_tail"][-1] == "late cleanup diagnostic"
+        assert document["final_metrics"]["total_cost_usd"] == 0.01
+    lifecycle = document["extra"]["subtrajectories"][0]["backend_lifecycle"]
+    assert lifecycle["process_returncode"] == metadata["process_returncode"]
+    assert lifecycle["teardown_started_s"] is not None and lifecycle["teardown_completed_s"] is not None
+    assert lifecycle["stdout_eof_s"] is not None
+    if failure_kind == "native-error":
+        assert lifecycle["stdout_eof_s"] >= lifecycle["teardown_started_s"]
 
 
 @pytest.mark.parametrize('failure_kind', ['provider', 'host-input'])
@@ -63,13 +132,16 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
                            'usage': {'input': 100, 'output': 10, 'cost': {'total': 0.01}}}
                 return make_mock_process([json.dumps(row) for row in [
                     {'type': 'session', 'sessionId': 'failed-stage'}, {'type': 'agent_start'},
-                    {'type': 'turn_start'}, {'type': 'message_start', 'message': {'role': 'assistant'}},
+                    {'type': 'turn_start'},
+                    {'type': 'daydream_provider_response', 'status': 200,
+                     'headers': {'x-request-id': 'frozen-provider-request'}},
+                    {'type': 'message_start', 'message': {'role': 'assistant'}},
                     {'type': 'message_end', 'message': message}, {'type': 'turn_end', 'message': message},
                 ]])
             payload = review_stage_result(prompt, [record()] if stage['scope_id'] == 'python' else [])
             if stage['scope_id'] == 'python' and stage['progress'] and failure_kind == 'host-input':
                 fail_next_canonical_open = True
-        elif '--extension' not in argv:
+        elif not any(arg.endswith('pi_structured_output.ts') for arg in argv):
             return make_mock_process_from_fixture('simple_text.jsonl')
         elif 'cross-stack merge agent' in prompt.lower():
             payload = merge_result([dict(record(), lens='per-stack', source_uids=['python:1'])])
@@ -137,6 +209,10 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
     if failure_kind == 'provider':
         assert diagnostic['message'] == terminal_message
         assert diagnostic['metadata']['category'] == 'UNKNOWN' and diagnostic['metadata']['retryable'] is False
+        provider_response = next(item for _, item in diagnostics if item['code'] == 'pi_provider_response')
+        assert provider_response['metadata'] == {'status': 200, 'headers': {'x-request-id': 'frozen-provider-request'},
+            'generation_id': diagnostic['metadata']['generation_id'],
+            'observed_at_unix_ns': provider_response['metadata']['observed_at_unix_ns']}
     else:
         assert canonical_faults == 1 and 'canonical-diff' in diagnostic['message']
         assert diagnostic['metadata']['code'] == 'input_unavailable' and diagnostic['metadata']['retryable'] is False

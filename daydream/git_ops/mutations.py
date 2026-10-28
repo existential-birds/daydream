@@ -262,13 +262,22 @@ def worktree_add(
     process._run_git(repo, args, timeout=30, retries=0, error_context=f"git worktree add {path} {ref} failed")
 
 
-def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
-    """Remove a linked worktree, allowing dirty content only with ``force``; failures raise."""
+def worktree_remove(repo: Path, path: Path, *, force: bool = True, git_directory_fd: int | None = None) -> None:
+    """Remove a linked worktree, optionally anchored to its held Git common-directory descriptor.
+
+    Dirty content requires ``force``. Descriptor-backed removal never rediscovers
+    Git metadata through the source pathname; failures raise without retrying.
+    """
     args = ["worktree", "remove"]
+    if git_directory_fd is not None:
+        args.insert(0, "--git-dir=.")
     if force:
         args.append("--force")
     args.append(str(path))
-    process._run_git(repo, args, timeout=30, retries=0, error_context=f"git worktree remove {path} failed")
+    process._run_git(
+        repo, args, timeout=30, retries=0, error_context=f"git worktree remove {path} failed",
+        directory_fd=git_directory_fd,
+    )
 
 
 def worktree_move(repo: Path, source: Path, destination: Path) -> None:

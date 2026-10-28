@@ -8,6 +8,7 @@ from typing import Any
 from daydream import agent, ui
 from daydream.artifact_visibility import (
     ArtifactSession,
+    ArtifactSourceUnavailableError,
     review_output_path_for,
 )
 from daydream.deep.artifacts import DeepArtifact
@@ -304,11 +305,14 @@ def _write_single_stack_merged_items(
     allow_standalone: bool = False,
 ) -> None:
     """Normalize single-stack records and structural findings into the merged artifact."""
-    canonical_path = review_output_path_for(
-        repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    try:
+        canonical_path = review_output_path_for(repo, session=artifact_session, allow_standalone=allow_standalone)
+    except ArtifactSourceUnavailableError:
+        if artifact_session is None:
+            raise
+        # Terminal salvage projects admitted records against the retained hunk
+        # index. Its output remains private even when live source work must stop.
+        canonical_path = artifact_session.review_output
     report_path = DeepArtifact.MERGED_REPORT.at(deep_dir_path)
     items_path = DeepArtifact.MERGED_ITEMS.at(deep_dir_path)
 

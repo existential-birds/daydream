@@ -26,7 +26,8 @@ from daydream.artifacts.models import (
     _ExternalEntryLifecycle,
     _ExternalEntryPurpose,
 )
-from daydream.json_utils import _fsync_directory, _fsync_file
+from daydream.artifacts.ownership import SourceOwnership
+from daydream.json_utils import _fsync_directory
 
 
 def _validated_canonical_entries(
@@ -110,102 +111,132 @@ def _validate_public_tree(
     return public_entries
 
 
-def _replace_public_from_tree(source: Path, tree: Path, entries: tuple[ArtifactManifestEntry, ...]) -> None:
+def _replace_public_from_tree(
+    source: SourceOwnership, tree: Path, entries: tuple[ArtifactManifestEntry, ...],
+) -> None:
     """Install a staged public tree onto a source whose own tree is already detached."""
-    if filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT)):
-        raise ArtifactVisibilityError("public artifacts changed before publication")
-    for name in (_DAYDREAM, _REVIEW_OUTPUT):
-        staged = tree / name
-        if staged.exists() or staged.is_symlink():
-            _install_staged_path(staged, source / name)
-    if filesystem.manifest_tree(source, (_DAYDREAM, _REVIEW_OUTPUT)) != entries:
-        raise ArtifactVisibilityError("public artifact publication verification failed")
+    with source.operation():
+        if filesystem.manifest_tree(source.path, (_DAYDREAM, _REVIEW_OUTPUT)):
+            raise ArtifactVisibilityError("public artifacts changed before publication")
+        for name in (_DAYDREAM, _REVIEW_OUTPUT):
+            staged = tree / name
+            if staged.exists() or staged.is_symlink():
+                _install_staged_path(staged, source.path / name, source=source)
+        if filesystem.manifest_tree(source.path, (_DAYDREAM, _REVIEW_OUTPUT)) != entries:
+            raise ArtifactVisibilityError("public artifact publication verification failed")
 
 
-def _install_staged_path(staged: Path, target: Path) -> None:
+def _install_staged_path(staged: Path, target: Path, *, source: SourceOwnership) -> None:
     metadata = staged.lstat()
     try:
+        with source.parent_descriptor(target) as parent_fd:
+            if stat.S_ISREG(metadata.st_mode):
+                os.link(staged, target.name, dst_dir_fd=parent_fd, follow_symlinks=False)
+                _fsync_installed_file(parent_fd, target.name)
+                os.fsync(parent_fd)
+            elif stat.S_ISDIR(metadata.st_mode):
+                os.replace(staged, target.name, dst_dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            else:
+                raise ArtifactVisibilityError("artifact source stage has an unsafe entry")
         if stat.S_ISREG(metadata.st_mode):
-            os.link(staged, target, follow_symlinks=False)
-            _fsync_file(target)
-            _fsync_directory(target.parent)
             staged.unlink()
             _fsync_directory(staged.parent)
-        elif stat.S_ISDIR(metadata.st_mode):
-            os.replace(staged, target)
-            _fsync_directory(target.parent)
-        else:
-            raise ArtifactVisibilityError("artifact source stage has an unsafe entry")
     except OSError as exc:
         raise ArtifactVisibilityError("artifact destination changed during atomic install") from exc
 
 
-def _install_regular_noclobber(source: Path, target: Path, entry: ArtifactManifestEntry) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    staged = target.parent / f".{target.name}.{secrets.token_hex(8)}.install"
+def _fsync_installed_file(parent_fd: int, name: str) -> None:
+    descriptor = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
     try:
-        filesystem._copy_regular_entry(source, staged, entry, changed_message="artifact recovery source changed")
-        try:
-            os.link(staged, target, follow_symlinks=False)
-        except FileExistsError as exc:
-            raise ArtifactVisibilityError("artifact destination changed during no-clobber install") from exc
-        os.chmod(target, entry.mode)
-        _fsync_file(target)
-        _fsync_directory(target.parent)
+        os.fsync(descriptor)
     finally:
-        with suppress(OSError):
-            staged.unlink()
-            _fsync_directory(staged.parent)
+        os.close(descriptor)
+
+
+def _install_regular_noclobber(
+    staged_source: Path, target: Path, entry: ArtifactManifestEntry, *, source: SourceOwnership,
+) -> None:
+    # Manifested parent directories are installed first. Creating parents here
+    # could recreate a checkout that disappeared during recovery.
+    staged = target.parent / f".{target.name}.{secrets.token_hex(8)}.install"
+    with source.parent_descriptor(target) as parent_fd:
+        try:
+            filesystem._copy_regular_entry(
+                staged_source, staged, entry, changed_message="artifact recovery source changed", create_parents=False,
+                destination_fd=parent_fd,
+            )
+            try:
+                with source.operation():
+                    os.link(staged.name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise ArtifactVisibilityError("artifact destination changed during no-clobber install") from exc
+            _fsync_installed_file(parent_fd, target.name)
+            os.fsync(parent_fd)
+        finally:
+            with suppress(OSError):
+                os.unlink(staged.name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
 
 
 def _restore_manifest_noclobber(
-    root: Path,
+    source: SourceOwnership,
     canonical: Path,
     entries: tuple[ArtifactManifestEntry, ...],
 ) -> tuple[str, ...]:
-    conflicts: list[str] = []
-    for entry in entries:
-        if entry.kind != "directory":
-            continue
-        target = root / entry.path
-        if target.exists() or target.is_symlink():
-            metadata = target.lstat()
-            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                conflicts.append(entry.path)
-            continue
-        target.mkdir(mode=entry.mode)
-        os.chmod(target, entry.mode)
-        _fsync_directory(target.parent)
-    for entry in entries:
-        if entry.kind != "file":
-            continue
-        target = root / entry.path
-        if target.exists() or target.is_symlink():
-            try:
-                actual = filesystem.manifest_tree(root, (entry.path,))
-            except ArtifactVisibilityError:
-                conflicts.append(entry.path)
+    with source.operation():
+        conflicts: list[str] = []
+        for entry in entries:
+            if entry.kind != "directory":
                 continue
-            if actual != (entry,):
-                conflicts.append(entry.path)
-            continue
-        _install_regular_noclobber(canonical / entry.path, target, entry)
-    return tuple(conflicts)
+            target = source.path / entry.path
+            if target.exists() or target.is_symlink():
+                metadata = target.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    conflicts.append(entry.path)
+                continue
+            source.mkdir(target, mode=entry.mode)
+            with source.parent_descriptor(target) as parent_fd:
+                descriptor = os.open(
+                    target.name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+                try:
+                    os.fchmod(descriptor, entry.mode)
+                finally:
+                    os.close(descriptor)
+        for entry in entries:
+            if entry.kind != "file":
+                continue
+            target = source.path / entry.path
+            if target.exists() or target.is_symlink():
+                try:
+                    actual = filesystem.manifest_tree(source.path, (entry.path,))
+                except ArtifactVisibilityError:
+                    conflicts.append(entry.path)
+                    continue
+                if actual != (entry,):
+                    conflicts.append(entry.path)
+                continue
+            _install_regular_noclobber(canonical / entry.path, target, entry, source=source)
+        return tuple(conflicts)
 
 
-def _source_stage_path(source: Path, transaction_id: str, purpose: str) -> Path:
+def _source_stage_path(source: SourceOwnership, transaction_id: str, purpose: str) -> Path:
     if (
         not transaction_id
         or any(character in transaction_id for character in ("/", "\\", "\0"))
         or purpose not in ("publish", "restore")
     ):
         raise ArtifactVisibilityError("artifact source-stage identity is invalid")
-    return source.parent / f".{source.name}.daydream-{purpose}-{transaction_id}"
+    return source.path.parent / f".{source.path.name}.daydream-{purpose}-{transaction_id}"
 
 
-def _source_stage_owner(source: Path, transaction_id: str, purpose: str, workspace_key: str) -> dict[str, object]:
+def _source_stage_owner(
+    source: SourceOwnership, transaction_id: str, purpose: str, workspace_key: str,
+) -> dict[str, object]:
     """Derive the owner attestation a source stage carries, re-stat'ing its parent."""
-    parent = source.parent.lstat()
+    parent = source.path.parent.lstat()
     return {
         "schema_version": _SCHEMA_VERSION,
         "workspace_key": workspace_key,
@@ -216,7 +247,7 @@ def _source_stage_owner(source: Path, transaction_id: str, purpose: str, workspa
     }
 
 
-def _create_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> Path:
+def _create_source_stage(source: SourceOwnership, transaction_id: str, purpose: str, *, workspace_key: str) -> Path:
     stage = _source_stage_path(source, transaction_id, purpose)
     if stage.exists() or stage.is_symlink():
         raise ArtifactVisibilityError("artifact source-stage collision")
@@ -224,20 +255,20 @@ def _create_source_stage(source: Path, transaction_id: str, purpose: str, *, wor
     filesystem._atomic_json(
         stage / "stage-owner.json", _source_stage_owner(source, transaction_id, purpose, workspace_key)
     )
-    _fsync_directory(source.parent)
+    _fsync_directory(source.path.parent)
     return stage
 
 
-def _retire_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
+def _retire_source_stage(source: SourceOwnership, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
     """Re-attest this identity's source stage, then remove the tree it owns."""
     stage = _source_stage_path(source, transaction_id, purpose)
     expected = _source_stage_owner(source, transaction_id, purpose, workspace_key)
     if filesystem._load_json(stage / "stage-owner.json") != expected:
         raise ArtifactVisibilityError("artifact source-stage ownership is malformed")
-    filesystem._remove_owned_tree(stage, source.parent)
+    filesystem._remove_owned_tree(stage, source.path.parent)
 
 
-def _reset_source_stage(source: Path, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
+def _reset_source_stage(source: SourceOwnership, transaction_id: str, purpose: str, *, workspace_key: str) -> None:
     """Reclaim only a stage attesting this exact workspace, transaction, purpose, and
     parent. Its contents are regenerable from durable baselines; foreign, tampered, or
     unattested residue remains a collision.
@@ -252,7 +283,7 @@ def _reset_source_stage(source: Path, transaction_id: str, purpose: str, *, work
         return
     if filesystem._load_json(owner) != _source_stage_owner(source, transaction_id, purpose, workspace_key):
         return
-    filesystem._remove_owned_tree(stage, source.parent)
+    filesystem._remove_owned_tree(stage, source.path.parent)
 
 
 def _overlay_destination(
@@ -308,47 +339,46 @@ def _replace_destination_from_tree(
     desired: tuple[ArtifactManifestEntry, ...],
     transaction: Path,
     workspace_key: str,
-    source: Path,
+    source: SourceOwnership,
 ) -> None:
-    root = Path(record.base)
-    if record.expected_kind == "directory":
-        _merge_directory_from_tree(
-            tree,
-            record,
-            desired=desired,
-            transaction=transaction,
-            workspace_key=workspace_key,
-            source=source,
-        )
-        return
-    actual = filesystem.manifest_tree(root, (record.relative,))
-    if not any(filesystem._manifest_is_subset(actual, candidate) for candidate in allowed):
-        raise ArtifactVisibilityError("explicit artifact destination changed during publication")
-    if actual:
-        transfer._remove_manifested(
-            root,
-            actual,
-            (record.relative,),
-            transaction=transaction,
-            workspace_key=workspace_key,
-            purpose="replace-destination",
-            stage_parent=root,
-            record_id=record.record_id,
-        )
-    staged = tree / record.relative
-    if desired:
-        for parent_relative in record.missing_parents:
-            parent = root / parent_relative
-            parent.mkdir(mode=0o700)
-            _fsync_directory(parent.parent)
-        _install_staged_path(staged, root / record.relative)
-    else:
-        for parent_relative in reversed(record.missing_parents):
-            with suppress(OSError):
-                (root / parent_relative).rmdir()
-                _fsync_directory((root / parent_relative).parent)
-    if filesystem.manifest_tree(root, (record.relative,)) != desired:
-        raise ArtifactVisibilityError("explicit artifact destination verification failed")
+    with source.operation():
+        root = Path(record.base)
+        if record.expected_kind == "directory":
+            _merge_directory_from_tree(
+                tree,
+                record,
+                desired=desired,
+                transaction=transaction,
+                workspace_key=workspace_key,
+                source=source,
+            )
+            return
+        actual = filesystem.manifest_tree(root, (record.relative,))
+        if not any(filesystem._manifest_is_subset(actual, candidate) for candidate in allowed):
+            raise ArtifactVisibilityError("explicit artifact destination changed during publication")
+        if actual:
+            transfer._remove_manifested(
+                root,
+                actual,
+                (record.relative,),
+                transaction=transaction,
+                workspace_key=workspace_key,
+                purpose="replace-destination",
+                record_id=record.record_id,
+                source=source,
+            )
+        staged = tree / record.relative
+        if desired:
+            for parent_relative in record.missing_parents:
+                parent = root / parent_relative
+                source.mkdir(parent, mode=0o700)
+            _install_staged_path(staged, root / record.relative, source=source)
+        else:
+            for parent_relative in reversed(record.missing_parents):
+                with suppress(OSError):
+                    source.rmdir(root / parent_relative)
+        if filesystem.manifest_tree(root, (record.relative,)) != desired:
+            raise ArtifactVisibilityError("explicit artifact destination verification failed")
 
 
 def _remove_directory_destination(
@@ -356,6 +386,7 @@ def _remove_directory_destination(
     *,
     transaction: Path,
     workspace_key: str,
+    source: SourceOwnership,
 ) -> None:
     """Remove the validated live destination and its owned parents, restoring an originally
     absent directory.
@@ -370,15 +401,14 @@ def _remove_directory_destination(
             transaction=transaction,
             workspace_key=workspace_key,
             purpose="remove-dump-destination",
-            stage_parent=root,
             record_id=record.record_id,
             changed_message="dump destination changed during removal",
+            source=source,
         )
     for parent_relative in reversed(record.missing_parents):
         parent = root / parent_relative
         with suppress(OSError):
-            parent.rmdir()
-            _fsync_directory(parent.parent)
+            source.rmdir(parent)
     if filesystem.manifest_tree(root, (record.relative,)):
         raise ArtifactVisibilityError("dump destination removal verification failed")
 
@@ -390,7 +420,7 @@ def _merge_directory_from_tree(
     desired: tuple[ArtifactManifestEntry, ...],
     transaction: Path,
     workspace_key: str,
-    source: Path,
+    source: SourceOwnership,
 ) -> None:
     root = Path(record.base)
     target_root = root / record.relative
@@ -401,7 +431,9 @@ def _merge_directory_from_tree(
         # from the projection is a malformed restore.
         if record.baseline:
             raise ArtifactVisibilityError("dump destination projection dropped a baseline file")
-        _remove_directory_destination(record, transaction=transaction, workspace_key=workspace_key)
+        _remove_directory_destination(
+            record, transaction=transaction, workspace_key=workspace_key, source=source
+        )
         return
     desired_root = desired_by_path.get(record.relative)
     if desired_root is None or desired_root.kind != "directory":
@@ -411,8 +443,9 @@ def _merge_directory_from_tree(
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ArtifactVisibilityError("dump destination shell changed")
     else:
-        target_root.mkdir(parents=True, mode=desired_root.mode)
-        _fsync_directory(target_root.parent)
+        for parent_relative in record.missing_parents:
+            source.mkdir(root / parent_relative, mode=0o700, exist_ok=True)
+        source.mkdir(target_root, mode=desired_root.mode)
 
     for entry in desired:
         if entry.kind != "directory" or entry.path == record.relative:
@@ -423,11 +456,10 @@ def _merge_directory_from_tree(
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                 raise ArtifactVisibilityError("dump destination directory changed")
         else:
-            target.mkdir(mode=entry.mode)
-            _fsync_directory(target.parent)
+            source.mkdir(target, mode=entry.mode)
 
     requested = Path(record.requested)
-    baseline_was_detached = requested == source or source in requested.parents
+    baseline_was_detached = requested == source.path or source.path in requested.parents
     for entry in desired:
         if entry.kind != "file":
             continue
@@ -447,14 +479,14 @@ def _merge_directory_from_tree(
                 transaction=transaction,
                 workspace_key=workspace_key,
                 purpose="replace-dump-file",
-                stage_parent=root,
                 record_id=record.record_id,
+                source=source,
             )
         elif expected is not None and not baseline_was_detached:
             # External baselines remain live; their disappearance is a conflict.
             # In-source baselines were deliberately transferred before dispatch.
             raise ArtifactVisibilityError("dump destination baseline disappeared")
-        _install_regular_noclobber(tree / entry.path, target, entry)
+        _install_regular_noclobber(tree / entry.path, target, entry, source=source)
     for baseline_entry in record.baseline:
         if baseline_entry.kind == "file" and baseline_entry.path not in desired_by_path:
             raise ArtifactVisibilityError("dump destination projection dropped a baseline file")
@@ -485,84 +517,87 @@ def _reinstall_external_baseline(
 
 
 def _restore_destination_records(
-    source: Path,
+    source: SourceOwnership,
     transaction: Path,
     records: Sequence[_DestinationRecord],
     source_stage: Path,
 ) -> None:
-    workspace_key = transaction.parent.parent.name
-    for record in records:
-        try:
-            index = int(record.record_id.removeprefix("destination-"))
-        except ValueError as exc:
-            raise ArtifactVisibilityError("artifact destination record identity is malformed") from exc
-        baseline_root = transaction / f"destination-{index:04d}-baseline"
-        install_stage = source_stage / f"destination-{index:04d}"
-        filesystem._copy_tree(baseline_root, install_stage, record.baseline)
-        root = Path(record.base)
-        actual = filesystem.manifest_tree(root, (record.relative,))
-        if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
-            if actual == record.baseline:
+    with source.operation():
+        workspace_key = transaction.parent.parent.name
+        for record in records:
+            try:
+                index = int(record.record_id.removeprefix("destination-"))
+            except ValueError as exc:
+                raise ArtifactVisibilityError("artifact destination record identity is malformed") from exc
+            baseline_root = transaction / f"destination-{index:04d}-baseline"
+            install_stage = source_stage / f"destination-{index:04d}"
+            filesystem._copy_tree(baseline_root, install_stage, record.baseline)
+            root = Path(record.base)
+            actual = filesystem.manifest_tree(root, (record.relative,))
+            if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
+                if actual == record.baseline:
+                    continue
+                baseline_file = filesystem._entry_at(record.baseline, record.relative, kind="file")
+                if not actual and baseline_file is not None:
+                    _reinstall_external_baseline(
+                        transaction,
+                        replace(
+                            record,
+                            baseline_state="absent",
+                            expected_dev=None,
+                            expected_ino=None,
+                            prepared_sha256=None,
+                            installed_sha256=None,
+                        ),
+                        baseline_root,
+                        baseline_file,
+                    )
+                    continue
+                if not _wrote_recorded_session(actual, record):
+                    raise ArtifactVisibilityError("external trajectory conflict during recovery")
+                expected: tuple[int | None, int | None] = (record.expected_dev, record.expected_ino)
+                if None in expected:
+                    expected = external._external_target_identity_from_ledger(transaction, record)
+                requested_metadata = Path(record.requested).lstat()
+                if (requested_metadata.st_dev, requested_metadata.st_ino) != expected:
+                    raise ArtifactVisibilityError("external trajectory identity changed during recovery")
+                if baseline_file is None:
+                    transfer._remove_manifested(
+                        root,
+                        actual,
+                        (record.relative,),
+                        transaction=transaction,
+                        workspace_key=workspace_key,
+                        purpose="restore-live-external",
+                        record_id=record.record_id,
+                        source=source,
+                    )
+                    continue
+                _reinstall_external_baseline(transaction, record, baseline_root, baseline_file)
                 continue
-            baseline_file = filesystem._entry_at(record.baseline, record.relative, kind="file")
-            if not actual and baseline_file is not None:
-                _reinstall_external_baseline(
-                    transaction,
-                    replace(
-                        record,
-                        baseline_state="absent",
-                        expected_dev=None,
-                        expected_ino=None,
-                        prepared_sha256=None,
-                        installed_sha256=None,
-                    ),
-                    baseline_root,
-                    baseline_file,
-                )
-                continue
-            if not _wrote_recorded_session(actual, record):
-                raise ArtifactVisibilityError("external trajectory conflict during recovery")
-            expected: tuple[int | None, int | None] = (record.expected_dev, record.expected_ino)
-            if None in expected:
-                expected = external._external_target_identity_from_ledger(transaction, record)
-            requested_metadata = Path(record.requested).lstat()
-            if (requested_metadata.st_dev, requested_metadata.st_ino) != expected:
-                raise ArtifactVisibilityError("external trajectory identity changed during recovery")
-            if baseline_file is None:
-                transfer._remove_manifested(
-                    root,
-                    actual,
-                    (record.relative,),
-                    transaction=transaction,
-                    workspace_key=workspace_key,
-                    purpose="restore-live-external",
-                    stage_parent=root,
-                    record_id=record.record_id,
-                )
-                continue
-            _reinstall_external_baseline(transaction, record, baseline_root, baseline_file)
-            continue
-        allowed = [record.baseline]
-        if record.published:
-            allowed.append(record.published)
-        recorded_session = _wrote_recorded_session(actual, record)
-        if not any(filesystem._manifest_is_subset(actual, candidate) for candidate in allowed) and not recorded_session:
-            raise ArtifactVisibilityError("explicit artifact destination changed during recovery")
-        if recorded_session:
-            allowed.append(actual)
-        _replace_destination_from_tree(
-            install_stage,
-            record,
-            allowed=allowed,
-            desired=record.baseline,
-            transaction=transaction,
-            workspace_key=workspace_key,
-            source=source,
-        )
-    parent_indexes = [
-        index
-        for index, external in enumerate(external._external_records(transaction))
-        if external["purpose"] == _ExternalEntryPurpose.MISSING_PARENT.value
-        and external["lifecycle"] == _ExternalEntryLifecycle.ATTESTED.value
-    ]
-    external._cleanup_external_directories(transaction, parent_indexes)
+            allowed = [record.baseline]
+            if record.published:
+                allowed.append(record.published)
+            recorded_session = _wrote_recorded_session(actual, record)
+            if not recorded_session and not any(
+                filesystem._manifest_is_subset(actual, candidate) for candidate in allowed
+            ):
+                raise ArtifactVisibilityError("explicit artifact destination changed during recovery")
+            if recorded_session:
+                allowed.append(actual)
+            _replace_destination_from_tree(
+                install_stage,
+                record,
+                allowed=allowed,
+                desired=record.baseline,
+                transaction=transaction,
+                workspace_key=workspace_key,
+                source=source,
+            )
+        parent_indexes = [
+            index
+            for index, external in enumerate(external._external_records(transaction))
+            if external["purpose"] == _ExternalEntryPurpose.MISSING_PARENT.value
+            and external["lifecycle"] == _ExternalEntryLifecycle.ATTESTED.value
+        ]
+        external._cleanup_external_directories(transaction, parent_indexes)

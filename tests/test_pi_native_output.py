@@ -77,6 +77,52 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         yield fixture
 
 
+@pytest.mark.parametrize("mode", ["text", "structured", "failure"])
+async def test_native_pi_response_diagnostics_bind_to_each_generation(
+    tmp_path: Path, native_provider: _NativeProvider, mode: str,
+) -> None:
+    """Real Pi hooks must retain response metadata without exposing other headers.
+
+    Terminal JSONL replays cannot prove the packaged extension actually observes
+    HTTP responses, works with tools disabled, or correlates consecutive requests.
+    """
+    native_provider.response_headers = {"Retry-After": "2", "Set-Cookie": "private-cookie-canary",
+                                        "X-Unrelated": "private-header-canary"}
+    if mode == "structured":
+        source = tmp_path / "source.txt"
+        source.write_text("Source evidence\n")
+        native_provider.turns = [[("read-source", "read", {"path": str(source)})],
+                                 [("submit", "structured_output", {"verdict": "clean", "findings": []})]]
+    elif mode == "failure":
+        native_provider.finish_reasons[0] = "error"
+    backend = PiBackend(model="output-model")
+    backend.retry_attempts = 0
+    recorder = make_recorder(tmp_path, agent_model_name="output-model", backend_name="pi")
+    async with recorder:
+        try:
+            await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
+                tools_disabled=mode != "structured", output_schema=_SCHEMA if mode == "structured" else None,
+                persist_session=False, progress_callback=lambda _: None)
+        except PiError:
+            assert mode == "failure"
+        else:
+            assert mode != "failure"
+    document = json.loads(recorder.path.read_text())
+    responses = [item for step in document["steps"]
+                 for item in step.get("extra", {}).get("backend_diagnostics", [])
+                 if item["code"] == "pi_provider_response"]
+    generations = document["extra"]["subtrajectories"][0]["generation_lifecycle"]["drafts"]
+    assert len(responses) == len(generations) == (2 if mode == "structured" else 1)
+    for index, (response, generation) in enumerate(zip(responses, generations, strict=True)):
+        observed = response["metadata"]["observed_at_unix_ns"]
+        assert generation["native_started_at_unix_ns"] <= observed <= generation["ended_at_unix_ns"]
+        assert response["metadata"] == {"status": 200, "headers": {
+            "x-request-id": f"fixture-response-{index}", "retry-after": "2"},
+            "generation_id": generation["generation_id"], "observed_at_unix_ns": observed}
+    assert "private-cookie-canary" not in json.dumps(document)
+    assert "private-header-canary" not in json.dumps(document)
+
+
 @pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted", "hosted-alternate",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
@@ -193,7 +239,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assets = tmp_path / "unsupported-assets"
             assets.mkdir()
             packaged = files("daydream.backends")
-            for name in ("pi_structured_output.ts", "pi_host_tools.ts"):
+            for name in ("pi_structured_output.ts", "pi_host_tools.ts", "pi_diagnostics.ts"):
                 source = packaged.joinpath(name).read_text()
                 if name == "pi_host_tools.ts":
                     if case == "hosted-capability":
@@ -837,6 +883,7 @@ async def test_native_required_admission_readiness_fails_before_provider(
         assets = root / "faulty-assets"
         assets.mkdir()
         packaged = files("daydream.backends")
+        (assets / "pi_diagnostics.ts").write_text(packaged.joinpath("pi_diagnostics.ts").read_text())
         (assets / "pi_structured_output.ts").write_text(packaged.joinpath("pi_structured_output.ts").read_text())
         if fault == "broken-extension":
             (assets / "pi_host_tools.ts").write_text("this is an invalid TypeScript module {{")

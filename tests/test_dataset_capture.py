@@ -267,15 +267,18 @@ async def test_failed_attempt_and_child_registration_without_tracing(
     )
 
 
-@pytest.mark.parametrize("tracing", [False, True])
+@pytest.mark.parametrize("tracing,source_loss", [(False, False), (True, False), (True, True)])
 async def test_interruption_retains_task_and_partial_tool_after_worktree_teardown(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    tracing: bool, memory_exporters: list[InMemorySpanExporter],
+    tracing: bool, source_loss: bool, memory_exporters: list[InMemorySpanExporter],
 ) -> None:
     config = replace(config, observability=ObservabilityConfig(destinations=("memory",) if tracing else ()))
     repo = Path(config.target or "")
-    backend = ScriptedBackend(events=[ToolStartEvent("interrupted-tool", "Read", {"file_path": "api.py"}),
-                                      asyncio.CancelledError()])
+    def interrupt(*_args: Any) -> Any:
+        if source_loss:
+            repo.rename(tmp_path / "removed-source")
+        return [ToolStartEvent("interrupted-tool", "Read", {"file_path": "api.py"}), asyncio.CancelledError()]
+    backend = ScriptedBackend(responder=interrupt)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     remote = bare_remote(tmp_path / "origin.git")
     git(repo, "remote", "add", "origin", str(remote))
@@ -284,7 +287,11 @@ async def test_interruption_retains_task_and_partial_tool_after_worktree_teardow
     with pytest.raises(asyncio.CancelledError):
         await run(replace(config, shallow=True, stack="python", force_worktree=True))
     cwd = backend.calls[0]["cwd"]
-    assert cwd != repo and not cwd.exists()
+    assert cwd != repo
+    if source_loss:
+        assert cwd.is_dir()
+    else:
+        assert not cwd.exists()
     raw = captured(config)
     assert raw["outcome"] == "interrupted" and raw["original_task"]["value"]["diff"] == diff
     assert raw["trace_id"] == (owned_trace_id(memory_exporters[0], raw["run_id"]) if tracing else None)
@@ -294,17 +301,31 @@ async def test_interruption_retains_task_and_partial_tool_after_worktree_teardow
     assert any(result.get("extra", {}).get("status") == "interrupted" for doc in documents
         for step in doc["steps"] for result in step.get("observation", {}).get("results", []))
     assert raw["recommended_patch"]["status"] == "unproduced"
+    if source_loss:
+        assert not repo.exists() and not repo.is_symlink()
+        assert raw["original_task"]["value"]["analyzed_revision"]["head_sha"] == git(
+            tmp_path / "removed-source", "rev-parse", "HEAD")
+        assert all(document["session_id"] == raw["run_id"] for document in documents)
 
 
+@pytest.mark.parametrize("source_loss", [False, True])
 async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch, memory_exporters: list[InMemorySpanExporter],
+    tmp_path: Path, source_loss: bool,
 ) -> None:
-    backend = ScriptedBackend(events=[ToolStartEvent("failed-tool", "Read", {"file_path": "api.py"}),
-                                      RuntimeError("terminal offline failure")])
+    repo = Path(config.target or "")
+    original_head, original_diff = git(repo, "rev-parse", "HEAD"), git_ops.diff(repo, "main")
+    primary = RuntimeError("terminal offline failure")
+    def fail(*_args: Any) -> Any:
+        if source_loss:
+            repo.rename(tmp_path / "removed-source")
+        return [ToolStartEvent("failed-tool", "Read", {"file_path": "api.py"}), primary]
+    backend = ScriptedBackend(responder=fail)
     monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: backend)
     config = replace(config, shallow=True, stack="python", observability=ObservabilityConfig(destinations=("memory",)))
-    with pytest.raises(RuntimeError, match="terminal offline failure"):
+    with pytest.raises(RuntimeError, match="terminal offline failure") as raised:
         await run(config)
+    assert raised.value is primary
     raw = captured(config)
     assert raw["outcome"] == "failed"
     assert raw["trace_id"] == owned_trace_id(memory_exporters[0], raw["run_id"])
@@ -313,6 +334,12 @@ async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
     assert any(tool["tool_call_id"] == "failed-tool" for doc in documents for step in doc["steps"]
                for tool in step.get("tool_calls", []))
     assert any(doc.get("extra", {}).get("partial") for doc in documents)
+    assert raw["original_task"]["value"]["diff"] == original_diff
+    assert raw["original_task"]["value"]["analyzed_revision"]["head_sha"] == original_head
+    assert all(document["session_id"] == raw["run_id"] for document in documents)
+    if source_loss:
+        assert not repo.exists() and not repo.is_symlink()
+        assert any("secondary base failure" in note for note in primary.__notes__)
 
 
 @pytest.mark.parametrize("fault", ["start", "invalid", "context"])

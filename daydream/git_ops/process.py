@@ -9,6 +9,7 @@ import os
 import re
 import selectors
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -144,6 +145,7 @@ def _retrying_subprocess(
     scrub: Callable[[str], str] = str,
     suffix: str = "",
     max_output_bytes: int | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[Any]:
     """Run *argv*, retrying only timeouts; *scrub* redacts failure text, *suffix* labels the exhausted error."""
     program = argv[0]
@@ -153,7 +155,9 @@ def _retrying_subprocess(
             if max_output_bytes is not None:
                 if input_data is not None or max_output_bytes < 0:
                     raise GitError("bounded git capture requires no input and a nonnegative output limit")
-                bounded = _bounded_subprocess(argv, cwd=cwd, env=env, timeout=timeout, limit=max_output_bytes)
+                bounded = _bounded_subprocess(
+                    argv, cwd=cwd, env=env, timeout=timeout, limit=max_output_bytes, pass_fds=pass_fds,
+                )
                 if text:
                     return subprocess.CompletedProcess(
                         bounded.args, bounded.returncode,
@@ -171,6 +175,7 @@ def _retrying_subprocess(
                 check=False,
                 input=input_data,
                 env=env,
+                pass_fds=pass_fds,
             )
         except subprocess.TimeoutExpired as exc:
             last_timeout = exc
@@ -189,11 +194,13 @@ def _retrying_subprocess(
 
 
 def _bounded_subprocess(
-    argv: list[str], *, cwd: Path, env: Any | None, timeout: int | float, limit: int,
+    argv: list[str], *, cwd: Path, env: Any | None, timeout: int | float, limit: int, pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[bytes]:
     """Drain both pipes within one byte/deadline budget, killing and reaping on refusal."""
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+    with subprocess.Popen(
+        argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=pass_fds,
+    ) as proc:
         assert proc.stdout is not None and proc.stderr is not None
         output = {proc.stdout.fileno(): bytearray(), proc.stderr.fileno(): bytearray()}
         total = 0
@@ -236,6 +243,7 @@ def _run_git(
     env_cmd: Any | None = None,
     error_context: str | None = None,
     max_output_bytes: int | None = None,
+    directory_fd: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Binary-capture variant: ``capture_bytes=True`` reads bytes stdout."""
 
@@ -253,6 +261,7 @@ def _run_git(
     env_cmd: Any | None = None,
     error_context: str | None = None,
     max_output_bytes: int | None = None,
+    directory_fd: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Text-capture variant (the default): decoded ``str`` stdout."""
 
@@ -269,6 +278,7 @@ def _run_git(
     env_cmd: Any | None = None,
     error_context: str | None = None,
     max_output_bytes: int | None = None,
+    directory_fd: int | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` from *repo*, returning its completed process without checking its exit code.
 
@@ -277,7 +287,8 @@ def _run_git(
     ``retries=0`` to avoid repeating a partially completed command. Subprocess
     failures raise ``GitError``; exhausted timeouts raise ``GitTimeoutError``.
     ``max_output_bytes`` bounds combined stdout/stderr while draining and requires
-    no input; refusal and timeout both kill and reap that invocation.
+    no input; refusal and timeout both kill and reap that invocation. A supplied
+    ``directory_fd`` pins child cwd through fchdir before exec, retaining the same PID.
     """
     if input_text is not None and input_bytes is not None:
         raise GitError("git subprocess input must be text or bytes, not both")
@@ -288,11 +299,24 @@ def _run_git(
     inert_environment = git_environment(repo)
     if inert_environment is not None:
         env_cmd = inert_environment
+    command = ["git", *args]
+    if directory_fd is not None:
+        # A child-side fchdir pins Git metadata without thread-unsafe preexec_fn.
+        command = [
+            sys.executable, "-I", "-S", "-c",
+            "import os,sys;fd=int(sys.argv[1]);os.fchdir(fd);os.close(fd);"
+            "os.execvp('git',sys.argv[2:])",
+            str(directory_fd), *command,
+        ]
+        env_cmd = dict(os.environ if env_cmd is None else env_cmd)
+        for variable in ("GIT_DIR", "GIT_WORK_TREE"):
+            env_cmd.pop(variable, None)
+        env_cmd["GIT_COMMON_DIR"] = "."
     display = " ".join(args)
     proc = _retrying_subprocess(
-        ["git", *args],
+        command,
         display=display,
-        cwd=repo,
+        cwd=repo if directory_fd is None else Path("/"),
         text=not capture_bytes,
         input_data=(
             input_bytes
@@ -306,6 +330,7 @@ def _run_git(
         retries=retries,
         suffix=f" ({retries + 1} attempts)",
         max_output_bytes=max_output_bytes,
+        pass_fds=() if directory_fd is None else (directory_fd,),
     )
     if error_context is not None:
         _require_ok(proc, error_context)

@@ -578,6 +578,7 @@ def classify(
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     renderers: ReviewRenderers | None = None,
     snapshot_diff: str | None = None,
+    frozen_only: bool = False,
 ) -> ClassifiedIssues:
     """Place findings inline, then at file level, then in the review body.
 
@@ -590,8 +591,14 @@ def classify(
         from daydream.hunk_index import head_side_ranges_by_file, parse_hunks
 
         hunks_cache = head_side_ranges_by_file(parse_hunks(snapshot_diff))
-        changed_files = set(git_ops.diff_name_only_strict(target_dir, pr.base_sha, pr.head_sha))
+        if frozen_only:
+            from daydream.deep.diff import _diff_changed_files
+            changed_files = set(_diff_changed_files(snapshot_diff))
+        else:
+            changed_files = set(git_ops.diff_name_only_strict(target_dir, pr.base_sha, pr.head_sha))
     else:
+        if frozen_only:
+            raise ValueError("frozen findings placement requires the captured diff")
         changed_files = pr_changed_files(target_dir, pr, auth=auth)
 
     def _unplaced(issue: ParsedIssue) -> None:
@@ -601,7 +608,7 @@ def classify(
             out.body_only.append(issue)
 
     for issue in issues:
-        if issue.is_cross_stack:
+        if issue.is_cross_stack or frozen_only:
             _unplaced(issue)
             continue
         # Skip the file_hunks() diff lookup -- a git-diff subprocess call with

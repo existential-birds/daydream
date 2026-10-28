@@ -843,7 +843,7 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
         stage = review_stage_state(prompt)
         if len(captured) == 1:
             fake.advance(1)  # Preparation/earlier phases spend the shared allowance.
-        if stage is None and "--extension" not in argv:
+        if stage is None and not any(arg.endswith("pi_structured_output.ts") for arg in argv):
             return make_mock_process_from_fixture("simple_text.jsonl")
         if stage is not None:
             reviewer_args.append(argv)
@@ -1074,7 +1074,8 @@ async def test_error_turn_sets_retryable_via_classifier(
     assert exc_info.value.retryable is expected_retryable
     assert exc_info.value.category == expected_category and str(exc_info.value) == error_message
     assert spawn.call_count == 1
-    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    diagnostics = [event for event in events
+                   if isinstance(event, DiagnosticEvent) and event.code == "pi_terminal_error"]
     assert len(diagnostics) == 1 and diagnostics[0].message == error_message
     assert diagnostics[0].metadata == {
         "category": expected_category, "retryable": expected_retryable, "finish_reason": "error",
@@ -1122,7 +1123,8 @@ async def test_pi_terminal_diagnostic_is_bounded_and_redacted_before_persistence
     assert spawn.call_count == 1
     document = json.loads(recorder.path.read_text())
     diagnostics = [diagnostic for step in document["steps"]
-                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
+                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+                   if diagnostic["code"] == "pi_terminal_error"]
     assert len(diagnostics) == 1
     diagnostic = diagnostics[0]
     assert len(diagnostic["message"]) <= 4096
@@ -1167,7 +1169,8 @@ async def test_pi_diagnostic_redaction_fault_preserves_native_failure_and_termin
     assert spawn.call_count == 1
     document = json.loads(recorder.path.read_text())
     diagnostics = [diagnostic for step in document["steps"]
-                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
+                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
+                   if diagnostic["code"] == "pi_terminal_error"]
     assert len(diagnostics) == 1
     assert diagnostics[0]["message"] == "[DIAGNOSTIC_REDACTION_FAILED]"
     assert diagnostics[0]["metadata"]["raw_stop_reason"] == "[DIAGNOSTIC_REDACTION_FAILED]"
@@ -1175,6 +1178,66 @@ async def test_pi_diagnostic_redaction_fault_preserves_native_failure_and_termin
     assert document["final_metrics"]["total_prompt_tokens"] == 100
     assert document["final_metrics"]["total_completion_tokens"] == 10
     assert document["final_metrics"]["total_cost_usd"] == 0.01
+
+
+@pytest.mark.parametrize("status", [None, True, 99, 600, "200", 200])
+async def test_pi_response_diagnostics_admit_only_bounded_redacted_fields(status: Any) -> None:
+    """Optional helper data cannot leak headers or replace a native terminal failure.
+
+    Installed-native journeys exercise ordinary HTTP headers; they cannot emit
+    malformed helper frames or put a secret before a truncated header boundary.
+    """
+    native = {"type": "daydream_provider_response", "status": status, "headers": {
+        "x-request-id": "TOKEN=private-response-canary; " + "safe " * 1000,
+        "retry-after": {"malformed": True}, "authorization": "private-auth-canary"}}
+    process = make_mock_process([json.dumps(frame) for frame in [
+        {"type": "session", "id": "diagnostics"}, native,
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "turn_end", "message": {"role": "assistant", "stopReason": "error",
+                                         "errorMessage": "terminated"}},
+    ]])
+    events = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(PiError, match="^terminated$") as failure:
+            async for event in PiBackend(model="fixture-model").execute(Path("/tmp"), "Review"):
+                events.append(event)
+    assert failure.value.category == "STREAM_DROP" and failure.value.retryable
+    responses = [event for event in events
+                 if isinstance(event, DiagnosticEvent) and event.code == "pi_provider_response"]
+    assert len(responses) == int(type(status) is int and status == 200)
+    if responses:
+        metadata = responses[0].metadata
+        assert metadata["status"] == 200 and metadata["generation_id"] is not None
+        assert metadata["headers_truncated"] is True and set(metadata["headers"]) == {"x-request-id"}
+        value = metadata["headers"]["x-request-id"]
+        assert len(value) <= 512 and "[REDACTED_ENV_VAR]" in value
+        assert "private-response-canary" not in json.dumps(metadata)
+        assert "private-auth-canary" not in json.dumps(metadata)
+
+
+async def test_pi_response_without_generation_is_retained_without_previous_attribution() -> None:
+    """An interrupted second request cannot inherit the previous generation's ID.
+
+    Complete native responses always emit message_start; only a partial transport
+    replay can isolate headers followed by EOF before that boundary.
+    """
+    message = {"role": "assistant", "content": [], "stopReason": "stop"}
+    process = make_mock_process([json.dumps(frame) for frame in [
+        {"type": "session", "id": "diagnostics"}, {"type": "turn_start"},
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "message_end", "message": message}, {"type": "turn_end", "message": message},
+        {"type": "turn_start"}, {"type": "daydream_provider_response", "status": 200,
+                                "headers": {"x-request-id": "interrupted-request"}},
+    ]])
+    events = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(PiError, match="Stream ended without finish_reason"):
+            async for event in PiBackend(model="fixture-model").execute(Path("/tmp"), "Review"):
+                events.append(event)
+    response = next(event for event in events
+                    if isinstance(event, DiagnosticEvent) and event.code == "pi_provider_response")
+    assert response.metadata["generation_id"] is None
+    assert response.metadata["headers"] == {"x-request-id": "interrupted-request"}
 
 
 # Retry env knobs

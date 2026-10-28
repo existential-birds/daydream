@@ -468,9 +468,10 @@ async def test_collection_failure_preserves_deep_review_exports(
         multi_stack_target, output_mode="review", non_interactive=True, dump_artifacts=str(dump),
         pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
         trajectory_hub_repo="test/new-runs" if failure == "upload" else None,
-        dataset_store_path=tmp_path / "records",
+        dataset_capture=True, dataset_store_path=tmp_path / "records",
     ))
     assert exit_code == 0
+    assert len(read_records(LocalRecordStore(tmp_path / "records")).runs) == 1
     assert reached == ([] if failure == "filesystem" else [failure])
     assert review.read_text() != "operator baseline"
     assert json.loads(findings.read_text())["findings"]
@@ -492,6 +493,14 @@ async def test_collection_failure_preserves_deep_review_exports(
     assert "Data Collection" in out
     assert "SECRET_COLLECTION_FAILURE" not in out
     assert "/private/runtime" not in out
+    assert "Finalization complete" not in out
+    assert "Local JSONL capture: retained" in out
+    assert "Public publication: installed" in out
+    if failure == "upload":
+        assert "Configured upload: failed" in out
+        assert "Archive/evaluation: retained" in out
+    else:
+        assert "Archive/evaluation: failed" in out
 
 
 async def test_no_eval_leaves_manifest_eval_fields_null(

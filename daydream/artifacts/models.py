@@ -24,6 +24,10 @@ class ArtifactVisibilityError(RuntimeError):
     """A live artifact namespace could not be opened or used safely."""
 
 
+class ArtifactSourceUnavailableError(ArtifactVisibilityError):
+    """An expected held checkout is missing or inaccessible, with its OS cause."""
+
+
 class _Transition(str, Enum):
     """Journalled in-flight transaction state; ``PUBLISH_*`` members publish."""
 

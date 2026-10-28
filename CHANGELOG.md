@@ -37,6 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pi:** retain provider HTTP status and selected request/retry headers with
+  generation correlation, plus bounded redacted diagnostic output and process
+  cleanup evidence when native invocations fail.
+- **artifacts:** diagnose unavailable source checkouts, retain validated frozen
+  findings and evidence, and report capture, archive/evaluation and publication
+  outcomes independently. Refuse restoration or publication into replacement
+  checkouts while preserving recovery evidence. Keep source and Git ownership
+  alive through worktree cleanup, with guarded operations shared by publication,
+  recovery and live-code consumers
+  ([#1700](https://github.com/existential-birds/daydream/issues/1700)).
 - **review:** bound compressed and reconstructed immutable object populations,
   Git allocations and captured output before validating supplied source
   ([#1709](https://github.com/existential-birds/daydream/pull/1709)).

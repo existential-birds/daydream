@@ -59,6 +59,7 @@ async def test_codex_process_exit_message_anchor_and_count() -> None:
     (1, False),
 ])
 async def test_pi_process_exit_message_anchor_and_count(returncode: int, retryable: bool) -> None:
+    """Overflow retains the newest diagnostic excerpt without changing exit/retry semantics."""
     proc = FakeCliProcess(DIAG, exit_code=returncode)
     backend = PiBackend(model="glm-5.2")
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
@@ -67,7 +68,7 @@ async def test_pi_process_exit_message_anchor_and_count(returncode: int, retryab
                 pass
     assert str(exc_info.value) == (
         f"Pi CLI exited with return code {returncode}.\nPi CLI output (last 10 non-JSON lines):\n"
-        + "\n".join(DIAG[10:20])
+        + "\n".join(DIAG[-10:])
     )
     assert exc_info.value.category == "PROCESS_EXIT" and exc_info.value.retryable is retryable
     assert proc.reaped and proc.stdin.closed and proc._transport.closed

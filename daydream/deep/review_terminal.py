@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import copy
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 
 from daydream.agent import console
+from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
@@ -122,7 +124,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     ctx.data['terminal_review_held'] = held
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
-    except (OSError, ValueError, TypeError, RecursionError) as exc:
+    except (OSError, ValueError, TypeError, RecursionError, ArtifactSourceUnavailableError) as exc:
         diagnostic = f'Review report unavailable: {type(exc).__name__}'
         ctx.data['review_report_diagnostic'] = diagnostic
         print_warning(console, diagnostic)
@@ -136,10 +138,17 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
     if info.diagnostic is not None:
         print_warning(console, info.diagnostic)
-    return _write_findings_for_parsed(
+    write_findings = partial(
+        _write_findings_for_parsed,
         ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
         review_warnings=review_warnings(state.dd), renderers=resolve_review_renderers(ctx.registry),
         diagrams=(state.diagrams or {}).get("payload"), auth=ctx.github_execution.auth,
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],
         review_context=context,
     )
+    if ctx.artifacts is None:
+        return write_findings(frozen_only=False)
+    try:
+        return ctx.artifacts.code_workspace.run(partial(write_findings, frozen_only=False))
+    except ArtifactSourceUnavailableError:
+        return write_findings(frozen_only=True)

@@ -11,7 +11,7 @@ import shutil
 import stat
 import tempfile
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import AsyncIterator, Iterable
@@ -25,6 +25,7 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
     validate_private_workspace_owner,
 )
+from daydream.artifacts.ownership import WorkspaceOwnership
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
 
@@ -85,6 +86,7 @@ class WorkContext:
     head_sha: str | None
     is_ephemeral: bool
     run_id: str
+    ownership: WorkspaceOwnership | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.base_sha is None) != (self.head_sha is None):
@@ -115,7 +117,8 @@ async def open_workspace(
 
     Ephemeral runs fetch first: a branch selects origin/<branch>, otherwise HEAD.
     The base defaults to an open PR's base, then the repository default branch.
-    Ignored support files are copied unless skip_tests; cleanup runs on every exit.
+    Ignored support files are copied unless skip_tests. Ephemeral cleanup requires
+    the original source directory; unsafe source changes retain the worktree.
 
     Validate/resolve the source's private owner before any mutation. Unborn Improve
     requires explicit opt-in, a symbolic HEAD, and no branch/base/ephemeral override.
@@ -130,85 +133,88 @@ async def open_workspace(
     else:
         validate_private_workspace_owner(private_owner, source=source)
     source = private_owner.source
-    reject_public_operational_storage(source)
+    with WorkspaceOwnership(private_owner) as ownership:
+        reject_public_operational_storage(source)
 
-    if allow_unborn and git_ops.is_unborn_head(source):
-        if branch is not None or base is not None or force_ephemeral:
-            raise UnbornWorkspaceError("unborn improve requires an in-place checkout without branch/base overrides")
-        symbolic = git_ops.symbolic_head(source, strict=True)
-        if symbolic is None:
-            raise UnbornWorkspaceError("unborn improve requires a symbolic HEAD")
-        yield WorkContext(
-            repo=source, source=source, base_branch=symbolic, base_sha=None,
-            head_branch=symbolic, head_sha=None, is_ephemeral=False, run_id=_make_run_id(),
-        )
-        return
-
-    is_ephemeral = force_ephemeral or branch is not None
-    operational_root = (
-        operational_worktree_root(private_owner) if is_ephemeral else None
-    )
-
-    if is_ephemeral:
-        # Fetch from the source -- the ephemeral worktree does not exist yet.
-        git_ops.fetch(source)
-
-    resolved_ref = _resolve_ref(source, branch) if is_ephemeral else None
-    base_branch = _resolve_base(source, branch, base, auth=auth)
-
-    run_id = _make_run_id()
-    worktree_path: Path | None = None
-
-    try:
-        if is_ephemeral:
-            assert resolved_ref is not None  # narrows for the type-checker
-            assert operational_root is not None
-            worktree_path = operational_root / run_id
-            git_ops.worktree_add(source, worktree_path, resolved_ref, detach=True)
-            copy_files_into_ephemeral(
-                source,
-                worktree_path,
-                extra=extra_copy,
-                skip=skip_tests,
+        if allow_unborn and ownership.source_code.run(lambda: git_ops.is_unborn_head(source)):
+            if branch is not None or base is not None or force_ephemeral:
+                raise UnbornWorkspaceError("unborn improve requires an in-place checkout without branch/base overrides")
+            symbolic = ownership.source_code.run(lambda: git_ops.symbolic_head(source, strict=True))
+            if symbolic is None:
+                raise UnbornWorkspaceError("unborn improve requires a symbolic HEAD")
+            yield WorkContext(
+                repo=source, source=source, base_branch=symbolic, base_sha=None,
+                head_branch=symbolic, head_sha=None, is_ephemeral=False, run_id=_make_run_id(), ownership=ownership,
             )
-            repo = worktree_path
-        else:
-            repo = source
+            return
 
-        # Validate the resolved base exists relative to the working repo.
-        # --base accepts any commit-ish (SHA, tag, relative expr), so use
-        # ref_exists rather than the named-ref-only branch_exists.
-        if not git_ops.ref_exists(repo, base_branch):
-            raise BranchNotFoundError(f"base ref '{base_branch}' not found in {repo}")
-
-        base_sha = git_ops.merge_base(repo, base_branch)
-        if base_sha is None:
-            raise BranchNotFoundError(f"could not resolve merge-base for '{base_branch}' in {repo}")
-
-        head_sha = git_ops.head_sha(repo)
-        head_branch = git_ops.current_branch(repo)
-
-        ctx = WorkContext(
-            repo=repo,
-            source=source,
-            base_branch=base_branch,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            head_sha=head_sha,
-            is_ephemeral=is_ephemeral,
-            run_id=run_id,
+        is_ephemeral = force_ephemeral or branch is not None
+        operational_root = (
+            operational_worktree_root(private_owner) if is_ephemeral else None
         )
 
-        yield ctx
-    finally:
-        if worktree_path is not None:
-            try:
-                git_ops.worktree_remove(source, worktree_path, force=True)
-            except GitError as exc:
+        if is_ephemeral:
+            # Fetch from the source -- the ephemeral worktree does not exist yet.
+            ownership.source_code.run(lambda: git_ops.fetch(source))
+
+        resolved_ref = ownership.source_code.run(lambda: _resolve_ref(source, branch)) if is_ephemeral else None
+        base_branch = ownership.source_code.run(lambda: _resolve_base(source, branch, base, auth=auth))
+
+        run_id = _make_run_id()
+        worktree_path: Path | None = None
+
+        try:
+            if is_ephemeral:
+                assert resolved_ref is not None  # narrows for the type-checker
+                assert operational_root is not None
+                worktree_path = operational_root / run_id
+                ownership.add_worktree(worktree_path, resolved_ref)
+                repo = worktree_path
+            else:
+                repo = source
+
+            # Validate the resolved base exists relative to the working repo.
+            # --base accepts any commit-ish (SHA, tag, relative expr), so use
+            # ref_exists rather than the named-ref-only branch_exists.
+            code = ownership.bind_code(repo)
+            if is_ephemeral:
+                ownership.source_code.run(lambda: code.run(lambda: copy_files_into_ephemeral(
+                    source, repo, extra=extra_copy, skip=skip_tests,
+                )))
+            if not code.run(lambda: git_ops.ref_exists(repo, base_branch)):
+                raise BranchNotFoundError(f"base ref '{base_branch}' not found in {repo}")
+
+            base_sha = code.run(lambda: git_ops.merge_base(repo, base_branch))
+            if base_sha is None:
+                raise BranchNotFoundError(f"could not resolve merge-base for '{base_branch}' in {repo}")
+
+            head_sha = code.run(lambda: git_ops.head_sha(repo))
+            head_branch = code.run(lambda: git_ops.current_branch(repo))
+
+            ctx = WorkContext(
+                repo=repo,
+                source=source,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                head_branch=head_branch,
+                head_sha=head_sha,
+                is_ephemeral=is_ephemeral,
+                run_id=run_id,
+                ownership=ownership,
+            )
+
+            yield ctx
+        finally:
+            if worktree_path is not None:
                 from daydream.agent import console
                 from daydream.ui import print_warning
 
-                print_warning(console, f"Failed to remove ephemeral worktree {worktree_path}: {exc}")
+                try:
+                    ownership.remove_worktree(worktree_path)
+                except ArtifactVisibilityError:
+                    print_warning(console, "Worktree cleanup skipped: original source is unavailable or changed.")
+                except GitError:
+                    print_warning(console, "Worktree cleanup failed; the operational worktree was retained.")
 
 
 @dataclass(frozen=True)
