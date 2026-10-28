@@ -66,8 +66,6 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
-
 
 @bind_resolved_run_context
 async def post_review_to_pr_from_report(
@@ -1009,6 +1007,8 @@ def post_findings_from_artifact(
     head_sha: str,
     repo: str,
     console: Console,
+    base_sha: str | None = None,
+    comparison_sha: str | None = None,
     bot_login: str | None = None,
     approve_on_clean: bool = False,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
@@ -1019,11 +1019,16 @@ def post_findings_from_artifact(
     missing identity disables REST dedup. All current findings, including already posted
     matches, participate in the approval gate. Invalid optional diagrams are dropped;
     a standalone diagram artifact fails if its only deliverable is invalid.
+    Immutable artifacts also require independently trusted base/comparison SHAs.
     Return 0 for success/no new findings, 1 for rejected artifacts or GitHub failures."""
     # Late imports: ``findings`` and ``reconcile`` both import this module at
     # module level (one-way by design), so the poster flow resolves them at
     # call time — the same no-cycle pattern as ``daydream.deep.orchestrator``.
-    from daydream.findings import FindingsValidationError, load_findings_artifact
+    from daydream.findings import (
+        IMMUTABLE_FINDINGS_SCHEMA_VERSION,
+        FindingsValidationError,
+        load_findings_artifact,
+    )
     from daydream.reconcile import fetch_prior_findings, partition, resolve_threads
 
     # Resolve the effective bot login in ONE place (here), so both the CLI
@@ -1044,6 +1049,8 @@ def post_findings_from_artifact(
             expected_repo=repo,
             expected_pr_number=pr_number,
             expected_head_sha=head_sha,
+            expected_base_sha=base_sha,
+            expected_comparison_sha=comparison_sha,
         )
     except FindingsValidationError as exc:
         print_error(console, "Findings Artifact Rejected", str(exc))
@@ -1115,7 +1122,7 @@ def post_findings_from_artifact(
     for finding in artifact.findings:
         if finding.fingerprint not in new_fingerprints:
             continue
-        issue = _issue_from_artifact_finding(finding)
+        issue = ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})
         if finding.placement == "inline" and finding.line is not None:
             classified.inline.append(_inline_comment(issue, finding.line, renderers))
             classified.inline_issues.append(issue)
@@ -1132,7 +1139,8 @@ def post_findings_from_artifact(
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
     can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
-        _finding_blocks_approval(
+        (artifact.schema_version == IMMUTABLE_FINDINGS_SCHEMA_VERSION and finding.severity is None)
+        or _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
             finding.severity_off_vocabulary,
@@ -1150,8 +1158,7 @@ def post_findings_from_artifact(
 
     from daydream.review_reporting import render_github_review_context, render_review_run_id
 
-    review_summary = (render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
-                      if artifact.kind == 'review' else '')
+    review_summary = render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
     run_info = artifact.run_info if artifact.run_info is not None else render_run_info(())
     run_id = render_review_run_id(artifact.terminal_result)
     if run_id:
@@ -1188,8 +1195,3 @@ def post_findings_from_artifact(
         return 1
     print_success(console, f"Posted review: {result.review_url}")
     return 0
-
-
-def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
-    """Restore validated issue fields; artifact placement requires no local PR Git objects."""
-    return ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})

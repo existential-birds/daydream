@@ -367,7 +367,9 @@ class SnapshotReady(_SnapshotBase):
     original_head_sha: Sha40
     base_tree_sha: Sha40
     head_tree_sha: Sha40
-    diff_sha256: Sha64
+    # Retained only so saved cases continue to load; source identity is bound by
+    # the frozen trees, bundle bytes, and synthetic commit topology.
+    diff_sha256: Sha64 | None = None
     bundle_file: str
     bundle_sha256: Sha64
     error: None = None

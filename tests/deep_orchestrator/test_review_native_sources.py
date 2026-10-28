@@ -5,21 +5,67 @@ import copy
 import hashlib
 import json
 import tracemalloc
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream import git_ops
+from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import canonicalize_source_selectors, source_id
 from tests.deep_orchestrator.test_review_completion import record, scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate
+from tests.deep_orchestrator.test_review_investigation import (
+    InvestigationRun,
+    candidate,
+    many_file_review,
+    read_events,
+    stage_ends,
+)
 from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
+
+
+@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
+@pytest.mark.parametrize('legacy', [False, True], ids=['compact', 'full-hash'])
+async def test_compact_assigned_selector_completes_on_the_last_native_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, legacy: bool,
+) -> None:
+    """Long-hash fixtures miss a provider selecting a compact handle with no correction call left."""
+    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
+    review.backend = NativeStageBackend(review.repo)
+    review.backend.sandbox = sandbox
+    diff = git_ops.diff(review.repo, 'main')
+    digest = hashlib.sha256(diff.encode()).hexdigest()
+
+    @review.backend.script('python')
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        binding = review.backend.calls[-1]['host_tools']
+        for index in range(stage['hard_tool_call_allowance'] - 1):
+            yield from read_events(review.repo, 'api.py', event_id=f'read-{index}')
+        identifier = source_id(stage['source_refs']['api.py'][0]) if legacy else 'source:1'
+        output['targets'][0]['evidence_refs'] = [
+            {'source_id': identifier, 'basis': 'supplied_diff', 'source_range': None}]
+        yield ToolStartEvent(id='compact-submit', name='structured_output', input=output)
+        yield ToolResultEvent(id='compact-submit', output='Submitted.', is_error=False)
+        assert binding.accepted and binding.fatal_error is None
+        assert [option['source_id'] for option in stage['source_options']['api.py']] == ['source:1', 'source:2']
+
+    data = await review.finish('python')
+    decision, = scopes(data)['python']['target_decisions']
+    assert decision['evidence_refs'] == [{
+        'artifact_sha256': digest, 'part_sha256': digest, 'revision': review.pr.base_sha,
+        'path': 'api.py', 'side': 'old', 'source_range': {'start': 1, 'end': 2}, 'fragment': None,
+        'basis': 'supplied_diff', 'role': 'assigned',
+    }]
+    event, = stage_ends(review, 'python')
+    assert event['metadata']['admitted'] is True
+    assert event['metadata']['remaining_tool_calls'] == 0
+    assert event['metadata']['successful_submissions'] == 1
 
 
 async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.benchmark.harbor import verifier_core as vc
+from daydream.committed_review_model import CommittedReviewResult, validate_committed_result
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
 from daydream.pr_review import extract_item_fields
 
@@ -124,6 +125,44 @@ def build_candidate_artifact(
             f"cannot build candidate artifact: {exc}", kind="invalid_finding"
         ) from exc
     return artifact
+
+
+def build_committed_candidate(
+    result: CommittedReviewResult, *, immutable_input: dict[str, Any], case_id: str,
+    base_ref: str = "base", head_ref: str = "head",
+) -> dict[str, Any]:
+    """Project only complete installed current evidence, preserving local source identity."""
+    value = result.to_dict()
+    try:
+        validate_committed_result(value)
+    except (ValueError, TypeError) as exc:
+        raise CandidateError(f"invalid committed review result: {exc}", kind="invalid_result") from exc
+    if (not result.complete or result.capture_state != "complete" or result.output_error is not None
+            or result.delivery_state not in {"not_requested", "complete"}
+            or value.get("immutable_input") != immutable_input):
+        raise CandidateError("committed review is incomplete or belongs to another immutable input", kind="incomplete")
+    findings: list[dict[str, Any]] = []
+    groups: dict[tuple[object, ...], int] = {}
+    for claim in value["findings"]:
+        payload = claim["payload"]
+        if payload["line"] is None:
+            raise CandidateError("Harbor candidates require a concrete finding line", kind="unsupported_location")
+        title = _candidate_title(claim["title"]) or _candidate_title(payload["claim"])
+        body = [payload[key] for key in ("claim", "trigger", "consequence", "grounds")]
+        if claim["title"].strip() and title != claim["title"].strip():
+            body.insert(0, claim["title"])
+        finding = {
+            "title": title,
+            "body": "\n\n".join(body),
+            "severity": None, "path": payload["file"], "start_line": payload["line"], "end_line": payload["line"],
+        }
+        try:
+            entry = vc.parse_finding_content(finding)
+        except vc.VerifierError as exc:
+            raise CandidateError(f"cannot project committed finding: {exc}", kind="invalid_finding") from exc
+        entry["candidate_id"] = vc.assign_candidate_id(case_id, entry, groups)
+        findings.append(entry)
+    return build_candidate_artifact(case_id, findings, base_ref=base_ref, head_ref=head_ref)
 
 
 def write_candidate_artifact_atomic(dest: str | Path, artifact: dict[str, Any]) -> None:

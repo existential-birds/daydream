@@ -8,6 +8,7 @@ against the real object store. Only the import-gating tests (in
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from daydream.benchmark import snapshot, snapshot as sn, storage
 from daydream.benchmark.schema import case_id_for
 from daydream.benchmark.storage import recover_startup
 from daydream.git_ops import GitError, process as git_process
+from daydream.git_ops.immutable import inert_git_context
 from tests.harness.git_helpers import git as _git, seed_pr_origin, seeded_commit, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
 
@@ -244,12 +246,9 @@ def test_resolve_base_and_trees(tmp_path: Path, origin: str) -> None:
     assert bt == _SHA_BASE2_TREE and ht == _SHA_HEAD_TREE
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
-def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path, origin: str) -> None:
-    m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
+def test_degenerate_equal_trees() -> None:
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
-    d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    assert re.fullmatch(r"[0-9a-f]{64}", d)
 
 def test_bundle_two_refs_deterministic(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
@@ -279,18 +278,26 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(
     assert heads_rel == {"refs/heads/base", "refs/heads/head"}
     assert heads_abs == {"refs/heads/base", "refs/heads/head"}
 
-def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: str) -> None:
-    """The same base/head pair hashes identically whether the diff runs in a
-    mirror whose effective core.abbrev is widened past the clone's. Failing-by-
-    construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
-    default, so validate_offline_clone raises a digest mismatch."""
+def test_offline_clone_returns_current_review_diff_key(tmp_path: Path, origin: str) -> None:
+    """Bind execution to the current inert review rendering despite ambient Git settings."""
+
+    from daydream.git_ops.immutable import immutable_review_diff
 
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     _git(m, "config", "core.abbrev", "12")
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+    local = sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, workdir=tmp_path)
+    assert local["comparison_base_sha"] == sn.rev_parse(m, "refs/heads/base")
+    assert local["head_sha"] == sn.rev_parse(m, "refs/heads/head")
+    review_clone = tmp_path / "review-identity"
+    _git(tmp_path, "clone", "--no-checkout", str(bundle), str(review_clone))
+    with inert_git_context(review_clone):
+        expected_review = hashlib.sha256(immutable_review_diff(
+            review_clone, local["comparison_base_sha"], local["head_sha"]).encode()).hexdigest()
+    assert local["review_diff_key"] == expected_review
+    ambient_review = hashlib.sha256(git_ops.committed_diff(m, _SHA_BASE2, _SHA_HEAD).encode()).hexdigest()
+    assert local["review_diff_key"] != ambient_review
 
 def test_git_fetch_wires_command_scoped_credential_helper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -317,12 +324,11 @@ def test_offline_clone_validates(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
-    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, workdir=tmp_path)
     bad = tmp_path / "snapshots" / "bad.bundle"
     bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
+        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, workdir=tmp_path)
 
 def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -> None:
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
@@ -332,11 +338,10 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -
 
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base_tree, head_tree = _SHA_BASE2_TREE, _SHA_HEAD_TREE
-    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
 
     valid = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, valid)
-    sn.validate_offline_clone(valid, base_tree, head_tree, diff_sha, workdir=tmp_path)
+    sn.validate_offline_clone(valid, base_tree, head_tree, workdir=tmp_path)
 
     # Synthetic commits with the same pinned identity as build_bundle's
     # (deterministic: identical tree+message+env => identical sha).
@@ -344,31 +349,33 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -
     base_commit = _git(m, "commit-tree", base_tree, "-m", "snapshot base", env=synth_env)
     head_commit = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "snapshot head", env=synth_env)
 
-    # (c) extra ref: a third ref in the bundle -> for-each-ref sees 3.
+    # Advertised tags/custom refs may disappear from cloned remote refs. Point
+    # them at the existing base so extra commit history cannot mask this guard.
     extra_ref_bundle = tmp_path / "snapshots" / "extra-ref.bundle"
-    extra = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "extra", env=synth_env)
-    _git(m, "update-ref", "refs/heads/extra", extra)
-    _git(m, "bundle", "create", str(extra_ref_bundle), "refs/heads/base", "refs/heads/head", "refs/heads/extra")
-    with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+    for extra_ref in ("refs/heads/extra", "refs/tags/extra", "refs/custom/extra"):
+        _git(m, "update-ref", extra_ref, base_commit)
+        _git(m, "bundle", "create", str(extra_ref_bundle), "refs/heads/base", "refs/heads/head", extra_ref)
+        with pytest.raises(git_ops.GitError, match="refs"):
+            sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, workdir=tmp_path)
+        _git(m, "update-ref", "-d", extra_ref)
 
     # (c) extra reachable commit (no extra ref): head parented on an extra
-    # commit parented on base -> rev-list --count origin/head == 3.
+    # commit parented on base, violating the exact root/child topology.
     extra_commit_bundle = tmp_path / "snapshots" / "extra-commit.bundle"
     extra_commit = _git(m, "commit-tree", base_tree, "-p", base_commit, "-m", "extra", env=synth_env)
     head_tampered = _git(m, "commit-tree", head_tree, "-p", extra_commit, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", head_tampered)
     _git(m, "bundle", "create", str(extra_commit_bundle), "refs/heads/base", "refs/heads/head")
-    with pytest.raises(git_ops.GitError, match="exactly two reachable commits"):
-        sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+    with pytest.raises(git_ops.GitError, match="exactly two commits"):
+        sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, workdir=tmp_path)
 
-    # (c) wrong parent: head with NO parent -> GitError (head^ fails, count 1).
+    # (c) wrong parent: head with NO parent violates the single-child topology.
     wrong_parent_bundle = tmp_path / "snapshots" / "wrong-parent.bundle"
     parentless_head = _git(m, "commit-tree", head_tree, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", parentless_head)
     _git(m, "bundle", "create", str(wrong_parent_bundle), "refs/heads/base", "refs/heads/head")
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(wrong_parent_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+        sn.validate_offline_clone(wrong_parent_bundle, base_tree, head_tree, workdir=tmp_path)
 
     # (c) wrong tree: head's tree is the base tree -> tree mismatch.
     wrong_tree_bundle = tmp_path / "snapshots" / "wrong-tree.bundle"
@@ -376,7 +383,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -
     _git(m, "update-ref", "refs/heads/head", wrong_tree_head)
     _git(m, "bundle", "create", str(wrong_tree_bundle), "refs/heads/base", "refs/heads/head")
     with pytest.raises(git_ops.GitError, match="tree mismatch"):
-        sn.validate_offline_clone(wrong_tree_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
+        sn.validate_offline_clone(wrong_tree_bundle, base_tree, head_tree, workdir=tmp_path)
 
     # Restore the mirror refs so the mirror is reusable for later freezes.
     _git(m, "update-ref", "refs/heads/base", base_commit)
@@ -434,7 +441,7 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path, origin: str) -> None:
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
     assert ready["requested_base_sha"] == _SHA_BASE2
     assert ready["base_tree_sha"] == _SHA_BASE2_TREE and ready["head_tree_sha"] == _SHA_HEAD_TREE
-    assert re.fullmatch(r"[0-9a-f]{64}", ready["diff_sha256"])
+    assert "diff_sha256" not in ready
     assert re.fullmatch(r"[0-9a-f]{64}", ready["bundle_sha256"])
     expect_rel = f"snapshots/{case_id_for(1, _SHA_HEAD)}.bundle"
     assert ready["bundle_file"] == expect_rel
@@ -546,6 +553,8 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     repo.mkdir()
     _git(repo, "init", "-b", "main")
     write_and_stage(repo, "readme.txt", "hello rich\n")
+    write_and_stage(repo, ".gitattributes", "*.dat diff filter=hostile\n")
+    write_and_stage(repo, "record.dat", "old ordinary text\n")
     (repo / "run.sh").write_text("#!/bin/sh\necho hi\n")
     (repo / "run.sh").chmod(0o755)
     _git(repo, "add", "run.sh")
@@ -562,6 +571,8 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
         _git(repo, "rm", "alias.txt")
     (repo / "payload.bin").write_bytes(b"\x00\x01\x02\x03\x04\x05")
     _git(repo, "add", "payload.bin")
+    write_and_stage(repo, "record.dat", "new ordinary text\n")
+    write_and_stage(repo, ".gitattributes", "*.dat -diff filter=hostile\n")
     head_sha = seeded_commit(repo, "rich head")
     head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
 
@@ -570,7 +581,9 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
     return str(bare), base_sha, head_sha, base_tree, head_tree
 
 
-def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: Path) -> None:
+def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=base, explicit_shas=[head])
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
@@ -578,13 +591,33 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
     assert sn.rev_parse(m, "refs/heads/base^{tree}") == base_tree
     assert sn.rev_parse(m, "refs/heads/head^{tree}") == head_tree
-    diff = sn.canonical_diff_sha256(m, base, head)
-    sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
+    marker = tmp_path / "forbidden-git-effect"
+    order = tmp_path / "diff-order"
+    order.write_text("payload.bin\nrecord.dat\n")
+    global_config = tmp_path / "ambient-gitconfig"
+    global_config.write_text("[diff]\n\talgorithm = patience\n\tcontext = 0\n\trenames = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    _git(m, "config", "diff.orderFile", str(order))
+    _git(m, "config", "diff.external", f"touch '{marker}'")
+    (m / "info/attributes").write_text("*.dat diff\n")
+    local = sn.validate_offline_clone(bundle, base_tree, head_tree, workdir=tmp_path)
+    from daydream.git_ops.immutable import immutable_review_diff
+
     first = storage.sha256_file(bundle)
     sn.build_bundle(m, base, head, bundle)
     assert storage.sha256_file(bundle) == first
     clone = _clone_offline(bundle, tmp_path)
     try:
+        compiled_review = immutable_review_diff(clone, local["comparison_base_sha"], local["head_sha"])
+        assert "Binary files a/record.dat and b/record.dat differ" in compiled_review
+        assert hashlib.sha256(compiled_review.encode()).hexdigest() == local["review_diff_key"]
+        _git(clone, "checkout", "--detach", local["head_sha"])
+        _git(clone, "config", "filter.hostile.smudge", f"touch '{marker}'; cat")
+        _git(clone, "config", "filter.hostile.clean", f"touch '{marker}'; cat")
+        _git(clone, "config", "diff.orderFile", str(order))
+        (clone / ".git/info/attributes").write_text("*.dat diff\n")
+        assert immutable_review_diff(clone, local["comparison_base_sha"], local["head_sha"]) == compiled_review
+        assert not marker.exists()
         url = _git(Path(clone), "remote", "get-url", "origin")
         # the clone's only remote points at the local bundle artifact, so it is
         # fully offline-replayable with no GitHub/HTTPS network dependency

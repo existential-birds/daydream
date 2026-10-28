@@ -28,7 +28,7 @@ PI_BASE_IMAGE = (
     "node:24.18.1-bookworm-slim@"
     "sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 )
-PI_PACKAGE = "@earendil-works/pi-coding-agent@0.84.3"
+PI_PACKAGE = "@earendil-works/pi-coding-agent@1.4.0"
 
 # Marker comment pair delimiting the wheel-install block of the environment
 # Dockerfile template. render_environment_dockerfile strips the delimited block

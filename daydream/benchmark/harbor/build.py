@@ -15,13 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from daydream import severity
-from daydream.benchmark import schema, snapshot, storage, workspace
+from daydream import git_ops, severity
+from daydream.benchmark import schema, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.prompt_budget import truncate_utf8_to_budget
 
-TEMPLATE_VERSION = "4"
+TEMPLATE_VERSION = "5"
 
 
 class CompileError(Exception):
@@ -469,24 +469,6 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     return None
 
 
-# bundle archive-inventory check
-
-
-def validate_bundle_inventory(bundle_path: Path) -> None:
-    """Structurally validate a compiled bundle: exactly base/head, no credential URL."""
-    heads = snapshot.bundle_heads(bundle_path)
-    if heads != {"refs/heads/base", "refs/heads/head"}:
-        raise CompileError(
-            f"bundle {bundle_path} exposes refs {sorted(heads)}; "
-            "expected exactly refs/heads/base and refs/heads/head"
-        )
-    raw = bundle_path.read_bytes().decode("utf-8", errors="replace")
-    m = _AUTHENTICATED_URL_PATTERN.search(raw)
-    if m is not None:
-        raise CompileError(f"bundle {bundle_path} contains a credential-bearing URL")
-    return None
-
-
 # case compilation + lock + atomic swap
 
 _CASE_README = (
@@ -639,7 +621,39 @@ def _compile_case(
         raise CompileError(
             f"case {case_id} bundle sha mismatch (wanted {expected}, got {bundle_sha256})"
         )
-    validate_bundle_inventory(bundle_dst)
+    if _AUTHENTICATED_URL_PATTERN.search(bundle_dst.read_bytes().decode("utf-8", errors="replace")) is not None:
+        raise CompileError(f"bundle {bundle_dst} contains a credential-bearing URL")
+    from daydream.benchmark.snapshot import validate_offline_clone
+
+    try:
+        local = validate_offline_clone(
+            bundle_dst, snapshot["base_tree_sha"], snapshot["head_tree_sha"],
+            workdir=case_stage / "environment",
+        )
+    except (KeyError, git_ops.GitError) as exc:
+        raise CompileError(f"case {case_id} frozen projection attestation failed: {exc}") from exc
+    from daydream.immutable_review import ImmutableReviewInput
+
+    immutable_input = ImmutableReviewInput.from_dict({
+        "schema_version": 1,
+        "provenance": {
+            "repository": repo_slug, "pr_number": pull_request.get("number"),
+            "head_sha": snapshot["original_head_sha"], "requested_base_sha": snapshot["requested_base_sha"],
+            "comparison_base_sha": snapshot["original_base_sha"], "title": "", "body": "",
+            "context": bounded_pr_context(pull_request),
+        },
+        "materialization": {
+            "kind": "synthetic", "head_sha": local["head_sha"],
+            "requested_base_sha": local["comparison_base_sha"], "comparison_base_sha": local["comparison_base_sha"],
+            "head_tree_sha": snapshot["head_tree_sha"], "comparison_tree_sha": snapshot["base_tree_sha"],
+            "review_diff_key": local["review_diff_key"],
+            "bundle_sha256": bundle_sha256,
+        },
+    })
+    # This trusted runtime subset is copied outside the model's captured source.
+    # Hidden gold, verifier state and the authoring lock never enter the image.
+    trusted_rel = "environment/immutable-request.json"
+    (case_stage / trusted_rel).write_text(json.dumps(immutable_input.to_dict(), sort_keys=True))
 
     gold = build_gold_list(findings, key=key)
     gold_bytes = json.dumps(gold, sort_keys=False).encode("utf-8")
@@ -679,6 +693,7 @@ def _compile_case(
     # re-reading and re-hashing the same bytes.
     files: dict[str, str] = {
         "environment/repository.bundle": bundle_sha256,
+        trusted_rel: hashlib.sha256((case_stage / trusted_rel).read_bytes()).hexdigest(),
         "tests/golden-review.json": gold_sha256,
         "solution/golden-review.json": oracle_sha256,
     }
@@ -701,6 +716,11 @@ def _compile_case(
         "original_base_sha": snapshot.get("original_base_sha"),
         "requested_base_sha": snapshot.get("requested_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
+        "base_tree_sha": snapshot["base_tree_sha"],
+        "head_tree_sha": snapshot["head_tree_sha"],
+        "local_base_sha": local["comparison_base_sha"],
+        "local_head_sha": local["head_sha"],
+        "review_diff_key": local["review_diff_key"],
         "bundle_sha256": bundle_sha256,
         "gold_sha256": gold_sha256,
         "oracle_sha256": oracle_sha256,

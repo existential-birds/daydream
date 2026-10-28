@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **review:** allow review profiles to configure the cumulative staged-review
+  tool-call budget while retaining host enforcement and diff-size scaling
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **review:** consume versioned immutable PR inputs offline through the committed
+  Pi API, with inert source materialization, distinct original/local identities,
+  strict findings export and independent publisher target checks
+  ([#1421](https://github.com/existential-birds/daydream/issues/1421)). The bounded
+  Harbor consumer uses frozen two-commit bundles and installs candidates only from
+  complete validated results; its packaged native baseline is Pi 1.4.0 / Node
+  24.18.1. This compatible minor feature adds immutable request 1, committed result
+  2 and findings 3 while preserving ordinary result 1/findings 2 and extension API 8.
+  Source limits cover both comparison and head trees before diff expansion, and
+  subprocess capture enforces the diff byte limit while reading.
+  Saved benchmark source is identified by validated Git commits and trees; legacy
+  rendered-diff checksums no longer gate reuse after upgrades. Execution patch,
+  bundle and exported-artifact digests retain their independent checks.
 - **review:** add an explicit hosted operator policy for committed Pi reviews,
   isolating configuration/resources, enforcing read/search and bounded submission
   grants, and delivering host-owned outputs without repository policy overrides
@@ -21,6 +37,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **review:** bound compressed and reconstructed immutable object populations,
+  Git allocations and captured output before validating supplied source
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **benchmark:** reject missing or blank Harbor reviewer models before normal-run setup
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **review:** offer compact, target-bound native source selectors while retaining
+  canonical snapshot evidence and exact full-hash selector compatibility
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)). Private
+  stage/cache contract 14 invalidates prior stage caches; extension API 8 is unchanged.
+- **review:** retain rejected submission details when the final native tool call
+  exhausts its allowance, and report tool-budget exhaustion while preserving
+  earlier admitted work ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **review:** accept legal punctuation and Unicode in loose and packed symbolic
+  HEAD refs during immutable source preparation while retaining path confinement
+  ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- **review:** block approval for immutable findings with missing severity,
+  including findings already posted on the PR, while preserving complete-empty
+  approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities

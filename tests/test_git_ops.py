@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -962,6 +963,166 @@ def test_run_git_encodes_input_text_when_capturing_bytes(repo: Path) -> None:
     text_proc = git_process._run_git(repo, ["hash-object", "--stdin"], input_text="abc\n")
     assert bytes_proc.returncode == 0
     assert bytes_proc.stdout == text_proc.stdout.encode()
+
+
+def test_run_git_bounds_real_blob_capture_and_preserves_text_decoding(repo: Path) -> None:
+    """Immutable patches need a pipe limit; post-capture checks cannot constrain allocation.
+
+    Ordinary retry tests replace subprocess.run and cannot prove bounded draining
+    of real stdout, or preserve its text newline conversion alongside raw bytes.
+    """
+    body = b"first\r\nsecond\rthird\n" + b"x" * (512 * 1024)
+    write_and_stage(repo, "large.txt", body)
+    oid = _git(repo, "rev-parse", ":large.txt")
+    args = ["cat-file", "blob", oid]
+    with pytest.raises(GitError, match="output exceeds the supported size"):
+        git_process._run_git(repo, args, max_output_bytes=16 * 1024)
+    raw = git_process._run_git(repo, args, max_output_bytes=len(body), capture_bytes=True)
+    text = git_process._run_git(repo, args, max_output_bytes=len(body))
+    assert raw.stdout == body
+    assert text.stdout == body.decode().replace("\r\n", "\n").replace("\r", "\n")
+
+
+def test_immutable_diff_refuses_to_replay_completed_setup_after_timeout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed init can lose its response; preparation must fail without replaying it.
+
+    Generic mutation wrappers never enter the immutable owner's temporary Git
+    setup, and ordinary diff coverage cannot expose timeout recovery behavior.
+    """
+    from daydream.git_ops import immutable
+
+    head = _git(repo, "rev-parse", "HEAD")
+    before = _repository_identity(repo)
+    original_run = git_process._bounded_subprocess
+    initialized: list[Path] = []
+
+    def completed_init_timeout(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        result = original_run(argv, **kwargs)
+        if argv[:2] == ["git", "init"]:
+            prepared = Path(kwargs["cwd"])
+            assert (prepared / ".git/config").is_file()
+            initialized.append(prepared)
+            if len(initialized) == 1:
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+        return result
+
+    monkeypatch.setattr(git_process, "_bounded_subprocess", completed_init_timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        immutable.immutable_review_diff(repo, head, head)
+    assert len(initialized) == 1 and not initialized[0].exists()
+    assert _repository_identity(repo) == before
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_inert_git_bounds_each_object_allocation_without_rejecting_its_trailing_nul(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offset: int,
+) -> None:
+    """A compressed object's allocation includes a NUL absent from its reported size."""
+    from daydream.git_ops import immutable
+
+    limit = 2 * 1024 * 1024
+    body = b"x" * (limit + offset)
+    write_and_stage(repo, "stored.bin", body)
+    oid = _git(repo, "rev-parse", ":stored.bin")
+    _git(repo, "update-ref", "refs/tags/stored", oid)
+    bundle = tmp_path / "stored.bundle"
+    _git(repo, "bundle", "create", str(bundle), "refs/tags/stored")
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", limit)
+    with immutable.inert_git_context(prepared):
+        immutable._git(prepared, "init", "--template=", ".")
+        if offset > 0:
+            with pytest.raises(GitError, match=f"allocate {len(body) + 1} over limit {limit + 1}"):
+                immutable._git(prepared, "bundle", "unbundle", str(bundle))
+        else:
+            immutable._git(prepared, "bundle", "unbundle", str(bundle))
+            assert immutable._git(prepared, "cat-file", "-s", oid) == str(len(body))
+
+
+def test_immutable_diff_bounds_physical_metadata_before_borrowing_objects(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alternates expose metadata skipped by object copying, including maintained sidecars."""
+    from daydream.git_ops import immutable
+
+    head = _git(repo, "rev-parse", "HEAD")
+    metadata = repo / ".git/objects/pack/multi-pack-index.d"
+    metadata.mkdir()
+    for name in ("first", "second"):
+        (metadata / name).write_bytes(b"x" * (1024 * 1024 + 1))
+    monkeypatch.setattr(immutable, "_MAX_OBJECT_BYTES", 2 * 1024 * 1024)
+    with pytest.raises(GitError, match="object population exceeds the supported size"):
+        immutable.immutable_review_diff(repo, head, head)
+
+
+def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each tree fits while their replacement patch exceeds the independent capture limit.
+
+    Oversized-source rejection cannot exercise this path: it stops at inventory.
+    The prior helper rejected only after buffering the complete textual patch.
+    """
+    from daydream.git_ops import immutable
+
+    write_and_stage(repo, "replace.txt", "a" * (3 * 1024 * 1024) + "\n")
+    base = _commit(repo, "old text within source bounds")
+    write_and_stage(repo, "replace.txt", "b" * (3 * 1024 * 1024) + "\n")
+    head = _commit(repo, "replacement text within source bounds")
+    monkeypatch.setattr(immutable, "_MAX_SOURCE_BYTES", 4 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(GitError, match="supported size"):
+            immutable.immutable_review_diff(repo, base, head)
+    finally:
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize("mode", ["stdout-overflow", "stderr-overflow", "timeout", "nonzero"])
+def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    """Reap every real launch, including timeouts before the child reaches its own code."""
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "mode = sys.argv[1]\n"
+        "if mode == 'nonzero':\n"
+        "    os.write(2, b'bounded failure diagnostic')\n"
+        "    sys.exit(7)\n"
+        "if mode.endswith('-overflow'):\n"
+        "    os.write(1 if mode.startswith('stdout') else 2, b'x' * 65536)\n"
+        "while True: time.sleep(1)\n"
+    )
+    shim.chmod(0o755)
+    processes: list[subprocess.Popen[Any]] = []
+    real_popen = subprocess.Popen
+
+    def launch(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.defpath)
+    expected = ("timed out" if mode == "timeout" else "bounded failure diagnostic" if mode == "nonzero"
+                else "output exceeds the supported size")
+    with pytest.raises(git_ops.GitTimeoutError if mode == "timeout" else GitError, match=expected):
+        git_process._run_git(tmp_path, [mode], timeout=0.3, retries=1, max_output_bytes=1024,
+                             error_context="bounded command failed")
+    assert len(processes) == (2 if mode == "timeout" else 1)
+    for process in processes:
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
 
 
 @pytest.mark.parametrize(

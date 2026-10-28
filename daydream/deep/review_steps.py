@@ -682,7 +682,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 allow_standalone=ctx.allow_standalone_artifacts,
                 reuse_cache=reuse_cache,
                 phase_identity=phase_identity,
-                review_limits=ReviewLimits(investigation_s=ctx.pipeline().reviewer_investigation_budget_s),
+                review_limits=ReviewLimits(
+                    investigation_s=ctx.pipeline().reviewer_investigation_budget_s,
+                    tool_calls=ctx.pipeline().reviewer_tool_call_budget,
+                ),
                 coverage=deep_state.review_coverage,
                 unavailable_report_scopes=ctx.data.setdefault('unavailable_report_scopes', set()),
             )

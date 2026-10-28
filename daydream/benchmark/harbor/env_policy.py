@@ -1,7 +1,7 @@
 """Harbor environment boundaries. HOST allowlists child inputs; CONTAINER scrubs again
 because Harbor may inject new names. RENDERER/TASK declare compiled configuration
-inputs; JUDGE declares its isolated subset. Claude host credentials and renderer
-placeholders share the exact same Anthropic allowlist.
+inputs; JUDGE declares its isolated subset. Native reviewer configuration is
+restricted to the supported Pi route before credentials are selected.
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ TRAJECTORY_PATH_ENV = "DAYDREAM_REVIEW_TRAJECTORY_PATH"
 CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
 BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
 HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
+IMMUTABLE_INPUT_ENV = "DAYDREAM_REVIEW_IMMUTABLE_INPUT"
+BUNDLE_ENV = "DAYDREAM_REVIEW_BUNDLE"
+AGENT_DIR_ENV = "DAYDREAM_REVIEW_AGENT_DIR"
 JUDGE_PROVIDER_ENV = "DAYDREAM_JUDGE_PROVIDER"
 JUDGE_MODEL_ENV = "DAYDREAM_JUDGE_MODEL"
 JUDGE_API_KEY_ENV = "DAYDREAM_JUDGE_API_KEY"
@@ -44,13 +47,23 @@ REVIEWER_CONTROL_PLANE: Mapping[str, str] = MappingProxyType({
     CASE_ID_ENV: "injected",
     BASE_REF_ENV: "injected",
     HEAD_REF_ENV: "injected",
+    IMMUTABLE_INPUT_ENV: "defaulted",
+    BUNDLE_ENV: "defaulted",
+    AGENT_DIR_ENV: "operator",
 })
 ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
-CLAUDE_KEEP_PREFIX = "ANTHROPIC_"
 PI_API_KEY_ENV = "PI_API_KEY"
 SKILLS_DIR_ENV = "DAYDREAM_SKILLS_DIR"
+
+
+def require_reviewer_model(environment: Mapping[str, str | None]) -> str:
+    """Require an explicit model while preserving the operator's exact identifier."""
+    model = environment.get(MODEL_ENV)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(f"{MODEL_ENV} must be a nonblank operator-selected model ID")
+    return model
 
 
 @dataclass(frozen=True)
@@ -62,9 +75,6 @@ class HostChannel:
     required_process_vars: frozenset[str]
     banned_vars: frozenset[str]
     banned_prefixes: frozenset[str]
-    claude_keep_vars: frozenset[str]
-    claude_exempt_vars: frozenset[str]
-    claude_exempt_prefix: str
 
 
 HOST = HostChannel(
@@ -79,24 +89,18 @@ HOST = HostChannel(
     banned_prefixes=frozenset({
         JUDGE_PREFIX, "ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "OPENROUTER_", "PI_",
     }),
-    claude_keep_vars=frozenset({
-        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    }),
-    claude_exempt_vars=frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}),
-    claude_exempt_prefix=CLAUDE_KEEP_PREFIX,
 )
 
 
 @dataclass(frozen=True)
 class ContainerChannel:
-    """Names removed during the container scrub and before GitHub subprocesses."""
+    """Names removed during the container scrub."""
 
     posture: str
     github_credential_vars: frozenset[str]
     unselected_pi_credentials: frozenset[str]
     scrub_prefixes: frozenset[str]
     control_plane_aliases: frozenset[str]
-    github_subprocess_drops: frozenset[str]
 
 
 CONTAINER = ContainerChannel(
@@ -113,9 +117,6 @@ CONTAINER = ContainerChannel(
     control_plane_aliases=frozenset({
         API_KEY_ENV, BASE_URL_ENV, SKILLS_DIR_ENV,
     }),
-    github_subprocess_drops=frozenset({
-        "PI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-    }),
 )
 
 
@@ -129,7 +130,7 @@ class RendererChannel:
 
 RENDERER = RendererChannel(
     reviewer_placeholders=MappingProxyType({
-        # Backend selection passes through verbatim; agent/entrypoint validate pi|claude.
+        # Selection passes through verbatim; agent and entrypoint reject unsupported backends.
         BACKEND_ENV: "${DAYDREAM_REVIEW_BACKEND:-pi}",
         MODEL_ENV: "${DAYDREAM_REVIEW_MODEL}",
         # Mutually exclusive credentials get empty fallbacks so an unset
@@ -139,9 +140,8 @@ RENDERER = RendererChannel(
         API_KEY_ENV: "${DAYDREAM_REVIEW_API_KEY:-}",
         BASE_URL_ENV: "${DAYDREAM_REVIEW_BASE_URL:-}",
         CANDIDATE_ENV: "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}",
-        # ANTHROPIC_* carries claude-backend credentials into the container
-        # (agent.build_child_env keep-set, entrypoint claude branch); the
-        # API key and auth token are alternatives, the base URL optional.
+        # Preserve the rendered control-plane shape. The Pi-only agent gate
+        # rejects other reviewer backends before selecting native credentials.
         ANTHROPIC_API_KEY_ENV: "${ANTHROPIC_API_KEY:-}",
         ANTHROPIC_AUTH_TOKEN_ENV: "${ANTHROPIC_AUTH_TOKEN:-}",
         ANTHROPIC_BASE_URL_ENV: "${ANTHROPIC_BASE_URL:-}",
@@ -197,9 +197,9 @@ JUDGE = JudgeChannel(
 def declared_names() -> frozenset[str]:
     """Return all concrete environment names declared by any policy channel."""
     return frozenset(
-        HOST.required_process_vars | HOST.banned_vars | HOST.claude_keep_vars | HOST.claude_exempt_vars
+        HOST.required_process_vars | HOST.banned_vars
         | CONTAINER.github_credential_vars | CONTAINER.unselected_pi_credentials
-        | CONTAINER.control_plane_aliases | CONTAINER.github_subprocess_drops
+        | CONTAINER.control_plane_aliases
         | REVIEWER_CONTROL_PLANE.keys() | RENDERER.reviewer_placeholders.keys()
         | RENDERER.judge_placeholders.keys() | TASK.injected.keys()
         | JUDGE.host_supplied | {PI_API_KEY_ENV, SKILLS_DIR_ENV}

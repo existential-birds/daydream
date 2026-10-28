@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -260,6 +261,7 @@ class TrajectoryRecorder:
     explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
+    immutable_input: dict[str, object] | None = None
     backend_name: str = ""
     review_backend_name: str = ""
     fix_backend_name: str = ""
@@ -743,6 +745,8 @@ class TrajectoryRecorder:
             extra["pr_number"] = self.pr_number
         if self.pr_repo is not None:
             extra["pr_repo"] = self.pr_repo
+        if self.immutable_input is not None:
+            extra["immutable_input"] = deepcopy(self.immutable_input)
         if self._profile is not None:
             extra.update(self._profile)
         if self._phase_events:

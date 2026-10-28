@@ -9,6 +9,7 @@ from typing import Any
 
 import jsonschema
 
+from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
 from daydream.json_utils import canonical_json
 from daydream.output_schema import strict_object
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, ReasonCode, validate_terminal_result
@@ -92,16 +93,31 @@ COMMITTED_RESULT_SCHEMA = strict_object({
         "reason": {"enum": [None, *[reason.value for reason in ReasonCode]]},
     })},
 })
+IMMUTABLE_COMMITTED_RESULT_SCHEMA = strict_object({
+    **COMMITTED_RESULT_SCHEMA["properties"],
+    "schema_version": {"const": 2},
+    "immutable_input": IMMUTABLE_REVIEW_INPUT_SCHEMA,
+})
 
 
 def validate_committed_result(value: dict[str, Any]) -> None:
     """Reject identity drift, unchecked publication and manufactured completion."""
     try:
-        jsonschema.validate(value, COMMITTED_RESULT_SCHEMA)
+        version = value.get("schema_version")
+        if type(version) is not int or version not in {1, 2}:
+            raise ValueError("unsupported committed review result version")
+        jsonschema.validate(value, COMMITTED_RESULT_SCHEMA if version == 1 else IMMUTABLE_COMMITTED_RESULT_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f"invalid committed review at {exc.json_path}") from exc
     terminal = value["terminal_result"]
     revision = value["analyzed_revision"]
+    if version == 2:
+        validate_immutable_input(value["immutable_input"])
+        materialized = value["immutable_input"]["materialization"]
+        if revision != {"head_sha": materialized["head_sha"],
+                        "merge_base_sha": materialized["comparison_base_sha"],
+                        "diff_key": materialized["review_diff_key"]}:
+            raise ValueError("committed result differs from immutable materialization")
     validate_terminal_result(terminal, expected_head_sha=revision["head_sha"])
     if terminal["run_id"] != value["run_id"] or terminal["analyzed_revision"] != revision:
         raise ValueError("committed result differs from terminal run/source identity")

@@ -43,6 +43,29 @@ compiled tasks and trajectories. The environment declaration is
 Only an explicit trusted control-plane candidate profile or packaged default is
 admitted; ambient and target repository profiles cannot alter it. Pin wheel,
 compiled lock, candidate, model/backend, judge, and scoring identities.
+Normal Harbor runs require an explicit, nonblank `DAYDREAM_REVIEW_MODEL` with the
+exact operator-selected OpenRouter model ID; its spelling is preserved unchanged.
+
+The bounded Pi reviewer consumes the shared
+[immutable PR embedding API](runtime.md#immutable-pr-inputs), using official Pi
+1.4.0 and Node 24.18.1. Compilation preserves exactly two synthetic commits with
+the original comparison/head trees. Validated Git objects establish saved source
+identity; the current execution computes its own review diff key. Legacy saved
+`snapshot.diff_sha256` is accepted as ignored metadata, and new snapshots omit it.
+Bundle and exported-artifact checksums still bind their exact bytes. Trusted runtime metadata
+delivers only the immutable provenance/materialization subset and frozen bundle;
+the full lock, gold and verifier metadata remain private. Original repository/PR
+identity is retained in result/ATIF metadata, while source references identify the
+actual synthetic commits. Only approved bounded historical PR context is model
+input. Analysis requires no remote, GitHub discovery or GitHub credentials.
+
+The entrypoint keeps review-only effects and local trajectories/diagnostics.
+Only a complete, validated current result with successful native settlement,
+output installation and capture can install a candidate through the atomic
+candidate owner. Partial/error output cannot install a successful candidate.
+Unsupported backends and oversized plans fail explicitly. This adapter does not
+authorize fixing, posting, archive/upload/training, or claim comprehensive native
+parity; #1639 owns that migration. Ordinary candidate publication remains supported.
 
 `objective` reads an exact completed ledgered run; it invokes no models.
 `aggregate` pools completed compatible runs from a manifest:

@@ -8,15 +8,17 @@ checkout access. Dependencies flow from findings to pr_review.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 
 from daydream import git_ops, pr_review
+from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
 from daydream.json_utils import atomic_write_bytes
 from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
@@ -30,6 +32,7 @@ from daydream.review_result import (
 )
 
 FINDINGS_SCHEMA_VERSION = 2
+IMMUTABLE_FINDINGS_SCHEMA_VERSION = 3
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_RAW_ARTIFACT_BYTES = MAX_ARTIFACT_BYTES + RUN_TARGET_DECISIONS_MAX_BYTES
@@ -65,17 +68,44 @@ FINDINGS_SCHEMA['allOf'] = [{
     'then': {'required': ['terminal_result']},
     'else': {'not': {'required': ['terminal_result']}, 'properties': {'findings': {'maxItems': 0}}},
 }]
+IMMUTABLE_FINDINGS_SCHEMA = copy.deepcopy(FINDINGS_SCHEMA)
+IMMUTABLE_FINDINGS_SCHEMA['properties'].update({
+    'schema_version': {'const': IMMUTABLE_FINDINGS_SCHEMA_VERSION},
+    'kind': {'const': 'review'},
+    'immutable_input': IMMUTABLE_REVIEW_INPUT_SCHEMA,
+})
+IMMUTABLE_FINDINGS_SCHEMA['required'].append('immutable_input')
+
+
+def _validate_immutable_binding(data: dict[str, Any]) -> None:
+    """Keep captured PR provenance distinct from the locally analyzed revision."""
+    immutable = data['immutable_input']
+    validate_immutable_input(immutable)
+    provenance, materialization = immutable['provenance'], immutable['materialization']
+    for outer, captured in (('repo', 'repository'), ('pr_number', 'pr_number'), ('head_sha', 'head_sha')):
+        if data[outer] != provenance[captured]:
+            raise ValueError(f'findings {outer} differs from captured provenance')
+    revision = data['terminal_result']['analyzed_revision']
+    for analyzed, local in (('head_sha', 'head_sha'), ('merge_base_sha', 'comparison_base_sha'),
+                            ('diff_key', 'review_diff_key')):
+        if revision[analyzed] != materialization[local]:
+            raise ValueError(f'findings analyzed {analyzed} differs from immutable materialization')
 
 
 def _validate_artifact(data: Any) -> None:
     """Validate the current kind-specific envelope and its coverage semantics."""
     version = data.get("schema_version") if isinstance(data, dict) else None
-    if type(version) is not int or version != FINDINGS_SCHEMA_VERSION:
+    if type(version) is not int or version not in (FINDINGS_SCHEMA_VERSION, IMMUTABLE_FINDINGS_SCHEMA_VERSION):
         raise FindingsValidationError(f"artifact failed schema validation: unsupported schema version {version!r}")
     try:
-        jsonschema.validate(data, FINDINGS_SCHEMA)
+        jsonschema.validate(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
+                            else FINDINGS_SCHEMA)
         if data["kind"] == "review":
-            validate_terminal_result(data["terminal_result"], expected_head_sha=data["head_sha"])
+            immutable = version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
+            if immutable:
+                _validate_immutable_binding(data)
+            validate_terminal_result(data["terminal_result"],
+                                     expected_head_sha=None if immutable else data["head_sha"])
             if not data["terminal_result"]["projection_valid"] and data["findings"]:
                 raise ValueError("untrustworthy projection must not contain findings")
             if 'review_context' in data:
@@ -147,6 +177,7 @@ class FindingsArtifact:
     schema_version: int = FINDINGS_SCHEMA_VERSION
     terminal_result: dict[str, Any] | None = None
     review_context: dict[str, Any] | None = None
+    immutable_input: dict[str, Any] | None = None
 
     @property
     def analysis_complete(self) -> bool:
@@ -183,6 +214,7 @@ def build_findings_artifact(
     review_context: dict[str, Any] | None = None,
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
+    immutable_input: dict[str, Any] | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
     """Classify against the PR diff before producing the handoff artifact.
@@ -190,11 +222,32 @@ def build_findings_artifact(
     Inline findings retain snapped lines; file/body findings have line=None.
     Diagram-only callers provide empty issues and specs without stored Mermaid.
     Classification runs where PR Git objects are available, before privileged posting.
+    Immutable callers supply the validated input and keep the prepared source's
+    inert Git context active; classification uses its local commits, while the
+    envelope retains the original captured publication identity.
     """
     if (kind == 'review') != (terminal_result is not None):
         raise FindingsValidationError('review requires terminal_result; diagram forbids code coverage')
     if kind == 'review' and snapshot_diff is None:
         raise FindingsValidationError('review requires the captured snapshot diff')
+    artifact: dict[str, Any] = {
+        "schema_version": IMMUTABLE_FINDINGS_SCHEMA_VERSION if immutable_input is not None else FINDINGS_SCHEMA_VERSION,
+        "repo": f"{pr.owner}/{pr.repo}",
+        "pr_number": pr.number,
+        "head_sha": pr.head_sha,
+        "run_info": run_info,
+        "kind": kind,
+        "diagrams": diagrams,
+        "findings": [],
+        "review_warnings": list(review_warnings),
+        **({"terminal_result": copy.deepcopy(terminal_result)} if terminal_result is not None else {}),
+        **({"review_context": copy.deepcopy(review_context)} if review_context is not None else {}),
+        **({"immutable_input": copy.deepcopy(immutable_input)} if immutable_input is not None else {}),
+    }
+    if immutable_input is not None:
+        _validate_artifact(artifact)
+        local = immutable_input['materialization']
+        pr = replace(pr, head_sha=local['head_sha'], base_sha=local['comparison_base_sha'])
     placement_options = {"snapshot_diff": snapshot_diff} if snapshot_diff is not None else {}
     classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers, **placement_options)
     findings = [
@@ -203,19 +256,48 @@ def build_findings_artifact(
     ]
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
     findings.extend(_finding_dict(issue, placement="body", line=None) for issue in classified.body_only)
-    return {
-        "schema_version": FINDINGS_SCHEMA_VERSION,
-        "repo": f"{pr.owner}/{pr.repo}",
-        "pr_number": pr.number,
-        "head_sha": pr.head_sha,
-        "run_info": run_info,
-        "kind": kind,
-        "diagrams": diagrams,
-        "findings": findings,
-        "review_warnings": list(review_warnings),
-        **({"terminal_result": copy.deepcopy(terminal_result)} if terminal_result is not None else {}),
-        **({"review_context": copy.deepcopy(review_context)} if review_context is not None else {}),
-    }
+    artifact['findings'] = findings
+    return artifact
+
+
+def build_committed_findings_artifact(
+    target_dir: Path, payload: dict[str, Any], *, snapshot_diff: str,
+) -> dict[str, Any]:
+    """Project a sealed immutable review through snapshot-local finding placement.
+
+    The caller retains the prepared source's inert Git context and its artifact
+    session. Unresolved concerns and native diagnostics remain in the paired
+    committed result; this handoff retains confirmed findings and typed coverage.
+    """
+    from daydream.committed_review_model import validate_committed_result
+
+    validate_committed_result(payload)
+    if payload['schema_version'] != 2:
+        raise FindingsValidationError('committed findings require an immutable result')
+    if hashlib.sha256(snapshot_diff.encode()).hexdigest() != payload['analyzed_revision']['diff_key']:
+        raise FindingsValidationError('committed findings differ from the captured review diff')
+    immutable = payload['immutable_input']
+    original = immutable['provenance']
+    owner, repo = original['repository'].split('/', 1)
+    pr = PRInfo(original['pr_number'], original['head_sha'], original['comparison_base_sha'],
+                '', '', owner, repo, '')
+    issues = []
+    for finding in payload['findings']:
+        semantic = finding['payload']
+        body = '\n\n'.join([semantic['claim'], *(
+            f'**{label}:** {semantic[key]}'
+            for key, label in (('trigger', 'Trigger'), ('consequence', 'Consequence'),
+                               ('grounds', 'Supporting grounds'))
+        )])
+        issues.append(ParsedIssue(
+            path=semantic['file'], line=semantic['line'], title=finding['title'], body=body,
+            severity=None, confidence=None, is_cross_stack=False,
+            fingerprint=pr_review.compute_fingerprint(semantic['file'], finding['title'], body),
+        ))
+    return build_findings_artifact(
+        target_dir, pr, issues, run_info=f"Committed review {payload['run_id']}",
+        terminal_result=payload['terminal_result'], snapshot_diff=snapshot_diff, immutable_input=immutable,
+    )
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
@@ -272,11 +354,14 @@ def load_findings_artifact(
     expected_pr_number: int,
     expected_head_sha: str,
     expected_run_id: str | None = None,
+    expected_base_sha: str | None = None,
+    expected_comparison_sha: str | None = None,
 ) -> FindingsArtifact:
     """Validate untrusted output against event facts before privileged posting.
 
-    Check size before reading, then JSON, schema and repo/PR/head identity, in that
-    order. Any failure raises FindingsValidationError naming the check.
+    Check size before reading, then JSON, schema and independently trusted identity.
+    Immutable artifacts additionally require requested base and comparison facts;
+    their captured provenance never supplies publisher authority.
     """
     try:
         size = path.stat().st_size
@@ -300,6 +385,11 @@ def load_findings_artifact(
     except (ValueError, TypeError, RecursionError) as exc:
         raise FindingsValidationError(f'artifact size encoding failed: {exc}') from exc
 
+    if data['schema_version'] == IMMUTABLE_FINDINGS_SCHEMA_VERSION and (
+        type(expected_pr_number) is not int or expected_pr_number <= 0
+    ):
+        raise FindingsValidationError('immutable publisher requires an exact positive trusted PR number')
+
     for field_name, expected in (
         ("repo", expected_repo),
         ("pr_number", expected_pr_number),
@@ -310,6 +400,18 @@ def load_findings_artifact(
             raise FindingsValidationError(
                 f"artifact {field_name} {declared!r} does not match event-derived {field_name} {expected!r}"
             )
+
+    if data['schema_version'] == IMMUTABLE_FINDINGS_SCHEMA_VERSION:
+        provenance = data['immutable_input']['provenance']
+        for field_name, expected_binding in (('requested_base_sha', expected_base_sha),
+                                             ('comparison_base_sha', expected_comparison_sha)):
+            if expected_binding is None:
+                raise FindingsValidationError(f'immutable artifact requires independently trusted {field_name}')
+            if provenance[field_name] != expected_binding:
+                raise FindingsValidationError(
+                    f'artifact {field_name} {provenance[field_name]!r} does not match trusted '
+                    f'{field_name} {expected_binding!r}'
+                )
 
     if expected_run_id is not None:
         declared = data.get("terminal_result", {}).get("run_id")

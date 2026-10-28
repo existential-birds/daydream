@@ -353,7 +353,7 @@ def _verify_snapshot_checksums(
 ) -> None:
     """Verify ready bundle bytes and the portable offline-clone fidelity contract. Require
     bundle path/digest, exact refs, two synthetic commits, root base, head parentage,
-    tree ids, and canonical diff. A restamped but tampered bundle is corruption, never
+    and tree ids. A restamped but tampered bundle is corruption, never
     curatable staleness. Source-mirror provenance is checked separately.
     """
     for case in manifest.cases:
@@ -382,7 +382,7 @@ def _verify_snapshot_checksums(
         # prove the bundle is the frozen base->head snapshot (a restamped
         # tampered bundle matches), so run the full fidelity contract (exact
         # refs, two synthetic commits, root base, head-parented-on-base, tree
-        # IDs, canonical diff digest) on a disposable network-disabled clone of
+        # IDs) on a disposable network-disabled clone of
         # the bundle under ``cache/``. A fidelity failure is corruption — never
         # swallowed, never a fallback.
         try:
@@ -390,7 +390,6 @@ def _verify_snapshot_checksums(
                 bundle_path,
                 snapshot.base_tree_sha,
                 snapshot.head_tree_sha,
-                snapshot.diff_sha256,
                 workdir=root / "cache",
             )
         except (git_ops.GitError, OSError) as exc:

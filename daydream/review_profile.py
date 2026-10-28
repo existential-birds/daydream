@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from daydream import severity
+from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
 
@@ -99,6 +100,7 @@ class Pipeline:
     suppression: Suppression = field(default_factory=Suppression)
     review_wall_budget_s: int = 4500
     reviewer_investigation_budget_s: int = 2400
+    reviewer_tool_call_budget: int = REVIEWER_TOOL_CALL_BUDGET
 
 
 @dataclass(frozen=True)
@@ -483,6 +485,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         {
             "review_wall_budget_s",
             "reviewer_investigation_budget_s",
+            "reviewer_tool_call_budget",
             "structural_enabled",
             "arbitration_enabled",
             "arbitration_min_severity",
@@ -564,6 +567,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         reviewer_investigation_budget_s=_int(
             "reviewer_investigation_budget_s", defaults.reviewer_investigation_budget_s
         ),
+        reviewer_tool_call_budget=_int("reviewer_tool_call_budget", defaults.reviewer_tool_call_budget),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
         arbitration=arbitration,
         suppression=suppression,

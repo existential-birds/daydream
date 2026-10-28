@@ -14,7 +14,13 @@ import httpx
 import pytest
 
 from daydream import host_tools as policy
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
+from daydream.host_tools import (
+    NATIVE_SUBMIT,
+    HostToolBinding,
+    HostToolCallBudgetExceeded,
+    HostToolFatal,
+    HostToolRejected,
+)
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.harness.fake_clock import FakeClock
 
@@ -240,10 +246,11 @@ async def test_native_rejections_spend_original_allowance_and_retry_does_not_ren
     binding.restrict(deadline=time.monotonic() + 100, tool_call_budget=99)
     assert binding.deadline == deadline
     async with binding.session():
-        with pytest.raises(HostToolFatal, match="Original cumulative tool allowance"):
+        with pytest.raises(HostToolCallBudgetExceeded, match="Original cumulative tool allowance") as exhausted:
             binding.admit("corrected", NATIVE_SUBMIT, _RESULT, terminal=True)
-        with pytest.raises(HostToolFatal, match="Original cumulative tool allowance"):
+        with pytest.raises(HostToolCallBudgetExceeded, match="Original cumulative tool allowance") as repeated:
             binding.submit("corrected", _RESULT)
+        assert repeated.value is exhausted.value
     assert binding.calls == 3 and installed == [] and binding.cleanup_complete
 
 
@@ -279,7 +286,7 @@ async def test_http_operator_grants_are_frozen_and_retries_only_narrow_them() ->
     assert installed == [_RESULT] and binding.calls == 3 and binding.rejections == 2 and binding.cleanup_complete
 
 
-@pytest.mark.parametrize("fault", ["schema", "semantic", "items", "none"])
+@pytest.mark.parametrize("fault", ["schema", "semantic", "items", "unicode", "none"])
 async def test_last_available_native_call_cannot_invite_an_impossible_correction(
     monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
@@ -293,17 +300,19 @@ async def test_last_available_native_call_cannot_invite_an_impossible_correction
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         if fault == "semantic":
-            raise HostToolRejected('target "target.py": add the required judgment')
+            raise HostToolRejected('target "target.py": add the required judgment; '
+                                   'Authorization: Bearer callback-secret-123; ' + 'é' * 1024)
         installed.append(value)
         return value
     binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
     binding.restrict(deadline=None, tool_call_budget=1)
     arguments = {"schema": {"verdict": "complete", "findings": False},
-                 "items": {"verdict": "complete", "findings": list(range(130))}}.get(fault, _RESULT)
+                 "items": {"verdict": "complete", "findings": list(range(130))},
+                 "unicode": {"verdict": "\ud800", "findings": []}}.get(fault, _RESULT)
     async with _endpoint(binding) as client:
         assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
-        response = (await client.post("/admit", json={"id": "last", "name": NATIVE_SUBMIT,
-            "arguments": arguments, "terminal": True})).json()
+        response = (await client.post("/admit", content=json.dumps({"id": "last", "name": NATIVE_SUBMIT,
+            "arguments": arguments, "terminal": True}).encode(), headers={"Content-Type": "application/json"})).json()
         if fault in {"semantic", "none"}:
             assert response["allowed"] is True
             response = (await client.post("/submit", json={"id": "last", "arguments": arguments})).json()
@@ -315,8 +324,14 @@ async def test_last_available_native_call_cannot_invite_an_impossible_correction
             assert response["id"] == "last" and response["outcome"] == "fatal"
             assert response["code"] == "capacity_exhausted" and response["accepted"] is False
             assert "no calls remain" in response["error"] and not binding.authority_open
+            assert {"schema": "findings", "semantic": "required judgment", "items": "host request",
+                    "unicode": "UTF-8"}[fault] in response["error"]
+            assert len(response["error"].encode()) <= 1024
+            if fault == "semantic":
+                assert "callback-secret" not in response["error"] and "REDACTED" in response["error"]
             assert installed == [] and not binding.accepted and not binding.possibly_accepted
-            assert binding.fatal_error is not None and isinstance(binding.fatal_error.__cause__, HostToolRejected)
+            assert isinstance(binding.fatal_error, HostToolCallBudgetExceeded)
+            assert isinstance(binding.fatal_error.__cause__, HostToolRejected)
             repeat = (await client.post("/admit", json={"id": "retry", "name": NATIVE_SUBMIT,
                 "arguments": _RESULT, "terminal": True})).json()
             assert repeat["code"] == "capacity_exhausted"

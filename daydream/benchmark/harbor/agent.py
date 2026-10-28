@@ -29,15 +29,12 @@ class AgentError(Exception):
 
 def _supported_backend(extra_env: Mapping[str, str]) -> str:
     """Return the validated ``DAYDREAM_REVIEW_BACKEND`` or raise :class:`AgentError`."""
-    backend = (extra_env.get(env_policy.BACKEND_ENV) or "pi").strip().lower()
-    from daydream.benchmark.harbor.entrypoint import _SUPPORTED_BACKENDS
+    from daydream.benchmark.harbor.entrypoint import EntrypointError, require_supported_backend
 
-    if backend not in _SUPPORTED_BACKENDS:
-        supported = ", ".join(repr(b) for b in _SUPPORTED_BACKENDS)
-        raise AgentError(
-            f"unsupported DAYDREAM_REVIEW_BACKEND={backend!r}; supported backends: {supported}"
-        )
-    return backend
+    try:
+        return require_supported_backend({env_policy.BACKEND_ENV: extra_env.get(env_policy.BACKEND_ENV) or "pi"})
+    except EntrypointError as exc:
+        raise AgentError(str(exc)) from exc
 
 
 def _require_exec_ok(result: Any, label: str) -> None:
@@ -66,24 +63,16 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
     async def setup(self, environment: Any) -> None:
         """Without network access, probe the exact Daydream release and selected backend.
 
-        Validate the shared backend allowlist before probing Pi CLI or Claude SDK presence.
+        Validate the shared backend allowlist before probing the native baseline.
         A missing probe or nonzero container probe result raises ``AgentError``.
         """
-        backend = _supported_backend(self.extra_env)
-        # An allowlisted backend still needs its own probe; reject incomplete additions.
-        backend_probe = {
-            "pi": "assert shutil.which('pi') is not None;",
-            "claude": "import claude_agent_sdk;",
-        }.get(backend)
-        if backend_probe is None:
-            raise AgentError(
-                f"no setup probe is defined for DAYDREAM_REVIEW_BACKEND={backend!r}; "
-                "extend the probe map in DaydreamReviewAgent.setup()"
-            )
+        _supported_backend(self.extra_env)
         probe = (
-            "import importlib.metadata, shutil;"
+            "import importlib.metadata, shutil, subprocess;"
             f"assert importlib.metadata.version('daydream') == {self.version()!r};"
-            + backend_probe
+            "assert shutil.which('pi') is not None;"
+            "assert subprocess.check_output(['node','--version'],text=True).strip() == 'v24.18.1';"
+            "assert subprocess.check_output(['pi','--version'],text=True).strip() == '1.4.0';"
         )
         command = 'python -X utf8 -c "' + probe + '"'
         result = await environment.exec(command)
@@ -102,9 +91,9 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
-        backend = _supported_backend(self.extra_env)
+        _supported_backend(self.extra_env)
         parent = {**os.environ, **self.extra_env}
-        child_env = build_child_env(parent, backend=backend)
+        child_env = build_child_env(parent)
         result = await environment.exec(
             "python -m daydream.benchmark.harbor.entrypoint",
             cwd=child_env.get(env_policy.REPO_DIR_ENV, "/workspace/repo"),
@@ -137,29 +126,16 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
                 setattr(context, attr, value)
 
 
-def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> dict[str, str]:
-    """Pass only declared reviewer/process configuration, never the parent environment
-    wholesale. Claude additionally receives the exact HOST policy Anthropic credential
-    allowlist; other backends scrub those credentials. Judge, GitHub, Hub, and archive
-    secrets stay excluded. Review-profile candidates reach the reviewer entrypoint but
-    never the independently configured judge.
+def build_child_env(parent_env: Mapping[str, str]) -> dict[str, str]:
+    """Carry only declared reviewer controls and process configuration into Harbor.
+
+    Judge, GitHub, Hub, archive and unselected native credentials stay excluded.
     """
     host = env_policy.HOST
-    keep_anthropic = backend == "claude"
-    child = {
+    return {
         key: value
         for key, value in dict(parent_env).items()
-        if key.startswith(env_policy.REVIEW_CHANNEL_PREFIX)
-        or key in host.required_process_vars
-        or (keep_anthropic and key in host.claude_keep_vars)
+        if (key.startswith(host.keep_prefixes) or key in host.required_process_vars)
+        and key not in host.banned_vars
+        and not key.startswith(tuple(host.banned_prefixes))
     }
-    banned_vars = host.banned_vars if not keep_anthropic else host.banned_vars - host.claude_exempt_vars
-    banned_prefixes = (
-        host.banned_prefixes if not keep_anthropic else host.banned_prefixes - {host.claude_exempt_prefix}
-    )
-    for banned in banned_vars:
-        child.pop(banned, None)
-    for prefix in banned_prefixes:
-        for key in [k for k in child if k.startswith(prefix)]:
-            child.pop(key, None)
-    return child

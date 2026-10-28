@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import importlib.util
 import json
 import subprocess
 import sys
@@ -12,12 +11,9 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import build, candidate, entrypoint, env_policy, package as pkg, verifier_core as vc
+from daydream.benchmark.harbor import candidate, entrypoint, package as pkg, verifier_core as vc
 from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
-from daydream.config_file import DaydreamFileConfig
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import seed_feature_branch
-from tests.harness.stub_backend import install_stub_backend
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 
 
@@ -107,32 +103,11 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str
         candidate.build_candidate_artifact("case-key", [finding])
     assert rejected.value.kind == "invalid_finding"
 
-def test_entrypoint_build_run_config_is_controlled() -> None:
-    cfg = entrypoint.build_run_config(
-        repo_dir="/workspace/repo", trajectory_path="/logs/agent/trajectory.json", backend="pi",
-        model="deepseek/deepseek-v4-flash-0731", profile_candidate=None,
-    )
-    assert cfg.output_mode == "review"
-    assert cfg.base == "base"
-    assert cfg.non_interactive is True
-    assert cfg.archive is False and cfg.run_eval is False
-    assert cfg.findings_out is None                     # NO --findings-out (live PR lookup)
-    assert cfg.trajectory_path == Path("/logs/agent/trajectory.json")
-    assert cfg.backend == "pi" and cfg.model == "deepseek/deepseek-v4-flash-0731"
-    assert isinstance(cfg.file_config, DaydreamFileConfig)
-    # controlled empty: the target repo's .daydream.toml is never loaded
-    assert cfg.file_config == DaydreamFileConfig()
-
-def test_entrypoint_backend_fail_closed() -> None:
-    with pytest.raises(entrypoint.EntrypointError) as exc:
-        entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": "codex"})
-    assert "pi" in str(exc.value)
-
 def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
     for value in ("codex", "opencode"):
         with pytest.raises(entrypoint.EntrypointError) as exc:
             entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value})
-        assert "'pi'" in str(exc.value) and "'claude'" in str(exc.value)
+        assert "'pi'" in str(exc.value)
     assert entrypoint.require_supported_backend({}) == "pi"
 
 def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
@@ -236,22 +211,15 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path: Path) -> None:
     assert ctx.n_output_tokens == 800
     assert ctx.cost_usd == 0.42
 
-def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contents", [None, "not json at all"], ids=["absent", "malformed"])
+def test_populate_context_unavailable_trajectory_leaves_metrics_unset(tmp_path: Path, contents: str | None) -> None:
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    agent = DaydreamReviewAgent(logs_dir=tmp_path)  # no agent/trajectory.json
-    ctx = AgentContext()
-    agent.populate_context_post_run(ctx)
-    assert ctx.is_empty()  # metrics stay unset; no fabricated values
-
-def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path: Path) -> None:
-    pytest.importorskip("harbor")
-    from harbor.models.agent.context import AgentContext
-
-    traj_dir = tmp_path / "agent"
-    traj_dir.mkdir(parents=True)
-    (traj_dir / "trajectory.json").write_text("not json at all")
+    if contents is not None:
+        traj_dir = tmp_path / "agent"
+        traj_dir.mkdir(parents=True)
+        (traj_dir / "trajectory.json").write_text(contents)
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
     ctx = AgentContext()
     agent.populate_context_post_run(ctx)
@@ -282,61 +250,6 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
     assert "daydream.benchmark.harbor.agent" in str(rejected.value)
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
 
-# The stub-produced findings are the deterministic output of the real deep
-# pipeline over this single-python-file diff: the language stack's Record schema
-# item plus the structural meta-stack's, each in its own lens's wording. They are
-# two distinct findings, so the merge host's structural fold (issue #1103) leaves
-# both in place; a pair that DID restate one defect would arrive here as one.
-_EXPECTED_TITLES = ["Sample issue", "Structural maintainability concern"]
-
-
-_HELLO = "def hello():\n    return 'world'\n"
-_UNIVERSE = "def hello():\n    return 'universe'\n"
-
-
-def _seed_defect_repo(tmp_path: Path) -> Path:
-    """Build a real temp git repo with a ``base`` ref and a single-python diff.
-
-    ``base_ref`` is the literal ref the entrypoint's ``RunConfig.base="base"`` resolves
-    against, which is the one thing the shared seeder needs spelled out here.
-    """
-    project = tmp_path / "fixture"
-    seed_feature_branch(project, base={"api.py": _HELLO}, feature={"api.py": _UNIVERSE},
-        base_message="prime", feature_message="change", base_ref="base",
-    )
-    return project
-
-
-def _assert_published_artifact(artifact: dict[str, Any], case_id: str) -> list[Any]:
-    """The published-artifact contract every host publish path must satisfy; returns the parsed candidates."""
-    parsed = vc.validate_candidate_artifact(artifact)
-    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
-    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
-    assert artifact["case_id"] == case_id
-    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
-    return parsed
-
-
-def _assert_host_secrets_absent(child: dict[str, str], *, claude: bool) -> None:
-    """No host secret survives into the child env; ``claude`` exempts only its own credential."""
-    for banned in env_policy.HOST.banned_vars:
-        if not (claude and banned in env_policy.HOST.claude_exempt_vars):
-            assert banned not in child  # non-credential bans stay
-    for prefix in env_policy.HOST.banned_prefixes:
-        if claude and prefix == env_policy.HOST.claude_exempt_prefix:
-            continue  # exempted for backend="claude"
-        assert not any(k.startswith(prefix) for k in child)
-
-
-def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
-    return {"DAYDREAM_REVIEW_REPO_DIR": str(repo),
-        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(tmp / "logs" / "artifacts" / "review.json"),
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(tmp / "logs" / "agent" / "trajectory.json"),
-        "DAYDREAM_REVIEW_CASE_ID": case_id, "DAYDREAM_REVIEW_BACKEND": "pi", "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
-        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
-    }
-
-
 class Executed:
     """Captured results of the real agent lifecycle calls on the fake env."""
 
@@ -366,171 +279,11 @@ def _capturing_env(executed: Executed) -> type:
     return Env
 
 
-def test_local_harbor_task_with_fake_backend(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
-    operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
-) -> None:
-    """Compile and run a local Harbor trial through the real agent and entrypoint.
-
-    The fake environment executes setup and passes the allowlisted child mapping
-    into the runner. Container nftables isolation requires a separate Harbor runtime.
-    """
-
+@pytest.mark.parametrize("backend", ["codex", "claude", "osprey"])
+def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path, backend: str) -> None:
     pytest.importorskip("harbor")
-    from harbor.models.agent.context import AgentContext
-
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    wheel, _ = _stub_wheel(tmp_path)
-    pkg.build_harbor(ws, wheel=wheel)
-    assert pkg.validate_compiled(ws) == 0
-    key = build.derive_task_key(case_id)
-    assert (ws / "harbor" / key / "task.toml").is_file()
-    assert f'DAYDREAM_REVIEW_CASE_ID = "{key}"' in (ws / "harbor" / key / "task.toml").read_text()
-
-    repo = _seed_defect_repo(tmp_path)
-    install_stub_backend(monkeypatch, repo)
-    task_env = _end_env(repo, tmp_path, key)
-    for banned in env_policy.HOST.banned_vars:
-        monkeypatch.setenv(banned, "super-secret")
-
-    agent = DaydreamReviewAgent(logs_dir=tmp_path / "logs", extra_env=task_env)
-
+    agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": backend})
     executed = Executed()
-
-    env = _capturing_env(executed)()
-    asyncio.run(agent.setup(env))
-    asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
-
-    assert agent.name() == "daydream" and agent.SUPPORTS_ATIF is True
-    assert agent.version() in executed.setup
-    assert "shutil.which('pi')" in executed.setup
-    assert "claude_agent_sdk" not in executed.setup
-    assert "daydream.benchmark.harbor.entrypoint" in executed.command
-    assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
-    assert "--findings-out" not in executed.command  # no live-PR emission path
-    assert executed.child["DAYDREAM_REVIEW_CASE_ID"] == key
-    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "pi"
-    assert set(executed.child) <= {"PATH", "HOME", "LANG"} | {
-        k for k in executed.child if k.startswith("DAYDREAM_REVIEW_")
-    }
-    _assert_host_secrets_absent(executed.child, claude=False)  # fail-closed: host secrets never reach the child
-
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
-    rc = asyncio.run(entrypoint.main(executed.child))
-    assert rc == 0
-    from daydream.dataset import LocalRecordStore
-    from tests.harness.dataset import read_records
-
-    records = read_records(LocalRecordStore(dataset_store))
-    assert len(records.runs) == 1 and records.runs[0]["outcome"] == "success"
-    assert dataset_hub.commits
-    assert len(list((operator_dataset_sentinel / "runs").glob("*.jsonl"))) == 1
-
-    artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    parsed = _assert_published_artifact(artifact, key)
-
-    # Validate both host-produced artifacts with the verifier copied into the
-    # compiled task, exercising the actual deployment boundary.
-    spec = importlib.util.spec_from_file_location(
-        "compiled_verifier", ws / "harbor" / key / "tests" / "verifier_core.py"
-    )
-    assert spec is not None and spec.loader is not None
-    copied = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, copied)
-    spec.loader.exec_module(copied)
-    case = ws / "harbor" / key
-    gold = json.loads((case / "tests" / "golden-review.json").read_text())
-    copied_candidates = copied.validate_candidate_artifact(artifact)
-    copied_gold = copied.validate_gold_set(gold, case_id=key)
-    assert [(p.candidate_id, p.title, p.body, p.severity, p.path, p.start_line, p.end_line)
-        for p in copied_candidates
-    ] == [(p.candidate_id, p.title, p.body, p.severity, p.path, p.start_line, p.end_line) for p in parsed]
-    host_gold = vc.validate_gold_set(gold, case_id=key)
-    assert [(f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line)
-        for f in copied_gold
-    ] == [(f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line) for f in host_gold]
-
-
-    # Continue the actual reviewed workspace through explicit clean publication.
-    (repo / ".daydream" / "deep" / "merged-items.json").write_text(json.dumps({"items": []}))
-    clean_path = tmp_path / "logs" / "artifacts" / "review-clean.json"
-    entrypoint.publish_review(repo_dir=repo, artifact_path=clean_path, case_id=key)
-    clean = json.loads(clean_path.read_text())
-    assert clean == {"schema_version": 1, "case_id": key, "base_ref": "base", "head_ref": "head", "findings": []}
-    assert copied.validate_candidate_artifact(clean) == []
-
-
-def test_agent_run_accepts_claude_and_invokes_entrypoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
-) -> None:
-    """Claude's allowed credential survives into a successful entrypoint review.
-
-    The captured child mapping is executed directly, exposing incorrect backend scrubbing.
-    """
-
-    pytest.importorskip("harbor")
-    from harbor.models.agent.context import AgentContext
-
-    repo = _seed_defect_repo(tmp_path)
-    install_stub_backend(monkeypatch, repo)
-    case_id = "case-abc123def456"
-    task_env = {
-        **_end_env(repo, tmp_path, case_id), "DAYDREAM_REVIEW_BACKEND": " CLAUDE ", "DAYDREAM_REVIEW_API_KEY": "k",
-        "ANTHROPIC_API_KEY": "sk-ant-live", "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-    }
-    # Host secrets present in the parent env must never reach the child env --
-    # except the ANTHROPIC_* credential the claude backend is allowed to carry,
-    # which is controlled deterministically via extra_env (extra_env wins the
-    # ``{**os.environ, **extra_env}`` merge regardless of host state).
-    for banned in env_policy.HOST.banned_vars:
-        if banned in env_policy.HOST.claude_exempt_vars:
-            continue  # claude keep-set; pinned by extra_env above
-        monkeypatch.setenv(banned, "super-secret")
-
-    agent = DaydreamReviewAgent(logs_dir=tmp_path / "logs", extra_env=task_env)
-
-    executed = Executed()
-
-    env = _capturing_env(executed)()
-    asyncio.run(agent.setup(env))
-    asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
-
-    assert agent.version() in executed.setup
-    assert "import claude_agent_sdk" in executed.setup
-    assert "shutil.which('pi')" not in executed.setup
-    assert "daydream.benchmark.harbor.entrypoint" in executed.command
-    assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
-    assert "--findings-out" not in executed.command  # no live-PR emission path
-    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == " CLAUDE "
-    # The regression: with backend="claude" the ANTHROPIC_* credential SURVIVES
-    # the scrub into the child env (build_child_env's default backend="pi" would
-    # strip it and the in-container claude branch would fail below).
-    assert executed.child["ANTHROPIC_API_KEY"] == "sk-ant-live"
-    assert executed.child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
-    _assert_host_secrets_absent(executed.child, claude=True)
-
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
-    rc = asyncio.run(entrypoint.main(executed.child))
-    assert rc == 0
-    from daydream.dataset import LocalRecordStore
-    from tests.harness.dataset import read_records
-
-    records = read_records(LocalRecordStore(dataset_store))
-    assert len(records.runs) == 1 and records.runs[0]["outcome"] == "success"
-    assert dataset_hub.commits
-    assert len(list((operator_dataset_sentinel / "runs").glob("*.jsonl"))) == 1
-
-    artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    _assert_published_artifact(artifact, case_id)
-
-def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
-    pytest.importorskip("harbor")
-
-    agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"})
-    executed = Executed()
-
-    with pytest.raises(AgentError) as refused:
+    with pytest.raises(AgentError, match="pi"):
         asyncio.run(agent.setup(_capturing_env(executed)()))
-    assert "pi" in str(refused.value) and "claude" in str(refused.value)
-    assert executed.setup == "" and executed.command == ""  # rejected before any probe exec runs
+    assert executed.setup == "" and executed.command == ""

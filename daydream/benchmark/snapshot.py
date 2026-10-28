@@ -8,13 +8,17 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
+from typing import AbstractSet, Any, Literal, NamedTuple, cast
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.git_ops import process as git_process
+from daydream.git_ops.immutable import (
+    immutable_review_diff,
+    inert_git_context,
+    validate_synthetic_history,
+)
 
 # Pinned synthetic-commit identity/timestamp so a bundle is byte-identical
 # across repeated builds (Spike Finding 1).
@@ -443,69 +447,21 @@ def degenerate(base_tree: str, head_tree: str) -> str | None:
     return None
 
 
-def _canonical_diff_args(base: str, head: str) -> list[str]:
-    """The canonical diff argv: digest-pinned refs with full (non-abbreviated) SHAs."""
-    return ["-c", "core.abbrev=40", "diff", "--binary", base, head]
-
-
-def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
-    """sha256 of the canonical binary-safe diff between two commits."""
-    proc = git_process._run_git(
-        mirror_repo, _canonical_diff_args(base_sha, head_sha),
-        retries=0, capture_bytes=True,
-    )
-    git_process._require_ok(proc, f"git diff --binary {base_sha} {head_sha} failed")
-    return hashlib.sha256(proc.stdout).hexdigest()
-
-
 def _synthetic_env() -> dict[str, str]:
     return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
 
 
-@overload
 def _run_git_checked(
     repo: Path | str,
     args: list[str],
     *,
     env_cmd: dict[str, str] | None = None,
     timeout: int = 30,
-    capture_bytes: Literal[False] = False,
-) -> str: ...
-
-
-@overload
-def _run_git_checked(
-    repo: Path | str,
-    args: list[str],
-    *,
-    env_cmd: dict[str, str] | None = None,
-    timeout: int = 30,
-    capture_bytes: Literal[True],
-) -> bytes: ...
-
-
-def _run_git_checked(
-    repo: Path | str,
-    args: list[str],
-    *,
-    env_cmd: dict[str, str] | None = None,
-    timeout: int = 30,
-    capture_bytes: bool = False,
-) -> str | bytes:
+) -> str:
     """Run git and raise GitError on a non-zero exit."""
     repo = Path(repo)
-    proc: subprocess.CompletedProcess[bytes] | subprocess.CompletedProcess[str]
-    if capture_bytes:
-        proc = git_process._run_git(
-            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=True
-        )
-    else:
-        proc = git_process._run_git(
-            repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=False
-        )
+    proc = git_process._run_git(repo, args, env_cmd=env_cmd, retries=0, timeout=timeout)
     git_process._require_ok(proc, f"git {' '.join(args)} failed")
-    if capture_bytes:
-        return proc.stdout
     return proc.stdout.strip()
 
 
@@ -553,71 +509,55 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 
 
 def validate_offline_clone(
-    bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
-) -> None:
+    bundle_path: Path, base_tree: str, head_tree: str, workdir: Path
+) -> dict[str, str]:
     """Clone with network disabled and verify the full portable fidelity contract. Require
     exactly origin/base and origin/head refs, exactly two reachable commits, a root
-    base, head parented only on base, matching tree ids, and the canonical diff digest.
+    base, head parented only on base, and matching tree ids.
     Any mismatch or clone error raises GitError.
     """
     bundle_path = Path(bundle_path).resolve()
     import tempfile
 
+    with inert_git_context(bundle_path.parent):
+        heads = bundle_heads(bundle_path)
+    if heads != {"refs/heads/base", "refs/heads/head"}:
+        raise git_ops.GitError(f"bundle exposes unexpected refs {sorted(heads)}; expected exactly base and head")
     clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))
     try:
-        proc = git_process._run_git(
-            Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
-            retries=0, timeout=120,
-        )
-        git_process._require_ok(proc, f"offline clone of {bundle_path} failed")
-        refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        refs = set(refs_out.splitlines())
-        expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
-        if refs != expected_refs:
-            raise git_ops.GitError(
-                f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
-                f"got {sorted(refs)})"
+        with inert_git_context(Path(workdir).resolve()):
+            proc = git_process._run_git(
+                Path(workdir),
+                ["clone", "--template=", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
+                retries=0, timeout=120,
             )
-        count = _run_git_checked(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
-        if count != "2":
-            raise git_ops.GitError(
-                f"offline clone head ancestry must contain exactly two reachable commits "
-                f"(got {count})"
-            )
-        parents_out = _run_git_checked(
-            clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
-        )
-        if len(parents_out.splitlines()) != 1:
-            raise git_ops.GitError(
-                f"offline clone base must be a root commit with no parent "
-                f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
-            )
-        head_parent = _run_git_checked(
-            clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
-        )
-        base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
-        if head_parent != base_commit:
-            raise git_ops.GitError(
-                f"offline clone head's parent must be the base commit "
-                f"(expected {base_commit}, got {head_parent})"
-            )
-        for ref, expected in (
-            ("refs/remotes/origin/base", base_tree),
-            ("refs/remotes/origin/head", head_tree),
-        ):
-            got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
-            if got != expected:
-                raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-        diff = _run_git_checked(
-            clone_dir,
-            _canonical_diff_args("refs/remotes/origin/base", "refs/remotes/origin/head"),
-            capture_bytes=True,
-        )
-        if hashlib.sha256(diff).hexdigest() != diff_sha256:
-            raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
+            git_process._require_ok(proc, f"offline clone of {bundle_path} failed")
+            refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            refs = set(refs_out.splitlines())
+            expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
+            if refs != expected_refs:
+                raise git_ops.GitError(
+                    f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
+                    f"got {sorted(refs)})"
+                )
+            base_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
+            head_commit = _run_git_checked(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head"])
+            validate_synthetic_history(clone_dir, base_commit, head_commit, retries=0)
+            for ref, expected in (
+                ("refs/remotes/origin/base", base_tree),
+                ("refs/remotes/origin/head", head_tree),
+            ):
+                got = _run_git_checked(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
+                if got != expected:
+                    raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
+            return {
+                "comparison_base_sha": base_commit,
+                "head_sha": head_commit,
+                "review_diff_key": hashlib.sha256(
+                    immutable_review_diff(clone_dir, base_commit, head_commit).encode()).hexdigest(),
+            }
     finally:
         shutil.rmtree(clone_dir, ignore_errors=True)
-    return None
 
 
 def freeze_one(
@@ -730,16 +670,15 @@ def freeze_one(
                 f"snapshot contains {len(extra_paths)} path(s) outside PR inventory: {preview}{suffix}",
             )
 
-    # 7) canonical diff + deterministic bundle + offline validation.
+    # 7) deterministic bundle + offline validation.
     #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
     #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
     #    written only by the caller's journaled Transaction commit.
     scratch_bundle = root / "cache" / "freeze-scratch" / f"{case_id}.bundle"
     try:
-        diff_sha = canonical_diff_sha256(m, base, head_sha)
         build_bundle(m, base, head_sha, scratch_bundle)
         bundle_sha = storage.sha256_file(scratch_bundle)
-        validate_offline_clone(scratch_bundle, base_tree, head_tree, diff_sha, workdir=root / "cache")
+        validate_offline_clone(scratch_bundle, base_tree, head_tree, workdir=root / "cache")
         bundle_bytes = scratch_bundle.read_bytes()
     except (git_ops.GitError, OSError) as exc:
         # A raw file-I/O error (storage.sha256_file / read_bytes) is likewise a
@@ -760,7 +699,6 @@ def freeze_one(
         "original_head_sha": head_sha,
         "base_tree_sha": base_tree,
         "head_tree_sha": head_tree,
-        "diff_sha256": diff_sha,
         "bundle_file": bundle_rel,
         "bundle_sha256": bundle_sha,
         "error": None,

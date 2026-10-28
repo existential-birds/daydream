@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import clock
+from daydream.config import REVIEWER_TOOL_CALL_BUDGET
 
 _CANONICAL_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs (at most four, 8192 UTF-8 JSON bytes). For reviewed work, cite at least
@@ -24,6 +25,7 @@ assigned reference. basis is supplied_diff, source_inspection or executed_check;
 _SELECTOR_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs with at most four source selectors. For reviewed work, select at
 least one assigned source_id from source_options or assignment_parts.source_options; not_reviewed may use [].
+Copy compact source_id handles exactly from source_options; do not reconstruct hashes or renumber handles per target.
 Assigned selectors contain source_id, basis and source_range. Set source_range=null to retain the exact supplied
 identity, including continuation fragments; an explicit range must be contained in the offered non-null range.
 Source IDs accompany supplied parts, including deferred Structure parts in the bounded supporting catalogs.
@@ -132,7 +134,7 @@ class ReviewLimits:
 
     investigation_s: float = 480
     finalization_s: float = 120
-    tool_calls: int = 48
+    tool_calls: int = REVIEWER_TOOL_CALL_BUDGET
     discovery: bool = True
 
 

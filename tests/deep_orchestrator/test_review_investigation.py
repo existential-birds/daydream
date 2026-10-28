@@ -837,8 +837,10 @@ async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_
 
 
 @pytest.mark.parametrize('scope_id', ['python', 'generic', 'structure'])
+@pytest.mark.parametrize('tool_calls', [48, 96], ids=['default', 'raised'])
 async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str, tool_calls: int) -> None:
+    """A raised host allowance permits real tool starts beyond the default across retained stages."""
     review = many_file_review(tmp_path, monkeypatch, docs_count=9)
     stage_spend: list[int] = []
     request_prompts: list[str] = []
@@ -860,9 +862,11 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
         assert 'At zero remaining calls, capacity is exhausted' in prompt
         initial = not stage_spend
         starts = stage['advisory_tool_call_target'] + 1 if initial else 1
+        if initial and tool_calls > 48:
+            starts = max(starts, 49)
         stage_spend.append(starts + 1)
         assert stage['observed_tool_starts'] == sum(stage_spend[:-1])
-        assert stage['remaining_tool_calls'] == 48 - sum(stage_spend[:-1])
+        assert stage['remaining_tool_calls'] == tool_calls - sum(stage_spend[:-1])
         path = stage['assigned_files'][0]
         for index in range(starts):
             yield from read_events(review.repo, path, event_id=f"stage-{len(stage_spend)}-read-{index}")
@@ -878,13 +882,15 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
         yield ToolStartEvent(id='submit', name='structured_output', input=output)
         yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
 
-    await review.finish(scope_id, findings=('Grounded defect',))
+    overrides: dict[str, Any] = ({'review_profile': _profile_with_pipeline(reviewer_tool_call_budget=tool_calls)}
+                                 if tool_calls != 48 else {})
+    await review.finish(scope_id, findings=('Grounded defect',), **overrides)
     stages = [stage for stage in review.backend.stages if stage['scope_id'] == scope_id]
     metadata = [event['metadata'] for event in stage_ends(review, scope_id)]
     assert len(stages) > 1 and stage_spend[0] - 1 > stages[0]['advisory_tool_call_target']
     assert [item['observed_tool_starts'] for item in metadata] == [
         sum(stage_spend[:index + 1]) for index in range(len(stage_spend))]
-    assert metadata[-1]['remaining_tool_calls'] == 48 - sum(stage_spend)
+    assert metadata[-1]['remaining_tool_calls'] == tool_calls - sum(stage_spend)
     assert all(item['admitted'] for item in metadata)
 
     assert metadata[-1]['remaining_tool_calls'] > 0
@@ -1171,21 +1177,25 @@ async def test_configured_investigation_time_changes_completion_without_renewing
         assert events[-1]['metadata']['retained_findings'] == 1
 
 
-async def test_zero_configured_investigation_time_dispatches_no_review_and_reports_incomplete_coverage(
-    investigation: InvestigationRun, ext_dir: ExtDir,
+@pytest.mark.parametrize(('field', 'reason'), [
+    ('reviewer_investigation_budget_s', 'host_wall_budget_exhaustion'),
+    ('reviewer_tool_call_budget', 'host_tool_budget_exhaustion'),
+])
+async def test_zero_configured_reviewer_budget_dispatches_no_review_and_reports_incomplete_coverage(
+    investigation: InvestigationRun, ext_dir: ExtDir, field: str, reason: str,
 ) -> None:
-    """Zero disables staged investigation rather than silently restoring its default allowance."""
+    """Zero stops staged investigation rather than silently restoring its default allowance."""
     ext_dir.write_module(
         "def forbidden(**kw): raise AssertionError('Zero allowance dispatched a review prompt builder')\n"
         "def register(r): r.override_prompt('per-stack', forbidden)\n"
     )
-    assert await investigation.run(review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=0)) == 0
+    assert await investigation.run(review_profile=_profile_with_pipeline(**{field: 0})) == 0
     data = investigation.load()
     assert investigation.backend.stages == []
     assert data['findings'] == [] and data['review_warnings']
     assert data['terminal_result']['analysis_state'] == 'failed'
     assert all(scope['status'] == 'incomplete' and scope['partial_evidence'] is False
-               and scope['reason_codes'] == ['host_wall_budget_exhaustion'] for scope in scopes(data).values())
+               and scope['reason_codes'] == [reason] for scope in scopes(data).values())
     assert 'Review incomplete' in (investigation.repo / '.review-output.md').read_text()
 
 

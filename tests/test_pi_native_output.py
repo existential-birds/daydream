@@ -11,8 +11,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field, replace
+from collections.abc import Iterator
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -45,23 +45,12 @@ from daydream.review_source_refs import (
 from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git, seed_feature_branch
-from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
+from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
+from tests.test_committed_review import immutable_input_for
 
 _SCHEMA = {"type": "object", "additionalProperties": False,
     "properties": {"verdict": {"type": "string"}, "findings": {"type": "array"}}, "required": ["verdict", "findings"]}
-
-
-@dataclass
-class _NativeProvider:
-    config: Path
-    requests: list[dict[str, Any]] = field(default_factory=list)
-    authorizations: list[str | None] = field(default_factory=list)
-    turns: list[list[tuple[str, str, dict[str, Any]]]] = field(default_factory=list)
-    choose: Callable[[dict[str, Any]], list[tuple[str, str, dict[str, Any]]]] | None = None
-    text: str | None = None
-    errors: dict[int, str] = field(default_factory=dict)
-    finish_reasons: dict[int, str] = field(default_factory=dict)
 
 
 @pytest.fixture
@@ -79,42 +68,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
             monkeypatch.delenv(name, raising=False)
     fixture = _NativeProvider(config)
 
-    class Provider(_QuietHTTPHandler):
-        def do_POST(self) -> None:
-            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            fixture.requests.append(request)
-            fixture.authorizations.append(self.headers.get("Authorization"))
-            index = len(fixture.requests) - 1
-            if index in fixture.errors:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": {"message": fixture.errors[index]}}).encode())
-                return
-            batch = (fixture.choose(request) if fixture.choose is not None else
-                     fixture.turns[index] if index < len(fixture.turns) else [])
-            delta: dict[str, Any] = {"role": "assistant", "content": fixture.text or f"Native reasoning {index}."}
-            if batch:
-                delta["tool_calls"] = [{"index": i, "id": call_id, "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments)}}
-                    for i, (call_id, name, arguments) in enumerate(batch)]
-            finish_reason = fixture.finish_reasons.get(index, "tool_calls" if batch else "stop")
-            chunks: list[dict[str, Any]] = [
-                {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
-                {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
-            ]
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            for chunk in chunks:
-                self.wfile.write(("data: " + json.dumps({"id": f"host-output-{index}",
-                    "object": "chat.completion.chunk", "created": 1, "model": request["model"], **chunk})
-                    + "\n\n").encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-
-    with _loopback_http_server(Provider) as base_url:
+    with native_provider_server(fixture) as base_url:
         (config / "models.json").write_text(json.dumps({"providers": {"output-fixture": {
             "baseUrl": f"{base_url}/v1", "api": "openai-completions", "apiKey": "synthetic-loopback-only",
             "models": [{"id": "output-model", "reasoning": False, "input": ["text"],
@@ -126,7 +80,8 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
 @pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted", "hosted-alternate",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
-                                  "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"])
+                                  "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override",
+                                  "hosted-immutable"])
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -145,6 +100,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     An explicit operator loader override must be rejected before its preload can
     execute; hostile ambient loader settings alone only prove environment isolation.
     """
+    immutable = case == "hosted-immutable"
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
     retried = case in {"hosted", "hosted-alternate"}
@@ -158,8 +114,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                feature={"ratio.py": captured, "AGENTS.md": context})
     base = git(repo, "rev-parse", "main")
     working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
-               if defect else captured)
-    if defect:
+               if defect and not immutable else captured)
+    if defect and not immutable:
         (repo / "ratio.py").write_text(working)
         (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     settings = native_provider.config / "settings.json"
@@ -419,6 +375,18 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         return [(f"{call_kind}-submit", "structured_output", payload)]
 
     native_provider.choose = choose
+    immutable_input = immutable_input_for(repo) if immutable else None
+    if immutable:
+        hook = repo / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\ntouch '{forbidden_marker}'\n")
+        hook.chmod(0o755)
+        git(repo, "config", "core.autocrlf", "true")
+        git(repo, "config", "filter.hostile.smudge", f"touch '{forbidden_marker}'; cat")
+        (repo / ".git/info/attributes").write_text("ratio.py filter=hostile\n")
+        assert not forbidden_marker.exists()
+        git(repo, "cat-file", "--filters", "HEAD:ratio.py")
+        assert forbidden_marker.exists()
+        forbidden_marker.unlink()
     request = CommittedReviewRequest(
         repo, base, config=RunConfig(backend="codex" if hosted else "pi", output_mode="review", archive=False,
                                     run_eval=False, review_backend="claude" if hosted else None,
@@ -426,7 +394,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
                                     model="request-forbidden-model" if hosted else
                                     "output-model:high" if case == "false-positive" else None),
-        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy)
+        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy, immutable_input=immutable_input)
     unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                    "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
     if case.startswith("hosted-unsupported") or case in unsupported:
@@ -519,6 +487,15 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     trajectory_path = (output_root / "trajectory.json" if hosted else
                        output_root / ".daydream/runs" / value["run_id"] / "trajectory.json")
     trajectory = json.loads(trajectory_path.read_text())
+    if immutable:
+        assert immutable_input is not None
+        assert value["schema_version"] == 2 and value["immutable_input"] == immutable_input.to_dict()
+        assert trajectory["extra"]["pr_repo"] == "captured/repository"
+        assert trajectory["extra"]["pr_number"] == 1421
+        assert trajectory["extra"]["immutable_input"] == immutable_input.to_dict()
+        assert all("captured/repository" not in json.dumps(assignment) for assignment in assignments_seen)
+        exported = json.loads((output_root / "findings.json").read_text())
+        assert exported["head_sha"] == head and exported["terminal_result"] == value["terminal_result"]
     if hosted:
         assert trajectory["extra"]["profile_name"] == operator_profile.name
         assert trajectory["extra"]["profile_digest"] == operator_profile.digest
@@ -545,7 +522,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                for execution in value["execution"])
     assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
     assert (repo / "AGENTS.md").read_text() == (
-        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect else context)
+        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect and not immutable else context)
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 

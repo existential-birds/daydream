@@ -1,7 +1,8 @@
 """Trusted operator policy for the bounded native Pi committed-review entry point.
 
-This is model/tool authority, not inert Git preparation or infrastructure isolation.
-The operator must attest to prepared source before any Git materialization occurs.
+This is model/tool authority, not infrastructure isolation. The immutable request
+adds independently validated inert Git preparation; the legacy request retains
+the operator's preparation responsibility.
 """
 
 from __future__ import annotations
@@ -52,8 +53,8 @@ class HostedReviewPolicy:
         if self.trusted_prepared_source is not True:
             raise UnsupportedHostedPolicy(
                 "Hosted review requires trusted_prepared_source=True: the operator must prepare and audit "
-                "Git configuration, checkout hooks/filters and source staging before invoking this API. "
-                "Inert immutable input preparation is not supported by this entry point."
+                "source staging before invoking this API. Legacy requests additionally require audited "
+                "Git configuration, checkout hooks and filters; immutable requests use the inert Git owner."
             )
         if self.backend != "pi":
             raise UnsupportedHostedPolicy(

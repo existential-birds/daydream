@@ -13,21 +13,35 @@ from typing import Any
 from urllib.parse import quote
 
 import pytest
+from rich.console import Console
 
-from daydream.findings import write_findings_artifact
-from daydream.pr_review import parse_finding_markers, validate_diagram_payload
+from daydream import git_ops
+from daydream.findings import build_findings_artifact, write_findings_artifact
+from daydream.pr_review import (
+    ParsedIssue,
+    PRInfo,
+    parse_finding_markers,
+    post_findings_from_artifact,
+    validate_diagram_payload,
+)
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.review_result import findings_artifact, terminal_result
 from tests.harness.scripts import cli_main
+from tests.test_findings import immutable_findings_artifact
 from tests.test_review_result import large_attributed_terminal
 
 
-def _post_argv(artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,) -> list[str]:
+def _post_argv(
+    artifact: Path, *, pr: int = 7, head_sha: str | None = None, target: Path | None = None,
+    repo: str = 'o/r', base_sha: str | None = None, comparison_sha: str | None = None,
+) -> list[str]:
     """The ``post-findings`` argv for *artifact*; override only what a test varies."""
-    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", head_sha or "h" * 40, "--repo", "o/r",
+    return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", head_sha or "h" * 40, "--repo", repo,
         *(["--target", str(target)] if target is not None else []),
+        *(['--base-sha', base_sha] if base_sha is not None else []),
+        *(['--comparison-sha', comparison_sha] if comparison_sha is not None else []),
     ]
 
 def test_post_findings_uses_two_explicit_checkout_configs_without_chdir(fake_gh: FakeGh, tmp_path: Path,) -> None:
@@ -215,6 +229,61 @@ def test_event_artifact_mismatch_aborts_with_no_side_effects(fake_gh: FakeGh, ar
     assert rc == 1
     assert fake_gh.calls("POST") == []  # nothing posted, nothing resolved
 
+
+@pytest.mark.parametrize('target', ['repo', 'pr', 'head_sha', 'base_sha', 'comparison_sha',
+                                   'missing-base', 'missing-comparison'])
+def test_immutable_publisher_requires_all_independent_target_facts(
+    fake_gh: FakeGh, tmp_path: Path, target: str,
+) -> None:
+    """A schema-2 PR/head check does not protect immutable requested/comparison bases."""
+    path = tmp_path / 'immutable.json'
+    write_findings_artifact(path, immutable_findings_artifact([_inline_finding('Confirmed concern')]))
+    expected: dict[str, Any] = {'repo': 'o/r', 'pr': 7, 'head_sha': 'a' * 40,
+                               'base_sha': 'b' * 40, 'comparison_sha': 'c' * 40}
+    if target.startswith('missing-'):
+        expected.pop('base_sha' if target == 'missing-base' else 'comparison_sha')
+    else:
+        expected[target] = 8 if target == 'pr' else 'other/repository' if target == 'repo' else 'd' * 40
+    assert cli_main(_post_argv(path, **expected)) == 1
+    assert fake_gh.process_calls() == [], 'Rejected provenance must not reach even GitHub inventory reads'
+
+
+def test_immutable_library_publisher_rejects_boolean_pr_authority(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    """CLI integer parsing hides Python's True == 1 alias from the library publisher boundary."""
+    path = tmp_path / 'immutable.json'
+    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')])
+    artifact['pr_number'] = artifact['immutable_input']['provenance']['pr_number'] = 1
+    write_findings_artifact(path, artifact)
+    assert post_findings_from_artifact(
+        tmp_path, path, pr_number=True, head_sha='a' * 40, repo='o/r', console=Console(),
+        base_sha='b' * 40, comparison_sha='c' * 40,
+    ) == 1
+    assert fake_gh.process_calls() == []
+
+
+@pytest.mark.parametrize('state', ['complete', 'incomplete'])
+def test_immutable_publisher_uses_original_head_and_retains_partial_coverage(
+    fake_gh: FakeGh, tmp_path: Path, state: str,
+) -> None:
+    """Synthetic source references must survive export while posting targets captured original A."""
+    path = tmp_path / 'immutable.json'
+    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')], state=state)
+    write_findings_artifact(path, artifact)
+    assert cli_main(_post_argv(path, head_sha='a' * 40, base_sha='b' * 40, comparison_sha='c' * 40)) == 0
+    posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
+    assert len(posts) == 1 and posts[0].payload['commit_id'] == 'a' * 40
+    assert posts[0].payload['event'] == 'COMMENT'
+    assert 'Confirmed concern' in posts[0].payload['comments'][0]['body']
+    body = posts[0].payload['body']
+    assert ('**Review incomplete.**' in body) == (state == 'incomplete')
+    if state == 'incomplete':
+        assert 'python: backend failure' in body
+    assert json.loads(path.read_text()) == artifact
+    assert artifact['terminal_result']['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0][
+        'revision'] == '1' * 40
+
 def test_malformed_artifact_aborts(fake_gh: FakeGh, tmp_path: Path) -> None:
     bad = tmp_path / "f.json"
     bad.write_text("{not json")
@@ -259,12 +328,33 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
 
-def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
+@pytest.mark.parametrize("severity", ["low", None, "omitted"])
+def test_post_findings_approve_when_all_matched_and_clean_flag(
+    fake_gh: FakeGh, tmp_path: Path, git_repo: Path, severity: str | None,
+) -> None:
+    """Schema 2 serializes missing classification as required null, retaining approval eligibility."""
+    finding = _inline_finding("Nit", severity="low")
+    finding.pop("placement")
+    if severity == "omitted":
+        finding.pop("severity")
+    else:
+        finding["severity"] = severity
+    base = git(git_repo, "rev-parse", "HEAD")
+    (git_repo / "a.py").write_text("FIRST = 1\nSECOND = 2\nTHIRD = 3\n")
+    git(git_repo, "add", "a.py")
+    head = commit(git_repo, "add reviewed source")
+    data = build_findings_artifact(
+        git_repo, PRInfo(7, head, base, "main", "feature", "o", "r", ""), [ParsedIssue(**finding)],
+        run_info=None, terminal_result=terminal_result(head_sha=head), snapshot_diff=git_ops.diff(git_repo, base, head),
+    )
+    assert data["findings"][0]["severity"] == (None if severity == "omitted" else severity)
+    artifact = tmp_path / "f.json"
+    write_findings_artifact(artifact, data)
+    argv = _post_argv(artifact, head_sha=head, target=git_repo) + ["--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    assert cli_main(_post_argv(artifact) + ["--bot-login", "daydream"]) == 0
+    assert cli_main(argv) == 0
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    code = cli_main(argv + ["--approve-on-clean"])
     assert code == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
@@ -611,19 +701,35 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     assert posts[0].payload["body"].startswith("Actionable comments posted: 1\n\n")
     assert "```mermaid" not in posts[0].payload["body"]
 
-def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
-    artifact = _write_artifact(tmp_path / "f.json",
-        [_inline_finding("Old high finding"),
-            _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low",),
-        ],
-    )
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_post_findings_matched_blocking_finding_prevents_approval(
+    fake_gh: FakeGh, tmp_path: Path, schema_version: int,
+) -> None:
+    """Deduplication must retain blockers without reposting the matched findings."""
+    retained = _inline_finding("Retained concern")
+    if schema_version == 3:
+        retained["severity"] = None
+    findings = [retained,
+        _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low"),
+    ]
+    artifact = tmp_path / "f.json"
+    data = immutable_findings_artifact(findings) if schema_version == 3 else findings_artifact(findings)
+    write_findings_artifact(artifact, data)
+    argv = _post_argv(artifact, head_sha="a" * 40 if schema_version == 3 else None,
+                      base_sha="b" * 40 if schema_version == 3 else None,
+                      comparison_sha="c" * 40 if schema_version == 3 else None)
+    argv += ["--approve-on-clean", "--bot-login", "daydream"]
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
-    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
-    assert code == 0
+    assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
+    assert [parse_finding_markers(comment["body"]) for comment in posts[0].payload["comments"]] == [["b" * 64]]
+    assert "Retained concern" not in json.dumps(posts[0].payload)
     assert "no high/medium findings" not in posts[0].payload["body"]
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64, "b" * 64], thread_ids=["RT_1", "RT_2"], viewer_did_author=True)
+    assert cli_main(argv) == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 
 @pytest.mark.parametrize("run_info", ["Artifact-owned run details", None])
 def test_artifact_post_never_acquires_live_trajectory_details(
@@ -750,15 +856,10 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
 
 
-@pytest.mark.parametrize('version', [
-    99,
-])
-def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path, version: int) -> None:
+def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path) -> None:
     path = _write_artifact(tmp_path / "unknown.json", [_inline_finding("Legacy nit", severity="low")])
     data = json.loads(path.read_text())
-    data["schema_version"] = version
-    if version == 1:
-        data.pop("terminal_result")
+    data["schema_version"] = 99
     path.write_text(json.dumps(data))
     assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 1
     assert fake_gh.calls("POST") == []

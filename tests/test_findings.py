@@ -1,5 +1,6 @@
 """Strict current findings envelopes, atomic writes, and production Phase A exports."""
 import copy
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.backend import ScriptedBackend
 from tests.harness.execution import test_execution_identity as execution_identity
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
 from tests.test_review_result import attribution_bytes, large_attributed_terminal
@@ -47,6 +49,91 @@ def _diagram_payload() -> dict[str, Any]:
             "results": {"sequence": {"status": "rendered", "reason": None, "omit_reasons": [],
                                      "spec_final": {"participants": [], "messages": [], "blocks": []}},
                         "flowchart": None}}
+
+
+def immutable_findings_artifact(
+    findings: list[dict[str, Any]] | None = None, *, state: str = 'complete',
+) -> dict[str, Any]:
+    """A trusted synthetic input keeps original PR commits outside local attribution."""
+    immutable: dict[str, Any] = {
+        'schema_version': 1,
+        'provenance': {'repository': 'o/r', 'pr_number': 7, 'head_sha': 'a' * 40,
+                       'requested_base_sha': 'b' * 40, 'comparison_base_sha': 'c' * 40,
+                       'title': 'Historical PR title', 'body': 'Historical PR body', 'context': ''},
+        'materialization': {'kind': 'synthetic', 'head_sha': '1' * 40, 'requested_base_sha': '2' * 40,
+                            'comparison_base_sha': '2' * 40, 'head_tree_sha': '3' * 40,
+                            'comparison_tree_sha': '4' * 40,
+                            'review_diff_key': '6' * 64, 'bundle_sha256': '7' * 64},
+    }
+    terminal = terminal_result(state, head_sha=immutable['materialization']['head_sha'])
+    terminal['analyzed_revision'].update(merge_base_sha='2' * 40, diff_key='6' * 64)
+    terminal['stack_outcomes'][0]['target_decisions'] = [{
+        'target_id': 'part:000001', 'status': 'reviewed', 'reason': '',
+        'evidence_refs': [{'artifact_sha256': '8' * 64, 'part_sha256': None,
+                          'revision': '1' * 40, 'path': 'a.py', 'side': 'new',
+                          'source_range': {'start': 1, 'end': 1}, 'fragment': None,
+                          'basis': 'source_inspection', 'role': 'assigned'}],
+    }]
+    return findings_artifact(findings or [], schema_version=3, head_sha='a' * 40,
+                             terminal_result=terminal, immutable_input=immutable)
+
+
+def test_immutable_export_places_against_local_source_without_relabeling_it(
+    git_repo: Path, tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    """Schema-2 round trips cannot detect placement against unavailable original commits."""
+    (git_repo / 'a.py').write_text('value = 1\n')
+    git(git_repo, 'add', 'a.py')
+    base = commit(git_repo, 'base source')
+    (git_repo / 'a.py').write_text('value = 2\n')
+    git(git_repo, 'add', 'a.py')
+    head = commit(git_repo, 'changed source')
+    diff = git_ops.diff_paths(git_repo, base, head, ['.'])
+    immutable = immutable_findings_artifact()['immutable_input']
+    local = immutable['materialization']
+    local.update(head_sha=head, requested_base_sha=base, comparison_base_sha=base,
+                 head_tree_sha=git(git_repo, 'rev-parse', f'{head}^{{tree}}'),
+                 comparison_tree_sha=git(git_repo, 'rev-parse', f'{base}^{{tree}}'),
+                 review_diff_key=hashlib.sha256(diff.encode()).hexdigest())
+    terminal = terminal_result(head_sha=head)
+    terminal['analyzed_revision'].update(merge_base_sha=base, diff_key=local['review_diff_key'])
+    pr = PRInfo(7, 'a' * 40, 'c' * 40, 'main', 'feature', 'o', 'r', '')
+    issue = ParsedIssue(path='a.py', line=1, title='Changed `value`', body='Missing guard',
+                        severity='high', confidence='HIGH', fingerprint='f' * 64, is_cross_stack=False)
+    artifact = build_findings_artifact(git_repo, pr, [issue], run_info=None, snapshot_diff=diff,
+                                       terminal_result=terminal, immutable_input=immutable)
+    path = tmp_path / 'immutable-findings.json'
+    write_findings_artifact(path, artifact)
+    loaded = _load(path, head_sha='a' * 40, expected_base_sha='b' * 40, expected_comparison_sha='c' * 40)
+    assert loaded.schema_version == 3 and loaded.head_sha == 'a' * 40
+    assert [(f.path, f.line, f.placement) for f in loaded.findings] == [('a.py', 1, 'inline')]
+    assert loaded.terminal_result == terminal and loaded.immutable_input == immutable
+    assert loaded.terminal_result['analyzed_revision']['head_sha'] == head != loaded.head_sha
+    assert fake_gh.process_calls() == []
+
+
+@pytest.mark.parametrize('field', ['outer-head', 'local-head', 'comparison', 'diff-key', 'source-ref', 'version'])
+def test_immutable_handoff_rejects_mixed_identities_before_replacing_prior_output(
+    tmp_path: Path, field: str,
+) -> None:
+    """The ordinary same-head guard cannot bind synthetic source or the execution diff."""
+    artifact = immutable_findings_artifact()
+    if field == 'outer-head':
+        artifact['head_sha'] = 'd' * 40
+    elif field == 'version':
+        artifact['immutable_input']['schema_version'] = 99
+    elif field == 'source-ref':
+        artifact['terminal_result']['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0][
+            'revision'] = artifact['head_sha']
+    else:
+        revision = artifact['terminal_result']['analyzed_revision']
+        key = {'local-head': 'head_sha', 'comparison': 'merge_base_sha', 'diff-key': 'diff_key'}[field]
+        revision[key] = 'd' * (64 if field == 'diff-key' else 40)
+    path = tmp_path / 'prior.json'
+    path.write_bytes(b'prior completed output')
+    with pytest.raises(FindingsValidationError):
+        write_findings_artifact(path, artifact)
+    assert path.read_bytes() == b'prior completed output'
 
 
 @pytest.mark.parametrize("kind", ["review", "diagram"])

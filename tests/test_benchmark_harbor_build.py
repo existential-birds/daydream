@@ -18,21 +18,13 @@ from daydream.benchmark.harbor import build, verifier_core as vc
 from daydream.benchmark.harbor.build import CompileError, compile_workspace
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
-from daydream.benchmark.workspace import init_workspace
+from daydream.benchmark.workspace import init_workspace, validate_workspace
 from daydream.pr_review import FINDING_MARKER_RE, finding_marker
 from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _seed_git, init_repo, seed_pr_origin
+from tests.harness.git_helpers import seed_pr_origin
 
 REPO = Path(__file__).resolve().parents[1]
-
-# Bundle-seed env: only the dates travel in ``env``; identity and other
-# config must come from the live ``os.environ`` at call time, because
-# ``git()`` merges ``{**os.environ, **env}`` with ``env`` later — an
-# import-time ``os.environ`` snapshot would shadow call-time
-# ``GIT_CONFIG_*`` entries added by tests after import.
-_BUNDLE_ENV: dict[str, str] = {"GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
-
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
     """A canned GitHub PR-header response for *number*."""
@@ -195,39 +187,6 @@ def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
         if p.is_file():
             out[str(p.relative_to(base))] = p.read_bytes()
     return out
-
-
-def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
-    """Build a real base/head repo + bare mirror + build_bundle."""
-    src = tmp_path / "src"
-    src.mkdir()
-    _seed_git(src, "init", "-q", env=_BUNDLE_ENV)
-    _seed_git(src, "config", "user.email", "t@t", env=_BUNDLE_ENV)
-    _seed_git(src, "config", "user.name", "t", env=_BUNDLE_ENV)
-    (src / "f.py").write_text("x=1\n")
-    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
-    _seed_git(src, "commit", "-qm", "base", env=_BUNDLE_ENV)
-    base = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
-    (src / "f.py").write_text("x=2\n")
-    _seed_git(src, "add", ".", env=_BUNDLE_ENV)
-    _seed_git(src, "commit", "-qm", "head", env=_BUNDLE_ENV)
-    head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
-    m = snapshot.ensure_mirror(tmp_path)
-    _seed_git(src, "push", str(m), f"{base}:refs/heads/base", f"{head}:refs/heads/head", env=_BUNDLE_ENV)
-    bundle = tmp_path / "b.bundle"
-    snapshot.build_bundle(m, base, head, bundle)
-    return m, bundle.read_bytes()
-
-
-def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "env-shadow"
-    init_repo(repo)
-    index = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-    monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", "user.email")
-    monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", "call-time@example.com")
-    monkeypatch.setenv("GIT_CONFIG_COUNT", str(index + 1))
-
-    assert _seed_git(repo, "config", "--get", "user.email", env=_BUNDLE_ENV) == "call-time@example.com"
 
 
 def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
@@ -402,7 +361,17 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
     key, clean_key, excluded_key = map(build.derive_task_key, (case_id, clean_id, excluded_id))
     case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert case_doc["curation"]["gold_mode"] == "mixed"
+    # Existing approved cases may retain a digest from an older diff renderer.
+    # It is metadata only: validate/compile must preserve the case and approval.
+    case_doc["snapshot"]["diff_sha256"] = "0" * 64
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    case_path.write_text(yaml.safe_dump(case_doc, sort_keys=False))
+    saved_case = case_path.read_bytes()
+    assert validate_workspace(ws) == (0, "ready")
     lock = build.compile_workspace(ws)
+    assert case_path.read_bytes() == saved_case
+    fresh_case = storage.load_yaml_strict(ws / "cases" / f"{clean_id}.yaml")
+    assert "diff_sha256" not in fresh_case["snapshot"]
     before = _harbor_tree_bytes(ws)
     assert set(lock["cases"]) == {key, clean_key}
     assert list(lock["cases"]) == sorted((key, clean_key))
@@ -446,6 +415,20 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
     assert lock["cases"][key]["repository"] == "o/r"
     assert lock["cases"][key]["original_head_sha"] == head_sha
     assert lock["cases"][key]["bundle_sha256"] == storage.sha256_file(case / "environment" / "repository.bundle")
+    trusted = _load_json(case / "environment/immutable-request.json")
+    assert trusted["provenance"] == {
+        "repository": "o/r", "pr_number": 101, "head_sha": head_sha,
+        "requested_base_sha": raw["snapshot"]["requested_base_sha"],
+        "comparison_base_sha": raw["snapshot"]["original_base_sha"],
+        "title": "", "body": "", "context": build.bounded_pr_context(raw["pull_request"]),
+    }
+    assert trusted["materialization"]["head_sha"] == lock["cases"][key]["local_head_sha"]
+    assert trusted["materialization"]["head_sha"] != head_sha
+    assert trusted["materialization"]["head_tree_sha"] == raw["snapshot"]["head_tree_sha"]
+    assert "canonical_diff_sha256" not in trusted["materialization"]
+    assert "canonical_diff_sha256" not in lock["cases"][key]
+    assert trusted["materialization"]["review_diff_key"] == lock["cases"][key]["review_diff_key"]
+    assert "gold_sha256" not in json.dumps(trusted) and "curation" not in trusted
     assert lock["cases"][key]["files"]["tests/verifier_core.py"] == \
         lock["files"][f"{key}/tests/verifier_core.py"]
     assert not any("timestamp" in k or "created_at" in k for k in lock.keys())
@@ -513,7 +496,7 @@ def test_compile_population_preserves_finding_clean_and_excluded_cases(
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    assert env_files == {"repository.bundle", "immutable-request.json", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
 
     toml = (ws / "harbor" / key / "task.toml").read_bytes()
@@ -628,10 +611,13 @@ def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-7f3c" not in outside
     assert instr.count("</historical_pr_context>") == 1
-    # no raw body in any other shipped file (instruction.md's bounded block is
-    # the sole allowed conduit and is validated separately above)
+    # The host-only typed request carries exactly the approved bounded block;
+    # all other shipped surfaces retain the leakage prohibition.
+    trusted = json.loads((ws / "harbor" / key / "environment/immutable-request.json").read_text())
+    assert trusted["provenance"]["context"] == build.bounded_pr_context(
+        storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["pull_request"])
     for rel, _ in lock["files"].items():
-        if rel.endswith("instruction.md"):
+        if rel.endswith(("instruction.md", "environment/immutable-request.json")):
             continue
         p = ws / "harbor" / rel
         if p.is_file() and rel.endswith((".md", ".json")):
@@ -783,16 +769,6 @@ def test_leakage_scan_rejects_clean_readme() -> None:
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
     assert "clean_attested" in str(rejected.value)
-
-
-def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
-    m, _ = _seed_bare_bundle(tmp_path)
-    bp = tmp_path / "bad.bundle"
-    _seed_git(m, "update-ref", "refs/heads/extra", "refs/heads/base")
-    _seed_git(m, "bundle", "create", str(bp), "refs/heads/base", "refs/heads/head", "refs/heads/extra", env=_BUNDLE_ENV)
-    with pytest.raises(CompileError) as rejected:
-        build.validate_bundle_inventory(bp)
-    assert "ref" in str(rejected.value)
 
 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
