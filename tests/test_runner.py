@@ -610,7 +610,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 assert (repo / "replacement.txt").read_bytes() == b"replacement checkout\x00\xff"
         assert "Local JSONL capture: retained" in progress
         assert "Public publication: failed" in progress or "Public publication: not attempted" in progress
-        assert "Run data could not be persisted" not in captured.out
+        assert "Run evidence could not be persisted" not in captured.out
         assert json.loads(external_trajectory.read_text()) == documents[0]
         assert (dump / "prior.txt").read_text() == "prior dump"
         assert list((tmp_path / "private" / "runtime").glob("*/transactions/*/journal.json"))

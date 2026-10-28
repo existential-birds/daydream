@@ -865,14 +865,6 @@ class ArtifactSession:
         transaction_id = f"publish-{self.layout.session_id}-{secrets.token_hex(8)}"
         transaction = self.layout.state_root / "transactions" / transaction_id
         transaction.mkdir(parents=True)
-        transactions._write_transaction_owner(
-            transaction,
-            workspace_key=self.layout.workspace_key,
-            session_id=self.layout.session_id,
-            kind="publish",
-            source=self.layout.source,
-            source_fd=self._source_fd,
-        )
         mark = partial(
             transactions._write_transition,
             transaction / "journal.json",
@@ -881,6 +873,14 @@ class ArtifactSession:
         )
         publication_stage: Path | None = None
         try:
+            transactions._write_transaction_owner(
+                transaction,
+                workspace_key=self.layout.workspace_key,
+                session_id=self.layout.session_id,
+                kind="publish",
+                source=self.layout.source,
+                source_fd=self._source_fd,
+            )
             filesystem._atomic_json(transaction / "publish-manifest.json", filesystem._manifest_payload(public_entries))
             publication_stage = publication._create_source_stage(
                 self.layout.source,

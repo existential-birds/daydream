@@ -1458,6 +1458,61 @@ async def test_frozen_finalization_preserves_evidence_when_public_source_is_lost
     assert (session._detach_transaction / "journal.json").is_file()
 
 
+@pytest.mark.parametrize("source_state", ["missing", "replacement"])
+async def test_publish_initialization_failure_does_not_block_recovery(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
+) -> None:
+    """Loss after transaction mkdir must not leave an ownerless recovery record.
+
+    Existing source-loss cases fail before transaction creation or after staging,
+    leaving the owner-write failure window untested.
+    """
+    (source / ".review-output.md").write_bytes(b"prior report\n")
+    baseline = _manifest(source)
+    owner = _owner(source)
+    held = tmp_path / "held-source"
+    replacement = tmp_path / "replacement"
+    original_mkdir = Path.mkdir
+    lost = False
+
+    def mkdir_then_lose(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal lost
+        original_mkdir(path, *args, **kwargs)
+        if not lost and path.parent == owner.artifact_state_root / "transactions" and path.name.startswith("publish-"):
+            lost = True
+            source.rename(held)
+            if source_state == "replacement":
+                source.mkdir()
+                (source / "foreign.txt").write_bytes(b"foreign checkout\n")
+
+    async with open_artifact_session(_work(source), session_id="owner-failure", owner=owner) as session:
+        frozen = _freeze_run(session, "owner-failure")
+        frozen_manifest = _manifest(frozen.root)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, "mkdir", mkdir_then_lose)
+                with pytest.raises(ArtifactVisibilityError) as refused:
+                    _publish(session, frozen)
+            assert lost
+            assert isinstance(refused.value, artifact_models.ArtifactSourceUnavailableError) is (
+                source_state == "missing"
+            )
+            assert _manifest(frozen.root) == frozen_manifest
+            assert _manifest(owner.artifact_state_root / "canonical") == baseline
+            if source_state == "replacement":
+                assert list(source.iterdir()) == [source / "foreign.txt"]
+                assert (source / "foreign.txt").read_bytes() == b"foreign checkout\n"
+        finally:
+            if held.exists():
+                if source.exists():
+                    source.rename(replacement)
+                held.rename(source)
+    async with open_artifact_session(_work(source), session_id="owner-failure-retry", owner=owner):
+        pass
+    assert _manifest(source) == baseline
+    assert not tuple((owner.artifact_state_root / "transactions").iterdir())
+
+
 async def test_code_workspace_with_external_git_metadata_survives_public_source_loss(tmp_path: Path) -> None:
     """An intact operational tree and its external Git owner still support quality.
 

@@ -288,7 +288,9 @@ async def test_interruption_retains_task_and_partial_tool_after_worktree_teardow
         await run(replace(config, shallow=True, stack="python", force_worktree=True))
     cwd = backend.calls[0]["cwd"]
     assert cwd != repo
-    if not source_loss:
+    if source_loss:
+        assert cwd.is_dir()
+    else:
         assert not cwd.exists()
     raw = captured(config)
     assert raw["outcome"] == "interrupted" and raw["original_task"]["value"]["diff"] == diff
