@@ -28,6 +28,7 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
         expected_paths.add('daydream/backends/pi_structured_output.ts')
         expected_paths.add('daydream/backends/pi_host_tools.ts')
+        expected_paths.add('daydream/backends/pi_diagnostics.ts')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
             assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "

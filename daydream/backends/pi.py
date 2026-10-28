@@ -21,6 +21,7 @@ import stat
 import tempfile
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any, Literal
+
+import anyio
 
 from daydream import clock, host_tools as host_policy
 from daydream.backends import (
@@ -75,7 +78,7 @@ from daydream.backends._transport import (
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.host_tools import HostToolBinding
-from daydream.redaction import redact_structured_text
+from daydream.redaction import _PEM_HEADER, _PEM_KEY_REDACTED_MARKER, redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -84,6 +87,9 @@ _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _PI_FINAL_PAYLOAD_MAX_BYTES = 128 * 1024
 _PI_ERROR_MESSAGE_MAX_CHARS = 4096
 _PI_RAW_STOP_REASON_MAX_CHARS = 256
+_PI_RESPONSE_HEADERS = frozenset({"x-request-id", "request-id", "x-amzn-requestid", "x-amz-request-id",
+                                  "cf-ray", "retry-after", "retry-after-ms"})
+_PI_PEM_START = re.compile(rf"-----BEGIN (?P<kind>{_PEM_HEADER})-----")
 
 
 def _pi_diagnostic_text(value: str, limit: int) -> tuple[str, bool]:
@@ -96,6 +102,23 @@ def _pi_diagnostic_text(value: str, limit: int) -> tuple[str, bool]:
         redacted = "[DIAGNOSTIC_REDACTION_FAILED]"
     return redacted[:limit], len(redacted) > limit
 
+
+def _pi_response_metadata(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Independently admit the helper's closed response fields before recording."""
+    status = event.get("status")
+    if type(status) is not int or not 100 <= status <= 599:
+        return None
+    headers = event.get("headers")
+    selected: dict[str, str] = {}
+    truncated = False
+    if isinstance(headers, dict):
+        for name in _PI_RESPONSE_HEADERS:
+            value = headers.get(name)
+            if isinstance(value, str):
+                selected[name], clipped = _pi_diagnostic_text(value, 512)
+                truncated |= clipped
+    return {"status": status, "headers": selected, **({"headers_truncated": True} if truncated else {})}
+
 # Known AgentSessionEvent types. Used to decide whether the first
 # stdout line — the session header — also carries a dispatchable event type.
 _PI_EVENT_TYPES: frozenset[str] = frozenset(
@@ -106,6 +129,7 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
         "daydream_host_tools_ready",
         "daydream_host_tools_failed",
         "daydream_host_tool_fatal",
+        "daydream_provider_response",
         "turn_start",
         "turn_end",
         "message_start",
@@ -1020,9 +1044,36 @@ class PiBackend:
         pending_submission: Any = None
         pending_submission_generation: str | None = None
         pending_usage: dict[str, Any] | None = None
-        # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
-        # captured for error reporting when the process exits non-zero.
-        stderr_lines: list[str] = []
+        # Pi routes extension protocol events through stderr, so preserve the
+        # merged stream's ordering. Only non-JSON text enters this bounded tail.
+        stderr_lines: deque[str] = deque(maxlen=20)
+        diagnostic_tail_truncated = False
+        pending_response: DiagnosticEvent | None = None
+        pem_end: str | None = None
+
+        def capture_diagnostic(line: str) -> None:
+            nonlocal diagnostic_tail_truncated, pem_end
+            # Suppress private blocks before line clipping/eviction, including
+            # an unterminated key. Flat redaction cannot see adjacent lines.
+            parts = []
+            while True:
+                if pem_end is not None:
+                    _, ended, line = line.partition(pem_end)
+                    if not ended:
+                        break
+                    pem_end = None
+                start = _PI_PEM_START.search(line)
+                if start is None:
+                    parts.append(line)
+                    break
+                parts.append(line[:start.start()] + _PEM_KEY_REDACTED_MARKER)
+                pem_end = f"-----END {start['kind']}-----"
+                line = line[start.end():]
+            if not any(parts):
+                return
+            safe, clipped = _pi_diagnostic_text("".join(parts), 1024)
+            diagnostic_tail_truncated |= clipped or len(stderr_lines) == stderr_lines.maxlen
+            stderr_lines.append(safe)
 
         total_input: int | None = None
         total_output: int | None = None
@@ -1187,6 +1238,66 @@ class PiBackend:
 
         attachments = AsyncExitStack()
         native_failed = False
+        cleaned_up = False
+        process_running_at_cleanup: bool | None = None
+
+        async def cleanup() -> None:
+            nonlocal cleaned_up, process_running_at_cleanup
+            if cleaned_up:
+                return
+            cleaned_up = True
+            if host_tools is not None:
+                host_tools.close_authority()
+            try:
+                if transport is not None:
+                    process_running_at_cleanup = transport.returncode is None
+                    if lifecycle is not None:
+                        lifecycle.teardown_started()
+                    async def collect_tail() -> None:
+                        nonlocal diagnostic_tail_truncated
+                        assert transport is not None
+                        size = 0
+                        try:
+                            async with asyncio.timeout(host_policy._CLEANUP_TIMEOUT_S):
+                                count = 0
+                                async for line in transport.lines(lambda: 0.1):
+                                    size += len(line.encode("utf-8")) + 1
+                                    count += 1
+                                    if size > 64 * 1024 or count > 1024:
+                                        diagnostic_tail_truncated = True
+                                        break
+                                    try:
+                                        json.loads(line)
+                                    except json.JSONDecodeError:
+                                        capture_diagnostic(line)
+                        except Exception:  # noqa: BLE001 - diagnostic-only tail cannot replace the original failure
+                            diagnostic_tail_truncated = True
+
+                    tail = asyncio.create_task(collect_tail()) if native_failed else None
+                    try:
+                        await teardown(transport, self._transports,
+                                       cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
+                    except BaseException:
+                        if host_tools is not None:
+                            host_tools.mark_cleanup_failed()
+                        if host_tools is None or not native_failed:
+                            raise
+                    else:
+                        if lifecycle is not None:
+                            lifecycle.teardown_completed()
+                    finally:
+                        if tail is not None:
+                            with anyio.CancelScope(shield=True):
+                                await asyncio.gather(tail, return_exceptions=True)
+            finally:
+                try:
+                    await attachments.aclose()
+                finally:
+                    if host_tools is not None and lifecycle is not None:
+                        lifecycle.host_tools_closed(native_settled=host_tools.native_settled,
+                                                    cleanup_complete=host_tools.cleanup_complete,
+                                                    calls=host_tools.calls, rejections=host_tools.rejections)
+
         try:
             extensions: list[tuple[str, str, dict[str, Any]]] = []
             if host_tools is not None:
@@ -1214,6 +1325,9 @@ class PiBackend:
                 child_env.pop(variable, None)
             if read_only and (native_output or host_tools is not None or review_context is not None):
                 args.append("--no-extensions")
+            diagnostic_extension = attachments.enter_context(as_file(
+                files("daydream.backends").joinpath("pi_diagnostics.ts")))
+            args.extend(["--extension", str(diagnostic_extension)])
             for variable, resource, packet in extensions:
                 child_env[variable] = str(_write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments))
                 extension = attachments.enter_context(as_file(files("daydream.backends").joinpath(resource)))
@@ -1239,6 +1353,8 @@ class PiBackend:
                 spawn_pending=lifecycle.spawn_pending if lifecycle is not None else None,
                 spawn_completed=lifecycle.spawn_completed if lifecycle is not None else None,
                 raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,
+                stdout_eof=lifecycle.stdout_eof if lifecycle is not None else None,
+                process_exited=lifecycle.process_exited if lifecycle is not None else None,
             )
             self._transports.append(transport)
             if host_tools is not None:
@@ -1269,11 +1385,7 @@ class PiBackend:
                 except json.JSONDecodeError:
                     if native_output and raw_line.lstrip().startswith(("{", "[")):
                         raise PiError("Malformed native event", retryable=True, category="STREAM_TRUNCATION")
-                    # Capture non-JSON lines — these are stderr merged into
-                    # stdout (pi diagnostics, login prompts, errors). Kept for
-                    # error reporting when the process exits non-zero.
-                    if len(stderr_lines) < 20:
-                        stderr_lines.append(raw_line)
+                    capture_diagnostic(raw_line)
                     continue
 
                 if is_first_line:
@@ -1292,6 +1404,15 @@ class PiBackend:
                         continue
 
                 event_type = event.get("type", "")
+                if event_type == "daydream_provider_response":
+                    if pending_response is not None:
+                        yield pending_response
+                    response_metadata = _pi_response_metadata(event)
+                    pending_response = (DiagnosticEvent(
+                        code="pi_provider_response", message="Provider HTTP response", metadata={
+                            **response_metadata, "generation_id": None, "observed_at_unix_ns": time.time_ns(),
+                        }) if response_metadata is not None else None)
+                    continue
                 if event_type == "daydream_host_tools_ready":
                     if host_server is None or not host_server.ready:
                         raise PiError("Native host readiness was not established", category="HOST_TOOLS")
@@ -1372,6 +1493,10 @@ class PiBackend:
                             observed_at_unix_ns=generation_start_ns,
                             boundary_complete=True,
                         )
+                        if pending_response is not None:
+                            pending_response.metadata["generation_id"] = open_generation_id
+                            yield pending_response
+                            pending_response = None
 
                 elif event_type == "message_update":
                     # Pi's JSON mode emits delta-only assistantMessageEvent frames;
@@ -1643,6 +1768,9 @@ class PiBackend:
             # exit check formats the backend-specific message from the code and
             # captured stderr lines (the events must stay between the two).
             returncode = await reap(transport, timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
+            if pending_response is not None:
+                yield pending_response
+                pending_response = None
 
             native_unsettled = (native_output or host_tools is not None) and (
                 active_tool_calls != 0 or open_generation_id is not None
@@ -1697,7 +1825,7 @@ class PiBackend:
                 returncode,
                 error_type=PiError,
                 category="PROCESS_EXIT",
-                build_message=partial(_pi_process_exit_message, stderr_lines),
+                build_message=partial(_pi_process_exit_message, list(stderr_lines)),
                 retryable=_is_retryable_exit_code(returncode),
             )
 
@@ -1711,6 +1839,15 @@ class PiBackend:
 
         except Exception:
             native_failed = True
+            await cleanup()
+            if pending_response is not None:
+                yield pending_response
+            if transport is not None:
+                yield DiagnosticEvent(code="pi_process_failure", message="Pi process failure context",
+                    metadata={"process_running_at_cleanup": process_running_at_cleanup,
+                              "process_returncode": transport.returncode,
+                              "diagnostic_tail": list(stderr_lines),
+                              "diagnostic_tail_truncated": diagnostic_tail_truncated})
             if pending_usage is not None:
                 # Do not consume later native events after an association error.
                 # Flush only usage already observed on the finalized assistant
@@ -1741,26 +1878,7 @@ class PiBackend:
             native_failed = True
             raise
         finally:
-            if host_tools is not None:
-                host_tools.close_authority()
-            try:
-                if transport is not None:
-                    try:
-                        await teardown(transport, self._transports,
-                                       cleanup_timeout_s=host_policy._CLEANUP_TIMEOUT_S if host_tools else None)
-                    except BaseException:
-                        if host_tools is not None:
-                            host_tools.mark_cleanup_failed()
-                        if host_tools is None or not native_failed:
-                            raise
-            finally:
-                try:
-                    await attachments.aclose()
-                finally:
-                    if host_tools is not None and lifecycle is not None:
-                        lifecycle.host_tools_closed(native_settled=host_tools.native_settled,
-                                                    cleanup_complete=host_tools.cleanup_complete,
-                                                    calls=host_tools.calls, rejections=host_tools.rejections)
+            await cleanup()
 
     async def cancel(self) -> None:
         """Terminate and reap every active Pi transport."""

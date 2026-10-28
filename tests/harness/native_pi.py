@@ -22,6 +22,7 @@ class _NativeProvider:
     text: str | None = None
     errors: dict[int, str] = field(default_factory=dict)
     finish_reasons: dict[int, str] = field(default_factory=dict)
+    response_headers: dict[str, str] = field(default_factory=dict)
 
 
 @contextmanager
@@ -58,6 +59,9 @@ def native_provider_server(fixture: _NativeProvider) -> Iterator[str]:
             ]
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
+            self.send_header("X-Request-Id", f"fixture-response-{index}")
+            for name, value in fixture.response_headers.items():
+                self.send_header(name, value)
             self.end_headers()
             for chunk in chunks:
                 self.wfile.write(("data: " + json.dumps({"id": f"host-output-{index}",

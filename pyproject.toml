@@ -69,6 +69,7 @@ include = [
     "daydream/templates/**",
     "daydream/backends/pi_structured_output.ts",
     "daydream/backends/pi_host_tools.ts",
+    "daydream/backends/pi_diagnostics.ts",
     "daydream/training/schema/**",
     "daydream/atif/LICENSE",
     "daydream/atif/NOTICE",

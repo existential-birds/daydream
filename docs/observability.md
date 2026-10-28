@@ -46,6 +46,24 @@ distinct. Never infer provider root causes or missing tools from absent telemetr
 
 ## Pi host-tool lifecycle evidence
 
+Pi records HTTP response status and allowlisted request/retry headers through
+the native response hook, with host receipt time and correlation to the following
+assistant generation.
+Responses without an observed generation retain a null generation ID. Missing
+responses remain unknown: the hook need not run for rejected requests or a
+connection failure before headers arrive. These observations do not establish a
+provider outage or change retry decisions.
+
+On ordinary invocation errors, retain a redacted diagnostic tail (20 lines, up to
+1,024 characters each) from the merged native stream, including bounded cleanup output.
+Pi routes extension events through stderr, so that stream stays merged to preserve
+protocol ordering. Cleanup stops at 1,024 additional lines, a 64 KiB threshold,
+or its time bound, and accepts no late model/tool results. Process exit, EOF and
+teardown times are host observations; the failure diagnostic states whether the
+child was still running when host cleanup began.
+An exit or EOF after that boundary cannot establish an independent native crash.
+Underlying exception causes discarded inside Pi remain unavailable.
+
 Host requests/rejections retain native IDs, roles and generation history;
 admission creates no synthetic tool events or billing. Lifecycle observations
 separately record authority closure, native settlement and aggregate cleanup of
