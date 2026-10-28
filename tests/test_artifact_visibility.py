@@ -1162,12 +1162,19 @@ async def test_artifact_session_recovers_real_process_death_at_every_transition(
             else:
                 proof["inode"] += 1
             proof_path.write_text(json.dumps(proof))
-        source_before, evidence_before = _manifest(source), _manifest(state_root)
+        source_before = _manifest(source)
+        evidence_before: list[_Entry] = []
+        _walk_entry(state_root, state_root, evidence_before)
+        evidence_files = {entry.path for entry in evidence_before if entry.kind == "file"}
+        assert "canonical/.daydream/deep/prior.md" in evidence_files
+        assert f"transactions/{transaction.name}/journal.json" in evidence_files
         with pytest.raises(ArtifactVisibilityError, match="identity"):
             async with open_artifact_session(_work(source, repo=second_repo), session_id="invalid-source-proof"):
                 pytest.fail("unproven recovery admitted")
         assert _manifest(source) == source_before
-        assert _manifest(state_root) == evidence_before
+        evidence_after: list[_Entry] = []
+        _walk_entry(state_root, state_root, evidence_after)
+        assert evidence_after == evidence_before
         return
 
     has_published_run = transition in {"PUBLISH_INSTALLED", "PUBLISH_VERIFIED"}
