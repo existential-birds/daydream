@@ -357,7 +357,8 @@ and public installation separately. Later failure cannot revoke a successful
 capture receipt or imply successful public installation. Valid frozen analysis
 can be archived with explicitly unavailable live-source quality (null metrics
 and an unavailable diagnostic); a valid operational workspace can still supply
-quality independently of public-source availability. Genuine evaluation or
+quality independently of public-source availability when its current Git routing
+matches the captured worktree and common directories. Genuine evaluation or
 integrity failures continue to abort atomic archive installation. Body failures
 and cancellation remain primary when finalization also fails.
 

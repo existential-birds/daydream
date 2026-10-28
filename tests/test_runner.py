@@ -371,6 +371,7 @@ def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
     ("dataset-file", 0), ("dataset-symlink", 0), ("dataset-runtime-owned", 0),
     ("source-missing", 0), ("source-replaced", 0), ("source-symlink", 0),
     ("source-missing-worktree", 0), ("source-replaced-worktree", 0), ("source-replaced-capture-worktree", 0),
+    ("git-redirect-capture-worktree", 0),
 ])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
@@ -383,6 +384,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     force_worktree = failure_mode.endswith("-worktree")
     repo = _feature_repo(tmp_path, remote=force_worktree)
     source_loss = failure_mode.startswith("source-")
+    git_redirect = failure_mode == "git-redirect-capture-worktree"
     original_head = _git(repo, "rev-parse", "HEAD")
     original_diff = git_ops.diff(repo, "main")
     _write_probe_flow(ext_dir, "artifact-probe", exit_code=exit_code)
@@ -439,8 +441,10 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     (repo / ".review-output.md").write_text("prior review")
     config = RunConfig(
         target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
-        run_eval=source_loss or failure_mode in ("none", "evaluation", "frozen_tree"), dump_artifacts=str(dump),
-        archive=True, non_interactive=True, dataset_capture=source_loss or failure_mode.startswith("dataset"),
+        run_eval=source_loss or git_redirect or failure_mode in ("none", "evaluation", "frozen_tree"),
+        dump_artifacts=str(dump),
+        archive=True, non_interactive=True,
+        dataset_capture=source_loss or git_redirect or failure_mode.startswith("dataset"),
         dataset_store_path=store_path,
         force_worktree=force_worktree,
     )
@@ -455,6 +459,21 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     replacement_git_entries: list[_Entry]
     capture_dispatched = False
     real_run = subprocess.run
+    foreign_repo, foreign_worktree = tmp_path / "foreign", tmp_path / "foreign-worktree"
+    foreign_entries: list[_Entry] = []
+    foreign_git_dir = foreign_head = ""
+    if git_redirect:
+        _init_repo(foreign_repo)
+        _git(foreign_repo, "config", "maintenance.auto", "false")
+        (foreign_repo / "foreign.py").write_bytes(b"FOREIGN_SENTINEL = 9\n")
+        _git(foreign_repo, "add", "foreign.py")
+        _commit(foreign_repo, "foreign head")
+        _git(foreign_repo, "worktree", "add", "--detach", str(foreign_worktree), "HEAD")
+        foreign_head = _git(foreign_repo, "rev-parse", "HEAD")
+        assert foreign_head != original_head
+        foreign_git_dir = _git(foreign_worktree, "rev-parse", "--absolute-git-dir")
+        _walk_entry(tmp_path, foreign_repo, foreign_entries)
+        _walk_entry(tmp_path, foreign_worktree, foreign_entries)
 
     def lose_source() -> None:
         nonlocal replacement_root, replacement_before, replacement_git, replacement_git_entries
@@ -486,7 +505,12 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         if (not capture_dispatched and args == ["git", "rev-parse", "HEAD"] and kwargs.get("cwd") == backend.cwd
                 and list((tmp_path / "private" / "runtime").glob("*/runs/*/frozen/.daydream/diff.patch"))):
             capture_dispatched = True
-            lose_source()
+            if git_redirect:
+                assert backend.cwd is not None
+                (backend.cwd / ".git").write_text(f"gitdir: {foreign_git_dir}\n", encoding="utf-8")
+                assert _git(backend.cwd, "rev-parse", "HEAD") == foreign_head
+            else:
+                lose_source()
         return real_run(args, **kwargs)
 
     with anyio.fail_after(20):
@@ -500,8 +524,8 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 replacement = external_trajectory.with_name("replacement.tmp")
                 replacement.write_text("concurrent replacement\n", encoding="utf-8")
                 os.replace(replacement, external_trajectory)
-            if source_loss:
-                if failure_mode == "source-replaced-capture-worktree":
+            if source_loss or git_redirect:
+                if failure_mode in ("source-replaced-capture-worktree", "git-redirect-capture-worktree"):
                     monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_before_capture)
                 else:
                     lose_source()
@@ -525,12 +549,32 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                     frozen_trajectory = live_trajectories[0].read_bytes()
                 finally:
                     evaluation_release.set()
-    assert capture_dispatched is (failure_mode == "source-replaced-capture-worktree")
+    assert capture_dispatched is (failure_mode in ("source-replaced-capture-worktree", "git-redirect-capture-worktree"))
     captured = capsys.readouterr()
     progress = active_progress + captured.err
     assert not re.search(r"Finalization(?: started|:| complete| failed| finished)", captured.out)
     assert "\x1b[" not in progress and "\r" not in progress
     assert str(tmp_path / "private") not in progress
+    if git_redirect:
+        assert result == [0]
+        raw = read_records(LocalRecordStore(store_path)).runs
+        assert len(raw) == 1 and raw[0]["final_state"]["value"]["head_sha"] is None
+        assert _git(repo, "rev-parse", "HEAD") == original_head
+        frozen_diff, = (tmp_path / "private" / "runtime").glob("*/runs/*/frozen/.daydream/diff.patch")
+        assert frozen_diff.read_text() == original_diff
+        assert all(document["session_id"] == raw[0]["run_id"]
+                   for document in raw[0]["trajectories"]["value"]["documents"])
+        retained_foreign: list[_Entry] = []
+        _walk_entry(tmp_path, foreign_repo, retained_foreign)
+        _walk_entry(tmp_path, foreign_worktree, retained_foreign)
+        assert retained_foreign == foreign_entries
+        assert not list((archive_dir / "runs").glob("[!.]*"))
+        assert "Finalization complete" not in progress
+        assert "Local JSONL capture: retained" in progress and "Archive/evaluation: failed" in progress
+        assert "Public publication: installed" in progress
+        assert str(foreign_repo) not in progress and foreign_head not in progress
+        assert (repo / ".review-output.md").read_text() == "Completed review\n"
+        return
     if source_loss:
         assert result == [1]
         assert "Finalization complete" not in progress

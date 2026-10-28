@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import replace
@@ -27,7 +28,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import bare_remote, git
+from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
@@ -740,7 +741,8 @@ async def test_optional_presentation_failure_preserves_canonical_export(
 
 
 @pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation', 'source-loss', 'source-loss-salvage',
-                                  'source-loss-worktree'])
+                                  'source-loss-worktree', 'source-loss-placement-worktree',
+                                  'placement-git-error-worktree', 'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     force_worktree = fault.endswith('-worktree')
     if force_worktree:
@@ -751,6 +753,25 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     show = git_ops.show
     state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': [], 'export': None}
     staging_coverage = False
+    real_run = subprocess.run
+    placement_fault = 'placement' in fault
+    def fault_at_placement(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if (placement_fault and state['failed']
+                and args == ['git', 'diff', '--name-only', '-z', review.pr.base_sha, review.pr.head_sha]):
+            assert not state.get('dispatch_injected')
+            state['dispatch_injected'] = True
+            if fault == 'placement-git-error-worktree':
+                oid = review.pr.base_sha
+                (review.repo / '.git' / 'objects' / oid[:2] / oid[2:]).rename(review.tmp / 'removed-commit-object')
+            else:
+                review.repo.rename(review.tmp / 'removed-source')
+                if fault == 'placement-replacement-worktree':
+                    init_repo(review.repo)
+                    (review.repo / 'replacement.bin').write_bytes(b'replacement\x00\xff')
+                    from tests.test_artifact_visibility import _walk_entry
+                    state['replacement_git'] = []
+                    _walk_entry(review.repo, review.repo / '.git', state['replacement_git'])
+        return real_run(args, **kwargs)
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
         if fault == 'presentation' and state['failed'] and path.name == 'review-report-context.json':
@@ -784,11 +805,8 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             pytest.fail('terminal export attempted to read live Git after source loss')
         return show(target, *args, **kwargs)
     def response(prompt: str) -> Any:
-        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
-                   'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication',
-                   'source-loss': 'supervisor adjudication',
-                   'source-loss-salvage': 'supervisor adjudication',
-                   'source-loss-worktree': 'supervisor adjudication'}[fault]
+        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue'}.get(
+            fault, 'supervisor adjudication')
         if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
             state['failed'] = True
             if fault == 'salvage':
@@ -798,14 +816,16 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
                 state['admitted'] = json.loads(state['merged'].read_text())['items'][0]
                 if fault == 'source-loss-salvage':
                     state['merged'].unlink()
-                review.repo.rename(review.tmp / 'removed-source')
+                if fault != 'source-loss-placement-worktree':
+                    review.repo.rename(review.tmp / 'removed-source')
             return [error]
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
     review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
     review.patch.setattr(git_ops, 'show', retained_source_only)
-    stack = 'python' if fault in {'source-loss', 'source-loss-worktree'} else 'structure'
+    review.patch.setattr('daydream.git_ops.process.subprocess.run', fault_at_placement)
+    stack = 'python' if force_worktree or fault == 'source-loss' else 'structure'
     review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=stack != 'python',
                                        review_by_stack={stack: [record()]}, responder=response)
     review.backend.merge_echo_records = True
@@ -822,6 +842,20 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         await review.run(dataset_capture=fault.startswith('source-loss'),
                          dataset_store_path=review.tmp / 'records', force_worktree=force_worktree)
     assert raised.value is error
+    if placement_fault:
+        assert state.get('dispatch_injected')
+    if fault.startswith('placement-'):
+        assert state['export'] is None and not review.output.exists()
+        warning = collapse_panel_text(capsys)
+        diagnostic = 'ArtifactVisibilityError' if fault == 'placement-replacement-worktree' else 'GitError'
+        assert f'Terminal review finalization failed: {diagnostic}' in warning
+        if fault == 'placement-replacement-worktree':
+            from tests.test_artifact_visibility import _Entry, _walk_entry
+            after: list[_Entry] = []
+            _walk_entry(review.repo, review.repo / '.git', after)
+            assert after == state['replacement_git']
+            assert (review.repo / 'replacement.bin').read_bytes() == b'replacement\x00\xff'
+        return
     if fault.startswith('source-loss'):
         assert not review.repo.exists()
         if force_worktree:

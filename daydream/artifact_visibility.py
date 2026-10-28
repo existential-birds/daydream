@@ -110,6 +110,7 @@ class ArtifactSession:
             layout.source, source_metadata.st_dev, source_metadata.st_ino
         )
         self._git_directory_fds = git_directory_fds
+        self._git_marker_expected = (layout.repo / ".git").exists()
         self._canonical_entries = canonical_entries
         self._detach_transaction = detach_transaction
         self._state = _SessionState.ACTIVE
@@ -240,6 +241,16 @@ class ArtifactSession:
 
     def validate_code_workspace(self) -> None:
         """Require the captured checkout and Git metadata for live code evaluation."""
+        directories = self._validate_code_workspace_paths()
+        try:
+            current = git_ops.git_dirs(self.layout.repo)
+        except (git_ops.GitError, OSError):
+            self._validate_code_workspace_paths()
+            raise
+        if current != directories:
+            raise ArtifactVisibilityError("artifact code workspace Git routing changed")
+
+    def _validate_code_workspace_paths(self) -> tuple[Path, Path]:
         self.validate_repo()
         directories = (self.layout.repo_git_dir, self.layout.git_common_dir)
         if any(path == self.layout.source or self.layout.source in path.parents for path in directories):
@@ -249,6 +260,14 @@ class ArtifactSession:
             filesystem._validate_directory_identity(
                 path, device=held.st_dev, inode=held.st_ino, label="artifact code workspace Git directory"
             )
+        marker = self.layout.repo / ".git"
+        if self._git_marker_expected:
+            try:
+                marker.lstat()
+            except (FileNotFoundError, PermissionError) as exc:
+                raise ArtifactSourceUnavailableError("artifact code workspace Git marker is unavailable") from exc
+        filesystem._validate_projection_ancestry(marker, expected_kind="either")
+        return directories
 
     def _validate_destination(
         self,

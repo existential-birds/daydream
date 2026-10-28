@@ -1483,6 +1483,94 @@ async def test_code_workspace_with_external_git_metadata_survives_public_source_
     assert not source.exists()
 
 
+@pytest.mark.parametrize("redirect", ["foreign-common", "sibling-worktree", "gitfile-symlink"])
+async def test_code_workspace_rejects_redirected_git_routing(tmp_path: Path, source: Path, redirect: str) -> None:
+    """An intact checkout and old Git directories cannot attest rewritten routing.
+
+    Source-replacement cases remove the old metadata; this preserves every held
+    inode while cwd-based Git reads select another worktree's HEAD instead.
+    """
+    model_repo, sibling = _worktrees(source, "model-repo", "sibling-worktree")
+    foreign = sibling if redirect == "sibling-worktree" else tmp_path / "foreign"
+    if foreign != sibling:
+        _init_repo(foreign)
+    (foreign / "source.txt").write_bytes(b"foreign HEAD canary\n")
+    _git(foreign, "add", "source.txt")
+    _git(foreign, "commit", "-m", "foreign head")
+    foreign_head = _git(foreign, "rev-parse", "HEAD")
+    foreign_git_dir = _git(foreign, "rev-parse", "--absolute-git-dir")
+    marker = model_repo / ".git"
+    original_marker = marker.read_bytes()
+    async with open_artifact_session(_work(source, repo=model_repo), session_id="redirected-git") as session:
+        original_paths = (model_repo, session.layout.repo_git_dir, session.layout.git_common_dir)
+        held = [path.lstat() for path in original_paths]
+        try:
+            if redirect == "gitfile-symlink":
+                marker.unlink()
+                marker.symlink_to(foreign / ".git", target_is_directory=True)
+            else:
+                marker.write_text(f"gitdir: {foreign_git_dir}\n", encoding="utf-8")
+            assert _git(model_repo, "rev-parse", "HEAD") == foreign_head
+            current = [path.lstat() for path in original_paths]
+            assert [(item.st_dev, item.st_ino) for item in current] == [(item.st_dev, item.st_ino) for item in held]
+            assert artifact_dir_for(model_repo, session=session) == session.daydream_dir
+            with pytest.raises(ArtifactVisibilityError, match="routing|symlink") as refused:
+                session.validate_code_workspace()
+            assert type(refused.value).__name__ != "ArtifactSourceUnavailableError"
+        finally:
+            if marker.is_symlink():
+                marker.unlink()
+            marker.write_bytes(original_marker)
+        session.validate_code_workspace()
+
+
+@pytest.mark.parametrize("loss", ["marker", "source-at-query", "corrupt-marker"])
+async def test_code_workspace_missing_git_query_input(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, loss: str,
+) -> None:
+    """Required Git inputs lost around routing queries retain unavailable causes.
+
+    Held-directory checks miss an absent worktree marker or loss at subprocess
+    dispatch; malformed marker contents must still preserve genuine Git errors.
+    """
+    from daydream.git_ops import GitError
+
+    (model_repo,) = _worktrees(source, "model-repo")
+    work = _work(source, repo=model_repo)
+    marker = model_repo / ".git"
+    marker_bytes = marker.read_bytes()
+    original_run = subprocess.run
+    dispatched = False
+
+    def lose_at_query(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        nonlocal dispatched
+        if not dispatched and args == ["git", "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]:
+            dispatched = True
+            source.rename(tmp_path / "held-source")
+        return original_run(args, **kwargs)
+
+    async with open_artifact_session(work, session_id="query-input-loss") as session:
+        try:
+            if loss == "marker":
+                marker.unlink()
+            elif loss == "corrupt-marker":
+                marker.write_bytes(b"invalid Git marker\n")
+            else:
+                monkeypatch.setattr("daydream.git_ops.process.subprocess.run", lose_at_query)
+            expected = GitError if loss == "corrupt-marker" else artifact_visibility.ArtifactSourceUnavailableError
+            with pytest.raises(expected) as failure:
+                session.validate_code_workspace()
+            if loss != "corrupt-marker":
+                assert isinstance(failure.value.__cause__, FileNotFoundError)
+            assert dispatched is (loss == "source-at-query")
+        finally:
+            monkeypatch.setattr("daydream.git_ops.process.subprocess.run", original_run)
+            if loss == "source-at-query":
+                (tmp_path / "held-source").rename(source)
+            marker.write_bytes(marker_bytes)
+        session.validate_code_workspace()
+
+
 async def test_failed_detach_never_recreates_missing_report_only_source(
     tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

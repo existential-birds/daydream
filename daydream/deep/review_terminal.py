@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import copy
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import jsonschema
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
@@ -143,11 +145,21 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
             ctx.artifacts.validate_code_workspace()
         except ArtifactSourceUnavailableError:
             frozen_only = True
-    return _write_findings_for_parsed(
+    write_findings = partial(
+        _write_findings_for_parsed,
         ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
         review_warnings=review_warnings(state.dd), renderers=resolve_review_renderers(ctx.registry),
         diagrams=(state.diagrams or {}).get("payload"), auth=ctx.github_execution.auth,
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],
         review_context=context,
-        frozen_only=frozen_only,
     )
+    try:
+        return write_findings(frozen_only=frozen_only)
+    except git_ops.GitError:
+        if frozen_only or ctx.artifacts is None:
+            raise
+        try:
+            ctx.artifacts.validate_code_workspace()
+        except ArtifactSourceUnavailableError:
+            return write_findings(frozen_only=True)
+        raise
