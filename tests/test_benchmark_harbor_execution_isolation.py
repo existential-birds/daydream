@@ -77,7 +77,10 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         environment.pop("DAYDREAM_REVIEW_MODEL")
     elif outcome in {"model-empty", "model-blank"}:
         environment["DAYDREAM_REVIEW_MODEL"] = "" if outcome == "model-empty" else " \t "
-    environment.update(GH_TOKEN="forbidden-gh", DAYDREAM_JUDGE_API_KEY="forbidden-judge", HF_TOKEN="forbidden-hub")
+    forbidden_credentials = {
+        "GH_TOKEN": "forbidden-gh", "DAYDREAM_JUDGE_API_KEY": "forbidden-judge", "HF_TOKEN": "forbidden-hub",
+    }
+    environment.update(forbidden_credentials)
     original_environment = dict(environment)
     parent_before = dict(os.environ)
     baseline_runs = {path.name: path.read_bytes() for path in (operator_dataset_sentinel / "runs").glob("*.jsonl")}
@@ -99,6 +102,21 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         return response
 
     native_provider.choose = choose
+    native_credential_checks: list[dict[str, bool]] = []
+    if outcome == "finding":
+        real_spawn = asyncio.create_subprocess_exec
+
+        async def observe_native_environment(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            if args and Path(str(args[0])).name == "pi" and args[1:3] == ("--mode", "json"):
+                child = kwargs.get("env") or {}
+                native_credential_checks.append({
+                    **{name: name not in child and secret not in child.values()
+                       for name, secret in forbidden_credentials.items()},
+                    "selected_reviewer": child.get("OPENROUTER_API_KEY") == "synthetic-loopback-only",
+                })
+            return await real_spawn(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_native_environment)
     artifact = tmp_path / "review.json"
     artifact.write_bytes(b"prior candidate")
     if outcome == "bundle-tamper":
@@ -135,6 +153,8 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
         return
     assignments = [assignment_from_request(request) for request in native_provider.requests]
     if outcome == "finding":
+        assert native_credential_checks
+        assert all(all(check.values()) for check in native_credential_checks), native_credential_checks
         assert native_provider.headers
         assert all(not {"http-referer", "x-openrouter-title", "x-openrouter-categories"} & headers.keys()
                    for headers in native_provider.headers)
@@ -147,7 +167,7 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     assert immutable["provenance"]["head_sha"] not in prompts and '"pr_number"' not in assigned
     assert '"repository": "o/r"' not in assigned and '"pr_repo": "o/r"' not in assigned
     assert "Fix cache" in prompts
-    assert "forbidden-gh" not in prompts and "forbidden-judge" not in prompts
+    assert all(secret not in prompts for secret in forbidden_credentials.values())
     if outcome in {"finding", "clean", "partial", "noninline", "candidate-fault", "trajectory-fault",
                    "long-title", "blank-title", "oversized-body"}:
         result_path, = (tmp_path / "logs").glob("committed-*/committed-review.json")
