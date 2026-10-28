@@ -1087,7 +1087,11 @@ def test_immutable_diff_refuses_expansion_without_buffering_the_whole_patch(
 def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
-    """Reap every real launch, including timeouts before the child reaches its own code."""
+    """Reap every real launch, including timeouts before the child reaches its own code.
+
+    Only the timeout row needs a short deadline. Other rows allow interpreter
+    startup under full-suite contention so their intended failures win the race.
+    """
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
     shim = shim_dir / "git"
@@ -1115,8 +1119,9 @@ def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
     monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.defpath)
     expected = ("timed out" if mode == "timeout" else "bounded failure diagnostic" if mode == "nonzero"
                 else "output exceeds the supported size")
+    timeout = 0.3 if mode == "timeout" else 5.0
     with pytest.raises(git_ops.GitTimeoutError if mode == "timeout" else GitError, match=expected):
-        git_process._run_git(tmp_path, [mode], timeout=0.3, retries=1, max_output_bytes=1024,
+        git_process._run_git(tmp_path, [mode], timeout=timeout, retries=1, max_output_bytes=1024,
                              error_context="bounded command failed")
     assert len(processes) == (2 if mode == "timeout" else 1)
     for process in processes:
