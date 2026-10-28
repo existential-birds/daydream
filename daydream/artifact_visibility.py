@@ -95,22 +95,17 @@ class ArtifactSession:
         layout: ArtifactLayout,
         *,
         lock_fd: int,
-        repo_fd: int,
-        source_fd: int,
-        git_directory_fds: tuple[int, ...],
+        workspace: ownership.WorkspaceOwnership,
+        code_workspace: ownership.CodeWorkspace,
+        owns_workspace: bool,
         canonical_entries: tuple[ArtifactManifestEntry, ...],
         detach_transaction: Path,
     ) -> None:
         self.layout = layout
         self._lock_fd = lock_fd
-        self._repo_fd = repo_fd
-        self._source_fd = source_fd
-        source_metadata = os.fstat(source_fd)
-        self._source_identity = filesystem._SourceIdentity(
-            layout.source, source_metadata.st_dev, source_metadata.st_ino
-        )
-        self._git_directory_fds = git_directory_fds
-        self._git_marker_expected = (layout.repo / ".git").exists()
+        self.ownership = workspace
+        self.code_workspace = code_workspace
+        self._owns_workspace = owns_workspace
         self._canonical_entries = canonical_entries
         self._detach_transaction = detach_transaction
         self._state = _SessionState.ACTIVE
@@ -224,50 +219,19 @@ class ArtifactSession:
         self.validate_repo()
 
     def validate_repo(self) -> None:
-        """Reattest the held model checkout, including after private evidence freezes."""
+        """Reattest the held checkout, retaining the extension routing contract."""
         try:
-            held = os.fstat(self._repo_fd)
-            filesystem._validate_directory_identity(
-                self.layout.repo, device=held.st_dev, inode=held.st_ino, label="artifact repo"
-            )
+            self.code_workspace.validate_checkout()
         except ArtifactSourceUnavailableError:
             raise
         except (OSError, ArtifactVisibilityError) as exc:
             raise ArtifactVisibilityError("requested repo does not match active artifact session") from exc
 
     def validate_source(self) -> None:
-        """Reattest the original publication source independently of the model repo."""
-        self._source_identity.validate()
+        self.ownership.source.validate()
 
     def validate_code_workspace(self) -> None:
-        """Require the captured checkout and Git metadata for live code evaluation."""
-        directories = self._validate_code_workspace_paths()
-        try:
-            current = git_ops.git_dirs(self.layout.repo)
-        except (git_ops.GitError, OSError):
-            self._validate_code_workspace_paths()
-            raise
-        if current != directories:
-            raise ArtifactVisibilityError("artifact code workspace Git routing changed")
-
-    def _validate_code_workspace_paths(self) -> tuple[Path, Path]:
-        self.validate_repo()
-        directories = (self.layout.repo_git_dir, self.layout.git_common_dir)
-        if any(path == self.layout.source or self.layout.source in path.parents for path in directories):
-            self.validate_source()
-        for path, descriptor in zip(directories, self._git_directory_fds, strict=True):
-            held = os.fstat(descriptor)
-            filesystem._validate_directory_identity(
-                path, device=held.st_dev, inode=held.st_ino, label="artifact code workspace Git directory"
-            )
-        marker = self.layout.repo / ".git"
-        if self._git_marker_expected:
-            try:
-                marker.lstat()
-            except (FileNotFoundError, PermissionError) as exc:
-                raise ArtifactSourceUnavailableError("artifact code workspace Git marker is unavailable") from exc
-        filesystem._validate_projection_ancestry(marker, expected_kind="either")
-        return directories
+        self.code_workspace.validate()
 
     def _validate_destination(
         self,
@@ -461,11 +425,10 @@ class ArtifactSession:
                 transaction=self._detach_transaction,
                 workspace_key=self.layout.workspace_key,
                 purpose="detach-dump" if dump else "detach-destination",
-                stage_parent=base,
                 record_id=record.record_id,
                 remove_directories=not dump,
                 changed_message="explicit artifact destination changed during detach",
-                source_identity=self._source_identity,
+                source=self.ownership.source,
             )
 
     def _records(self) -> list[_DestinationRecord]:
@@ -623,21 +586,19 @@ class ArtifactSession:
         """Undo the two destination captures a failed paired registration made."""
         captured = self._records()[initial:]
         if captured:
-            self.validate_source()
             restore_stage = publication._create_source_stage(
-                self.layout.source,
+                self.ownership.source,
                 self._detach_transaction.name,
                 "restore",
                 workspace_key=self.layout.workspace_key,
             )
             try:
                 publication._restore_destination_records(
-                    self.layout.source, self._detach_transaction, captured, restore_stage,
-                    source_identity=self._source_identity,
+                    self.ownership.source, self._detach_transaction, captured, restore_stage,
                 )
             finally:
                 publication._retire_source_stage(
-                    self.layout.source,
+                    self.ownership.source,
                     self._detach_transaction.name,
                     "restore",
                     workspace_key=self.layout.workspace_key,
@@ -848,7 +809,6 @@ class ArtifactSession:
             raise ArtifactVisibilityError("frozen artifact destination identity mismatch")
         if filesystem.manifest_tree(snapshot.root) != snapshot.manifest:
             raise ArtifactVisibilityError("frozen artifact snapshot changed before publication")
-        self.validate_source()
         if disposition is ArtifactDisposition.ROLLBACK:
             self._restore_prior()
             self._retire_late_paths()
@@ -878,12 +838,11 @@ class ArtifactSession:
                 workspace_key=self.layout.workspace_key,
                 session_id=self.layout.session_id,
                 kind="publish",
-                source=self.layout.source,
-                source_fd=self._source_fd,
+                source=self.ownership.source,
             )
             filesystem._atomic_json(transaction / "publish-manifest.json", filesystem._manifest_payload(public_entries))
             publication_stage = publication._create_source_stage(
-                self.layout.source,
+                self.ownership.source,
                 transaction_id,
                 "publish",
                 workspace_key=self.layout.workspace_key,
@@ -939,22 +898,24 @@ class ArtifactSession:
             )
             external._inherit_external_capability_proofs(self._detach_transaction, transaction)
             mark(state=_Transition.PUBLISH_STAGED)
-        except BaseException:
-            if publication_stage is not None:
-                publication._retire_source_stage(
-                    self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
+        except BaseException as primary:
+            try:
+                if publication_stage is not None:
+                    publication._retire_source_stage(
+                        self.ownership.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
+                    )
+                transactions._retire_transaction(
+                    self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED
                 )
-            transactions._retire_transaction(
-                self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED
-            )
+            except BaseException as cleanup_error:
+                primary.add_note(f"publication staging cleanup retained evidence ({type(cleanup_error).__name__})")
             raise
         self._state = _SessionState.PUBLISHING
         (transaction / "public-backup").mkdir()
         _fsync_directory(transaction)
         mark(state=_Transition.PUBLISH_BACKED_UP)
-        self.validate_source()
         publication._replace_public_from_tree(
-            self.layout.source, public_stage, public_entries, source_identity=self._source_identity
+            self.ownership.source, public_stage, public_entries
         )
         for index, record in enumerate(publish_records):
             if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
@@ -966,8 +927,7 @@ class ArtifactSession:
                 desired=record.published,
                 transaction=transaction,
                 workspace_key=self.layout.workspace_key,
-                source=self.layout.source,
-                source_identity=self._source_identity,
+                source=self.ownership.source,
             )
         self.validate_source()
         mark(state=_Transition.PUBLISH_INSTALLED)
@@ -987,7 +947,7 @@ class ArtifactSession:
             terminal_state=_TerminalState.DETACHED_RECONCILED,
         )
         publication._retire_source_stage(
-            self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
+            self.ownership.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
         )
         transactions._retire_transaction(
             self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_VERIFIED
@@ -1002,13 +962,12 @@ class ArtifactSession:
             # earlier attempt (``finalize_frozen`` and session close both call
             # this). There is nothing left to restore from.
             return
-        self.validate_source()
         canonical = state_root / "canonical"
         publication._reset_source_stage(
-            self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+            self.ownership.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
         )
         source_stage = publication._create_source_stage(
-            self.layout.source,
+            self.ownership.source,
             transaction.name,
             "restore",
             workspace_key=self.layout.workspace_key,
@@ -1018,24 +977,22 @@ class ArtifactSession:
         destination_errors: list[Exception] = []
         public_errors: list[Exception] = []
         try:
-            self.validate_source()
             publication._restore_destination_records(
-                self.layout.source, transaction, self._records(), source_stage, source_identity=self._source_identity
+                self.ownership.source, transaction, self._records(), source_stage
             )
         except Exception as exc:
             destination_errors.append(exc)
         try:
             projection = source_stage / "public"
             filesystem._copy_tree(canonical, projection, self._canonical_entries)
-            self.validate_source()
             publication._replace_public_from_tree(
-                self.layout.source, projection, self._canonical_entries, source_identity=self._source_identity
+                self.ownership.source, projection, self._canonical_entries
             )
         except Exception as exc:
             public_errors.append(exc)
         try:
             publication._retire_source_stage(
-                self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+                self.ownership.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
             )
         except Exception as exc:
             destination_errors.append(exc)
@@ -1054,17 +1011,17 @@ class ArtifactSession:
         except Exception as exc:
             destination_errors.append(exc)
         if destination_errors:
-            raise transactions._clear_failed_restore(state_root, self.layout.source, transaction, destination_errors[0])
+            raise transactions._clear_failed_restore(
+                state_root, self.ownership.source, transaction, destination_errors[0]
+            )
         transactions._retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
 
     def _close(self) -> None:
         self._state = _SessionState.CLOSED
         fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         os.close(self._lock_fd)
-        os.close(self._repo_fd)
-        os.close(self._source_fd)
-        for descriptor in self._git_directory_fds:
-            os.close(descriptor)
+        if self._owns_workspace:
+            self.ownership.close()
 
 
 def _routing_session(
@@ -1195,16 +1152,15 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
     workspace_key = identity.workspace_key
     state_root = identity.state_root
     with ExitStack() as held:
-        repo_fd = filesystem._open_directory_descriptor(identity.repo, label="artifact repo")
-        held.callback(os.close, repo_fd)
-        source_fd = filesystem._open_directory_descriptor(source, label="artifact source")
-        held.callback(os.close, source_fd)
-        git_directory_descriptors: list[int] = []
-        for path in (identity.repo_git_dir, identity.git_common_dir):
-            descriptor = filesystem._open_directory_descriptor(path, label="artifact code workspace Git directory")
-            held.callback(os.close, descriptor)
-            git_directory_descriptors.append(descriptor)
-        git_directory_fds = tuple(git_directory_descriptors)
+        workspace = work.ownership
+        owns_workspace = workspace is None
+        if workspace is None:
+            workspace = ownership.WorkspaceOwnership(owner)
+            held.callback(workspace.close)
+        elif workspace.owner != owner:
+            raise ArtifactVisibilityError("artifact workspace owner identity mismatch")
+        code_workspace = workspace.bind_code(identity.repo)
+        source_owner = workspace.source
         try:
             collisions = git_ops.tracked_artifact_collisions(source)
         except git_ops.GitError as exc:
@@ -1230,11 +1186,8 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         held.callback(fcntl.flock, lock_fd, fcntl.LOCK_UN)
         transaction: Path | None = None
         try:
-            source_metadata = os.fstat(source_fd)
-            filesystem._validate_directory_identity(
-                source, device=source_metadata.st_dev, inode=source_metadata.st_ino, label="artifact source"
-            )
-            transactions._recover_transactions(state_root, source)
+            source_owner.validate()
+            transactions._recover_transactions(state_root, source_owner)
             validated_canonical_entries = publication._validated_canonical_entries(state_root)
             validated_public_entries = publication._validate_public_tree(
                 source,
@@ -1257,7 +1210,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             transaction.mkdir(mode=0o700)
             transactions._write_transaction_owner(
                 transaction, workspace_key=workspace_key, session_id=session_id, kind="detach",
-                source=source, source_fd=source_fd,
+                source=source_owner,
             )
             mark = partial(
                 transactions._write_transition,
@@ -1306,8 +1259,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
                     transaction=transaction,
                     workspace_key=workspace_key,
                     purpose="detach-public",
-                    stage_parent=source.parent,
-                    source_identity=transactions._validate_source_identity(transaction, source),
+                    source=source_owner,
                 )
             mark(state=_Transition.DETACHED)
             layout = ArtifactLayout(
@@ -1324,7 +1276,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         except BaseException as primary:
             if transaction is not None and transaction.exists() and not transaction.is_symlink():
                 try:
-                    transactions._reconcile_failed_detach(state_root, source, transaction)
+                    transactions._reconcile_failed_detach(state_root, source_owner, transaction)
                 except Exception:
                     primary.add_note("artifact recovery retained a closed conflict")
             raise
@@ -1332,9 +1284,9 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
     return ArtifactSession(
         layout,
         lock_fd=lock_fd,
-        repo_fd=repo_fd,
-        source_fd=source_fd,
-        git_directory_fds=git_directory_fds,
+        workspace=workspace,
+        code_workspace=code_workspace,
+        owns_workspace=owns_workspace,
         canonical_entries=canonical_entries,
         detach_transaction=transaction,
     )
@@ -1345,8 +1297,7 @@ def _close_artifact_session(session: ArtifactSession) -> None:
     primary: BaseException | None = None
     try:
         if session._state == "publishing":
-            session.validate_source()
-            transactions._recover_transactions(session.layout.state_root, session.layout.source)
+            transactions._recover_transactions(session.layout.state_root, session.ownership.source)
         elif session._state not in ("published", "closed"):
             session._restore_prior()
     except BaseException as exc:

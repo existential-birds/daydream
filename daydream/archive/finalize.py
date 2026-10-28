@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
     )
+    from daydream.artifacts.ownership import CodeWorkspace
     from daydream.run_config import RunConfig
     from daydream.workspace import WorkContext
 
@@ -135,7 +137,7 @@ def finalize_archive_run(
     work: WorkContext | None,
     dump_path: Path | None = None,
     progress: Callable[[str], None] | None = None,
-    validate_code_workspace: Callable[[], None] | None = None,
+    code_workspace: CodeWorkspace | None = None,
 ) -> None:
     """Strictly archive one immutable run or raise a closed typed error."""
     recorder_provenance = run.recorder_provenance
@@ -180,15 +182,16 @@ def finalize_archive_run(
         )
         target_dir = artifacts.root
         try:
-            if validate_code_workspace is not None:
-                validate_code_workspace()
+            git_ctx = (
+                code_workspace.run(partial(capture_git_context, code_workspace.path))
+                if code_workspace is not None
+                else capture_git_context(work.repo if work is not None else target_dir)
+            )
         except ArtifactSourceUnavailableError:
             git_ctx = GitContext(
                 branch=work.head_branch if work is not None else None,
                 head_sha=work.head_sha if work is not None else None,
             )
-        else:
-            git_ctx = capture_git_context(work.repo if work is not None else target_dir)
         if work is not None:
             git_ctx.base_branch = work.base_branch
             if git_ctx.base_sha is None:
@@ -211,8 +214,9 @@ def finalize_archive_run(
                         target_dir / ".daydream",
                         write_snapshot=write_snapshot,
                         artifact_provenance=artifact_provenance,
-                        code_workspace=work.repo if work is not None else artifact_provenance.public_source,
-                        validate_code_workspace=validate_code_workspace,
+                        code_workspace=code_workspace or (
+                            work.repo if work is not None else artifact_provenance.public_source
+                        ),
                     )
                     _validate_evaluation(
                         evaluation, session_id=session_id, trajectory_count=len(write_snapshot.documents),

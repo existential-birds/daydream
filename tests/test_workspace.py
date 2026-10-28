@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -134,6 +135,58 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
 
     # Source remains untouched after exit (no cleanup paths to assert).
     assert repo.exists()
+
+
+@pytest.mark.parametrize("ephemeral", [False, True], ids=["source", "model-worktree"])
+@pytest.mark.parametrize("change", ["replacement", "git-routing"])
+async def test_workspace_setup_refuses_changed_code_before_yield(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ephemeral: bool, change: str,
+) -> None:
+    """Setup anchor reads cannot yield ownership of a replacement checkout or foreign Git tree.
+
+    Existing cleanup tests change ownership after the workspace is yielded; setup previously ran
+    these reads outside its captured authority and accepted a mixed or foreign commit identity.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    owner = _private_owner(repo, tmp_path)
+    foreign = tmp_path / "foreign"
+    _init_repo(foreign)
+    (foreign / "foreign.txt").write_bytes(b"foreign checkout must survive\n")
+    _git(foreign, "add", "foreign.txt")
+    _commit(foreign, "foreign commit")
+    _git(foreign, "checkout", "-b", "foreign-branch")
+    original_run = subprocess.run
+    retained = tmp_path / "retained-code"
+    changed: Path | None = None
+
+    def replace_at_anchor(args: Any, **kwargs: Any) -> Any:
+        nonlocal changed
+        if changed is None and args == ["git", "branch", "--show-current"]:
+            changed = Path(kwargs["cwd"])
+            if change == "replacement":
+                changed.rename(retained)
+                foreign.rename(changed)
+            elif (changed / ".git").is_file():
+                (changed / ".git").write_text(f"gitdir: {foreign / '.git'}\n")
+            else:
+                (changed / ".git").rename(tmp_path / "retained-git")
+                shutil.copytree(foreign / ".git", changed / ".git")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_at_anchor)
+    with pytest.raises(ArtifactVisibilityError):
+        async with _open(repo, owner, ephemeral=ephemeral):
+            pytest.fail("workspace yielded changed code ownership")
+
+    assert changed is not None
+    if change == "replacement":
+        assert (retained / "base.txt").read_bytes() == b"base\n"
+        assert (changed / "foreign.txt").read_bytes() == b"foreign checkout must survive\n"
+    else:
+        assert (changed / "base.txt").read_bytes() == b"base\n"
+        assert (foreign / "foreign.txt").read_bytes() == b"foreign checkout must survive\n"
+    if ephemeral:
+        assert changed.is_dir(), "unsafe cleanup must retain the operational checkout"
 
 
 async def test_external_worktrees_use_supplied_private_workspace_owner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path

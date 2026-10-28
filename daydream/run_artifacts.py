@@ -402,7 +402,7 @@ def _finalize_run_artifacts(
             run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
             artifact_provenance=run_artifacts.session.provenance, config=config,
             work=work, dump_path=dump_path, progress=progress,
-            validate_code_workspace=run_artifacts.session.validate_code_workspace,
+            code_workspace=run_artifacts.session.code_workspace,
         )
     except (ArchiveIntegrityError, ArchivePublicationError) as exc:
         raise ArtifactVisibilityError(str(exc)) from exc

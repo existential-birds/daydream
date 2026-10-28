@@ -347,6 +347,14 @@ frozen bytes, transaction journals and conflict bytes; never recreate the source
 or install into its replacement. Recovery requires the transaction's captured
 source identity; pending older journals without that proof are preserved and
 refused rather than adopted or migrated.
+`WorkspaceOwnership` holds checkout and Git descriptors from workspace setup
+through cleanup. Its source capability owns strict journal proof and anchored
+publication/restoration operations; its code capability guards live reads and
+Git routing around each operation. Consumers request these operations and retain
+their own refusal, frozen-evidence fallback, or warning response. An artifact
+session borrows this authority; closing that session does not end workspace
+ownership. Standalone analysis holds a temporary code capability with the same
+directory checks, admitting plain directories without requiring Git.
 Ephemeral cleanup verifies the original source and holds its Git common directory
 through subprocess dispatch; inherited Git routing cannot select replacement
 metadata. Unsafe cleanup retains the operational worktree and warns without

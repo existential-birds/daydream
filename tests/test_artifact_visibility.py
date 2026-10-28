@@ -1130,9 +1130,12 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
             session.freeze(snapshot)
 
 
-@pytest.mark.parametrize("transition", _TRANSITIONS)
+@pytest.mark.parametrize(("transition", "proof_problem"), [
+    *((transition, None) for transition in _TRANSITIONS),
+    ("DETACHED", "missing"), ("DETACHED", "bool-device"), ("DETACHED", "wrong-inode"),
+])
 async def test_artifact_session_recovers_real_process_death_at_every_transition(
-    tmp_path: Path, source: Path, artifact_runtime_root: Path, transition: str,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path, transition: str, proof_problem: str | None,
 ) -> None:
     expected = _seed_public_artifacts(source)
     (source / "explicit-output.txt").write_bytes(b"prior explicit bytes")
@@ -1143,6 +1146,29 @@ async def test_artifact_session_recovers_real_process_death_at_every_transition(
         str(marker),
     ):
         pass
+
+    # Source proof is an independent replay contract: a valid journal and intact
+    # checkout cannot authorize recovery with absent, malformed, or foreign proof.
+    if proof_problem is not None:
+        state_root = artifact_runtime_root / _workspace_key(source)
+        transaction, = (state_root / "transactions").iterdir()
+        proof_path = transaction / "source-identity.json"
+        if proof_problem == "missing":
+            proof_path.unlink()
+        else:
+            proof = json.loads(proof_path.read_bytes())
+            if proof_problem == "bool-device":
+                proof["device"] = True
+            else:
+                proof["inode"] += 1
+            proof_path.write_text(json.dumps(proof))
+        source_before, evidence_before = _manifest(source), _manifest(state_root)
+        with pytest.raises(ArtifactVisibilityError, match="identity"):
+            async with open_artifact_session(_work(source, repo=second_repo), session_id="invalid-source-proof"):
+                pytest.fail("unproven recovery admitted")
+        assert _manifest(source) == source_before
+        assert _manifest(state_root) == evidence_before
+        return
 
     has_published_run = transition in {"PUBLISH_INSTALLED", "PUBLISH_VERIFIED"}
     async with open_artifact_session(_work(source, repo=second_repo), session_id=f"recovery-{transition.lower()}",
@@ -1511,6 +1537,75 @@ async def test_publish_initialization_failure_does_not_block_recovery(
         pass
     assert _manifest(source) == baseline
     assert not tuple((owner.artifact_state_root / "transactions").iterdir())
+
+
+@pytest.mark.parametrize("primary_kind", ["error", "cancel"])
+@pytest.mark.parametrize("cleanup_failure", ["source-stage", "transaction"])
+async def test_publication_preparation_cleanup_preserves_primary_and_retains_evidence(
+    source: Path, monkeypatch: pytest.MonkeyPatch, primary_kind: str, cleanup_failure: str,
+) -> None:
+    """A failed cleanup syscall cannot replace publication's pending error or cancellation.
+
+    Existing preparation failures exercise successful cleanup and therefore miss
+    both a retained source stage and a failed private transaction retirement.
+    """
+    expected = _seed_public_artifacts(source)
+    owner = _owner(source)
+    primary: BaseException = (
+        RuntimeError("publication preparation failed") if primary_kind == "error" else anyio.get_cancelled_exc_class()()
+    )
+    real_open, real_unlink, real_replace = os.open, Path.unlink, os.replace
+    stage: Path | None = None
+    cleanup_failed = False
+
+    def fail_public_copy(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal stage
+        target = Path(path)
+        if target.name == ".review-output.md" and target.parent.name == "public":
+            stage = target.parent.parent
+            raise primary
+        return real_open(path, flags, *args, **kwargs)
+
+    def fail_stage_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        nonlocal cleanup_failed
+        if cleanup_failure == "source-stage" and stage is not None and path == stage / "stage-owner.json":
+            cleanup_failed = True
+            raise PermissionError("secondary private cleanup detail")
+        real_unlink(path, *args, **kwargs)
+
+    def fail_transaction_retirement(original: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
+        nonlocal cleanup_failed
+        path = Path(original)
+        if (cleanup_failure == "transaction" and path.parent == owner.artifact_state_root / "transactions"
+                and path.name.startswith("publish-")):
+            cleanup_failed = True
+            raise PermissionError("secondary private cleanup detail")
+        real_replace(original, destination, *args, **kwargs)
+
+    with pytest.raises(BaseException) as caught:
+        async with open_artifact_session(_work(source), session_id="preparation-cleanup", owner=owner) as session:
+            frozen = _freeze_run(session, "preparation-cleanup")
+            frozen_manifest = _manifest(frozen.root)
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "open", fail_public_copy)
+                patch.setattr(Path, "unlink", fail_stage_unlink)
+                patch.setattr(os, "replace", fail_transaction_retirement)
+                _publish(session, frozen)
+    assert caught.value is primary and cleanup_failed
+    assert any("publication staging cleanup retained evidence (PermissionError)" == note for note in primary.__notes__)
+    assert all("secondary private cleanup detail" not in note for note in primary.__notes__)
+    assert _manifest(source) == expected
+    assert _manifest(owner.artifact_state_root / "canonical") == expected
+    assert _manifest(frozen.root) == frozen_manifest
+    transaction, = (owner.artifact_state_root / "transactions").glob("publish-*")
+    assert (transaction / "source-identity.json").is_file()
+    assert (transaction / "publish-manifest.json").is_file()
+    assert stage is not None
+    if cleanup_failure == "source-stage":
+        assert (stage / "stage-owner.json").is_file()
+    else:
+        assert not stage.exists()
+        assert (owner.artifact_state_root / "cleanup" / f"{transaction.name}.json").is_file()
 
 
 async def test_code_workspace_with_external_git_metadata_survives_public_source_loss(tmp_path: Path) -> None:

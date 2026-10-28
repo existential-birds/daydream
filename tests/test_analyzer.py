@@ -3,8 +3,9 @@
 import json
 import math
 import os
+import subprocess
 import uuid
-from functools import partial
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +13,7 @@ import pytest
 
 from daydream import _tree_sitter_safety as safety
 from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactVisibilityError
+from daydream.artifacts.ownership import CodeWorkspace
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval import quality as quality_mod
@@ -1013,64 +1015,117 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
 
 @pytest.mark.parametrize("unavailable", [
     "tree-sitter", "removed-source", "git-metadata-during-inventory", "git-metadata-before-inventory",
+    "source-during-git-discovery", "source-during-git-capture", "nested-git-metadata-at-inventory",
+    "source-during-checkout-open", "denied-checkout-open",
 ])
 def test_analyze_session_preserves_frozen_analysis_when_quality_is_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str,
 ) -> None:
-    """Unavailable native/source inputs preserve frozen-only analysis rather than dropping the run."""
+    """Unavailable native/source inputs preserve frozen-only analysis rather than dropping the run.
 
-    ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
-    daydream_dir, deep = _deep_dirs(tmp_path / "frozen")
-    seed_shipped_items(deep, high=1, med=0)
-    (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
-    root = _root_trajectory("quality-unavailable")
-    root["final_metrics"] = {"total_cost_usd": 0.5}
-    root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
-    child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
-    snapshot = _snapshot(root, child)
-    validate_code_workspace = None
-    if unavailable == "tree-sitter":
-        monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    elif unavailable == "removed-source":
-        ws.rename(tmp_path / "removed-source")
-    else:
-        from daydream.artifacts.filesystem import _validate_directory_identity
+    Existing inventory faults start after root acquisition. Loss during descriptor/Git discovery
+    previously escaped as a generic failure; nested Git loss could read ignored files recursively.
+    """
+    with ExitStack() as held:
 
-        git(ws, "init")
-        metadata = (ws / ".git").stat()
-        validate_code_workspace = partial(
-            _validate_directory_identity, ws / ".git", device=metadata.st_dev, inode=metadata.st_ino,
-            label="code Git metadata",
+        ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
+        daydream_dir, deep = _deep_dirs(tmp_path / "frozen")
+        seed_shipped_items(deep, high=1, med=0)
+        (deep / "latency-routing.json").write_text(json.dumps({"profile": {"selected": "forensic"}}))
+        root = _root_trajectory("quality-unavailable")
+        root["final_metrics"] = {"total_cost_usd": 0.5}
+        root["steps"] = [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}]
+        child = _root_trajectory("quality-unavailable") | {"trajectory_id": "child", "_source_file": "child.json"}
+        snapshot = _snapshot(root, child)
+        code_workspace: Path | CodeWorkspace = ws
+        if unavailable == "tree-sitter":
+            monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+        elif unavailable == "removed-source":
+            ws.rename(tmp_path / "removed-source")
+        elif unavailable in {"source-during-checkout-open", "denied-checkout-open"}:
+            original_open = os.open
+
+            def open_checkout(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+                if path == ws:
+                    if unavailable == "source-during-checkout-open":
+                        ws.rename(tmp_path / "removed-source")
+                    else:
+                        raise PermissionError("checkout descriptor is unavailable")
+                return original_open(path, flags, *args, **kwargs)
+
+            monkeypatch.setattr(os, "open", open_checkout)
+        elif unavailable in {"source-during-git-discovery", "source-during-git-capture"}:
+            git(ws, "init")
+            original_run = subprocess.run
+            command = (["rev-parse", "--is-inside-work-tree"] if unavailable == "source-during-git-discovery"
+                       else ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+
+            def discover_after_loss(args: Any, **kwargs: Any) -> Any:
+                if args == ["git", *command]:
+                    ws.rename(tmp_path / "removed-source")
+                return original_run(args, **kwargs)
+
+            monkeypatch.setattr("daydream.git_ops.process.subprocess.run", discover_after_loss)
+        elif unavailable == "nested-git-metadata-at-inventory":
+            git(ws, "init")
+            nested = ws / "service"
+            nested.mkdir()
+            (ws / "app.py").rename(nested / "app.py")
+            (ws / ".gitignore").write_text("ignored/\n")
+            ignored = nested / "ignored"
+            ignored.mkdir()
+            (ignored / "canary.py").write_text("SECRET = 1\n")
+            code_workspace = held.enter_context(CodeWorkspace.standalone(nested))
+            original_run, original_open_path = subprocess.run, Path.open
+            removed = False
+
+            def inventory_after_git_loss(args: Any, **kwargs: Any) -> Any:
+                nonlocal removed
+                if not removed and kwargs.get("cwd") == nested:
+                    removed = True
+                    (ws / ".git").rename(tmp_path / "removed-git")
+                return original_run(args, **kwargs)
+
+            def refuse_ignored_read(path: Path, *args: Any, **kwargs: Any) -> Any:
+                assert not path.is_relative_to(ignored), "lost Git metadata must not widen Python reads"
+                return original_open_path(path, *args, **kwargs)
+
+            monkeypatch.setattr("daydream.git_ops.process.subprocess.run", inventory_after_git_loss)
+            monkeypatch.setattr(Path, "open", refuse_ignored_read)
+        else:
+            git(ws, "init")
+            code_workspace = held.enter_context(CodeWorkspace.standalone(ws))
+            inventory = search_files
+
+            def enumerate_then_remove_git(*args: Any, **kwargs: Any) -> list[str]:
+                paths = inventory(*args, **kwargs) if unavailable == "git-metadata-during-inventory" else []
+                (ws / ".git").rename(tmp_path / "removed-git")
+                return paths if unavailable == "git-metadata-during-inventory" else inventory(*args, **kwargs)
+
+            monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
+
+        result = analyze_session(
+            daydream_dir, write_snapshot=snapshot, code_workspace=code_workspace,
         )
-        inventory = search_files
 
-        def enumerate_then_remove_git(*args: Any, **kwargs: Any) -> list[str]:
-            paths = inventory(*args, **kwargs) if unavailable == "git-metadata-during-inventory" else []
-            (ws / ".git").rename(tmp_path / "removed-git")
-            return paths if unavailable == "git-metadata-during-inventory" else inventory(*args, **kwargs)
-
-        monkeypatch.setattr(quality_mod, "search_files", enumerate_then_remove_git)
-
-    result = analyze_session(
-        daydream_dir, write_snapshot=snapshot, code_workspace=ws, validate_code_workspace=validate_code_workspace,
-    )
-
-    quality = result["quality"]
-    assert quality["unavailable"] is True
-    assert quality["error"]
-    assert quality["erosion"] is quality["verbosity"] is None
-    assert quality["per_file"] == {}
-    assert quality["scoped_files"] == 0
-    assert quality["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
-    assert result["session_id"] == "quality-unavailable"
-    assert result["trajectory_count"] == 2
-    assert result["cost"]["total_cost_usd"] == 0.5
-    assert result["findings"]["total"] == 1
-    assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
-    assert result["routing"]["profile"] == "forensic"
-    assert result["training_signals"]["total_trajectories"] == result["training_signals"]["clean_for_training"] == 1
-    if unavailable == "removed-source":
-        assert not ws.exists()
+        quality = result["quality"]
+        assert quality["unavailable"] is True
+        assert quality["error"]
+        assert quality["erosion"] is quality["verbosity"] is None
+        assert quality["per_file"] == {}
+        assert quality["scoped_files"] == 0
+        assert quality["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
+        assert result["session_id"] == "quality-unavailable"
+        assert result["trajectory_count"] == 2
+        assert result["cost"]["total_cost_usd"] == 0.5
+        assert result["findings"]["total"] == 1
+        assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+        assert result["routing"]["profile"] == "forensic"
+        assert result["training_signals"]["total_trajectories"] == result["training_signals"]["clean_for_training"] == 1
+        if unavailable == "removed-source" or unavailable.startswith("source-during-"):
+            assert not ws.exists()
+        if unavailable == "nested-git-metadata-at-inventory":
+            assert removed and not (ws / ".git").exists()
 
 
 # Seed the exact production artifact shapes for location and duplication analysis.

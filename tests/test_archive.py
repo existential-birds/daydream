@@ -6,9 +6,8 @@ Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flo
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass, replace
-from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -38,7 +37,8 @@ from daydream.artifact_visibility import (
     ArtifactTreeSnapshot,
     RoutedDestination,
 )
-from daydream.artifacts.filesystem import _validate_directory_identity, manifest_tree
+from daydream.artifacts.filesystem import manifest_tree
+from daydream.artifacts.ownership import CodeWorkspace
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.artifacts import DeepArtifact
 from daydream.remote_ci import (
@@ -1309,61 +1309,58 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | tuple[tuple[str, ...], Any],
 ) -> None:
     """The host finalizer cannot infer success from the legacy fail-open wrapper."""
-    session_id = "strict-session"
-    arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),)
-    from daydream.eval.analyzer import analyze_session
+    with ExitStack() as held:
+        session_id = "strict-session"
+        arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=True),)
+        from daydream.eval.analyzer import analyze_session
 
-    if failure == "corrupt-git-index":
-        from tests.harness.git_helpers import git
+        if failure == "corrupt-git-index":
+            from tests.harness.git_helpers import git
 
-        source = arguments["artifact_provenance"].public_source
-        source.mkdir()
-        git(source, "init")
-        metadata = (source / ".git").stat()
-        arguments["validate_code_workspace"] = partial(
-            _validate_directory_identity, source / ".git", device=metadata.st_dev, inode=metadata.st_ino,
-            label="code Git metadata",
-        )
-        (source / ".git/index").write_bytes(b"corrupt-index")
+            source = arguments["artifact_provenance"].public_source
+            source.mkdir()
+            git(source, "init")
+            arguments["code_workspace"] = held.enter_context(CodeWorkspace.standalone(source))
+            (source / ".git/index").write_bytes(b"corrupt-index")
 
-    def fail_evaluation(*args: Any, **kwargs: Any) -> Any:
-        if failure == "raised":
-            raise RuntimeError("eval failed")
-        if failure == "error-result":
-            return {"error": "no trajectory"}
-        if failure == "malformed-result":
-            return None
-        if failure == "empty-result":
-            return {}
-        evaluation = analyze_session(*args, **kwargs)
-        if isinstance(failure, tuple):
-            path, value = failure
-            section = evaluation
-            for key in path[:-1]:
-                section = section[key]
-            section[path[-1]] = value
+        def fail_evaluation(*args: Any, **kwargs: Any) -> Any:
+            if failure == "raised":
+                raise RuntimeError("eval failed")
+            if failure == "error-result":
+                return {"error": "no trajectory"}
+            if failure == "malformed-result":
+                return None
+            if failure == "empty-result":
+                return {}
+            evaluation = analyze_session(*args, **kwargs)
+            if isinstance(failure, tuple):
+                path, value = failure
+                section = evaluation
+                for key in path[:-1]:
+                    section = section[key]
+                section[path[-1]] = value
+                return evaluation
+            if failure == "wrong-session":
+                evaluation["session_id"] = "another-session"
+            elif failure == "missing-section":
+                del evaluation["quality"]
+            elif failure == "empty-quality":
+                evaluation["quality"] = {}
+            elif failure == "invalid-unavailable":
+                evaluation["quality"]["erosion"] = 0.0
+            else:
+                evaluation["quality"] = None
             return evaluation
-        if failure == "wrong-session":
-            evaluation["session_id"] = "another-session"
-        elif failure == "missing-section":
-            del evaluation["quality"]
-        elif failure == "empty-quality":
-            evaluation["quality"] = {}
-        elif failure == "invalid-unavailable":
-            evaluation["quality"]["erosion"] = 0.0
-        else:
-            evaluation["quality"] = None
-        return evaluation
 
-    monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
-    with pytest.raises(ArchiveFinalizationError, match="evaluation") as caught:
-        finalize_archive_run(**arguments)
-    if failure == "corrupt-git-index":
-        from daydream.git_ops import GitError
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
+        with pytest.raises(ArchiveFinalizationError, match="evaluation") as caught:
+            finalize_archive_run(**arguments)
+        if failure == "corrupt-git-index":
+            from daydream.git_ops import GitError
 
-        assert isinstance(caught.value.__cause__, GitError)
-    assert not (get_archive_dir() / "runs" / session_id).exists()
-    assert not (get_archive_dir() / "index.db").exists()
+            assert isinstance(caught.value.__cause__, GitError)
+        assert not (get_archive_dir() / "runs" / session_id).exists()
+        assert not (get_archive_dir() / "index.db").exists()
 
 
 @pytest.mark.parametrize("remove_at", ["before-finalization", "git-discovery", "git-inventory"])
@@ -1371,50 +1368,48 @@ def test_strict_archive_keeps_frozen_analysis_without_live_code(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, remove_at: str,
 ) -> None:
     """Source loss cannot drop valid frozen evidence or fabricate measured empty quality."""
-    session_id = "source-unavailable"
-    arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
-    frozen = arguments["artifacts"]
-    trajectory = arguments["run"].trajectories.documents[0].json_bytes
-    source = arguments["artifact_provenance"].public_source
-    source.mkdir()
-    (source / "app.py").write_text("VALUE = 1\n")
-    if remove_at == "before-finalization":
-        source.rename(tmp_path / "removed-source")
-    else:
-        from daydream.git_ops import process as git_process
-        from tests.harness.git_helpers import git
+    with ExitStack() as held:
+        session_id = "source-unavailable"
+        arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
+        frozen = arguments["artifacts"]
+        trajectory = arguments["run"].trajectories.documents[0].json_bytes
+        source = arguments["artifact_provenance"].public_source
+        source.mkdir()
+        (source / "app.py").write_text("VALUE = 1\n")
+        if remove_at == "before-finalization":
+            source.rename(tmp_path / "removed-source")
+        else:
+            from daydream.git_ops import process as git_process
+            from tests.harness.git_helpers import git
 
-        git(source, "init")
-        metadata = source.stat()
-        arguments["validate_code_workspace"] = partial(
-            _validate_directory_identity, source, device=metadata.st_dev, inode=metadata.st_ino, label="code workspace",
-        )
-        run_git = git_process._run_git
-        command = "rev-parse" if remove_at == "git-discovery" else "ls-files"
+            git(source, "init")
+            arguments["code_workspace"] = held.enter_context(CodeWorkspace.standalone(source))
+            run_git = git_process._run_git
+            command = "rev-parse" if remove_at == "git-discovery" else "ls-files"
 
-        def remove_then_dispatch(repo: Path, args: Any, **kwargs: Any) -> Any:
-            if repo == source and args[0] == command:
-                source.rename(tmp_path / "removed-source")
-            return run_git(repo, args, **kwargs)
+            def remove_then_dispatch(repo: Path, args: Any, **kwargs: Any) -> Any:
+                if repo == source and args[0] == command:
+                    source.rename(tmp_path / "removed-source")
+                return run_git(repo, args, **kwargs)
 
-        monkeypatch.setattr(git_process, "_run_git", remove_then_dispatch)
+            monkeypatch.setattr(git_process, "_run_git", remove_then_dispatch)
 
-    finalize_archive_run(**arguments)
+        finalize_archive_run(**arguments)
 
-    archived = archive_dir / "runs" / session_id
-    assert (archived / "trajectory.json").read_bytes() == trajectory
-    assert manifest_tree(frozen.root) == frozen.manifest
-    evaluation = json.loads((archived / "evaluation.json").read_bytes())
-    assert evaluation["session_id"] == session_id
-    assert evaluation["quality"]["unavailable"] is True
-    assert evaluation["quality"]["erosion"] is evaluation["quality"]["verbosity"] is None
-    manifest = json.loads((archived / "manifest.json").read_bytes())
-    assert manifest["metrics"]["erosion"] is manifest["metrics"]["verbosity"] is None
-    assert not source.exists()
-    with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
-        assert connection.execute("SELECT session_id, erosion, verbosity FROM runs").fetchall() == [
-            (session_id, None, None),
-        ]
+        archived = archive_dir / "runs" / session_id
+        assert (archived / "trajectory.json").read_bytes() == trajectory
+        assert manifest_tree(frozen.root) == frozen.manifest
+        evaluation = json.loads((archived / "evaluation.json").read_bytes())
+        assert evaluation["session_id"] == session_id
+        assert evaluation["quality"]["unavailable"] is True
+        assert evaluation["quality"]["erosion"] is evaluation["quality"]["verbosity"] is None
+        manifest = json.loads((archived / "manifest.json").read_bytes())
+        assert manifest["metrics"]["erosion"] is manifest["metrics"]["verbosity"] is None
+        assert not source.exists()
+        with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
+            assert connection.execute("SELECT session_id, erosion, verbosity FROM runs").fetchall() == [
+                (session_id, None, None),
+            ]
 
 
 @pytest.mark.parametrize("source_state", ["missing", "replacement", "symlink"])
@@ -1422,51 +1417,49 @@ def test_strict_archive_reattests_live_workspace_before_quality(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
 ) -> None:
     """A source changed during a real frozen-artifact read cannot evade the initial Git check."""
-    session_id = "late-source-change"
-    receipt = tmp_path / "frozen/.daydream/deep/merged-items.json"
-    receipt.parent.mkdir(parents=True)
-    receipt.write_text('{"items": [{"confidence": "HIGH"}]}')
-    arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
-    source = arguments["artifact_provenance"].public_source
-    source.mkdir()
-    metadata = source.stat()
-    arguments["validate_code_workspace"] = partial(
-        _validate_directory_identity, source, device=metadata.st_dev, inode=metadata.st_ino, label="code workspace",
-    )
-    replacement = tmp_path / "replacement"
-    replacement.mkdir()
-    marker = replacement / "app.py"
-    marker.write_bytes(b"VALUE = 'replacement code'\n")
-    original_read = Path.read_text
-    moved = tmp_path / "moved-source"
+    with ExitStack() as held:
+        session_id = "late-source-change"
+        receipt = tmp_path / "frozen/.daydream/deep/merged-items.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text('{"items": [{"confidence": "HIGH"}]}')
+        arguments = _finalizer_arguments(tmp_path, session_id, config=RunConfig(run_eval=True))
+        source = arguments["artifact_provenance"].public_source
+        source.mkdir()
+        arguments["code_workspace"] = held.enter_context(CodeWorkspace.standalone(source))
+        replacement = tmp_path / "replacement"
+        replacement.mkdir()
+        marker = replacement / "app.py"
+        marker.write_bytes(b"VALUE = 'replacement code'\n")
+        original_read = Path.read_text
+        moved = tmp_path / "moved-source"
 
-    def read_then_change(path: Path, *args: Any, **kwargs: Any) -> str:
-        content = original_read(path, *args, **kwargs)
-        if path == receipt and not moved.exists():
-            source.rename(moved)
-            if source_state == "replacement":
-                replacement.rename(source)
-            elif source_state == "symlink":
-                source.symlink_to(replacement, target_is_directory=True)
-        return content
+        def read_then_change(path: Path, *args: Any, **kwargs: Any) -> str:
+            content = original_read(path, *args, **kwargs)
+            if path == receipt and not moved.exists():
+                source.rename(moved)
+                if source_state == "replacement":
+                    replacement.rename(source)
+                elif source_state == "symlink":
+                    source.symlink_to(replacement, target_is_directory=True)
+            return content
 
-    monkeypatch.setattr(Path, "read_text", read_then_change)
-    archived = archive_dir / "runs" / session_id
-    if source_state == "missing":
-        finalize_archive_run(**arguments)
-        evaluation = json.loads((archived / "evaluation.json").read_bytes())
-        assert evaluation["findings"]["total"] == 1
-        assert evaluation["quality"]["unavailable"] is True
-        assert not source.exists()
-    else:
-        with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+        monkeypatch.setattr(Path, "read_text", read_then_change)
+        archived = archive_dir / "runs" / session_id
+        if source_state == "missing":
             finalize_archive_run(**arguments)
-        assert not archived.exists()
-        assert not (archive_dir / "index.db").exists()
-    assert moved.is_dir()
-    retained_marker = source / marker.name if source_state == "replacement" else marker
-    assert retained_marker.read_bytes() == b"VALUE = 'replacement code'\n"
-    assert receipt.read_bytes() == b'{"items": [{"confidence": "HIGH"}]}'
+            evaluation = json.loads((archived / "evaluation.json").read_bytes())
+            assert evaluation["findings"]["total"] == 1
+            assert evaluation["quality"]["unavailable"] is True
+            assert not source.exists()
+        else:
+            with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+                finalize_archive_run(**arguments)
+            assert not archived.exists()
+            assert not (archive_dir / "index.db").exists()
+        assert moved.is_dir()
+        retained_marker = source / marker.name if source_state == "replacement" else marker
+        assert retained_marker.read_bytes() == b"VALUE = 'replacement code'\n"
+        assert receipt.read_bytes() == b'{"items": [{"confidence": "HIGH"}]}'
 
 
 @pytest.mark.parametrize("mutate", [False, True])

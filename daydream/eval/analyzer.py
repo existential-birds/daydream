@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -13,10 +12,10 @@ from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
 )
 from daydream.artifact_visibility import ArtifactEvidenceProvenance, ArtifactSourceUnavailableError
+from daydream.artifacts.ownership import CodeWorkspace
 from daydream.deep.records import record_issues_or_empty
 from daydream.deep.routing_record import read_routing_record
 from daydream.eval.quality import _QUALITY_CALIBRATION, analyze_quality as analyze_quality
-from daydream.git_ops import GitError
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.observability.runtime import current_session
 from daydream.observability.spans import SpanScope
@@ -780,8 +779,7 @@ def analyze_session(
     *,
     write_snapshot: RunWriteSnapshot,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
-    code_workspace: Path | None = None,
-    validate_code_workspace: Callable[[], None] | None = None,
+    code_workspace: Path | CodeWorkspace | None = None,
 ) -> dict[str, Any]:
     """Combine trajectory, findings, timing, routing, training, and quality analysis.
 
@@ -821,18 +819,7 @@ def analyze_session(
             current_session(), "daydream.step.quality-analysis", "step",
             {"daydream.step": "quality-analysis", "daydream.phase": "quality-analysis"},
         ) as observed:
-            if validate_code_workspace is not None:
-                validate_code_workspace()
-            try:
-                quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
-            except GitError:
-                # Git can fail before the successful-analysis recheck. Only the
-                # held workspace authority may establish source unavailability.
-                if validate_code_workspace is not None:
-                    validate_code_workspace()
-                raise
-            if validate_code_workspace is not None:
-                validate_code_workspace()
+            quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
             observed.finish()
     except (ArtifactSourceUnavailableError, TreeSitterBadVersionError) as exc:
         # Frozen evidence remains valid when live quality cannot be measured.

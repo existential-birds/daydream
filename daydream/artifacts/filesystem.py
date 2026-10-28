@@ -7,9 +7,8 @@ import json
 import os
 import stat
 import unicodedata
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -111,57 +110,6 @@ def _validate_directory_identity(path: Path, *, device: int, inode: int, label: 
     canonical, metadata = _available_directory_metadata(path, label=label)
     if canonical != path or (metadata.st_dev, metadata.st_ino) != (device, inode):
         raise ArtifactVisibilityError(f"{label} directory identity changed")
-
-
-@dataclass(frozen=True)
-class _SourceIdentity:
-    """Captured source identity with no-follow, descriptor-anchored mutation parents."""
-
-    path: Path
-    device: int
-    inode: int
-
-    def validate(self) -> None:
-        _validate_directory_identity(self.path, device=self.device, inode=self.inode, label="artifact source")
-
-    @contextmanager
-    def parent_descriptor(self, target: Path) -> Iterator[int]:
-        """Pin a target's parent so pathname replacement cannot redirect a syscall."""
-        self.validate()
-        inside_source = self.path in target.parents
-        root = self.path if inside_source else _declared_directory(target.parent, label="artifact output parent")
-        descriptor = _open_directory_descriptor(root, label="artifact output parent")
-        try:
-            if inside_source:
-                metadata = os.fstat(descriptor)
-                if (metadata.st_dev, metadata.st_ino) != (self.device, self.inode):
-                    raise ArtifactVisibilityError("artifact source directory identity changed")
-                for component in target.parent.relative_to(self.path).parts:
-                    child = os.open(
-                        component, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-                        dir_fd=descriptor,
-                    )
-                    os.close(descriptor)
-                    descriptor = child
-            self.validate()
-            yield descriptor
-        finally:
-            os.close(descriptor)
-
-    def mkdir(self, target: Path, *, mode: int, exist_ok: bool = False) -> None:
-        with self.parent_descriptor(target) as descriptor:
-            try:
-                os.mkdir(target.name, mode=mode, dir_fd=descriptor)
-            except FileExistsError:
-                metadata = os.stat(target.name, dir_fd=descriptor, follow_symlinks=False)
-                if not exist_ok or not stat.S_ISDIR(metadata.st_mode):
-                    raise
-            os.fsync(descriptor)
-
-    def rmdir(self, target: Path) -> None:
-        with self.parent_descriptor(target) as descriptor:
-            os.rmdir(target.name, dir_fd=descriptor)
-            os.fsync(descriptor)
 
 
 def _open_directory_descriptor(path: Path, *, label: str) -> int:

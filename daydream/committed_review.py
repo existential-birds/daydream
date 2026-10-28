@@ -19,12 +19,13 @@ import jsonschema
 from daydream import agent, clock, git_ops
 from daydream.artifact_visibility import (
     ArtifactDisposition,
+    ArtifactVisibilityError,
     OutputLabel,
     open_artifact_session,
     private_root_locations,
     resolve_private_workspace_owner,
 )
-from daydream.artifacts.ownership import operational_worktree_root
+from daydream.artifacts.ownership import WorkspaceOwnership, operational_worktree_root
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiBackend
 from daydream.committed_review_model import (
@@ -440,8 +441,9 @@ async def _run_committed_review(
             ))
             captured_root = operational_worktree_root(owner) / run_id
             assert original.head_sha is not None and original.base_sha is not None
-            git_ops.worktree_add(source, captured_root, original.head_sha, detach=True)
-            lifetime.callback(_remove_capture, source, captured_root)
+            assert original.ownership is not None
+            original.ownership.add_worktree(captured_root, original.head_sha)
+            lifetime.callback(_remove_capture, original.ownership, captured_root)
             work = replace(original, repo=captured_root, is_ephemeral=True, run_id=run_id)
         else:
             assert request.immutable_input is not None
@@ -616,12 +618,14 @@ async def _run_committed_review(
                 raise unsupported
 
 
-def _remove_capture(source: Path, captured_root: Path) -> None:
-    try:
-        git_ops.worktree_remove(source, captured_root, force=True)
-    except git_ops.GitError as exc:
-        from daydream.ui import print_warning
+def _remove_capture(ownership: WorkspaceOwnership, captured_root: Path) -> None:
+    from daydream.ui import print_warning
 
+    try:
+        ownership.remove_worktree(captured_root)
+    except ArtifactVisibilityError:
+        print_warning(agent.console, "Captured worktree cleanup skipped: ownership changed; the worktree was retained.")
+    except git_ops.GitError as exc:
         print_warning(agent.console, f"Failed to remove captured worktree {captured_root}: {exc}")
 
 

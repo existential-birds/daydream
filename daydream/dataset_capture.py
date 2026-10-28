@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
@@ -175,9 +176,8 @@ def capture_run_record(
     from daydream.artifact_visibility import ArtifactVisibilityError
 
     try:
-        artifact_session.validate_code_workspace()
-        final_head = git_ops.head_sha(work.repo)
-        artifact_session.validate_code_workspace()
+        code_workspace = artifact_session.code_workspace
+        final_head = code_workspace.run(partial(git_ops.head_sha, code_workspace.path))
     except (ArtifactVisibilityError, git_ops.GitError):
         final_head = None
     provenance = {"producer": capture_executable_provenance().to_dict(),

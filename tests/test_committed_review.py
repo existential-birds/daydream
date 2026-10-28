@@ -6,9 +6,12 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import tracemalloc
 import zlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +22,7 @@ import pytest
 from rich.console import Console
 
 from daydream import agent, clock, committed_review, git_ops, json_utils
+from daydream.artifact_visibility import ArtifactSession, artifact_session_active, open_artifact_session
 from daydream.backends import MetricsEvent, TextEvent
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
@@ -543,6 +547,95 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         _forge_completion(corrupted)
         with pytest.raises(ValueError, match="native execution"):
             validate_committed_result(corrupted)
+
+
+@pytest.mark.parametrize("cleanup_change", ["none", "source-replacement", "git-routing"])
+async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    cleanup_change: str,
+) -> None:
+    """Committed captures share the workspace lease beyond artifact-session teardown.
+
+    Ordinary runner cleanup tests do not enter this separate capture path; a source
+    replacement must not let its Git registry delete the original capture, and a
+    redirected capture must survive cleanup without replacing caller cancellation.
+    """
+    from tests.test_artifact_visibility import _Entry, _walk_entry
+
+    repo = review_inputs.work.source
+    captured_root: Path | None = None
+    foreign_roots: list[Path] = []
+    foreign_before: list[_Entry] = []
+    primary = asyncio.CancelledError("caller cancelled committed review")
+
+    @asynccontextmanager
+    async def close_then_change(*args: Any, **kwargs: Any) -> AsyncIterator[ArtifactSession]:
+        nonlocal captured_root
+        try:
+            async with open_artifact_session(*args, **kwargs) as session:
+                captured_root = session.layout.repo
+                yield session
+        finally:
+            assert captured_root is not None and not artifact_session_active()
+            if cleanup_change == "source-replacement":
+                removed = repo.with_name("removed-source")
+                repo.rename(removed)
+                seed_feature_branch(repo, base={"foreign.py": "FOREIGN = 1\n"},
+                                    feature={"foreign.py": "FOREIGN = 2\n"})
+                # A foreign registry at the same spelling can otherwise claim this
+                # capture and authorize Git to delete both its bytes and registration.
+                shutil.copytree(removed / ".git/worktrees", repo / ".git/worktrees")
+                foreign_roots.append(repo)
+            elif cleanup_change == "git-routing":
+                foreign = repo.with_name("foreign")
+                seed_feature_branch(foreign, base={"foreign.py": "FOREIGN = 1\n"},
+                                    feature={"foreign.py": "FOREIGN = 2\n"})
+                linked = repo.with_name("foreign-linked")
+                git_ops.worktree_add(foreign, linked, "HEAD")
+                foreign_git, _ = git_ops.git_dirs(linked)
+                (captured_root / ".git").write_text(f"gitdir: {foreign_git}\n", encoding="utf-8")
+                foreign_roots.extend((foreign, linked))
+            for root in foreign_roots:
+                _walk_entry(repo.parent, root, foreign_before)
+
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
+        binding = kwargs["host_tools"]
+        binding.configure_schema(kwargs["output_schema"])
+        async with binding.session():
+            value = _discovery(review_inputs)
+            value["claims"] = []
+            binding.admit("terminal", "structured_output", value, terminal=True)
+            accepted = binding.submit("terminal", value)
+            if cleanup_change == "git-routing":
+                raise primary
+            binding.native_settled = True
+        return accepted, None, None
+
+    monkeypatch.setattr(committed_review, "open_artifact_session", close_then_change)
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    review_request = CommittedReviewRequest(repo, review_inputs.revision["merge_base_sha"])
+    if cleanup_change == "git-routing":
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await run_committed_review(review_request)
+        assert caught.value is primary
+        payload = json.loads((repo / ".daydream/committed-review.json").read_text())
+        validate_committed_result(payload)
+        assert payload["terminal_result"]["pipeline_state"] == "cancelled"
+    else:
+        result = await run_committed_review(review_request)
+        assert result.complete and result.output_installed
+    assert captured_root is not None
+    warning = capsys.readouterr().out
+    if cleanup_change == "none":
+        assert not captured_root.exists()
+        assert "Captured worktree cleanup" not in warning
+    else:
+        assert captured_root.is_dir()
+        assert "Captured worktree cleanup skipped" in warning and "retained" in warning
+        foreign_after: list[_Entry] = []
+        for root in foreign_roots:
+            _walk_entry(repo.parent, root, foreign_after)
+        assert foreign_after == foreign_before
 
 
 @pytest.mark.parametrize("fault", [

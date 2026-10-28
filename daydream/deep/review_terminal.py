@@ -9,7 +9,6 @@ from typing import Any
 
 import jsonschema
 
-from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
@@ -139,12 +138,6 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
     if info.diagnostic is not None:
         print_warning(console, info.diagnostic)
-    frozen_only = False
-    if ctx.artifacts is not None:
-        try:
-            ctx.artifacts.validate_code_workspace()
-        except ArtifactSourceUnavailableError:
-            frozen_only = True
     write_findings = partial(
         _write_findings_for_parsed,
         ctx.work.repo, ctx.config, parsed_issues_from_items(items), run_info=info.markdown,
@@ -153,13 +146,9 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
         captured_pr=pr, terminal_result=result, snapshot_diff=ctx.data["snapshot_diff"],
         review_context=context,
     )
+    if ctx.artifacts is None:
+        return write_findings(frozen_only=False)
     try:
-        return write_findings(frozen_only=frozen_only)
-    except git_ops.GitError:
-        if frozen_only or ctx.artifacts is None:
-            raise
-        try:
-            ctx.artifacts.validate_code_workspace()
-        except ArtifactSourceUnavailableError:
-            return write_findings(frozen_only=True)
-        raise
+        return ctx.artifacts.code_workspace.run(partial(write_findings, frozen_only=False))
+    except ArtifactSourceUnavailableError:
+        return write_findings(frozen_only=True)
