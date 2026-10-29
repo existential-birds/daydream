@@ -435,7 +435,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/55/ca/d323556e2bf9bfb63
 
 [[package]]
 name = "daydream"
-version = "0.31.0"
+version = "0.32.0"
 source = { editable = "../../" }
 dependencies = [
     { name = "anyio" },
