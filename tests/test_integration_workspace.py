@@ -21,6 +21,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _git
 from tests.test_workspace import _push_origin_commit_via_sidecar
 
@@ -197,14 +198,15 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 # --- Test 4: --comment + no open PR ----------------------------------------
 
 @pytest.mark.asyncio
-async def test_comment_mode_without_open_pr_runs_deep_flow(
-    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_comment_mode_without_open_pr_rejects_before_dispatch(
+    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """Comment mode resolves an origin-only branch and dispatches deep review without a PR."""
+    """An origin-only branch without a PR cannot dispatch committed comment review."""
     _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Z")
-    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
-    monkeypatch.setattr("daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
+    fake_gh.set_response("pr-list", value=[])
     captured: dict[str, Any] = {}
+    errors: list[str] = []
+    monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
 
     def _capture(work: Any, config: Any) -> None:
         captured["is_ephemeral"] = work.is_ephemeral
@@ -216,33 +218,35 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     config = RunConfig(target=str(repo_with_origin), branch="feat/Z", output_mode="comment", cleanup=False,)
     exit_code = await runner.run(config)
 
-    assert exit_code == 0
-    assert captured["is_ephemeral"] is True
-    assert captured["output_mode"] == "comment"
+    assert exit_code == 1
+    assert captured == {}
+    assert any("No target PR found" in message for message in errors)
 
 
 # --- Test 5: --comment + open PR resolves base from PR ---------------------
 
 @pytest.mark.asyncio
 async def test_comment_mode_with_open_pr_uses_pr_base(
-    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """An open PR's ``baseRefName`` is what ``open_workspace`` resolves as base."""
+    """An origin-only PR pins its head, comparison and distinct base tip before dispatch."""
     # PR base = "develop". Push a develop branch to origin AND create a local
     # tracking branch so ``git merge-base develop HEAD`` (run from inside the
     # ephemeral worktree) can resolve the ref symbolically.
-    _make_feature_branch_on_origin(tmp_path, bare_origin, branch="develop")
-    _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/W")
+    base_tip = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="develop")
+    head = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/W")
     _git(repo_with_origin, "fetch", "origin")
     _git(repo_with_origin, "branch", "develop", "origin/develop")
 
-    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch, **_kwargs: [{
-                "number": 42, "baseRefName": "develop", "headRefOid": "deadbeef", "baseRefOid": "cafebabe",
-                "url": "https://github.com/x/y/pull/42",
-            }
-        ],
-    )
+    comparison = _git(repo_with_origin, "merge-base", "develop", head)
+    fake_gh.serve_pr_view({
+        "number": 42, "headRefName": "feat/W", "baseRefName": "develop", "headRefOid": head,
+        "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/42",
+    })
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/42", {
+        "head": {"sha": head}, "base": {"sha": base_tip},
+    })
     # Stop _run_loop_deep after open_workspace resolves; assertions below check
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
@@ -250,6 +254,10 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     def _capture(work: Any, config: Any) -> None:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
+        captured["head_sha"] = work.head_sha
+        captured["pr"] = work.review_pr
+        captured["pr_number"] = config.pr_number
+        captured["pr_repo"] = config.pr_repo
 
     _stub_run_loop_deep(monkeypatch, _capture)
 
@@ -257,8 +265,16 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     exit_code = await runner.run(config)
 
     assert exit_code == 0
-    assert captured["base_branch"] == "develop"
+    assert captured["base_branch"] == comparison
     assert captured["is_ephemeral"] is True
+    assert captured["head_sha"] == head
+    assert captured["pr"].base_ref == "develop"
+    assert captured["pr"].base_sha == comparison
+    assert captured["pr"].pr_base_sha == base_tip
+    assert captured["pr_number"] == 42
+    assert captured["pr_repo"] == "acme/widgets"
+    assert config.pr_number is None
+    assert config.pr_repo is None
 
 
 # --- Test 6: --review on base branch is allowed ----------------------------
@@ -293,5 +309,5 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError must NOT have been raised.
     assert captured.get("title") != "Wrong Branch"
     # _run_loop_deep was reached.
-    assert routed["base_branch"] == "main"
+    assert routed["base_branch"] == _git(repo_with_origin, "rev-parse", "main")
     assert routed["head_branch"] == "main"

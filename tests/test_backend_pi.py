@@ -810,19 +810,19 @@ def _assert_pi_model_and_provider(captured: list[list[str]], *, model: str, prov
 
 @pytest.mark.parametrize(
     ("ambient", "cli_effort", "file_global", "file_phase", "expected", "env_provider", "expected_provider"), [
-        (None, None, None, None, "medium", None, "nous"),
+        (None, None, None, None, "medium", None, None),
         ("high", None, None, None, "medium", "custom-proxy", "custom-proxy"),
-        ("high", None, "low", None, "low", None, "nous"),
+        ("high", None, "low", None, "low", None, None),
         ("high", None, "low", "xhigh", "xhigh", "custom-proxy", "custom-proxy"),
-        ("high", "low", "high", "xhigh", "low", None, "nous"),
+        ("high", "low", "high", "xhigh", "low", None, None),
     ], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global"],
 )
 async def test_runner_pi_stack_review_effort_reaches_native_submission(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     ambient: str | None, cli_effort: str | None, file_global: str | None, file_phase: str | None, expected: str,
-    env_provider: str | None, expected_provider: str,
+    env_provider: str | None, expected_provider: str | None,
 ) -> None:
-    """Built-in effort precedence and default/override provider/model reach native Pi argv."""
+    """Effort precedence reaches captured review while Pi retains native model/provider defaults."""
     _silence(monkeypatch)
     if ambient is None:
         monkeypatch.delenv("PI_THINKING", raising=False)
@@ -843,7 +843,8 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
         stage = review_stage_state(prompt)
         if len(captured) == 1:
             fake.advance(1)  # Preparation/earlier phases spend the shared allowance.
-        if stage is None and not any(arg.endswith("pi_structured_output.ts") for arg in argv):
+        selected_tools = argv[argv.index("--tools") + 1].split(",") if "--tools" in argv else []
+        if stage is None and "structured_output" not in selected_tools:
             return make_mock_process_from_fixture("simple_text.jsonl")
         if stage is not None:
             reviewer_args.append(argv)
@@ -884,7 +885,10 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
         review_profile=profile,
         shallow_fanout_threshold=0, review_cache_enabled=False, run_eval=False)
     assert await run(config) == 0
-    _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
+    assert captured
+    assert all("--model" not in argv for argv in captured)
+    assert {(argv[argv.index("--provider") + 1] if "--provider" in argv else None)
+            for argv in captured} == {expected_provider}
     assert reviewer_args
     # The host nominal ceiling is 3600s; 385s shared minus 77s reserve and 1s spent leaves 307s.
     assert wall_allowances and all(0 < wall <= 307 for wall in wall_allowances)

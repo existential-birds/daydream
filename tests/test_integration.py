@@ -613,8 +613,11 @@ async def test_run_comment_resolves_pr_through_real_cli_boundary(
             "headRepositoryOwner": {"login": "acme"},
         }
     )
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", {
+        "head": {"sha": head}, "base": {"sha": _git(tmp_path, "rev-parse", "main")},
+    })
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, tmp_path)
+    backend = _install_stub_backend(monkeypatch, tmp_path)
     exit_code = await run(make_config(tmp_path, output_mode="comment", pr_number=pr_number))
     assert exit_code == 0
     items = json.loads((tmp_path / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
@@ -628,6 +631,7 @@ async def test_run_comment_resolves_pr_through_real_cli_boundary(
     assert review_calls[0].payload["comments"][0]["path"] in {item.get("file") for item in items}
     assert fake_gh.process_calls()
     assert {call.cwd for call in fake_gh.process_calls()} == {tmp_path.resolve()}
+    assert backend.calls and all(call["cwd"] != tmp_path for call in backend.calls)
     list_calls = [
         call for call in fake_gh.process_calls() if call.argv[1:3] == ["pr", "list"]
     ]
@@ -641,7 +645,7 @@ async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., "RunConfig"], fake_gh: FakeGh,
     pr_number: int | None, outcome: str,
 ) -> None:
-    """Both lookup modes fail closed without attempting a review POST."""
+    """Both lookup modes reject missing/unusable PRs before model dispatch or posting."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     if outcome == "malformed_head":
         fake_gh.serve_pr_view({
@@ -667,26 +671,23 @@ async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
         if pr_number is None:
             fake_gh.set_response("pr-list", value={"__error__": diagnostic})
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, tmp_path)
+    backend = _install_stub_backend(monkeypatch, tmp_path)
     errors: list[str] = []
-    warnings: list[str] = []
-    monkeypatch.setattr("daydream.pr_review.print_error", lambda _console, _title, message: errors.append(message))
-    monkeypatch.setattr("daydream.pr_review.print_warning", lambda _console, message: warnings.append(message))
+    monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
     exit_code = await run(make_config(tmp_path, output_mode="comment", pr_number=pr_number))
     assert exit_code == 1
+    assert not backend.calls
     assert fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews") == []
-    messages = errors + warnings
     if outcome != "absence":
         expected = (
             "authentication required"
             if outcome == "auth_failure"
             else "invalid PR row" if outcome == "malformed_head" else "futureCompatibilityFloor"
         )
-        assert any(expected in message for message in messages)
-        assert all("No open PR found" not in message for message in messages)
+        assert any(expected in message for message in errors)
+        assert all("No target PR found" not in message for message in errors)
     else:
-        expected = "No open PR found" if pr_number is None else "PR #7 not found"
-        assert any(expected in message for message in messages)
+        assert any("No target PR found" in message for message in errors)
 
 async def test_run_comment_does_not_prompt_for_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
@@ -695,7 +696,7 @@ async def test_run_comment_does_not_prompt_for_skill(
     """--comment mode should never prompt for skill selection."""
     _two_commit_repo(tmp_path, "f.txt", "a", "b", "feat")
     install_backend(PhaseDispatchBackend())
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: _COMMENT_PR)
+    fake_gh.serve_open_pr(tmp_path)
     silence_console("daydream.ui")
     silence_console("daydream.runner")
     # Trap: skill selection must never prompt in --comment mode.
@@ -708,18 +709,18 @@ async def test_run_comment_does_not_prompt_for_skill(
 
 
 async def test_run_comment_submission_failure_exits_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: FakeGh,
 ) -> None:
     """A gh-process failure propagates through real classification/posting as exit 1."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
-    fake_pr = _COMMENT_PR
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: fake_pr)
+    fake_gh.serve_open_pr(tmp_path)
     fake_gh.set_response("POST", "repos/acme/widgets/pulls/7/reviews", {"__error__": "HTTP 500"})
     config = make_config(tmp_path, output_mode="comment")
     exit_code = await run(config)
     assert exit_code == 1, "comment mode must fail when the review post fails"
+    assert len(fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")) == 1
 
 async def test_run_loop_submission_failure_warns_and_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: Any,

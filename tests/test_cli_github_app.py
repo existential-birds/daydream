@@ -39,7 +39,7 @@ class _Transport:
 
 
 @pytest.fixture
-def transport(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> _Transport:
+def transport(fake_gh: FakeGh, feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch) -> _Transport:
     boundary = _Transport(fake_gh)
     fake_gh.set_response("GET", "app/installations", [
         {"id": 99, "account": {"login": "another-owner"}, "app_slug": "unrelated-app"},
@@ -50,6 +50,7 @@ def transport(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> _Transport:
     })
     fake_gh.set_response("GET", "user", {"login": "ambient-user"})
     fake_gh.set_response("repo-view", value="acme/widgets")
+    fake_gh.serve_open_pr(feature_branch_repo)
     real_run = subprocess.run
 
     def request(args: Any, *positional: Any, **kwargs: Any) -> Any:
@@ -200,7 +201,12 @@ def test_cli_app_pr_target_survives_detached_workspace(
         "url": "https://github.com/acme/widgets/pull/73", "headRepository": {"name": "widgets"},
         "headRepositoryOwner": {"login": "acme"},
     })
+    transport.gh.set_response("GET", "repos/acme/widgets/pulls/73", {
+        "head": {"sha": head}, "base": {"sha": git(repo, "rev-parse", "main")},
+    })
+    model_cwds: list[Path] = []
     def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        model_cwds.append(Path(cwd))
         issue = {"id": 1, "file": "main.py", "line": 2, "severity": "medium",
                  "confidence": "HIGH", "description": "Changed greeting breaks callers",
                  "rationale": "Callers require world", "evidence": "return 'universe'"}
@@ -225,7 +231,8 @@ def test_cli_app_pr_target_survives_detached_workspace(
         assert views[0][1][:3] == ["gh", "pr", "view"] and views[0][1][3].startswith("--")
     else:
         assert all(argv[:4] == ["gh", "pr", "view", "73"] for _cwd, argv, _env in views)
-    assert any(cwd != repo for cwd, _argv, _env in views)
+    assert model_cwds and all(cwd != repo for cwd in model_cwds)
+    assert all(cwd == repo for cwd, _argv, _env in views)
     assert transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
     _assert_app_requests(transport)
     assert git(repo, "branch", "--show-current") == "feature"
@@ -303,3 +310,68 @@ def test_cli_invalid_app_key_aborts_without_exposing_secret(
     assert secret not in captured.out + captured.err
     assert transport.requests == []
     assert not (feature_branch_repo / ".review-output.md").exists()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_cli_requested_branch_ignores_current_checkout_pr(
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    transport: _Transport, explicit: bool,
+) -> None:
+    """CLI branch selection must bind capture and publication before detached review.
+
+    Direct runner tests omit CLI provenance discovery, which can otherwise turn
+    the current checkout's different PR into an explicit target for this run.
+    """
+    repo = feature_branch_repo
+    current_head = git(repo, "rev-parse", "HEAD")
+    base = git(repo, "rev-parse", "main")
+    git(repo, "checkout", "-b", "requested", "main")
+    (repo / "main.py").write_text("def hello():\n    return 'galaxy'\n")
+    git(repo, "add", "main.py")
+    git(repo, "commit", "-m", "requested branch change")
+    requested_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "feature")
+    remote = bare_remote(tmp_path / "origin.git")
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "origin", "main", "feature", "requested")
+    monkeypatch.setenv("GH_REPO", "acme/widgets")
+    requested_pr = {
+        "number": 73, "headRefOid": requested_head, "headRefName": "requested", "baseRefName": "main",
+        "url": "https://github.com/acme/widgets/pull/73", "headRepository": {"name": "widgets"},
+        "headRepositoryOwner": {"login": "acme"},
+    }
+    current_pr = {**requested_pr, "number": 7, "headRefOid": current_head, "headRefName": "feature",
+                  "url": "https://github.com/acme/widgets/pull/7"}
+    transport.gh.set_response("pr-list", value=[requested_pr])
+    transport.gh.set_response("GET", "repos/acme/widgets/pulls/73", {
+        "head": {"sha": requested_head}, "base": {"sha": base},
+    })
+    request = subprocess.run
+
+    def route_pr_view(args: Any, *positional: Any, **kwargs: Any) -> Any:
+        if isinstance(args, (list, tuple)) and args[:3] == ["gh", "pr", "view"]:
+            transport.gh.serve_pr_view(requested_pr if args[3] == "73" else current_pr)
+        return request(args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", route_pr_view)
+    model_heads: list[str] = []
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        model_heads.append(git(Path(cwd), "rev-parse", "HEAD"))
+        return [TextEvent(text="Review complete."), ResultEvent(
+            structured_output=review_stage_result(prompt, []) if output_schema else None, continuation=None,
+        )]
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: ScriptedBackend(responder=respond))
+    output = tmp_path / "trajectory.json"
+    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean",
+                *(["--pr-number", "73"] if explicit else [])) == 0
+
+    assert json.loads(output.read_text())["extra"]["pr_number"] == 73
+    assert model_heads and set(model_heads) == {requested_head}
+    reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
+    assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
+    assert not transport.gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
+    _assert_app_requests(transport)
+    assert git(repo, "branch", "--show-current") == "feature"
+    assert git(repo, "rev-parse", "HEAD") == current_head

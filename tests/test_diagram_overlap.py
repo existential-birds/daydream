@@ -235,7 +235,7 @@ async def test_cancellation_joins_diagram_writer_and_preserves_resumable_review(
     target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target, block=True)
     install_provider(monkeypatch, backend, 4)
-    config = config_for(target, diagram="auto")
+    config = config_for(target, diagram="auto", output_mode="loop", assume="no")
     caught: list[BaseException] = []
     private_base = tmp_path / "private"
     roots = private_root_locations(base=private_base)
@@ -306,7 +306,7 @@ async def test_completed_diagram_survives_cancellation_with_validated_resume(
     backend = DiagramBarrierBackend(target, block=True)
     backend.block_synthesis = True
     install_provider(monkeypatch, backend, 4)
-    config = config_for(target, diagram="auto")
+    config = config_for(target, diagram="auto", output_mode="loop", assume="no")
     private_base = tmp_path / "private"
     roots = private_root_locations(base=private_base)
     caught: list[BaseException] = []
@@ -356,7 +356,7 @@ async def test_checkpoint_publication_failure_keeps_review_complete_and_resume_r
     target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target)
     install_provider(monkeypatch, backend, 4)
-    config = config_for(target, diagram="auto")
+    config = config_for(target, diagram="auto", output_mode="loop", assume="no")
     private_base = tmp_path / "private"
     roots = private_root_locations(base=private_base)
     real_replace = os.replace
@@ -420,7 +420,7 @@ async def test_checkpoint_invalidation_failure_preserves_review_and_diagram_elig
     assert not list(private_base.rglob("diagram-complete.json"))
     assert not (target / ".daydream/deep/diagram-complete.json").exists()
     coverage = json.loads((target / ".daydream/deep/review-coverage.json").read_text())
-    assert coverage["schema_version"] == 1
+    assert coverage["schema_version"] == 2
     assert all(scope["status"] == "complete" for scope in coverage["stack_outcomes"])
     if eligible:
         assert backend.diagram_turns == {"sequence": 1}
@@ -441,7 +441,7 @@ async def test_diagram_resume_regenerates_when_generation_inputs_change(
     target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target)
     install_provider(monkeypatch, backend, 4)
-    config = config_for(target, diagram="auto")
+    config = config_for(target, diagram="auto", output_mode="loop", assume="no")
     assert await runner.run(config) == 0
     resumed = DiagramBarrierBackend(target)
     install_provider(monkeypatch, resumed, 4)
@@ -573,7 +573,7 @@ async def test_embedded_review_preserves_backend_dispatch_boundaries(
             records = json.loads((deep / f"stack-{scope}-records.json").read_text())
             assert records["issues"]
         coverage = json.loads((deep / "review-coverage.json").read_text())
-        assert coverage["schema_version"] == 1
+        assert coverage["schema_version"] == 2
         assert coverage["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
         assert {scope["scope_id"]: scope["status"] for scope in coverage["stack_outcomes"]} == {
             "python": "complete", "structure": "complete",

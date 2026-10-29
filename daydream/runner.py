@@ -475,6 +475,7 @@ async def _run_with_context(
             if (
                 config.discover_github_provenance
                 and config.pr_number is None
+                and config.branch is None
                 and (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
             ):
                 try:
@@ -535,6 +536,9 @@ async def _run_workspace(
             ) as original_work,
             _capture_review_workspace(original_work, config, private_owner, github_execution) as work,
         ):
+            if work.review_pr is not None:
+                config = replace(config, pr_number=work.review_pr.number,
+                                 pr_repo=f"{work.review_pr.owner}/{work.review_pr.repo}")
             session_id = str(uuid.uuid4())
             async with open_artifact_session(work, session_id=session_id, owner=private_owner) as artifacts:
                 def _route(path: str | Path | None, label: OutputLabel) -> RoutedDestination | None:
@@ -668,12 +672,16 @@ async def _capture_review_workspace(
     pinned_pr = None
     head, base = work.head_sha, work.base_sha
     if committed:
-        pinned_pr = (pr_review.find_pr_by_number(work.repo, config.pr_number, auth=github_execution.auth)
-                     if config.pr_number is not None else pr_review.find_open_pr(work.repo, auth=github_execution.auth))
+        if config.pr_number is not None:
+            pinned_pr = pr_review.find_pr_by_number(work.source, config.pr_number, auth=github_execution.auth)
+        elif config.branch is not None:
+            pinned_pr = pr_review.find_open_pr(work.source, branch=config.branch, auth=github_execution.auth)
+        else:
+            pinned_pr = pr_review.find_open_pr(work.source, auth=github_execution.auth)
         if pinned_pr is None:
             raise GitError("No target PR found; select the committed PR before rerunning the review.")
         head = pinned_pr.head_sha
-        tip = pr_review.capture_pr_base_tip(work.repo, pinned_pr, auth=github_execution.auth)
+        tip = pr_review.capture_pr_base_tip(work.source, pinned_pr, auth=github_execution.auth)
         if mode == "comment" and tip is None:
             raise GitError("The target PR base could not be pinned; fetch its refs and rerun.")
         try:
@@ -681,7 +689,7 @@ async def _capture_review_workspace(
         except GitError as exc:
             raise GitError("The pinned PR comparison objects are unavailable; fetch its refs and rerun.") from exc
         pinned_pr = replace(pinned_pr, base_sha=base, pr_base_sha=tip)
-    if committed and git_ops.status_porcelain(work.repo).strip():
+    if committed and git_ops.status_porcelain(work.source).strip():
         print_info(console, "Committed PR review excludes local tracked and untracked edits.")
     destination = operational_worktree_root(owner) / f"review-capture-{uuid.uuid4().hex}"
     captured = capture_source(work.repo, destination, base_sha=base,

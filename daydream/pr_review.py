@@ -343,10 +343,10 @@ def capture_pr_base_tip(
 
 
 def find_open_pr(
-    target_dir: Path, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+    target_dir: Path, *, branch: str | None = None, auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PRInfo | None:
     """Find the branch's open PR; return None for absence and raise GitError on failure."""
-    branch = git_ops.current_branch(target_dir)
+    branch = git_ops.current_branch(target_dir) if branch is None else branch
     if not branch:
         return None
     rows = git_ops.gh_pr_list_for_branch(target_dir, branch, auth=auth)

@@ -310,7 +310,7 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             return
         assert len(bindings) == 2, 'invalid frozen inputs must stop replacement and later-stage dispatch'
         unfinished.extend(stage['assigned_target_ids'])
-        original = artifact_dir_for(review.repo, allow_standalone=True) / 'diff.patch'
+        original = artifact_dir_for(backend.calls[-1]['cwd'], allow_standalone=True) / 'diff.patch'
         if fault == 'corrupt-canonical':
             original.write_bytes(original.read_bytes() + b'permanently changed input\n')
         elif fault == 'delete-canonical':
