@@ -1974,6 +1974,10 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     write_and_stage(repo, "shared.txt", "\n".join(feature) + "\n")
     write_and_stage(repo, "keep.txt", "keep\n")
     write_and_stage(repo, "drop.txt", "drop\n")
+    # A tracked path can share a revision's spelling. Every diff layer must
+    # separate revisions from paths, including the tracked-working layer.
+    write_and_stage(repo, "HEAD/module.py", "VALUE = 1\n")
+    assert 'HEAD/module.py' in git_ops.snapshot_index(repo).paths
     untagged = _commit(repo, "chore: unrelated change")
     assert git_ops.daydream_commits(repo, "main") is None
     assert git_ops.log_shas(repo, "HEAD", since="main") == [untagged]
@@ -2004,6 +2008,7 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     full = git_ops.diff(repo, "main")
     excluded = git_ops.diff(repo, "main", exclude=["drop.txt"])
     assert "keep.txt" in full and "+keep" in full and "drop.txt" in full
+    assert 'HEAD/module.py' in full and '+VALUE = 1' in full
     assert "keep.txt" in excluded and "drop.txt" not in excluded
     assert not git_ops.remote_contains_commit(repo, "feat/slash-name", tip)
     git_ops.push_branch(repo, "feat/slash-name")

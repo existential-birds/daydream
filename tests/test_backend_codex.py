@@ -293,14 +293,17 @@ async def test_nonzero_exit_with_no_output_still_informative() -> None:
 
 
 @pytest.mark.parametrize("read_only", [False, True])
-async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> None:
-    """Stable directories retain native resume, including non-Git read-only runs."""
+@pytest.mark.parametrize('local', [False, True])
+async def test_continuation_token_resumes(tmp_path: Path, read_only: bool, local: bool) -> None:
+    """Native output-schema transport must allow working-source identity instead of provenance HEAD."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
     head, base = '98d18d2e9f66792e1e732e1cddbb7007d84f5485', '7ec97298a90c28789e36afb4412ecdc640d8abae'
     canonical = review_stage_schema(['api.py'], [], triage=False)
-    schema = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': base})
+    after = 'd' * 64 if local else head
+    schema = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': base,
+                                                       **({'source_id': after} if local else {})})
     persisted: dict[str, Any] = {}
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
@@ -328,9 +331,10 @@ async def test_continuation_token_resumes(tmp_path: Path, read_only: bool) -> No
         assert request.output_schema == schema == persisted
         revision = persisted['properties']['targets']['items']['properties']['evidence_refs']['items'][
             'properties']['revision']
-        assert revision['enum'] == [head, base]
+        assert revision['enum'] == [after, base]
         validator = Draft202012Validator(revision)
-        assert validator.is_valid(head) and validator.is_valid(base)
+        assert validator.is_valid(after) and validator.is_valid(base)
+        assert validator.is_valid(head) is (not local)
         assert not validator.is_valid('98d18d2e9f66792e1732e1cddbb7007d84f5485')
         assert 'enum' not in canonical['properties']['targets']['items']['properties'][
             'evidence_refs']['items']['properties']['revision']

@@ -125,7 +125,7 @@ async def test_native_pi_response_diagnostics_bind_to_each_generation(
     assert "private-header-canary" not in json.dumps(document)
 
 
-@pytest.mark.parametrize("case", ["defect", "retry", "empty", "false-positive", "fallback", "hosted",
+@pytest.mark.parametrize("case", ["defect", "local", "retry", "empty", "false-positive", "fallback", "hosted",
                                   "hosted-alternate",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
@@ -140,13 +140,16 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     operator policy across retries; readiness rows reject versions, capabilities,
     model/settings faults and executable resources before provider work. A semantic
     rejection followed by provider failure must preserve the challenge assignment.
+    The local row proves stock reads/searches and supporting selectors share final
+    working contents after original-checkout mutations; committed rows exclude dirt.
     """
+    local = case == "local"
     immutable = case == "hosted-immutable"
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
     retry = case == "retry"
     retried = case in {"hosted", "hosted-alternate"} or retry
-    defect = case == "defect" or retry or hosted
+    defect = case == "defect" or local or retry or hosted
     if retry:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
         monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
@@ -156,19 +159,27 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if defect else
                 "def ratio(total, count):\n    return 0 if count == 0 else total / count\n")
+    helper = "VALUE = 'LOCAL_CAPTURE_HELPER'\n"
+    untracked = "VALUE = 'LOCAL_CAPTURE_UNTRACKED'\n"
+    supporting = {"supporting.py": helper} if local else {}
     context = "Review the committed ratio implementation carefully.\n"
-    head = seed_feature_branch(repo, base={"ratio.py": original, "AGENTS.md": context},
-                               feature={"ratio.py": captured, "AGENTS.md": context})
+    head = seed_feature_branch(repo, base={"ratio.py": original, "AGENTS.md": context, **supporting},
+        feature={"ratio.py": original if local else captured, "AGENTS.md": context,
+                 **({"supporting.py": "VALUE = 'HEAD_HELPER_MUST_REMAIN_UNREVIEWED'\n"} if local else {})})
     base = git(repo, "rev-parse", "main")
     working = ("def ratio(total, count):\n    return 'DIRTY_SOURCE_MUST_REMAIN_UNREVIEWED'\n"
-               if defect and not immutable else captured)
-    if defect and not immutable:
+               if defect and not immutable and not local else captured)
+    if local:
+        (repo / "ratio.py").write_text(working)
+        (repo / "supporting.py").write_text(helper)
+        (repo / "untracked.py").write_text(untracked)
+    elif defect and not immutable:
         (repo / "ratio.py").write_text(working)
         (repo / "AGENTS.md").write_text("DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n")
     settings = native_provider.config / "settings.json"
     expected_model = "native-inherited-model" if case == "fallback" else "alternate-model" if empty else "output-model"
     expected_provider = "nous" if case == "fallback" else "output-fixture"
-    expected_effort = "low" if retry else "high"
+    expected_effort = "low" if retry or local else "high"
     settings.write_text(json.dumps({
         **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
            if case != "fallback" else {}),
@@ -383,6 +394,15 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                         (f"{call_kind}-write", "write", {"path": str(forbidden_marker), "content": "forbidden"}),
                         (f"{call_kind}-edit", "edit", {"path": "ratio.py", "oldText": captured, "newText": "MUTATED"}),
                         (f"{call_kind}-ungranted", "publish_review", {"path": str(forbidden_marker)})]
+            if local:
+                if kind == "discovery":
+                    for name in ("ratio.py", "supporting.py", "untracked.py", "late.py"):
+                        (repo / name).write_text("VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n")
+                return [(f"{call_kind}-read", "read", {"path": "ratio.py"}),
+                        (f"{call_kind}-helper", "read", {"path": "supporting.py"}),
+                        (f"{call_kind}-untracked", "read", {"path": "untracked.py"}),
+                        (f"{call_kind}-grep", "grep", {"pattern": "LOCAL_CAPTURE", "path": "."}),
+                        (f"{call_kind}-ls", "ls", {"path": "."})]
             return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
         if hosted and not any(tool["tool_call_id"] == f"{call_kind}-read" for tool in tools):
             assert len(tools) == 4
@@ -390,6 +410,16 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
         read_result, = [tool for tool in tools if tool["tool_call_id"] == f"{call_kind}-read"]
         assert read_result["content"] == captured
+        if local:
+            observations = {tool["tool_call_id"]: tool["content"] for tool in tools}
+            assert observations[f"{call_kind}-helper"] == helper
+            assert observations[f"{call_kind}-untracked"] == untracked
+            searched = observations[f"{call_kind}-grep"]
+            assert "supporting.py:1:" in searched and helper.strip() in searched
+            assert "untracked.py:1:" in searched and untracked.strip() in searched
+            assert {entry for entry in observations[f"{call_kind}-ls"].splitlines() if entry.endswith(".py")} == {
+                "ratio.py", "supporting.py", "untracked.py"}
+            assert "POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
         if hosted and not any(tool["tool_call_id"] == f"{call_kind}-forbidden-domain" for tool in tools):
             return [(f"{call_kind}-forbidden-domain", "structured_output", {"write_path": str(forbidden_marker)})]
         if hosted:
@@ -398,7 +428,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         refs_by_target = {part["target_id"]: [{"source_id": next(
             option["source_id"] for option in part["source_options"] if option["side"] == "new"),
             "source_range": None, "basis": "supplied_diff"}] for part in assignment["assignments"]}
-        refs = next(iter(refs_by_target.values()))
+        ratio_part = next(part for part in assignment["assignments"] if part["file"] == "ratio.py")
+        refs = refs_by_target[ratio_part["target_id"]]
+        if local:
+            refs = [*refs, {"path": "supporting.py", "side": "new", "source_range": {"start": 1, "end": 1},
+                           "basis": "source_inspection"}]
         if kind == "discovery":
             claim = {"uid": "", "revision": 0, "source_uids": [], "title": "Division can fail", "payload": {
                 "claim": "The changed denominator divides by zero.",
@@ -445,7 +479,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
                                     model="request-forbidden-model" if hosted else
                                     "output-model:high" if case == "false-positive" else None),
-        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy, immutable_input=immutable_input)
+        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy, immutable_input=immutable_input, local=local)
     unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                    "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
     if case.startswith("hosted-unsupported") or case in unsupported:
@@ -489,7 +523,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert value["analyzed_revision"]["head_sha"] == head
     assert value["analyzed_revision"]["merge_base_sha"] == base
     assert value["terminal_result"]["analysis_state"] == "complete"
-    assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
+    assert {part["file"] for part in value["assignments"]} == ({"ratio.py", "untracked.py"} if local else {"ratio.py"})
     expected_kinds = (["discovery"] if empty else
                       ["discovery", "challenge", *(["challenge"] if hosted or retry else [])])
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
@@ -524,6 +558,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert len(value["findings"]) == int(defect)
         if case == "false-positive":
             assert claim["challenge_evidence"][0]["grounds"] == counterevidence
+        if local:
+            source_ref, = [ref for ref in claim["payload"]["evidence_refs"] if ref["path"] == "supporting.py"]
+            assert source_ref["role"] == "supporting"
+            assert source_ref["artifact_sha256"] == hashlib.sha256(helper.encode()).hexdigest()
     else:
         assert value["claims"] == value["findings"] == []
     result_path = output_root / ("committed-review.json" if hosted else ".daydream/committed-review.json")
@@ -572,7 +610,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                        for message in native_provider.requests[5]["messages"])
     elif not hosted:
         assert [call["tool_call_id"] for call in calls] == [
-            f"{kind}-{action}" for kind in expected_kinds for action in ("read", "submit")]
+            f"{kind}-{action}" for kind in expected_kinds
+            for action in (("read", "helper", "untracked", "grep", "ls", "submit") if local else ("read", "submit"))]
     else:
         assert {"discovery-0-read", "challenge-1-read", "challenge-2-read"} <= {
             call["tool_call_id"] for call in calls}
@@ -599,9 +638,11 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                for generation in generations)
     assert all(execution["settled"] and execution["accepted"] and execution["cleanup_complete"]
                for execution in value["execution"])
-    assert (repo / "ratio.py").read_text() == working and git(repo, "rev-parse", "HEAD") == head
+    assert (repo / "ratio.py").read_text() == (
+        "VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n" if local else working)
+    assert git(repo, "rev-parse", "HEAD") == head
     assert (repo / "AGENTS.md").read_text() == (
-        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect and not immutable else context)
+        "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED\n" if defect and not immutable and not local else context)
     assert all(path.read_bytes() == original_bytes for path, original_bytes in config_bytes.items())
 
 

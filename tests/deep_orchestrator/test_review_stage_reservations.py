@@ -33,6 +33,10 @@ class NativeStageBackend(StagedBackend, PiBackend):
 
     supports_budget_preamble = False
 
+    def __init__(self, repo: Path) -> None:
+        PiBackend.__init__(self, model='mock-model')
+        StagedBackend.__init__(self, repo)
+
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
         binding: HostToolBinding | None = kwargs.get('host_tools')
         if binding is None:

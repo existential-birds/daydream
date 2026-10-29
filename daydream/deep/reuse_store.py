@@ -219,7 +219,7 @@ def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
         budget=review_cache_budget(ctx.config),
         run_id=ctx.work.run_id,
         session_id=session_id,
-        enabled=review_cache_enabled(ctx.config),
+        enabled=ctx.work.captured_source is None and review_cache_enabled(ctx.config),
     )
     _ensure_private_dir(store.store_dir)
     return store
@@ -230,7 +230,7 @@ def reuse_cache_for(ctx: FlowContext) -> ReuseCache | None:
     value = ctx.data.get("reuse_cache")
     if not isinstance(value, ReuseCache):
         return None
-    if not review_cache_enabled(ctx.config):
+    if ctx.work.captured_source is not None or not review_cache_enabled(ctx.config):
         return None
     return value
 

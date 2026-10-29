@@ -242,10 +242,13 @@ def test_missing_truncated_nested_and_oversized_input_is_never_clean(
 @pytest.mark.parametrize("mutate", [
     lambda a: a.pop("terminal_result"), lambda a: a.update(schema_version=99), lambda a: a.update(kind="diagram"),
     lambda a: a["terminal_result"]["analyzed_revision"].update(head_sha="x" * 40),
+    lambda a: (a['terminal_result'].update(schema_version=2),
+               a['terminal_result']['analyzed_revision'].update(source_id='d' * 64)),
     lambda a: a["terminal_result"]["stack_outcomes"].clear(),
     lambda a: a["terminal_result"].update(reason_codes=["invented"]),
 ])
 def test_semantic_invariants_rejected_before_write(tmp_path: Path, mutate: Any) -> None:
+    """A PR envelope cannot accept local source identity just because the underlying HEAD matches."""
     artifact = findings_artifact()
     mutate(artifact)
     path = tmp_path / "invalid.json"

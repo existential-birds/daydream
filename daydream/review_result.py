@@ -17,7 +17,7 @@ import jsonschema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
-from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
+from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA, source_revision
 from daydream.run_context import current_run_context
 
 
@@ -119,13 +119,17 @@ _STACK_SCHEMA = strict_object({**_SCOPE_PROPERTIES, **_OUTCOME_PROPERTIES, 'part
 _STACK_SCHEMA['required'].remove('target_decisions')
 _PHASE_SCHEMA = strict_object({'phase': _TEXT, **_OUTCOME_PROPERTIES, 'noop': {'type': 'boolean'},
                               'usable_evidence': {'type': 'boolean'}})
-_REVISION_SCHEMA = strict_object({'head_sha': _TEXT, 'merge_base_sha': _TEXT, 'diff_key': _TEXT, 'pr_base_sha': _TEXT})
-_REVISION_SCHEMA['required'].remove('pr_base_sha')
+ANALYZED_REVISION_SCHEMA = strict_object({
+    'head_sha': _TEXT, 'merge_base_sha': _TEXT, 'diff_key': _TEXT, 'pr_base_sha': _TEXT,
+    'source_id': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+})
+for _optional in ('pr_base_sha', 'source_id'):
+    ANALYZED_REVISION_SCHEMA['required'].remove(_optional)
 TERMINAL_RESULT_SCHEMA: dict[str, Any] = strict_object({
-        'schema_version': {'const': 1}, 'run_id': _TEXT,
+        'schema_version': {'enum': [1, 2]}, 'run_id': _TEXT,
         'analysis_state': {'enum': ['complete', 'incomplete', 'failed']},
         'pipeline_state': {'enum': ['completed', 'failed', 'cancelled']},
-        'analyzed_revision': _REVISION_SCHEMA, 'reason_codes': _REASONS,
+        'analyzed_revision': ANALYZED_REVISION_SCHEMA, 'reason_codes': _REASONS,
         'planned_scopes': {'type': 'array', 'maxItems': 10000, 'items': _SCOPE_SCHEMA},
         'required_phases': {'type': 'array', 'uniqueItems': True, 'maxItems': 64, 'items': _TEXT},
         'stack_outcomes': {'type': 'array', 'maxItems': 10000, 'items': _STACK_SCHEMA},
@@ -148,22 +152,25 @@ _COVERAGE_SCHEMA = strict_object({
 
 @dataclass(frozen=True)
 class AnalyzedRevision:
-    """Immutable endpoints and provenance of the exact input analyzed."""
+    """Pinned base, actual HEAD provenance and optional captured working-source identity."""
 
     head_sha: str
     merge_base_sha: str
     diff_key: str
     pr_base_sha: str | None = None
+    source_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         if self.pr_base_sha is None:
             result.pop('pr_base_sha')
+        if self.source_id is None:
+            result.pop('source_id')
         return result
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AnalyzedRevision:
-        jsonschema.validate(dict(data), _REVISION_SCHEMA)
+        jsonschema.validate(dict(data), ANALYZED_REVISION_SCHEMA)
         return cls(**dict(data))
 
 
@@ -258,7 +265,7 @@ def validate_target_decisions(value: Any, *, analyzed_revision: Mapping[str, Any
         if decision['status'] == 'reviewed' and not any(ref['role'] == 'assigned' for ref in refs):
             raise ValueError('reviewed target decision requires assigned source attribution')
         if analyzed_revision is not None and any(
-                ref['revision'] != analyzed_revision['merge_base_sha' if ref['side'] == 'old' else 'head_sha']
+                ref['revision'] != source_revision(analyzed_revision, ref['side'])
                 for ref in refs):
             raise ValueError('target source reference revision differs from analyzed revision')
 
@@ -294,6 +301,9 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
         jsonschema.validate(data, TERMINAL_RESULT_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f'terminal result schema validation failed: {exc.message}') from exc
+    if type(data['schema_version']) is not int or data['schema_version'] != (
+            2 if 'source_id' in data['analyzed_revision'] else 1):
+        raise ValueError('terminal result version does not match its captured source identity; restart review')
     planned = {s['scope_id']: s for s in data['planned_scopes']}
     outcomes = {s['scope_id']: s for s in data['stack_outcomes']}
     phases = {p['phase']: p for p in data['phase_outcomes']}
@@ -440,7 +450,7 @@ class ReviewCoverage:
         if self._terminal is not None:
             assert self._frozen_evidence is not None
             return copy.deepcopy(self._frozen_evidence)
-        return copy.deepcopy({'schema_version': 1, 'run_id': self.run_id,
+        return copy.deepcopy({'schema_version': 2 if self.revision.source_id is not None else 1, 'run_id': self.run_id,
             'analyzed_revision': self.revision.to_dict(),
             'planned_scopes': sorted((s.to_dict() for s in self.planned_scopes), key=lambda s: s['scope_id']),
             'required_phases': sorted(self.required_phases),

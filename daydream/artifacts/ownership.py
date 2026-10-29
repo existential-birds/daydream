@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Self
 from daydream import git_ops
 
 if TYPE_CHECKING:
+    from daydream.git_ops.captured_source import CapturedSource
     from daydream.workspace import WorkContext
 
 
@@ -189,7 +190,10 @@ def operational_worktree_root(owner: PrivateWorkspaceOwner) -> Path:
 
 def derive_workspace_identity(work: WorkContext, *, owner: PrivateWorkspaceOwner) -> ArtifactWorkspaceIdentity:
     """Validate a WorkContext against one pre-resolved private owner."""
-    validate_private_workspace_owner(owner, source=work.source, repo=work.repo)
+    validate_private_workspace_owner(owner, source=work.source,
+                                     repo=work.repo if work.captured_source is None else None)
+    if work.captured_source is not None:
+        _validate_captured_workspace(work.repo, work.captured_source, owner)
     repo = filesystem._declared_directory(work.repo, label="artifact repo")
     try:
         source_git_dir = git_ops.git_dir(owner.source)
@@ -206,6 +210,13 @@ def derive_workspace_identity(work: WorkContext, *, owner: PrivateWorkspaceOwner
         state_root=owner.artifact_state_root,
         workspace_key=owner.workspace_key,
     )
+
+
+def _validate_captured_workspace(repo: Path, capture: CapturedSource, owner: PrivateWorkspaceOwner) -> None:
+    """Bind independent review storage explicitly to the existing private run owner."""
+    if repo != capture.root or not repo.is_relative_to(operational_worktree_path(owner)):
+        raise ArtifactVisibilityError('captured review source is outside its private workspace owner')
+    capture.validate()
 
 
 class SourceOwnership:
@@ -456,14 +467,16 @@ class WorkspaceOwnership:
             self._directories[path] = self._held.enter_context(SourceOwnership(path, label=label))
         return self._directories[path]
 
-    def bind_code(self, repo: Path) -> CodeWorkspace:
+    def bind_code(self, repo: Path, *, captured_source: CapturedSource | None = None) -> CodeWorkspace:
+        if captured_source is not None:
+            _validate_captured_workspace(repo, captured_source, self.owner)
         if repo in self._code:
             self._code[repo].validate()
             return self._code[repo]
         checkout = self._hold(repo, label="artifact repo")
         code = CodeWorkspace(checkout, source=self.source, git_directories=())
         directories = code.run(lambda: git_ops.git_dirs(checkout.path))
-        if directories[1] != self.owner.git_common_dir:
+        if captured_source is None and directories[1] != self.owner.git_common_dir:
             raise ArtifactVisibilityError("artifact repo does not share the source Git identity")
         try:
             git_owners = tuple(self._hold(p, label="artifact code workspace Git directory") for p in directories)

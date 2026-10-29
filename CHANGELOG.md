@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Review local changes as one captured net base-to-working comparison, including
+  nonignored untracked files and dirty supporting context. Native browsing and
+  canonical references share accepted source; unstable capture fails before model
+  work. Comment and findings-export modes independently pin committed PR source
+  and visibly exclude local edits ([#1676](https://github.com/existential-birds/daydream/issues/1676)).
+  Local results use schema 3/terminal 2 with a separate source identity; committed
+  results/exports remain distinct. Incompatible stage caches require a fresh review;
+  extension API 8 remains supported. Stopped reviews restart.
+
 ### Fixed
 
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies

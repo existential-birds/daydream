@@ -41,26 +41,34 @@ def retain_original_task(
     except git_ops.GitError:
         remote = None
     slug, canonical = normalize_remote_url(remote) if remote else (None, None)
-    try:
-        status = git_ops.status_porcelain(work.repo)
-        dirty_tracked: bool | None = any(
-            not line.startswith("??") and not line[3:].startswith(".daydream/")
-            and line[3:] not in (".daydream", REVIEW_OUTPUT_FILE) for line in status.splitlines()
-        )
-    except git_ops.GitError:
-        dirty_tracked = None
+    captured = work.captured_source
+    local = captured is not None and captured.source_id is not None
+    dirty_tracked: bool | None = None
+    if captured is None:
+        try:
+            status = git_ops.status_porcelain(work.repo)
+            dirty_tracked = any(
+                not line.startswith("??") and not line[3:].startswith(".daydream/")
+                and line[3:] not in (".daydream", REVIEW_OUTPUT_FILE) for line in status.splitlines()
+            )
+        except git_ops.GitError:
+            pass
+    # An accepted capture has its own index. Live checkout status after that
+    # boundary cannot attest whether accepted working bytes were dirty.
     run_artifacts.capture.original_task = {
         "analyzed_revision": analyzed_revision,
         "diff": diff,
         "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
         "repository": {"repo_slug": slug, "remote_url": canonical,
                        "host": urlparse(canonical).hostname if canonical else None},
-        "pr": {"number": config.pr_number, "repo": config.pr_repo},
+        "pr": {"number": config.pr_number if work.review_pr is None else work.review_pr.number,
+               "repo": config.pr_repo if work.review_pr is None else f'{work.review_pr.owner}/{work.review_pr.repo}'},
         "changed_files": _diff_changed_files(diff),
-        "input_scope": "committed" if config.findings_out is not None and config.output_mode != "diagram"
-                       else "committed_and_tracked_worktree",
+        "input_scope": ("captured_working" if local else "committed" if captured is not None
+                        or config.findings_out is not None and config.output_mode != "diagram"
+                        else "committed_and_tracked_worktree"),
         "dirty_tracked": dirty_tracked,
-        "untracked_files_included": False,
+        "untracked_files_included": local,
     }
 
 
@@ -177,7 +185,8 @@ def capture_run_record(
 
     try:
         code_workspace = artifact_session.code_workspace
-        final_head = code_workspace.run(partial(git_ops.head_sha, code_workspace.path))
+        final_head = (work.head_sha if work.captured_source is not None else
+                      code_workspace.run(partial(git_ops.head_sha, code_workspace.path)))
     except (ArtifactVisibilityError, git_ops.GitError):
         final_head = None
     provenance = {"producer": capture_executable_provenance().to_dict(),
@@ -215,7 +224,9 @@ def capture_run_record(
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),
-        "final_state": evidence({"head_sha": final_head}),
+        "final_state": evidence({"head_sha": final_head, **(
+            {'source_id': work.captured_source.source_id}
+            if work.captured_source is not None and work.captured_source.source_id is not None else {})}),
         "recommended_patch": evidence({
             "patch": patch, "sha256": hashlib.sha256(patch.encode()).hexdigest(),
             "capture": verification.get("recommended-capture.json"),

@@ -1159,7 +1159,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
             held.callback(workspace.close)
         elif workspace.owner != owner:
             raise ArtifactVisibilityError("artifact workspace owner identity mismatch")
-        code_workspace = workspace.bind_code(identity.repo)
+        code_workspace = workspace.bind_code(identity.repo, captured_source=work.captured_source)
         source_owner = workspace.source
         try:
             collisions = git_ops.tracked_artifact_collisions(source)

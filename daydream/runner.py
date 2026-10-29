@@ -12,11 +12,12 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import anyio
 from rich.console import Console
@@ -32,6 +33,7 @@ from daydream.artifact_visibility import (
     RoutedDestination,
     artifact_dir_for,
     open_artifact_session,
+    operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
 )
@@ -100,6 +102,7 @@ from daydream.ui import (
     print_info,
     print_phase_hero,
     print_success,
+    print_warning,
 )
 from daydream.workspace import (
     AuditWorkspace,
@@ -519,16 +522,19 @@ async def _run_workspace(
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
     # a confusing "no diff found". ``WrongBranchError`` is raised in ``_dispatch``.
     try:
-        async with open_workspace(
-            source=target_dir,
-            branch=config.branch,
-            base=config.base,
-            force_ephemeral=config.force_worktree,
-            extra_copy=config.extra_copy,
-            skip_tests=skip_tests,
-            allow_unborn=config.flow_name == "improve",
-            private_owner=private_owner, auth=github_execution.auth,
-        ) as work:
+        async with (
+            open_workspace(
+                source=target_dir,
+                branch=config.branch,
+                base=config.base,
+                force_ephemeral=config.force_worktree,
+                extra_copy=config.extra_copy,
+                skip_tests=skip_tests,
+                allow_unborn=config.flow_name == "improve",
+                private_owner=private_owner, auth=github_execution.auth,
+            ) as original_work,
+            _capture_review_workspace(original_work, config, private_owner, github_execution) as work,
+        ):
             session_id = str(uuid.uuid4())
             async with open_artifact_session(work, session_id=session_id, owner=private_owner) as artifacts:
                 def _route(path: str | Path | None, label: OutputLabel) -> RoutedDestination | None:
@@ -545,9 +551,10 @@ async def _run_workspace(
                     artifacts, private_owner, trajectory, capture, dump,
                     execution_input=backend_execution,
                 )
-                dispatch_config = (
-                    config if findings is None else replace(config, findings_out=str(findings.write_path))
-                )
+                dispatch_config = config
+                if work.captured_source is not None or findings is not None:
+                    dispatch_config = replace(config, findings_out=(
+                        config.findings_out if findings is None else str(findings.write_path)))
                 primary: BaseException | None = None
                 result = 1
                 try:
@@ -636,6 +643,58 @@ async def _run_workspace(
 
 
 # Dispatch
+
+
+@asynccontextmanager
+async def _capture_review_workspace(
+    work: WorkContext, config: RunConfig, owner: PrivateWorkspaceOwner,
+    github_execution: github_app.GitHubExecutionInput,
+) -> AsyncIterator[WorkContext]:
+    """Hold accepted review bytes through execution and artifact finalization."""
+    from daydream.deep.orchestrator import _resolve_mode
+    from daydream.git_ops.captured_source import capture_source
+
+    mode = _resolve_mode(config)
+    if (config.flow_name not in (None, *DEEP_FLOW_ALIASES)
+            or mode == "diagram"
+            or (mode not in {"review", "comment"} and config.findings_out is None)):
+        yield work
+        return
+    if config.start_at not in (None, "review"):
+        raise GitError("Captured reviews cannot resume retained judgments; "
+                       "rerun without --start-at for a fresh review.")
+    assert work.head_sha is not None and work.base_sha is not None
+    committed = mode == "comment" or config.findings_out is not None
+    pinned_pr = None
+    head, base = work.head_sha, work.base_sha
+    if committed:
+        pinned_pr = (pr_review.find_pr_by_number(work.repo, config.pr_number, auth=github_execution.auth)
+                     if config.pr_number is not None else pr_review.find_open_pr(work.repo, auth=github_execution.auth))
+        if pinned_pr is None:
+            raise GitError("No target PR found; select the committed PR before rerunning the review.")
+        head = pinned_pr.head_sha
+        tip = pr_review.capture_pr_base_tip(work.repo, pinned_pr, auth=github_execution.auth)
+        if mode == "comment" and tip is None:
+            raise GitError("The target PR base could not be pinned; fetch its refs and rerun.")
+        try:
+            base = git_ops.resolve_diff_merge_base(work.repo, config.base or tip or work.base_branch, head)
+        except GitError as exc:
+            raise GitError("The pinned PR comparison objects are unavailable; fetch its refs and rerun.") from exc
+        pinned_pr = replace(pinned_pr, base_sha=base, pr_base_sha=tip)
+    if committed and git_ops.status_porcelain(work.repo).strip():
+        print_info(console, "Committed PR review excludes local tracked and untracked edits.")
+    destination = operational_worktree_root(owner) / f"review-capture-{uuid.uuid4().hex}"
+    captured = capture_source(work.repo, destination, base_sha=base,
+                              head_sha=head, local=not committed, exclude=config.ignore_paths)
+    try:
+        captured.validate()
+        yield replace(work, repo=captured.root, captured_source=captured, review_pr=pinned_pr,
+                      head_sha=head, base_sha=base, base_branch=base, is_ephemeral=True)
+    finally:
+        try:
+            captured.remove()
+        except (OSError, GitError) as exc:
+            print_warning(console, f"Captured source retained after integrity failure ({type(exc).__name__}).")
 
 
 def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:

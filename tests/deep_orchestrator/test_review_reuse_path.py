@@ -357,7 +357,8 @@ async def test_precision_overlap_publishes_only_joined_whole_unit_and_restores_b
     backend.fanout_concurrency = 4
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     config = empty_review_config(multi_stack_target, tmp_path / "cached-overlap.json", precision_mode=True,
-        latency_profile="balanced", review_profile=independent_alternatives_profile(), review_cache_enabled=True)
+        output_mode='loop', latency_profile="balanced", review_profile=independent_alternatives_profile(),
+        review_cache_enabled=True, assume='no')
 
     async def drive() -> None:
         assert await run(config) == 0
@@ -455,7 +456,7 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_boun
     assert _count_review_prompts(stub.calls) >= 2  # changed snapshot cannot reuse prior completion claims
 
 
-async def test_automatic_plan_change_invalidates_whole_stack_reuse_at_unchanged_revision(
+async def test_captured_plan_changes_and_repeated_runs_require_fresh_judgments(
     sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.deep_orchestrator.test_review_completion import ReviewRun, scopes
 
@@ -464,7 +465,7 @@ async def test_automatic_plan_change_invalidates_whole_stack_reuse_at_unchanged_
     first = review.load()['terminal_result']
     assert {scope['scope_id'] for scope in first['stack_outcomes']} == {'python', 'structure'}
     deep = review.repo / '.daydream/deep'
-    assert _entry_count_for_unit(deep, 'shard:python') == 1
+    assert not list((deep.parent / 'review-cache/entries').glob('*/complete.marker'))
 
     review.backend.calls.clear()
     assert await review.run(review_cache_enabled=True) == 0
@@ -475,12 +476,13 @@ async def test_automatic_plan_change_invalidates_whole_stack_reuse_at_unchanged_
     assert _reviewed_stacks(review.backend.calls) == {'python#0', 'python#1', 'python#2'}
     assert _reused_stacks(deep) == set(), 'Structure also depends on the full planned-scope inventory'
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
-    records = _records_bytes(review.repo)
     review.backend.calls.clear()
     assert await review.run(review_cache_enabled=True) == 0
-    assert _count_review_prompts(review.backend.calls) == 0
-    assert _reused_stacks(deep) == set(scopes(data))
-    assert _records_bytes(review.repo) == records
+    assert _reviewed_stacks(review.backend.calls) == {'python#0', 'python#1', 'python#2'}
+    assert _reused_stacks(deep) == set()
+    third = review.load()['terminal_result']
+    assert third['analyzed_revision'] == second['analyzed_revision']
+    assert third['run_id'] != second['run_id']
 
 
 async def test_editing_a_recorded_frontier_file_invalidates_snapshot_bound_coverage(
@@ -659,6 +661,8 @@ async def test_cache_population_restores_warm_bytes_then_recomputes_only_indepen
     seed_feature_branch(repo, base=before, feature=after)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     config = dict(
+        output_mode='loop',
+        findings_out=None,
         deep_shard_enabled=True,
         deep_shard_max_files=2,
         deep_shard_max_bytes=10**9,
@@ -831,7 +835,7 @@ async def test_aggregate_cached_attribution_regains_all_frozen_references_within
                                     "missing-attribution", "invalid-attribution", "aggregate-attribution",
                                     "attribution-path"])
 async def test_resume_rejects_missing_or_mismatched_coverage(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str,
 ) -> None:
     """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
@@ -840,8 +844,7 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
         monkeypatch.setattr('daydream.review_result.RUN_TARGET_DECISIONS_MAX_BYTES', 256 * 1024)
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    initial = tmp_path / "initial-review.json"
-    assert await run(make_config(multi_stack_target, findings_out=str(initial), pr_number=pr.number)) == 0
+    assert await run(make_config(multi_stack_target, pr_number=pr.number)) == 0
     path = multi_stack_target / ".daydream" / "deep" / "review-coverage.json"
     if damage == "missing":
         path.unlink()
@@ -870,20 +873,20 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
             evidence["required_phases"].append("unknown-stage")
         path.write_text(json.dumps(evidence))
     stub.calls.clear()
-    output = tmp_path / "resume-review.json"
-    assert await run(make_config(multi_stack_target, start_at="merge", findings_out=str(output),
+    damaged_bytes = path.read_bytes() if path.exists() else None
+    assert await run(make_config(multi_stack_target, start_at="merge",
                                 pr_number=pr.number)) == 1
     assert _review_surface_prompts(stub.calls) == []
-    assert not output.exists(), "rejected resume cannot manufacture version 2 coverage from unproven evidence"
-    assert initial.is_file()
+    assert (path.read_bytes() if path.exists() else None) == damaged_bytes
+    assert (multi_stack_target / '.review-output.md').is_file()
 
 
 @pytest.mark.parametrize("recovery", ["resume", "cache"])
 @pytest.mark.parametrize("scope", ["python", "structure"])
-async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
+async def test_captured_scope_failure_requires_a_fresh_review_for_same_revision(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str, scope: str,
 ) -> None:
-    """Unfinished scopes require successful investigation before resume or cache reuse."""
+    """A completed sibling in a stopped run cannot restore review authority or suppress fresh investigation."""
     from daydream.backends import AgentEvent, ResultEvent
     from tests.deep_orchestrator.test_review_completion import ReviewRun
     from tests.harness.git_helpers import git
@@ -928,20 +931,16 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
     report = (review.repo / '.review-output.md').read_text()
     assert '<code>incomplete</code>' in report and first['run_id'] in report
     assert first['analyzed_revision']['head_sha'] in report
-    first_origins = {entry['scope_id']: entry['originating_run_id'] for entry in first_data['review_context']['scopes']}
 
     assert first["failed_stacks"] == ([] if recovery == "cache" else [scope])
     if recovery == "cache":
         assert saved_coverage(deep).unfinished_scopes.keys() == {scope}
-        assert _entry_count_for_unit(deep, f"shard:{scope}") == 0
-        sibling = "structure" if scope == "python" else "python"
-        assert _entry_count_for_unit(deep, f"shard:{sibling}") == 1
+        assert not list((deep.parent / 'review-cache/entries').glob('*/complete.marker'))
     else:
         backend.calls.clear()
-        assert await review.run(**options, start_at="merge") == 0
+        assert await review.run(**options, start_at="merge") == 1
         resumed = review.load()
-        assert resumed["findings"] == first_data["findings"]
-        assert resumed['review_context']['scopes'] == first_data['review_context']['scopes']
+        assert resumed == first_data
         report = (review.repo / '.review-output.md').read_text()
         assert '<code>incomplete</code>' in report and resumed['terminal_result']['run_id'] in report
 
@@ -950,7 +949,6 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert saved_coverage(deep).diagnostics == persisted.diagnostics
         assert _review_surface_prompts(backend.calls) == []
         assert not any(review_stage_state(call["prompt"]) is not None for call in backend.calls)
-        options["start_at"] = "per-stack"
     backend.fail_stack = backend.responder = None
     backend.calls.clear()
     assert await review.run(**options) == 0
@@ -964,31 +962,28 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
     assert current.phases["alternatives"]["reason_codes"] == []
     assert "alternatives" not in current.diagnostics["phases"]
     assert _count_unit_prompts(backend.calls, _WONDER_DISCRIMINATOR) == 0
-    if recovery == "resume":
-        assert {stage["scope_id"] for call in backend.calls
-                if (stage := review_stage_state(call["prompt"])) is not None} == {
-                    "python", "react", "generic", "structure"}
+    assert {stage["scope_id"] for call in backend.calls
+            if (stage := review_stage_state(call["prompt"])) is not None} == {
+                "python", "react", "generic", "structure"}
     assert {name: (review.repo / name).read_bytes() for name in source} == source
     assert second["analysis_state"] == "complete" and second["failed_stacks"] == []
     report = (review.repo / '.review-output.md').read_text()
     assert '<code>complete</code>' in report and second['run_id'] in report
     assert report.count('## Review outcome') == 1
     assert 'Assigned changed behavior reviewed' in report
-    if recovery == 'cache':
-        second_origins = {entry['scope_id']: entry['originating_run_id']
-                          for entry in second_data['review_context']['scopes']}
-        assert second_origins[sibling] == first_origins[sibling]
+    assert all(entry['originating_run_id'] == second['run_id']
+               for entry in second_data['review_context']['scopes'])
 
     assert "backend_failure" not in second["reason_codes"]
     assert first["analyzed_revision"] == second["analyzed_revision"]
     if recovery == "cache":
         stages = [stage for call in backend.calls
                   if (stage := review_stage_state(call["prompt"])) is not None]
-        assert {stage["scope_id"] for stage in stages} == {scope}
-        assert _entry_count_for_unit(deep, f"shard:{scope}") == 1
+        assert {stage["scope_id"] for stage in stages} == {"python", "react", "generic", "structure"}
+        assert not list((deep.parent / 'review-cache/entries').glob('*/complete.marker'))
         assert saved_coverage(deep).unfinished_scopes == {}
         backend.calls.clear()
         assert await review.run(**options) == 0
-        assert _count_review_prompts(backend.calls) == 0
-        assert _reused_stacks(deep) == {"python", "react", "generic", "structure"}
+        assert _count_review_prompts(backend.calls) > 0
+        assert _reused_stacks(deep) == set()
         assert saved_coverage(deep).unfinished_scopes == {}

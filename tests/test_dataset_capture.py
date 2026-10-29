@@ -143,7 +143,7 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     head = git_ops.head_sha(repo)
     base = git_ops.resolve_diff_merge_base(repo, "main", head)
     (repo / "api.py").write_text(f"# tracked dirty input: {_SENSITIVE}\n")
-    diff = git_ops.diff(repo, "main")
+    diff = git_ops.diff_worktree_against(repo, base, ['.'])
     ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
     stage = json_utils._stage_bytes
     findings_reports: list[str] = []
@@ -161,7 +161,9 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     assert task["diff"] == diff and task["diff_sha256"] == hashlib.sha256(diff.encode()).hexdigest()
     assert "redaction" not in task and "source_diff_sha256" not in task
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (head, base)
-    assert task["input_scope"] == "committed_and_tracked_worktree" and task["dirty_tracked"]
+    assert task["input_scope"] == "captured_working" and task['untracked_files_included']
+    assert task['dirty_tracked'] is None
+    assert raw['final_state']['value'] == {'head_sha': head, 'source_id': task['analyzed_revision']['source_id']}
     expected_trace = owned_trace_id(memory_exporters[0], raw["run_id"]) if tracing else None
     assert expected_trace != format(123, "032x")
     assert raw["outcome"] == "success" and raw["trace_id"] == expected_trace
@@ -288,10 +290,10 @@ async def test_interruption_retains_task_and_partial_tool_after_worktree_teardow
         await run(replace(config, shallow=True, stack="python", force_worktree=True))
     cwd = backend.calls[0]["cwd"]
     assert cwd != repo
+    assert not cwd.exists(), 'Independent captured source cleanup does not require the live source registry'
     if source_loss:
-        assert cwd.is_dir()
-    else:
-        assert not cwd.exists()
+        registrations = tmp_path / 'removed-source/.git/worktrees'
+        assert registrations.is_dir() and any(registrations.iterdir()), 'Original linked workspace remains retained'
     raw = captured(config)
     assert raw["outcome"] == "interrupted" and raw["original_task"]["value"]["diff"] == diff
     assert raw["trace_id"] == (owned_trace_id(memory_exporters[0], raw["run_id"]) if tracing else None)

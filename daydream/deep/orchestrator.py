@@ -563,6 +563,10 @@ async def run_deep(
         raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
     artifact_session = None if run_artifacts is None else run_artifacts.session
     mode = _resolve_mode(config)
+    if work.captured_source is not None and config.start_at not in (None, "review"):
+        print_error(console, "Captured Review Restart",
+                    "Captured reviews cannot resume retained judgments; rerun without --start-at for a fresh review.")
+        return 1
     github_execution = github_execution or GitHubExecutionInput()
     # Late imports to avoid circular dependency with runner.
     from daydream.git_ops import GitError, GitTimeoutError
@@ -582,20 +586,26 @@ async def run_deep(
     # two-dot diff selection below.
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
-    captured_pr = None
-    pr_base_sha = None
+    captured_pr = work.review_pr
+    pr_base_sha = None if captured_pr is None else captured_pr.pr_base_sha
+    source_id = None if work.captured_source is None else work.captured_source.source_id
     dirty_snapshot = False
     diff: str | None
     try:
-        captured_head = git_ops.head_sha(target_dir)
-        captured_base = git_ops.resolve_diff_merge_base(target_dir, work.base_branch, captured_head)
+        if work.captured_source is not None:
+            work.captured_source.validate()
+            captured_head = work.captured_source.head_sha
+            captured_base = work.captured_source.base_sha
+        else:
+            captured_head = git_ops.head_sha(target_dir)
+            captured_base = git_ops.resolve_diff_merge_base(target_dir, work.base_branch, captured_head)
     except GitTimeoutError as exc:
         print_error(console, "Git Timeout", f"git timed out under load: {exc}")
         return 1
     except GitError:
         diff = None
     else:
-        if config.findings_out is not None:
+        if config.findings_out is not None and work.captured_source is None:
             try:
                 captured = _capture_findings_target(
                     target_dir, config, github_execution, captured_head, captured_base,
@@ -615,7 +625,9 @@ async def run_deep(
             # its grounding) from working-tree content.
             dirty_snapshot = _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir))
         try:
-            if config.findings_out is not None and mode != "diagram":
+            if work.captured_source is not None:
+                diff = work.captured_source.diff
+            elif config.findings_out is not None and mode != "diagram":
                 paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
                 diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
             else:
@@ -631,7 +643,8 @@ async def run_deep(
         try:
             retain_original_task(
                 run_artifacts, work=work, config=config,
-                analyzed_revision=AnalyzedRevision(captured_head, captured_base, diff_key(diff), pr_base_sha).to_dict(),
+                analyzed_revision=AnalyzedRevision(captured_head, captured_base, diff_key(diff), pr_base_sha,
+                                                   source_id=source_id).to_dict(),
                 diff=diff,
             )
         except Exception as exc:
@@ -697,7 +710,8 @@ async def run_deep(
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        changed_files = _diff_changed_files(diff)
+        changed_files = (list(work.captured_source.files) if work.captured_source is not None
+                         else _diff_changed_files(diff))
         stacks, single_stack_mode, import_graph = _prepare_review_stacks(
             config, changed_files, diff, target_dir, mode
         )
@@ -708,7 +722,7 @@ async def run_deep(
         coverage = None if mode == "diagram" else ReviewCoverage(
             recorder.session_id,
             AnalyzedRevision(captured_head, captured_base, current_diff_sha,
-                             pr_base_sha),
+                             pr_base_sha, source_id=source_id),
             [PlannedScope(stack.stack_name, base_stack_name(stack.stack_name),
                           files=tuple(sorted(stack.files)),
                           shard=int(stack.stack_name.split("#", 1)[1]) if "#" in stack.stack_name else None)

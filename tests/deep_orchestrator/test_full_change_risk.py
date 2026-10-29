@@ -159,7 +159,7 @@ async def test_population_metrics_preserve_complete_snapshot_at_patch_edges(
 
 
 @pytest.mark.parametrize("evidence", ["stale-fields", "missing", "corrupt"])
-async def test_same_snapshot_resume_replaces_population_evidence_without_requiring_the_record(
+async def test_captured_restart_replaces_population_evidence_without_restoring_judgments(
     tmp_path: Path, make_config: MakeConfig, install_backend: Callable[[object], object], evidence: str,
 ) -> None:
     repo = tmp_path / "resume"
@@ -185,17 +185,22 @@ async def test_same_snapshot_resume_replaces_population_evidence_without_requiri
     stub.calls.clear()
     resumed_config = make_config(repo, output_mode="review", start_at="merge",
                                  review_profile=independent_alternatives_profile())
-    assert await run(resumed_config) == 0
+    damaged_record = record_path.read_bytes() if record_path.exists() else None
+    assert await run(resumed_config) == 1
+    assert not stub.calls
+    assert (record_path.read_bytes() if record_path.exists() else None) == damaged_record
+    assert await run(config) == 0
     resumed = read_routing_record(deep)
     assert resumed["diff_population"] == original["diff_population"]
     assert resumed["risk"] == original["risk"]
-    assert not stub.calls
+    assert stub.calls
     coverage = json.loads((deep / "review-coverage.json").read_text())
     assert coverage["analyzed_revision"]["diff_key"] == resumed["diff_population"]["diff_key"]
     if evidence == "stale-fields":
-        # A committed new snapshot must still fail the freshness gate, even with
-        # otherwise valid routing evidence. Rejected resumes do not rewrite it.
+        # Both unchanged and changed subjects require a fresh review; rejected
+        # resumes preserve the previous run's routing evidence.
         record_before_rejection = record_path.read_bytes()
+        stub.calls.clear()
         (repo / "aaa.py").write_text("VALUE = 'another snapshot'\n")
         git(repo, "add", "aaa.py")
         commit(repo, "new snapshot")
@@ -203,6 +208,10 @@ async def test_same_snapshot_resume_replaces_population_evidence_without_requiri
         assert not stub.calls
         assert record_path.read_bytes() == record_before_rejection
         assert (deep / "diff-key").read_text() == original["diff_population"]["diff_key"]
+        assert await run(config) == 0
+        fresh = read_routing_record(deep)
+        assert fresh['diff_population']['diff_key'] != original['diff_population']['diff_key']
+        assert fresh['risk']['signals']['changed_files'] == original['risk']['signals']['changed_files']
 
 
 async def test_prompt_capacity_and_marker_changes_cannot_change_full_snapshot_risk(

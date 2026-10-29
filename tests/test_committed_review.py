@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-import shutil
 import tempfile
 import tracemalloc
 import zlib
@@ -28,7 +27,6 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
-from daydream.git_ops.source import FrozenSourceRejected
 from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
@@ -304,13 +302,11 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
     challenge: str,
-    request: pytest.FixtureRequest,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
     Distinct rows cover cancellation usage, preparation time, typed terminal quota, protected allowances, pre-dispatch
-    refusals, pipeline-only strategy fallback, and real locked-worktree cleanup.
+    refusals, pipeline-only strategy fallback, and independent capture cleanup.
     Native journeys separately own transport/history/accounting.
     """
     output_failure = challenge in {
@@ -320,7 +316,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     dispatches: list[dict[str, Any]] = []
     challenge_started = asyncio.Event()
     bindings: list[HostToolBinding] = []
-    locked_captures: list[Path] = []
+    captures: list[Path] = []
     if challenge == "preparation":
         fake = FakeClock(monotonic_value=100).install(monkeypatch)
         real_open = os.open
@@ -335,14 +331,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 
         monkeypatch.setattr(os, "open", charge_preparation)
 
-    def remove_locked_captures() -> None:
-        for captured in locked_captures:
-            if captured.exists():
-                git(review_inputs.work.source, "worktree", "unlock", str(captured))
-                git_ops.worktree_remove(review_inputs.work.source, captured, force=True)
-
-    request.addfinalizer(remove_locked_captures)
-
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
         assignment = json.loads(
             prompt.split("\nCommitted review assignment:\n")[1].split("\nEnd committed review assignment.\n")[0]
@@ -351,8 +339,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"]}
         )
         if assignment["kind"] == "discovery" and challenge in {"exhausted", "cancelled"}:
-            git(review_inputs.work.source, "worktree", "lock", "--reason", "cleanup regression lock", str(cwd))
-            locked_captures.append(cwd)
+            captures.append(cwd)
         binding = kwargs["host_tools"]
         bindings.append(binding)
         binding.configure_schema(kwargs["output_schema"])
@@ -519,11 +506,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert trajectory["session_id"] == value["run_id"] and trajectory["extra"]["partial"]
         assert trajectory["final_metrics"]["total_prompt_tokens"] == 17
         assert trajectory["final_metrics"]["total_cost_usd"] == 0.002
-        captured = locked_captures[0]
-        assert captured.exists() and f"worktree {captured}\n" in git(repo, "worktree", "list", "--porcelain")
-        warning = capsys.readouterr().out
-        assert "Failed to remove captured worktree" in warning and "locked" in warning
-        assert str(captured) in "".join(warning.replace("│", "").split())
+        captured = captures[0]
+        assert not captured.exists()
+        assert f"worktree {captured}\n" not in git(repo, "worktree", "list", "--porcelain")
         return
     result = await run_committed_review(review_request)
     value = result.to_dict()
@@ -539,11 +524,9 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge == "exhausted":
         assert json.loads((repo / ".daydream/committed-review.json").read_text()) == value
         assert root_trajectory(repo)["session_id"] == value["run_id"]
-        captured = locked_captures[0]
-        assert captured.exists() and f"worktree {captured}\n" in git(repo, "worktree", "list", "--porcelain")
-        warning = capsys.readouterr().out
-        assert "Failed to remove captured worktree" in warning and "locked" in warning
-        assert str(captured) in "".join(warning.replace("│", "").split())
+        captured = captures[0]
+        assert not captured.exists()
+        assert f"worktree {captured}\n" not in git(repo, "worktree", "list", "--porcelain")
         assert value["settings"]["profile_name"] == "pipeline-only"
         assert value["settings"]["profile_source"] == "explicit"
         assert value["settings"]["limits"]["effective_investigation_s"] == pytest.approx(60)
@@ -595,16 +578,84 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             validate_committed_result(corrupted)
 
 
+@pytest.mark.parametrize('new_concern', [False, True], ids=['after-final-challenge', 'before-fresh-challenge'])
+async def test_local_capture_corruption_retains_challenged_findings_and_unfinished_work(
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
+    new_concern: bool,
+) -> None:
+    """Owner integrity tests miss corruption between admitted findings and a fresh challenge.
+
+    Delete real captured source after a challenge admits one confirmed concern and
+    discovers another. Required later work must stop without consulting intact live bytes.
+    """
+    repo = review_inputs.work.source
+    original = tracked_source_state(repo)
+    calls: list[dict[str, Any]] = []
+
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
+        assignment = json.loads(prompt.split('\nCommitted review assignment:\n')[1]
+                                .split('\nEnd committed review assignment.\n')[0])
+        calls.append(assignment)
+
+        def selectors(file: str) -> list[dict[str, Any]]:
+            part = next(part for part in assignment['assignments'] if part['file'] == file)
+            option = next(option for option in part['source_options'] if option['side'] == 'new')
+            return [{'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}]
+
+        claim = _proposal(review_inputs)
+        claim['payload']['evidence_refs'] = selectors('api.py')
+        if assignment['kind'] == 'discovery':
+            value = {'targets': [
+                {'target_id': part['target_id'], 'status': 'reviewed', 'reason': 'Captured source inspected.',
+                 'evidence_refs': selectors(part['file'])} for part in assignment['assignments']], 'claims': [claim]}
+        else:
+            claim['payload'].update(file='caller.py', grounds='A distinct changed caller needs fresh challenge.',
+                                    evidence_refs=selectors('caller.py'))
+            verdict = _verdict(review_inputs, assignment['claims'][0], evidence_refs=selectors('api.py'))
+            value = {'verdicts': [verdict], 'claims': [claim] if new_concern else []}
+        binding = kwargs['host_tools']
+        binding.restrict(deadline=kwargs['deadline'], tool_call_budget=kwargs['tool_call_budget'])
+        async with binding.session():
+            binding.admit('terminal', 'structured_output', value, terminal=True)
+            accepted = binding.submit('terminal', value)
+            kwargs['investigation_budget'].observed_tool_starts += binding.calls
+            binding.native_settled = True
+        if assignment['kind'] == 'challenge':
+            (cwd / 'api.py').unlink()
+        return accepted, None, None
+
+    monkeypatch.setattr(committed_review, 'agent', SimpleNamespace(run_agent=execute, console=agent.console))
+    result = await run_committed_review(CommittedReviewRequest(
+        repo, review_inputs.revision['merge_base_sha'], local=True, limits=ReviewLimits(90, 12, 12),
+    ))
+    value = result.to_dict()
+    assert result.output_installed and not result.complete
+    assert [call['kind'] for call in calls] == ['discovery', 'challenge']
+    assert value['schema_version'] == 3 and value['terminal_result']['schema_version'] == 2
+    assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
+    assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
+    assert value['terminal_result']['analysis_state'] == 'incomplete'
+    assert value['terminal_result']['reason_codes'] == (
+        ['backend_failure', 'evidence_incomplete'] if new_concern else ['evidence_incomplete'])
+    assert len(value['claims']) == (2 if new_concern else 1) and len(value['findings']) == 1
+    assert value['findings'][0]['payload']['file'] == 'api.py'
+    assert value['findings'][0]['payload']['evidence_refs'] == value['claims'][0]['payload']['evidence_refs']
+    if new_concern:
+        assert value['claims'][1]['disposition'] == 'unresolved'
+        assert value['execution'][-2]['assignment'] == 'challenge' and not value['execution'][-2]['accepted']
+    assert value['execution'][-1]['assignment'] == 'source_integrity' and not value['execution'][-1]['accepted']
+    assert tracked_source_state(repo) == original
+
+
 @pytest.mark.parametrize("cleanup_change", ["none", "source-replacement", "git-routing"])
 async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     cleanup_change: str,
 ) -> None:
-    """Committed captures share the workspace lease beyond artifact-session teardown.
+    """Independent capture cleanup ignores source replacement and preserves foreign storage.
 
-    Ordinary runner cleanup tests do not enter this separate capture path; a source
-    replacement must not let its Git registry delete the original capture, and a
-    redirected capture must survive cleanup without replacing caller cancellation.
+    Runner cleanup tests do not exercise the committed API lifetime. Replacing its
+    private Git directory must retain competing bytes without masking cancellation.
     """
     from tests.test_artifact_visibility import _Entry, _walk_entry
 
@@ -628,9 +679,6 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
                 repo.rename(removed)
                 seed_feature_branch(repo, base={"foreign.py": "FOREIGN = 1\n"},
                                     feature={"foreign.py": "FOREIGN = 2\n"})
-                # A foreign registry at the same spelling can otherwise claim this
-                # capture and authorize Git to delete both its bytes and registration.
-                shutil.copytree(removed / ".git/worktrees", repo / ".git/worktrees")
                 foreign_roots.append(repo)
             elif cleanup_change == "git-routing":
                 foreign = repo.with_name("foreign")
@@ -639,6 +687,7 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
                 linked = repo.with_name("foreign-linked")
                 git_ops.worktree_add(foreign, linked, "HEAD")
                 foreign_git, _ = git_ops.git_dirs(linked)
+                (captured_root / ".git").rename(captured_root / ".retained-git")
                 (captured_root / ".git").write_text(f"gitdir: {foreign_git}\n", encoding="utf-8")
                 foreign_roots.extend((foreign, linked))
             for root in foreign_roots:
@@ -672,16 +721,16 @@ async def test_committed_capture_cleanup_keeps_ownership_after_session_close(
         assert result.complete and result.output_installed
     assert captured_root is not None
     warning = capsys.readouterr().out
-    if cleanup_change == "none":
-        assert not captured_root.exists()
-        assert "Captured worktree cleanup" not in warning
-    else:
+    if cleanup_change == "git-routing":
         assert captured_root.is_dir()
-        assert "Captured worktree cleanup skipped" in warning and "retained" in warning
-        foreign_after: list[_Entry] = []
-        for root in foreign_roots:
-            _walk_entry(repo.parent, root, foreign_after)
-        assert foreign_after == foreign_before
+        assert "Captured source cleanup skipped" in warning and "retained" in warning
+    else:
+        assert not captured_root.exists()
+        assert "Captured source cleanup" not in warning
+    foreign_after: list[_Entry] = []
+    for root in foreign_roots:
+        _walk_entry(repo.parent, root, foreign_after)
+    assert foreign_after == foreign_before
 
 
 @pytest.mark.parametrize("fault", [
@@ -764,10 +813,14 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         validate_committed_result(value)
 
 
-async def test_committed_review_refuses_clean_checkout_with_transformed_native_bytes(
+async def test_committed_review_materializes_raw_bytes_despite_checkout_transforms(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clean Git status can hide changed native bytes; refuse before model dispatch."""
+    """Checkout filters cannot change captured native bytes or the user's dirty source.
+
+    The old refusal test covered transformed worktrees. Inert raw preparation now
+    supports this input, so the real dispatch seam must observe the raw Git blob.
+    """
     repo = tmp_path / "source"
     init_repo(repo)
     git(repo, "config", "filter.review.clean", "sed 's/NATIVE/CANONICAL/g'")
@@ -793,14 +846,25 @@ async def test_committed_review_refuses_clean_checkout_with_transformed_native_b
     original = tracked_source_state(repo)
     original_worktrees = git(repo, "worktree", "list", "--porcelain")
 
-    async def unexpected_dispatch(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("incoherent source reached model dispatch")
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
+        assert (cwd / "api.py").read_bytes() == b"VALUE = 'CANONICAL head'\n"
+        assignment = json.loads(prompt.split("\nCommitted review assignment:\n")[1]
+                                .split("\nEnd committed review assignment.\n")[0])
+        value = {"claims": [], "targets": [
+            {"target_id": part["target_id"], "status": "reviewed", "reason": "Raw captured bytes inspected.",
+             "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
+                                "basis": "supplied_diff", "source_range": None}]}
+            for part in assignment["assignments"]]}
+        binding = kwargs["host_tools"]
+        async with binding.session():
+            binding.admit("terminal", "structured_output", value, terminal=True)
+            accepted = binding.submit("terminal", value)
+            binding.native_settled = True
+        return accepted, None, None
 
-    monkeypatch.setattr(
-        committed_review, "agent", SimpleNamespace(run_agent=unexpected_dispatch, console=agent.console),
-    )
-    with pytest.raises(FrozenSourceRejected, match="api.py.*differs.*captured Git blob"):
-        await run_committed_review(CommittedReviewRequest(repo, base))
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    result = await run_committed_review(CommittedReviewRequest(repo, base))
+    assert result.complete and result.to_dict()["analyzed_revision"]["head_sha"] == head
     assert tracked_source_state(repo) == original
     assert git(repo, "worktree", "list", "--porcelain") == original_worktrees
 

@@ -203,7 +203,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
     # unit in the run, so it is recorded as run provenance (MH5/MH16) even when
     # the review cache itself is disabled.
     reuse = deep_state.reuse_cache
-    reuse_enabled = reuse is not None and review_cache_enabled(ctx.config)
+    reuse_enabled = reuse is not None and reuse.enabled and review_cache_enabled(ctx.config)
 
     def _record_exploration(outcome: str, reason: str) -> None:
         if reuse is None or not reuse_enabled:
@@ -329,7 +329,8 @@ async def _step_intent(ctx: FlowContext) -> None:
         elif config.pr_number is not None:
             try:
                 pr_view = git_ops.gh_pr_view(
-                    target_dir, config.pr_number, auth=ctx.github_execution.auth
+                    work.source if work.captured_source is not None else target_dir,
+                    config.pr_number, auth=ctx.github_execution.auth
                 )
             except git_ops.GitError as exc:
                 print_warning(

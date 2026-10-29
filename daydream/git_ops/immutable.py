@@ -265,7 +265,7 @@ def validate_synthetic_history(
         raise GitError("immutable synthetic bundle contains extra commit history")
 
 
-def _inventory(repo: Path, head: str) -> list[tuple[str, str, str]]:
+def _inventory(repo: Path, head: str, *, max_blob_bytes: int | None = None) -> list[tuple[str, str, str]]:
     raw = process._run_git(repo, ["ls-tree", "-r", "-z", "-l", head], capture_bytes=True,
                            timeout=30, error_context="immutable source inventory unavailable",
                            max_output_bytes=_MAX_SOURCE_BYTES).stdout
@@ -290,7 +290,7 @@ def _inventory(repo: Path, head: str) -> list[tuple[str, str, str]]:
         if kind == "blob":
             size = int(raw_size)
             total += size
-            if size > _MAX_BLOB_BYTES or total > _MAX_SOURCE_BYTES:
+            if size > (_MAX_BLOB_BYTES if max_blob_bytes is None else max_blob_bytes) or total > _MAX_SOURCE_BYTES:
                 raise GitError("immutable source files exceed the supported size")
         result.append((mode, oid, name))
     return result

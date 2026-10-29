@@ -32,6 +32,7 @@ from tests.harness.git_helpers import bare_remote, git, init_repo
 from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
+from tests.test_pr_review import _recording_fake_submit
 
 
 class ReviewRun:
@@ -77,6 +78,70 @@ def reviewer(prompt: str) -> bool:
 
 class AuthError(RuntimeError):
     category = 'AUTH_CONFIG'
+
+
+@pytest.mark.parametrize('corrupt_capture', [False, True], ids=['intact', 'late-source-corruption'])
+async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
+    review: ReviewRun, capsys: pytest.CaptureFixture[str],
+    corrupt_capture: bool,
+) -> None:
+    """Pin PR bytes independently; late capture corruption cannot authorize clean approval.
+
+    Capture-owner tests miss settlement after the final model response and posting.
+    """
+    from collections.abc import AsyncIterator
+
+    from daydream.backends import AgentEvent
+    from daydream.pr_review import ClassifiedReviewPlan, ReviewEvent
+
+    committed = git_ops.show(review.repo, review.pr.head_sha, 'api.py').decode()
+    (review.repo / 'api.py').write_text('LOCAL_COMMIT = True\n')
+    git(review.repo, 'add', 'api.py')
+    git(review.repo, 'commit', '-m', 'local change beyond PR')
+    local_head = git_ops.head_sha(review.repo)
+    (review.repo / 'api.py').write_text('LOCAL_INDEX = True\n')
+    git(review.repo, 'add', 'api.py')
+    (review.repo / 'api.py').write_text('LOCAL_WORKING = True\n')
+    (review.repo / 'untracked.py').write_text('LOCAL_UNTRACKED = True\n')
+    before = (review.repo / '.git/index').read_bytes()
+    plans: dict[str, ClassifiedReviewPlan] = {}
+    captured_roots: list[Path] = []
+
+    class CommittedReader(EmptyReviewBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            assert cwd != review.repo and (cwd / 'api.py').read_text() == committed
+            assert not (cwd / 'untracked.py').exists()
+            captured_roots.append(cwd)
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    review.backend = CommittedReader(review.repo)
+    if corrupt_capture:
+        finalize = review_terminal.finalize_review
+
+        def corrupt_before_finalization(ctx: Any, *args: Any, **kwargs: Any) -> int:
+            (ctx.work.repo / 'api.py').unlink()
+            return finalize(ctx, *args, **kwargs)
+
+        review.patch.setattr(review_terminal, 'finalize_review', corrupt_before_finalization)
+    review.patch.setattr('daydream.pr_review.post_classified_review', _recording_fake_submit(plans))
+    assert await review.run(output_mode='comment', findings_out=None, approve_on_clean=True) == 0
+    plan = plans['plan']
+    assert plan.pr.head_sha == review.pr.head_sha != local_head
+    assert plan.pr.base_sha == review.pr.base_sha and plan.pr.pr_base_sha == review.pr.base_sha
+    assert plan.event is (ReviewEvent.COMMENT if corrupt_capture else ReviewEvent.APPROVE)
+    coverage = ReviewCoverage.from_dict(json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()))
+    terminal = coverage.finalize('completed')
+    assert terminal['analysis_state'] == ('incomplete' if corrupt_capture else 'complete')
+    if corrupt_capture:
+        assert 'evidence_incomplete' in terminal['reason_codes']
+    patch = (review.repo / '.daydream/diff.patch').read_text()
+    assert 'LOCAL_' not in patch and patch
+    assert captured_roots and all(not root.exists() for root in captured_roots)
+    assert 'excludes local tracked and untracked edits' in collapse_panel_text(capsys)
+    assert git_ops.head_sha(review.repo) == local_head and (review.repo / '.git/index').read_bytes() == before
+    assert (review.repo / 'api.py').read_text() == 'LOCAL_WORKING = True\n'
+    assert (review.repo / 'untracked.py').read_text() == 'LOCAL_UNTRACKED = True\n'
 
 
 @pytest.mark.parametrize(('case', 'state', 'reason'), [
@@ -242,30 +307,28 @@ async def test_automatic_shard_failure_preserves_successful_sibling_findings_and
         'stack-python#0-records.json', 'stack-structure-records.json'}
     units = {json.loads(path.read_text())['unit']
              for path in (deep.parent / 'review-cache/entries').glob('*/manifest.json')}
-    assert {unit for unit in units if unit.startswith('shard:')} == {'shard:python#0'}
-    assert units - {'shard:python#0'} == {'intent', 'merge'}
+    assert units == set(), 'Admitted sibling evidence cannot become reusable review authority.'
 
 
-@pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
+@pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive',
                                   'base-tip', 'shards', 'pipeline-budget'])
 async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureRequest, case: str) -> None:
     overrides: dict[str, Any] = {}
     store = LocalRecordStore(review.tmp / 'records')
-    if case in {'mismatch', 'no-diff'}:
+    if case == 'no-diff':
         overrides.update(dataset_capture=True, dataset_store_path=store.root)
     prior = {'.review-output.md': 'prior completed review\n', '.daydream/deep/history.json': '{"prior": true}\n',
              '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
              '.daydream/recommended.patch': 'prior recommended patch\n'}
-    if case in {'mismatch', 'no-diff', 'dirty-no-diff'}:
+    if case in {'no-diff', 'dirty-no-diff'}:
         for name, text in prior.items():
             path = review.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-        if case != 'mismatch':
-            (review.repo / '.review-output.md').write_text(
-                '# Review\n\n## Issues\n1. [obsolete.py:9] PRIOR_FINDING\n\n'
-                '## Held Findings\n2. [obsolete.py:10] PRIOR_HELD\n\n'
-                '## Diagrams\nPRIOR_DIAGRAM\n')
+        (review.repo / '.review-output.md').write_text(
+            '# Review\n\n## Issues\n1. [obsolete.py:9] PRIOR_FINDING\n\n'
+            '## Held Findings\n2. [obsolete.py:10] PRIOR_HELD\n\n'
+            '## Diagrams\nPRIOR_DIAGRAM\n')
     live, calls = review.pr, []
     if case in {'no-diff', 'dirty-no-diff', 'base-tip'}:
         git(review.repo, 'checkout', 'main')
@@ -289,10 +352,10 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
         overrides.update(deep_shard_enabled=True, deep_shard_max_files=1)
     if case == 'pipeline-budget':
         overrides['review_profile'] = _profile_with_pipeline(review_wall_budget_s=0)
-    if case in {'live', 'mismatch', 'base-tip'}:
+    if case in {'live', 'base-tip'}:
         def lookup(*_a: Any, **_k: Any) -> Any:
             calls.append(live)
-            return replace(live, head_sha=live.base_sha) if case == 'mismatch' else live
+            return live
         review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
         def advance(_p: str) -> None:
             nonlocal live
@@ -302,34 +365,28 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
                 review_by_stack={'structure': [record()]}, responder=advance)
     if case == 'no-diff':
         assert await review.run(dataset_store_path=store.root) == 0 and not store.root.exists()
-    assert await review.run(**overrides) == (1 if case in {'dirty', 'dirty-no-diff', 'mismatch'} else 0)
-    if case in {'mismatch', 'no-diff'}:
+    assert await review.run(**overrides) == 0
+    if case == 'no-diff':
         raw = read_records(store).runs[0]
-        assert raw['outcome'] == ('failed' if case == 'mismatch' else 'success')
-        if case == 'mismatch':
-            assert raw['original_task']['status'] == 'unavailable'
-            assert all(raw[name]['status'] == 'unproduced'
-                       for name in ('trajectories', 'findings', 'scoring', 'recommended_patch'))
-            assert all((review.repo / name).read_text() == text for name, text in prior.items())
-        else:
-            assert raw['original_task']['value']['diff'] == '' and raw['findings']['value']['items'] == []
-            assert raw['scoring']['status'] == 'available'
-            assert 'No confirmed findings.' in raw['scoring']['value']['review_text']
-            assert raw['verification']['status'] == 'unproduced'
-    if case in {'interactive', 'mismatch'}:
+        assert raw['outcome'] == 'success'
+        assert raw['original_task']['value']['diff'] == '' and raw['findings']['value']['items'] == []
+        assert raw['scoring']['status'] == 'available'
+        assert 'No confirmed findings.' in raw['scoring']['value']['review_text']
+        assert raw['verification']['status'] == 'unproduced'
+    if case == 'interactive':
         assert not review.output.exists()
-        assert bool(review.backend.calls) is (case == 'interactive')
-        if case == 'interactive':
-            assert 'DIRTY = True' in (review.repo / '.daydream/diff.patch').read_text()
+        assert review.backend.calls
+        assert 'DIRTY = True' in (review.repo / '.daydream/diff.patch').read_text()
         return
     data = review.load()
     result = data['terminal_result']
-    failed = case in {'dirty', 'dirty-no-diff', 'pipeline-budget'}
+    failed = case == 'pipeline-budget'
     assert result['analysis_state'] == ('failed' if failed else 'complete')
-    if case in {'dirty', 'dirty-no-diff', 'no-diff', 'pipeline-budget'}:
+    if case in {'dirty-no-diff', 'no-diff', 'pipeline-budget'}:
         assert review.backend.calls == []
     if case.startswith('dirty'):
-        assert 'dirty_snapshot' in result['reason_codes']
+        assert (review.repo / 'api.py').read_text() == 'DIRTY = True\n'
+        assert 'DIRTY = True' not in (review.repo / '.daydream/diff.patch').read_text()
     if case == 'pipeline-budget':
         assert 'host_pipeline_budget_exhaustion' in result['reason_codes']
         assert all(s['status'] == 'uncovered' for s in scopes(data).values())
@@ -762,7 +819,9 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             state['dispatch_injected'] = True
             if fault == 'placement-git-error-worktree':
                 oid = review.pr.base_sha
-                (review.repo / '.git' / 'objects' / oid[:2] / oid[2:]).rename(review.tmp / 'removed-commit-object')
+                captured_root = Path(kwargs['cwd'])
+                assert captured_root != review.repo
+                (captured_root / '.git' / 'objects' / oid[:2] / oid[2:]).rename(review.tmp / 'removed-commit-object')
             else:
                 review.repo.rename(review.tmp / 'removed-source')
                 if fault == 'placement-replacement-worktree':
@@ -801,7 +860,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             return '{"issues": "invalid"}'
         return text
     def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
-        if fault.startswith('source-loss') and state['failed']:
+        if target == review.repo and fault.startswith('source-loss') and state['failed']:
             pytest.fail('terminal export attempted to read live Git after source loss')
         return show(target, *args, **kwargs)
     def response(prompt: str) -> Any:
@@ -845,10 +904,22 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     if placement_fault:
         assert state.get('dispatch_injected')
     if fault.startswith('placement-'):
-        assert state['export'] is None and not review.output.exists()
+        assert not review.output.exists()
+        if fault == 'placement-git-error-worktree':
+            assert state['export'] is None
+        else:
+            assert state['export'] is not None
+            private_path, private_bytes = state['export']
+            assert private_path.read_bytes() == private_bytes
+            retained = json.loads(private_bytes)
+            assert retained['terminal_result']['analysis_state'] == 'incomplete'
+            assert retained['findings'][0]['title'] == 'Grounded defect'
         warning = collapse_panel_text(capsys)
-        diagnostic = 'ArtifactVisibilityError' if fault == 'placement-replacement-worktree' else 'GitError'
-        assert f'Terminal review finalization failed: {diagnostic}' in warning
+        if fault == 'placement-git-error-worktree':
+            assert 'Terminal review finalization failed: GitError' in warning
+        else:
+            assert 'Terminal review finalization failed' not in warning
+            assert any('ArtifactVisibilityError' in note for note in error.__notes__)
         if fault == 'placement-replacement-worktree':
             from tests.test_artifact_visibility import _Entry, _walk_entry
             after: list[_Entry] = []
@@ -860,10 +931,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert not review.repo.exists()
         if force_worktree:
             operational = {call['cwd'] for call in review.backend.calls if 'cwd' in call}
-            assert operational and all(path != review.repo and path.is_dir() for path in operational)
-            for path in operational:
-                with pytest.raises(git_ops.GitError):
-                    git_ops.head_sha(path)
+            assert operational and all(path != review.repo and not path.exists() for path in operational)
         assert not review.output.exists()
         raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
         assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
@@ -883,7 +951,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert export_path.read_bytes() == exported_bytes
         exported = json.loads(exported_bytes)
         assert len(exported['findings']) == 1 and exported['findings'][0]['title'] == 'Grounded defect'
-        assert exported['findings'][0]['placement'] == 'file' and exported['findings'][0]['line'] is None
+        assert (exported['findings'][0]['placement'], exported['findings'][0]['line']) == ('inline', 2)
         result = exported['terminal_result']
         assert result['stack_outcomes'] == coverage['stack_outcomes']
         assert result['run_id'] == coverage['run_id']

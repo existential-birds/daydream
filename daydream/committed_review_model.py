@@ -17,6 +17,7 @@ from daydream.review_source_refs import (
     SOURCE_REF_SCHEMA,
     SOURCE_REFS_SCHEMA,
     SOURCE_SELECTORS_SCHEMA,
+    source_revision,
     validate_source_refs,
 )
 
@@ -98,19 +99,25 @@ IMMUTABLE_COMMITTED_RESULT_SCHEMA = strict_object({
     "schema_version": {"const": 2},
     "immutable_input": IMMUTABLE_REVIEW_INPUT_SCHEMA,
 })
+LOCAL_REVIEW_RESULT_SCHEMA = strict_object({
+    **COMMITTED_RESULT_SCHEMA['properties'], 'schema_version': {'const': 3},
+})
 
 
 def validate_committed_result(value: dict[str, Any]) -> None:
     """Reject identity drift, unchecked publication and manufactured completion."""
     try:
         version = value.get("schema_version")
-        if type(version) is not int or version not in {1, 2}:
+        if type(version) is not int or version not in {1, 2, 3}:
             raise ValueError("unsupported committed review result version")
-        jsonschema.validate(value, COMMITTED_RESULT_SCHEMA if version == 1 else IMMUTABLE_COMMITTED_RESULT_SCHEMA)
+        jsonschema.validate(value, {1: COMMITTED_RESULT_SCHEMA, 2: IMMUTABLE_COMMITTED_RESULT_SCHEMA,
+                                    3: LOCAL_REVIEW_RESULT_SCHEMA}[version])
     except jsonschema.ValidationError as exc:
         raise ValueError(f"invalid committed review at {exc.json_path}") from exc
     terminal = value["terminal_result"]
     revision = value["analyzed_revision"]
+    if ('source_id' in revision) != (version == 3):
+        raise ValueError('result version does not match captured source identity; restart review')
     if version == 2:
         validate_immutable_input(value["immutable_input"])
         materialized = value["immutable_input"]["materialization"]
@@ -138,7 +145,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
 
     def check_refs(refs: list[dict[str, Any]], expected: list[dict[str, Any]], *, assigned: bool = True) -> None:
         if any(
-            ref["revision"] != revision["merge_base_sha" if ref["side"] == "old" else "head_sha"]
+            ref["revision"] != source_revision(revision, ref['side'])
             or ref["role"] == "assigned"
             and ref["artifact_sha256"] != revision["diff_key"]
             for ref in refs
