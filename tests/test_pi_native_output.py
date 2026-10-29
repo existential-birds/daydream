@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
@@ -45,6 +46,7 @@ from daydream.review_source_refs import (
 from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git, seed_feature_branch
+from tests.harness.harbor_review import assignment_from_request
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
 from tests.test_committed_review import immutable_input_for
@@ -123,7 +125,8 @@ async def test_native_pi_response_diagnostics_bind_to_each_generation(
     assert "private-header-canary" not in json.dumps(document)
 
 
-@pytest.mark.parametrize("case", ["defect", "empty", "false-positive", "fallback", "hosted", "hosted-alternate",
+@pytest.mark.parametrize("case", ["defect", "retry", "empty", "false-positive", "fallback", "hosted",
+                                  "hosted-alternate",
                                   "hosted-unsupported-pi", "hosted-unsupported-node", "hosted-resources",
                                   "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                                   "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override",
@@ -131,26 +134,24 @@ async def test_native_pi_response_diagnostics_bind_to_each_generation(
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
-    """Production composition needs fresh challenge, frozen reads and sealed output.
+    """Real Pi reviews frozen source with fresh challenge and exact native selection.
 
-    Blank, absent and explicit selections are compared with Pi itself;
-    direct adapter journeys cannot detect host selection or shared-history bugs.
-    Hosted selections additionally prove that native resource/context discovery and
-    attempted effects cannot broaden the operator policy across retries and fresh
-    challenges. Both the preferred exact model and an unrelated provider/model
-    must reach native execution; an accepted constructor alone cannot prove this.
-    Unsupported versions must retain the command and expected version in their
-    mismatch diagnostic; a generic readiness rejection would hide the cause.
-    Suffix-only model registries and invalid UTF-8 settings exercise readiness
-    faults that the exact-model, valid-JSON success path cannot detect.
-    An explicit operator loader override must be rejected before its preload can
-    execute; hostile ambient loader settings alone only prove environment isolation.
+    Compare blank/absent/explicit selection with Pi itself. Hosted rows retain
+    operator policy across retries; readiness rows reject versions, capabilities,
+    model/settings faults and executable resources before provider work. A semantic
+    rejection followed by provider failure must preserve the challenge assignment.
     """
     immutable = case == "hosted-immutable"
     empty = case in {"empty", "fallback"}
     hosted = case.startswith("hosted")
-    retried = case in {"hosted", "hosted-alternate"}
-    defect = case == "defect" or hosted
+    retry = case == "retry"
+    retried = case in {"hosted", "hosted-alternate"} or retry
+    defect = case == "defect" or retry or hosted
+    if retry:
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+        native_provider.errors[4] = "503 Service Unavailable"
     repo = tmp_path / "committed-source"
     original = "def ratio(total, count):\n    return total / count\n"
     captured = ("def ratio(total, count):\n    return total / (count - 1)\n" if defect else
@@ -167,6 +168,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     settings = native_provider.config / "settings.json"
     expected_model = "native-inherited-model" if case == "fallback" else "alternate-model" if empty else "output-model"
     expected_provider = "nous" if case == "fallback" else "output-fixture"
+    expected_effort = "low" if retry else "high"
     settings.write_text(json.dumps({
         **({"defaultProvider": "nous" if case == "false-positive" else "output-fixture"}
            if case != "fallback" else {}),
@@ -336,6 +338,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                           cwd=repo, env=control_env, capture_output=True, timeout=30)
         assert control.returncode == 0, control.stderr.decode()
         assert len(native_provider.requests) == 1 and native_provider.requests[0]["model"] == expected_model
+        assert native_provider.requests[0]["reasoning_effort"] == expected_effort
     native_provider.requests.clear()
     native_provider.authorizations.clear()
     assignments_seen: list[dict[str, Any]] = []
@@ -353,12 +356,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         else:
             assert context.strip() in json.dumps(request["messages"])
         assert "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
-        users = [message for message in request["messages"] if message["role"] == "user"]
-        assert len(users) == 1
-        content = users[0]["content"]
-        text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content)
-        assignment = json.loads(text.split("\nCommitted review assignment:\n", 1)[1].split(
-            "\nEnd committed review assignment.\n", 1)[0])
+        assignment = assignment_from_request(request)
         kind = assignment["kind"]
         if hosted:
             assert assignment["profile"]["profile_name"] == operator_profile.name
@@ -368,10 +366,14 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert assignment["profile"]["hosted_policy"]["model"] == expected_model
             assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
             marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
-            assert marker in text and assignment["profile"]["strategies"][kind] == marker
+            assert marker in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
+            assert assignment["profile"]["strategies"][kind] == marker
         revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
         call_kind = f"{kind}-{revision}" if hosted else kind
         tools = [message for message in request["messages"] if message["role"] == "tool"]
+        challenge_attempt = sum(prior["kind"] == "challenge" for prior in assignments_seen) + int(not tools)
+        if retry and kind == "challenge":
+            call_kind = f"challenge-{challenge_attempt}"
         if not tools:
             assignments_seen.append(assignment)
             histories[kind] = request["messages"]
@@ -414,6 +416,9 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                 "verdict": "confirmed" if defect else "rejected",
                 "grounds": "At count=1 the captured denominator is zero." if defect else counterevidence,
                 "evidence_refs": refs}], "claims": []}
+            if retry and challenge_attempt == 1:
+                payload["verdicts"][0]["revision"] += 1
+                return [(f"{call_kind}-rejected", "structured_output", payload)]
             if hosted and claim["revision"] == 1:
                 payload["claims"] = [{key: claim[key] for key in ("uid", "revision", "source_uids", "title")} | {
                     "payload": {**claim["payload"], "grounds": "Captured denominator count-1 is zero at count=1.",
@@ -485,12 +490,13 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert value["analyzed_revision"]["merge_base_sha"] == base
     assert value["terminal_result"]["analysis_state"] == "complete"
     assert {part["file"] for part in value["assignments"]} == {"ratio.py"}
-    expected_kinds = ["discovery"] if empty else ["discovery", "challenge", *(["challenge"] if hosted else [])]
+    expected_kinds = (["discovery"] if empty else
+                      ["discovery", "challenge", *(["challenge"] if hosted or retry else [])])
     assert [assignment["kind"] for assignment in assignments_seen] == expected_kinds
     assert len(native_provider.requests) == (4 if hosted else 2) * len(expected_kinds) + int(retried)
     assert all(request["model"] == expected_model for request in native_provider.requests)
     if not hosted:
-        assert all(request["reasoning_effort"] == "high" for request in native_provider.requests)
+        assert all(request["reasoning_effort"] == expected_effort for request in native_provider.requests)
     else:
         assert native_provider.authorizations == ["Bearer synthetic-hosted-credential"] * len(native_provider.requests)
         assert all({tool["function"]["name"] for tool in request["tools"]} == {
@@ -546,7 +552,25 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert trajectory["extra"]["profile_name"] == operator_profile.name
         assert trajectory["extra"]["profile_digest"] == operator_profile.digest
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
-    if not hosted:
+    if retry:
+        assert assignments_seen[1] == assignments_seen[2]
+        assert [call["tool_call_id"] for call in calls] == [
+            "discovery-read", "discovery-submit", "challenge-1-read", "challenge-1-rejected",
+            "challenge-2-read", "challenge-2-submit"]
+        observations = {item["source_call_id"]: item["content"] for step in trajectory["steps"]
+                        for item in (step.get("observation") or {}).get("results", [])}
+        assert "assigned uid/current revision" in observations["challenge-1-rejected"]
+        assert len(value["execution"]) == 2
+        decisions = value["terminal_result"]["stack_outcomes"][0]["target_decisions"]
+        assert decisions and all(target["status"] == "reviewed" for target in decisions)
+        assert "tool-call allocation is 10 calls" in json.dumps(native_provider.requests[2]["messages"])
+        assert "tool-call allocation is 8 calls" in json.dumps(native_provider.requests[5]["messages"])
+        failed_history = native_provider.requests[4]["messages"]
+        assert any(message["role"] == "tool" and message["tool_call_id"] == "challenge-1-rejected"
+                   for message in failed_history)
+        assert not any(message["role"] in {"assistant", "tool"}
+                       for message in native_provider.requests[5]["messages"])
+    elif not hosted:
         assert [call["tool_call_id"] for call in calls] == [
             f"{kind}-{action}" for kind in expected_kinds for action in ("read", "submit")]
     else:
@@ -556,10 +580,19 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert (repo / ".daydream/diff.patch").read_text() == "prior public artifact\n"
         assert not (repo / ".daydream/committed-review.json").exists()
     invocations = trajectory["extra"]["subtrajectories"]
-    expected_invocations = len(expected_kinds) + int(retried)
+    expected_invocations = len(expected_kinds) + int(retried and not retry)
     assert len(invocations) == expected_invocations
     assert len({invocation["invocation_id"] for invocation in invocations}) == expected_invocations
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
+    if retry:
+        lifecycles = [invocation["backend_lifecycle"] for invocation in invocations]
+        assert [lifecycle["host_tool_call_count"] for lifecycle in lifecycles] == [2, 2, 4]
+        assert [lifecycle["host_native_settled"] for lifecycle in lifecycles] == [True, False, True]
+        assert all(lifecycle["host_authority_closed"] and lifecycle["host_cleanup_complete"]
+                   for lifecycle in lifecycles)
+        assert [lifecycle["host_tool_rejection_count"] for lifecycle in lifecycles] == [0, 1, 1]
+        assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0
+                   for step in trajectory["steps"]) == 60
     generations = [generation for invocation in invocations
                    for generation in invocation["generation_lifecycle"]["drafts"]]
     assert all(generation["model_name"] == expected_model and generation["provider_name"] == expected_provider
@@ -985,11 +1018,7 @@ async def test_native_reused_tool_identity_cannot_repeat_effect_or_hide_correlat
 async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_preserves_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, cancel_at: str,
 ) -> None:
-    """A blocked built-in read closes only its invocation before recorded evidence freezes.
-
-    Fake subprocess cancellation misses Node filesystem work, a real child whose
-    spawn returns after cancellation, and sibling authority on one cached backend.
-    """
+    """Cancel real FIFO reads or late starts before freeze, preserving a cached-backend sibling."""
     root = tmp_path.resolve()
     blocked = root / "blocked-source"
     os.mkfifo(blocked)
@@ -1011,15 +1040,12 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
     original = CliTransport.lines
     async def observe(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
         async for line in original(transport, *args, **kwargs):
-            try:
+            with suppress(json.JSONDecodeError):
                 event = json.loads(line)
-            except json.JSONDecodeError:
-                yield line
-                continue
-            if (cancel_at == "active-read" and event.get("type") == "tool_execution_start"
-                    and event.get("toolCallId") == "blocked-read"):
-                children.extend(transport.processes)
-                entered.set()
+                if (cancel_at == "active-read" and event.get("type") == "tool_execution_start"
+                        and event.get("toolCallId") == "blocked-read"):
+                    children.extend(transport.processes)
+                    entered.set()
             yield line
     monkeypatch.setattr(CliTransport, "lines", observe)
     survivor_waiting, release_survivor = threading.Event(), threading.Event()
@@ -1043,11 +1069,11 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
         sibling_results.append(value)
         return value
     cancelled_binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept_cancelled)
-    close_authority = cancelled_binding.close_authority
+    close_attempt = cancelled_binding.close_attempt
     def observe_close() -> None:
-        close_authority()
+        close_attempt()
         authority_closed.set()
-    monkeypatch.setattr(cancelled_binding, "close_authority", observe_close)
+    monkeypatch.setattr(cancelled_binding, "close_attempt", observe_close)
     sibling_binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept_sibling)
     cancelled_recorder = make_recorder(root, path=root / "cancelled.json", backend_name="pi")
     sibling_recorder = make_recorder(root, path=root / "sibling.json", backend_name="pi")
@@ -1060,9 +1086,7 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
     try:
         await asyncio.wait_for(entered.wait(), 8)
         assert await asyncio.to_thread(survivor_waiting.wait, 5)
-        # A nonblocking writer can open only after the real Node reader opens
-        # this FIFO. Keep it open without bytes so the child cannot finish its
-        # read naturally while the spawn-return barrier is still pending.
+        # Keep the FIFO writer open without bytes so the real Node read cannot finish before cancellation.
         async with asyncio.timeout(5):
             while fifo_writer is None:
                 try:
@@ -1176,14 +1200,14 @@ async def test_native_accepted_state_is_retained_when_terminal_settlement_or_cle
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
 
 
-@pytest.mark.parametrize("fault", ["timeout", "disconnect", "uncorrelated-reply"])
-async def test_native_indeterminate_submission_stops_generation_and_preserves_host_acceptance(
+@pytest.mark.parametrize("fault", ["timeout", "disconnect", "uncorrelated-reply", "missing-callback"])
+async def test_native_indeterminate_submission_stops_generation_and_never_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
 ) -> None:
-    """Losing the acceptance reply ends native work without undoing an accepted canonical result.
+    """Stop unconfirmed submissions, retaining accepted work and refusing replay.
 
-    A native error assertion alone misses an unwanted next generation. Successful
-    semantic correction is separately covered by the real source-selector journey.
+    Missing callbacks prove fresh-conversation denial before acceptance; lost
+    receipts retain accepted work. The source-selector journey owns correction.
     """
     submitted = {"verdict": "submitted", "findings": []}
     canonical = {"verdict": "complete", "findings": []}
@@ -1203,6 +1227,16 @@ async def test_native_indeterminate_submission_stops_generation_and_preserves_ho
         installed.append(canonical)
         return canonical
     binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    dropped_submissions: list[bytes] = []
+    if fault == "missing-callback":
+        read_body = asyncio.StreamReader.readexactly
+        async def lose_submit_body(reader: asyncio.StreamReader, size: int) -> bytes:
+            body = await read_body(reader, size)
+            if body and json.loads(body) == {"id": "submit", "arguments": submitted}:
+                dropped_submissions.append(body)
+                raise ConnectionResetError("Submission body read disconnected before callback dispatch")
+            return body
+        monkeypatch.setattr(asyncio.StreamReader, "readexactly", lose_submit_body)
     packet = PiHostToolServer.packet
     def timed_packet(server: PiHostToolServer) -> dict[str, Any]:
         value = packet(server)
@@ -1227,12 +1261,8 @@ async def test_native_indeterminate_submission_stops_generation_and_preserves_ho
     lines = CliTransport.lines
     async def observe_native(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
         async for line in lines(transport, *args, **kwargs):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                yield line
-                continue
-            native_rows.append(row)
+            with suppress(json.JSONDecodeError):
+                native_rows.append(json.loads(line))
             yield line
     monkeypatch.setattr(CliTransport, "lines", observe_native)
     recorder = make_recorder(tmp_path, backend_name="pi")
@@ -1244,8 +1274,12 @@ async def test_native_indeterminate_submission_stops_generation_and_preserves_ho
             await run_agent(backend, tmp_path, "Submit the canonical review.", phase=DaydreamPhase.REVIEW,
                 host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
                 tool_call_budget=4, progress_callback=lambda _: None)
-    assert installed == [canonical] and binding.accepted_result == canonical and lost_replies
-    assert len(callback_times) == 2 and callback_times[-1] < binding.deadline
+    if fault == "missing-callback":
+        assert dropped_submissions and not installed and not callback_times and not lost_replies
+        assert binding.accepted_result is None and not binding.possibly_accepted
+    else:
+        assert installed == [canonical] and binding.accepted_result == canonical and lost_replies
+        assert len(callback_times) == 2 and callback_times[-1] < binding.deadline
     if fault == "timeout":
         assert callback_times[-1] - callback_times[0] > timeout_s
     assert len(native_provider.requests) == 1, "indeterminate acceptance must stop further model generations"
@@ -1266,6 +1300,13 @@ async def test_native_indeterminate_submission_stops_generation_and_preserves_ho
                     for item in (step.get("observation") or {}).get("results", [])}
     assert [call["tool_call_id"] for call in calls] == ["submit"] and "indeterminate" in observations["submit"]
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
+    if fault == "missing-callback":
+        with pytest.raises(PiError) as subsequent:
+            await run_agent(backend, tmp_path, "Retry the same assignment in a new conversation.",
+                phase=DaydreamPhase.REVIEW, host_tools=binding, output_schema=_SCHEMA, read_only=True,
+                persist_session=False, tool_call_budget=4, progress_callback=lambda _: None)
+        assert len(native_provider.requests) == 1 and not installed
+        assert subsequent.value.category == "HOST_TOOLS" and not subsequent.value.retryable
 
 
 async def test_installed_pi_validation_optout_preserves_text(

@@ -71,6 +71,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **review:** keep assignment authority and accepted findings across permitted
+  live Pi retries, permanently reject revoked capabilities, and retain cumulative
+  preparation, backoff and tool spending across conversations
+  ([#1619](https://github.com/existential-birds/daydream/issues/1619)).
 - **pi:** retain provider HTTP status and selected request/retry headers with
   generation correlation, plus bounded redacted diagnostic output and process
   cleanup evidence when native invocations fail.

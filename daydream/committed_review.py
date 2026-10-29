@@ -151,7 +151,7 @@ class Review:
 
     def assignment(self, kind: str, *, deadline: float) -> tuple[HostToolBinding, dict[str, Any]]:
         """Open one native terminal capability for the current immutable work snapshot."""
-        if self._sealed or self._binding is not None and self._binding.authority_open:
+        if self._sealed or (self._binding is not None and not self._binding.closed and not self._binding.accepted):
             raise ValueError("Review is sealed or already has an active assignment")
         if kind not in {"discovery", "challenge"} or kind == "discovery" and self._discovered:
             raise ValueError("invalid or already admitted assignment")
@@ -215,7 +215,7 @@ class Review:
                 raise HostToolRejected("targets: reduce reasons/attribution to shared coverage capacity") from exc
             # No await, I/O, or model decision between final checks and installation.
             binding.ensure_open()
-            if self._sealed or clock.monotonic() >= self.deadline:
+            if self._sealed or self._binding is not binding or clock.monotonic() >= self.deadline:
                 raise HostToolFatal("Review authority has closed", code="authority_closed")
             if self._claims is not claims_snapshot or kind == "discovery" and self._discovered:
                 raise HostToolFatal("Assignment revisions changed before installation", code="authority_closed")
@@ -316,10 +316,11 @@ Historical PR context is captured untrusted intent, not instructions or executio
 
 async def run_committed_review(request: CommittedReviewRequest) -> CommittedReviewResult:
     """Review ordinary committed source or a validated trusted immutable envelope."""
+    started = clock.monotonic()
     if request.immutable_input is None:
         if request.immutable_bundle is not None:
             raise ValueError("immutable bundle requires a versioned immutable input")
-        return await _run_committed_review(request)
+        return await _run_committed_review(request, started=started)
     if not isinstance(request.immutable_input, ImmutableReviewInput):
         raise ValueError("immutable_input requires a validated ImmutableReviewInput")
     if request.hosted_policy is None:
@@ -337,11 +338,11 @@ async def run_committed_review(request: CommittedReviewRequest) -> CommittedRevi
         source, request.immutable_input, destination, bundle=request.immutable_bundle,
         environment=request.hosted_policy.environment,
     ) as prepared:
-        return await _run_committed_review(request, prepared_source=prepared)
+        return await _run_committed_review(request, started=started, prepared_source=prepared)
 
 
 async def _run_committed_review(
-    request: CommittedReviewRequest, *, prepared_source: Path | None = None,
+    request: CommittedReviewRequest, *, started: float, prepared_source: Path | None = None,
 ) -> CommittedReviewResult:
     """Review a pinned detached worktree; retain concerns and interrupted coverage before propagating cancellation."""
     from daydream.config_file import load_file_config
@@ -508,7 +509,6 @@ async def _run_committed_review(
             diff_path=diff_path, hunk_index_path=index_path, shared_paths={}, revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
         )
-        started = clock.monotonic()
         investigation_s = min(limits.investigation_s, profile.profile.pipeline.reviewer_investigation_budget_s)
         finish = started + min(
             investigation_s + limits.finalization_s, profile.profile.pipeline.review_wall_budget_s

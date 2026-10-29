@@ -163,8 +163,13 @@ callback prepares and atomically admits one complete canonical stage or raises
 `HostToolFatal` for a confirmed host/input/lifecycle failure, preserving its cause;
 unexpected callback exceptions have an indeterminate mutation outcome and cannot
 authorize replay. `output_schema` describes model selectors;
-`result_schema` describes canonical retained output. Live handlers, credentials,
-counters and authority belong to the invocation, including preacceptance retries.
+`result_schema` describes canonical retained output. The callback, counters and
+deadline belong to the live assignment, including preacceptance retries. Each
+attempt owns its endpoint and credentials. `close_attempt()` revokes that endpoint;
+`close_authority()` permanently prevents another session. Consumers must close
+assignment authority when cancelling, finishing or superseding its work. Neither
+method discards an accepted result. Shared investigation budgets retain retry
+recovery spending across conversations as well as observed native tool starts.
 
 The packaged native extensions and bounded authenticated loopback endpoint require
 Pi 1.4.0 for the verified completion/tool APIs. They confirm the active terminal

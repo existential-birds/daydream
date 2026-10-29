@@ -69,6 +69,15 @@ challenge/finalization allowances. Whole-submission admission rechecks authority
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.
 
+An assignment remains current before native startup and between permitted live
+attempts. Closing an attempt's callback endpoint does not finish that assignment;
+explicit revocation, supersession or sealing cannot be undone by another native
+session. Review checks the current assignment identity after prospective source
+validation at the same synchronous ordering point as installation. Stopped or
+crashed reviews start afresh; retained output is evidence, not resumable authority.
+The original review clock includes source preparation. Conversations share observed
+tool spending and retry-recovery consumption; backoff cannot renew either bound.
+
 Without a hosted policy, Pi's CLI resolves model/provider/thinking/trust/authentication in the original
 configuration context; stock read/search tools, model-visible cwd and AGENTS context
 use captured source. Daydream forwards explicit phase/environment overrides and
@@ -295,7 +304,10 @@ continuation and retry, and never invite removing the contradiction to obtain
 complete coverage. Foreign or duplicate contradiction IDs remain correctable
 payload faults.
 
-Ordinary transient preacceptance retries use existing cumulative policy. The
+Ordinary transient preacceptance retries use existing cumulative policy. Attempt
+closure revokes its endpoint before cleanup; only an unaccepted, nonfatal binding
+with completed cleanup may open another attempt. Explicit capability closure is
+permanent. A retired endpoint cannot revoke or mutate a later attempt. The
 binding owns the first terminal failure and cannot reopen after it. `/admit` and
 `/submit` enforce readiness, correlation, authority, deadline and cumulative
 capacity with the same recovery semantics. Frames, arguments, results,

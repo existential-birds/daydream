@@ -12,6 +12,7 @@ from typing import Any
 
 from daydream import clock
 from daydream.config import REVIEWER_TOOL_CALL_BUDGET
+from daydream.retry_policy import RetryRecoveryBudget
 
 _CANONICAL_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs (at most four, 8192 UTF-8 JSON bytes). For reviewed work, cite at least
@@ -212,6 +213,7 @@ class ReviewInvestigationBudget:
     deadline: float
     observed_tool_starts: int = 0
     shared_deadline: float | None = None
+    retry_recovery_budget: RetryRecoveryBudget | None = None
 
     @classmethod
     def from_limits(cls, limits: ReviewLimits, *, deadline: float | None = None) -> ReviewInvestigationBudget:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import httpx
 import pytest
 
 from daydream.agent import run_agent
@@ -22,6 +23,7 @@ from daydream.backends import (
 )
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
+from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.retry_policy import derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -258,24 +260,70 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(tmp_pa
     assert backend.cancel_calls == 0
 
 
-async def test_run_agent_cancellation_closes_only_its_invocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("bound", "backoff"), [(False, False), (True, False), (True, True)],
+                         ids=["ordinary-consumer", "host-tools-consumer", "host-tools-backoff"])
+async def test_run_agent_cancellation_closes_only_its_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool, backoff: bool,
+) -> None:
+    """Unlike cancellation inside iteration, consumer/backoff waits need host-owned closure before joining."""
     entered = asyncio.Event()
     closed = asyncio.Event()
-    async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-        try:
-            entered.set()
-            yield TextEvent(text="started")
-            await asyncio.sleep(3600)
-        finally:
-            closed.set()
-    backend = ScriptedBackend(responder=stream, model="mock-model")
-    task = asyncio.create_task(run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW))
-    await entered.wait()  # run_agent is inside the invocation
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_state: list[tuple[bool, bool]] = []
+    binding = HostToolBinding(deadline=anyio.current_time() + 60, accept=lambda payload: payload) if bound else None
+    if backoff:
+        monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+
+    async def stream(*_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        async with binding.session() if binding is not None else contextlib.nullcontext():
+            try:
+                if binding is not None:
+                    binding.admit("read-1", "read", {"path": "assigned.py"})
+                yield ToolStartEvent(id="read-1", name="read", input={"path": "assigned.py"})
+                if backoff:
+                    raise _RetryableBackendError("retry before cancellation")
+            finally:
+                if backoff:
+                    assert binding is not None
+                    binding.close_attempt()
+                elif binding is not None:
+                    cleanup_state.append((binding.authority_open, binding.closed))
+                cleanup_started.set()
+                if not backoff:
+                    await release_cleanup.wait()
+                closed.set()
+
+    async def progress(text: Any) -> None:
+        if backoff:
+            if text.plain.lstrip().startswith("[retry]"):
+                entered.set()  # Returning leaves the actual backoff sleep as the next scheduling yield.
+            return
+        entered.set()
+        await asyncio.sleep(3600)
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True,
+                              retry_policy=RetryPolicy(attempts=1, base_delay_s=30, max_delay_s=30))
+    monkeypatch.setattr(backend, "execute", stream)
+    with anyio.fail_after(5):
+        task = asyncio.create_task(run_agent(
+            backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW, host_tools=binding,
+            progress_callback=progress, run_context=RunContext(InteractionPolicy(log_mode=False)),
+        ))
+        await entered.wait()
+        task.cancel()
+        await cleanup_started.wait()
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     assert closed.is_set()
     assert backend.cancel_calls == 0
+    assert cleanup_state == ([(False, True)] if bound and not backoff else [])
+    if binding is not None:
+        assert binding.closed
+        with pytest.raises(HostToolFatal, match="authority is closed"):
+            async with binding.session():
+                pytest.fail("cancelled authority reopened")
 
 
 async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
@@ -317,6 +365,101 @@ async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
         await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=100.0)
     assert backend.call_count == 4  # 1 + 40 + 40 + 20, then the allowance is spent
     assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
+
+
+async def test_staged_conversations_cannot_renew_retry_recovery_spend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Single-call ladders miss renewal between conversations and charging healthy challenge work as recovery."""
+    fake = FakeClock(monotonic_value=1_000).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=10), deadline=1_100)
+
+    async def responder(_cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> None:
+        if prompt.splitlines()[0] == "challenge":
+            fake.advance(3)  # Fresh useful work cannot consume recovery activated by discovery.
+
+    failed = [_RetryableBackendError("transient")]
+    done: list[AgentEvent] = [TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)]
+    backend = ScriptedBackend(
+        script=[failed, done, done, failed, done, failed], responder=responder,
+        retry_policy=RetryPolicy(attempts=1, base_delay_s=4, max_delay_s=4),
+    )
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        for name, allowance in (("discovery", 6), ("challenge", 60), ("rechallenge", 60)):
+            output, _, reason = await run_agent(
+                backend, tmp_path, name, phase=DaydreamPhase.REVIEW,
+                investigation_budget=budget, retry_recovery_allowance_s=allowance,
+            )
+            assert (output, reason) == ("done", None)
+        with pytest.raises(_RetryableBackendError):
+            await run_agent(
+                backend, tmp_path, "final", phase=DaydreamPhase.REVIEW,
+                investigation_budget=budget, retry_recovery_allowance_s=60,
+            )
+    assert slept == [4, 2]
+    assert [prompt.splitlines()[0] for prompt in backend.prompts] == [
+        "discovery", "discovery", "challenge", "rechallenge", "rechallenge", "final",
+    ]
+    _, stop = _budget_stop(recorder)
+    assert stop["retry_recovery_spent_s"] == 0  # Earlier conversations' spend is not billed twice.
+
+
+async def test_host_admitted_starts_remain_charged_when_native_events_are_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike installed retry journeys, HTTP admissions lose native starts before the next conversation."""
+    deadline = anyio.current_time() + 60
+    budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=3), deadline=deadline)
+    bindings = [HostToolBinding(deadline=deadline, accept=lambda payload: payload) for _ in range(3)]
+    residual: list[int | None] = []
+
+    async def stream(
+        *_args: Any, host_tools: HostToolBinding, **_kwargs: Any,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        schema = {"type": "object"}
+        host_tools.configure_schema(schema)
+        async with host_tools.session() as server:
+            residual.append(host_tools.remaining_tool_calls)
+            async with httpx.AsyncClient(base_url=server.url, headers={
+                "Authorization": server.packet()["authorization"],
+            }, timeout=3) as client:
+                ready = await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": schema})
+                assert ready.json()["ready"]
+                response = await client.post("/admit", json={
+                    "id": "read-1", "name": "read", "arguments": {"path": "assigned.py"},
+                })
+                assert response.json()["allowed"]
+            if host_tools is bindings[0]:
+                raise _RetryableBackendError("native stream ended before the admitted start")
+            yield ToolStartEvent(id="read-1", name="read", input={"path": "assigned.py"})
+            yield TextEvent(text="done")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True,
+                              retry_policy=RetryPolicy(attempts=1, base_delay_s=0, max_delay_s=0))
+    monkeypatch.setattr(backend, "execute", stream)
+    recorder = make_recorder(tmp_path)
+    with anyio.fail_after(10):
+        async with recorder:
+            for index, binding in enumerate(bindings):
+                with pytest.raises(_RetryableBackendError) if index == 0 else contextlib.nullcontext():
+                    output, _, reason = await run_agent(
+                        backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                        investigation_budget=budget, host_tools=binding, tool_call_budget=2 if index == 0 else None,
+                    )
+                    assert reason == ("tool_call_budget_exceeded" if index == 2 else None)
+                    if index == 1:
+                        assert output == "done"
+    assert residual == [2, 1, 1]
+    assert [binding.calls for binding in bindings] == [2, 1, 0]
+    assert backend.cancel_calls == 0
+    assert budget.observed_tool_starts == 3
+    trajectory = json.loads(recorder.path.read_text())
+    calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
+    assert [call["tool_call_id"] for call in calls] == ["read-1"]
 
 
 async def test_group_deadline_still_wins_over_a_larger_allowance(

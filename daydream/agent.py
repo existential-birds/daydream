@@ -128,11 +128,13 @@ class _EventStreamScope:
     def __init__(
         self, event_iter: AgentEventStream, *, lifecycle: BackendLifecycleCollector,
         record_lifecycle: Callable[[BackendLifecycleSnapshot], None],
+        host_tools: HostToolBinding | None = None,
     ) -> None:
         self.event_iter = event_iter
         self._closed = False
         self._lifecycle = lifecycle
         self._record_lifecycle = record_lifecycle
+        self._host_tools = host_tools
 
     async def __aenter__(self) -> AgentEventStream:
         self._lifecycle_token = self._lifecycle.bind()
@@ -144,6 +146,10 @@ class _EventStreamScope:
         exc: BaseException | None,
         _traceback: TracebackType | None,
     ) -> None:
+        if self._host_tools is not None and (
+            isinstance(exc, _ToolSupervisorFailure) or (exc is not None and not isinstance(exc, Exception))
+        ):
+            self._host_tools.close_authority()
         try:
             await self.aclose()
         finally:
@@ -173,6 +179,8 @@ class _EventStreamScope:
         if self._closed:
             return
         self._closed = True
+        if self._host_tools is not None:
+            self._host_tools.close_attempt()
         try:
             with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True) as scope:
                 await self.event_iter.aclose()
@@ -500,9 +508,17 @@ async def _run_agent(
                 if deadline is None or not deadline <= wall_deadline:
                     effective_deadline = wall_deadline
                     limit_expired = "invocation_wall_budget"
-            recovery = RetryRecoveryBudget(resolved_allowance)
+            recovery = investigation_budget.retry_recovery_budget if investigation_budget is not None else None
+            if recovery is None:
+                recovery = RetryRecoveryBudget(resolved_allowance)
+                if investigation_budget is not None:
+                    investigation_budget.retry_recovery_budget = recovery
+            else:
+                recovery.allowance_s = min(recovery.allowance_s, resolved_allowance)
+            recovery_spent_before = recovery.spent_s
             if host_tools is not None:
                 host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
+            native_calls_before = host_tools.calls if host_tools is not None else 0
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its
@@ -543,7 +559,7 @@ async def _run_agent(
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s + pending,
+                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before + pending,
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
@@ -573,6 +589,11 @@ async def _run_agent(
                 if investigation_budget is None and host_tools is None:
                     tool_calls = 0
                 remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
+                if host_tools is not None and host_tools.remaining_tool_calls is not None:
+                    native_remaining = host_tools.remaining_tool_calls
+                    remaining_calls = min(remaining_calls, native_remaining) if remaining_calls is not None else (
+                        native_remaining
+                    )
                 if review_evidence is not None:
                     review_evidence.reset()
                 budget_reason: str | None = None
@@ -580,6 +601,8 @@ async def _run_agent(
                 # ladder stops here with the reset state.
                 if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                     aborted_reason = "wall_budget_exceeded"
+                    if host_tools is not None:
+                        host_tools.close_authority()
                     partials_discarded_by_deadline = True
                     # When retries or backoff spent time, preserve that overhead in a ladder-stop record.
                     if telemetry.spent_retry_overhead:
@@ -589,9 +612,12 @@ async def _run_agent(
                         )
                         stop_recorded = True
                     break
-                if investigation_budget is not None and (investigation_budget.remaining_tool_calls == 0
-                    or (remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
+                if ((investigation_budget is not None and investigation_budget.remaining_tool_calls == 0)
+                    or ((investigation_budget is not None or host_tools is not None)
+                        and remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
                     aborted_reason = "tool_call_budget_exceeded"
+                    if host_tools is not None:
+                        host_tools.close_authority()
                     break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
                 # later one is retry overhead. Retry attempts' backend time is
@@ -609,6 +635,8 @@ async def _run_agent(
                     dispatch_time = clock.monotonic()
                     if effective_deadline is not None and dispatch_time >= effective_deadline:
                         aborted_reason = "wall_budget_exceeded"
+                        if host_tools is not None:
+                            host_tools.close_authority()
                         partials_discarded_by_deadline = True
                         if telemetry.spent_retry_overhead:
                             _emit_ladder_stop(
@@ -616,7 +644,7 @@ async def _run_agent(
                             )
                             stop_recorded = True
                         break
-                    telemetry.start_attempt(dispatch_time, retry=recovery.active)
+                    telemetry.start_attempt(dispatch_time, retry=attempt > 0)
                     execute_kwargs: dict[str, Any] = {
                         "agents": agents,
                         "max_turns": max_turns,
@@ -677,6 +705,7 @@ async def _run_agent(
 
                     event_stream_scope = _EventStreamScope(
                         event_iter, lifecycle=lifecycle, record_lifecycle=record_lifecycle,
+                        host_tools=host_tools,
                     )
 
                     async with (
@@ -798,6 +827,8 @@ async def _run_agent(
                             budget_reason = "wall_budget_exceeded"
                         aborted_reason = budget_reason
                         if budget_reason is not None:
+                            if host_tools is not None:
+                                host_tools.close_authority()
                             observed.abort(budget_reason)
                             # Cleanup can hang on a backend subprocess that never
                             # exits. Bound it with a shielded grace so it cannot
@@ -964,6 +995,13 @@ async def _run_agent(
                             raise
                         primary_error.add_note(f"Log text unavailable ({type(exc).__name__[:64]})")
                     finally:
+                        if host_tools is not None:
+                            # HTTP admission can precede a start lost with the native stream.
+                            # Charge that known spend once without fabricating trajectory events.
+                            missing_starts = max(0, host_tools.calls - native_calls_before - tool_calls)
+                            tool_calls += missing_starts
+                            if investigation_budget is not None:
+                                investigation_budget.observed_tool_starts += missing_starts
                         if telemetry.attempt_started_at is not None:
                             # Post-stop cleanup (the bounded backend aclose) is not
                             # dispatched-attempt time: exclude it so backend_s keeps
@@ -994,7 +1032,7 @@ async def _run_agent(
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s,
+                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
                         ),
@@ -1028,6 +1066,8 @@ async def _run_agent(
         except asyncio.CancelledError:
             # The attempt stream already closed during unwinding. Cancellation
             # of one fanout task must not terminate a shared backend's siblings.
+            if host_tools is not None:
+                host_tools.close_authority()
             raise
         except BaseException:
             # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation

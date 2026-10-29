@@ -509,29 +509,70 @@ async def test_oversized_canonical_result_cannot_be_truncated_into_native_succes
     assert calls == [_RESULT] and binding.cleanup_complete
 
 
-async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return() -> None:
-    """Shutdown revokes authority and joins a real stalled HTTP request before evidence can freeze.
-
-    Complete-frame and installed-Pi settlement tests do not exercise a peer that
-    retains an incomplete body while the owning invocation closes.
-    """
+@pytest.mark.parametrize("fault", ["pending", "eof", "valid", "reply-error"])
+async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return(
+    monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Join pending frames and keep retired EOF/dispatch/reply faults out of a live retry."""
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
         installed.append(value)
         return value
     binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
     binding.configure_schema(_SCHEMA)
-    async with binding.session() as server:
-        endpoint = urlsplit(server.url)
-        reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
-        writer.write((f"POST /submit HTTP/1.1\r\nHost: {endpoint.netloc}\r\n"
-            f"Authorization: {server.packet()['authorization']}\r\n"
-            "Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"id\":").encode())
-        await writer.drain()
-        async with httpx.AsyncClient(base_url=server.url,
-            headers={"Authorization": server.packet()["authorization"]}) as client:
-            assert (await client.get("/status")).status_code == 200
-    assert await asyncio.wait_for(reader.read(), 3) == b""
-    writer.close()
-    await writer.wait_closed()
+    body = json.dumps({"id": "stale", "name": NATIVE_SUBMIT, "arguments": _RESULT, "terminal": True}).encode()
+    reading_body = asyncio.Event()
+    read_body = asyncio.StreamReader.readexactly
+    async def observe_body(reader: asyncio.StreamReader, size: int) -> bytes:
+        if size == len(body):
+            reading_body.set()
+        return await read_body(reader, size)
+    monkeypatch.setattr(asyncio.StreamReader, "readexactly", observe_body)
+    drain = asyncio.StreamWriter.drain
+    async def fail_reply(writer: asyncio.StreamWriter) -> None:
+        if fault == "reply-error" and writer in server._writers and not binding.authority_open:
+            raise ConnectionResetError("Peer disconnected before the retired frame's error reply")
+        await drain(writer)
+    writer: asyncio.StreamWriter | None = None
+    try:
+        async with binding.session() as server:
+            async with httpx.AsyncClient(base_url=server.url,
+                headers={"Authorization": server.packet()["authorization"]}) as client:
+                ready = await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})
+                assert ready.json()["ready"]
+            monkeypatch.setattr(asyncio.StreamWriter, "drain", fail_reply)
+            endpoint = urlsplit(server.url)
+            reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
+            writer.write((f"POST /admit HTTP/1.1\r\nHost: {endpoint.netloc}\r\n"
+                f"Authorization: {server.packet()['authorization']}\r\n"
+                f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body[:1])
+            await writer.drain()
+            await asyncio.wait_for(reading_body.wait(), 3)
+            if fault != "pending":
+                binding.close_attempt()
+                with pytest.raises(ValueError, match="cannot start another native attempt"):
+                    async with binding.session():
+                        pytest.fail("a retired endpoint must join before retry")
+                if fault == "valid":
+                    writer.write(body[1:])
+                    await writer.drain()
+                else:
+                    writer.write_eof()
+                await asyncio.wait_for(asyncio.gather(reader.read(), *server._tasks, return_exceptions=True), 3)
+                assert not binding.closed and binding.fatal_error is None
+                assert binding.calls == 0 and installed == []
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+    finally:
+        monkeypatch.setattr(asyncio.StreamWriter, "drain", drain)
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
     assert installed == [] and not binding.authority_open and binding.cleanup_complete and server.closed
+    async with _endpoint(binding) as client:
+        await server.close()
+        assert binding.authority_open
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        assert (await client.post("/admit", json={"id": "retry", "name": NATIVE_SUBMIT,
+            "arguments": _RESULT, "terminal": True})).json()["allowed"]
+        assert (await client.post("/submit", json={"id": "retry", "arguments": _RESULT})).json()["accepted"]
+    assert installed == [_RESULT] and binding.calls == 1 and binding.cleanup_complete
