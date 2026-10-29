@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
@@ -45,6 +46,7 @@ from daydream.review_source_refs import (
 from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git, seed_feature_branch
+from tests.harness.harbor_review import assignment_from_request
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
 from tests.test_committed_review import immutable_input_for
@@ -132,23 +134,12 @@ async def test_native_pi_response_diagnostics_bind_to_each_generation(
 async def test_committed_review_native_challenge_uses_fresh_captured_source_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, case: str,
 ) -> None:
-    """Production composition needs fresh challenge, frozen reads and sealed output.
+    """Real Pi reviews frozen source with fresh challenge and exact native selection.
 
-    Blank, absent and explicit selections are compared with Pi itself;
-    direct adapter journeys cannot detect host selection or shared-history bugs.
-    Hosted selections additionally prove that native resource/context discovery and
-    attempted effects cannot broaden the operator policy across retries and fresh
-    challenges. Both the preferred exact model and an unrelated provider/model
-    must reach native execution; an accepted constructor alone cannot prove this.
-    Unsupported versions must retain the command and expected version in their
-    mismatch diagnostic; a generic readiness rejection would hide the cause.
-    Correctable challenge rejection followed by a provider failure must preserve
-    the discovery admission and original challenge assignment through a live retry.
-    The generic binding retry journey cannot prove retained domain obligations.
-    Suffix-only model registries and invalid UTF-8 settings exercise readiness
-    faults that the exact-model, valid-JSON success path cannot detect.
-    An explicit operator loader override must be rejected before its preload can
-    execute; hostile ambient loader settings alone only prove environment isolation.
+    Compare blank/absent/explicit selection with Pi itself. Hosted rows retain
+    operator policy across retries; readiness rows reject versions, capabilities,
+    model/settings faults and executable resources before provider work. A semantic
+    rejection followed by provider failure must preserve the challenge assignment.
     """
     immutable = case == "hosted-immutable"
     empty = case in {"empty", "fallback"}
@@ -365,12 +356,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         else:
             assert context.strip() in json.dumps(request["messages"])
         assert "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
-        users = [message for message in request["messages"] if message["role"] == "user"]
-        assert len(users) == 1
-        content = users[0]["content"]
-        text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content)
-        assignment = json.loads(text.split("\nCommitted review assignment:\n", 1)[1].split(
-            "\nEnd committed review assignment.\n", 1)[0])
+        assignment = assignment_from_request(request)
         kind = assignment["kind"]
         if hosted:
             assert assignment["profile"]["profile_name"] == operator_profile.name
@@ -380,7 +366,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert assignment["profile"]["hosted_policy"]["model"] == expected_model
             assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
             marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
-            assert marker in text and assignment["profile"]["strategies"][kind] == marker
+            assert marker in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
+            assert assignment["profile"]["strategies"][kind] == marker
         revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
         call_kind = f"{kind}-{revision}" if hosted else kind
         tools = [message for message in request["messages"] if message["role"] == "tool"]
@@ -1031,11 +1018,7 @@ async def test_native_reused_tool_identity_cannot_repeat_effect_or_hide_correlat
 async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_preserves_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, cancel_at: str,
 ) -> None:
-    """A blocked built-in read closes only its invocation before recorded evidence freezes.
-
-    Fake subprocess cancellation misses Node filesystem work, a real child whose
-    spawn returns after cancellation, and sibling authority on one cached backend.
-    """
+    """Cancel real FIFO reads or late starts before freeze, preserving a cached-backend sibling."""
     root = tmp_path.resolve()
     blocked = root / "blocked-source"
     os.mkfifo(blocked)
@@ -1057,15 +1040,12 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
     original = CliTransport.lines
     async def observe(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
         async for line in original(transport, *args, **kwargs):
-            try:
+            with suppress(json.JSONDecodeError):
                 event = json.loads(line)
-            except json.JSONDecodeError:
-                yield line
-                continue
-            if (cancel_at == "active-read" and event.get("type") == "tool_execution_start"
-                    and event.get("toolCallId") == "blocked-read"):
-                children.extend(transport.processes)
-                entered.set()
+                if (cancel_at == "active-read" and event.get("type") == "tool_execution_start"
+                        and event.get("toolCallId") == "blocked-read"):
+                    children.extend(transport.processes)
+                    entered.set()
             yield line
     monkeypatch.setattr(CliTransport, "lines", observe)
     survivor_waiting, release_survivor = threading.Event(), threading.Event()
@@ -1106,9 +1086,7 @@ async def test_native_stock_read_cancellation_reaps_process_before_freeze_and_pr
     try:
         await asyncio.wait_for(entered.wait(), 8)
         assert await asyncio.to_thread(survivor_waiting.wait, 5)
-        # A nonblocking writer can open only after the real Node reader opens
-        # this FIFO. Keep it open without bytes so the child cannot finish its
-        # read naturally while the spawn-return barrier is still pending.
+        # Keep the FIFO writer open without bytes so the real Node read cannot finish before cancellation.
         async with asyncio.timeout(5):
             while fifo_writer is None:
                 try:
@@ -1226,11 +1204,10 @@ async def test_native_accepted_state_is_retained_when_terminal_settlement_or_cle
 async def test_native_indeterminate_submission_stops_generation_and_never_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
 ) -> None:
-    """Unconfirmed native submission stops work and preserves any accepted canonical result.
+    """Stop unconfirmed submissions, retaining accepted work and refusing replay.
 
-    Lost acceptance replies cannot prove a new conversation is denied when the
-    callback never entered. The socket-read fault retains that distinct risk;
-    semantic correction is separately covered by the real source-selector journey.
+    Missing callbacks prove fresh-conversation denial before acceptance; lost
+    receipts retain accepted work. The source-selector journey owns correction.
     """
     submitted = {"verdict": "submitted", "findings": []}
     canonical = {"verdict": "complete", "findings": []}
@@ -1284,12 +1261,8 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
     lines = CliTransport.lines
     async def observe_native(transport: CliTransport, *args: Any, **kwargs: Any) -> Any:
         async for line in lines(transport, *args, **kwargs):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                yield line
-                continue
-            native_rows.append(row)
+            with suppress(json.JSONDecodeError):
+                native_rows.append(json.loads(line))
             yield line
     monkeypatch.setattr(CliTransport, "lines", observe_native)
     recorder = make_recorder(tmp_path, backend_name="pi")

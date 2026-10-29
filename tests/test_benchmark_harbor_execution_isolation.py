@@ -213,12 +213,9 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
 async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(
     tmp_path: Path, fake_gh: FakeGh, native_provider: _NativeProvider,
 ) -> None:
-    """Concurrent in-process native calls must retain distinct operator contexts.
+    """Keep operator contexts private in one process with joined independent loops.
 
-    Harbor containers own separate callback loops. Sharing a loop here lets one
-    review's synchronous capture/fsync work expire its sibling's native callback,
-    hiding the shared-environment/configuration regression this journey owns.
-    The provider barrier proves both workers reach native work concurrently.
+    The provider barrier proves overlap without sharing container callback loops.
     """
     case, first, _ = _compiled_case(tmp_path, fake_gh)
     second = tmp_path / "second-repo"
@@ -240,8 +237,7 @@ async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(
     native_started = Barrier(2, timeout=10)
 
     def answer_concurrently(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
-        assignment = assignment_from_request(request)
-        if assignment["kind"] == "discovery" and not any(
+        if assignment_from_request(request)["kind"] == "discovery" and not any(
             message["role"] == "tool" for message in request["messages"]
         ):
             try:

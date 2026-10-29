@@ -151,11 +151,7 @@ async def _submit(review: Review, kind: str, value: dict[str, Any]) -> dict[str,
 async def test_assignment_stays_current_until_explicit_closure(
     review_inputs: StageInputFactory, boundary: str,
 ) -> None:
-    """An idle transport cannot replace still-authorized challenge work.
-
-    Existing admission races begin inside a session; they miss the closed
-    transport before startup and between live retry attempts.
-    """
+    """Unlike in-session admission races, idle transports cannot replace still-authorized challenge work."""
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     prior = review.pending()
@@ -176,8 +172,7 @@ async def test_assignment_stays_current_until_explicit_closure(
         value = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": []}
         replacement.admit("replacement", "structured_output", value, terminal=True)
         replacement.submit("replacement", value)
-    sealed = review.seal({})
-    assert len(sealed["findings"]) == 1 and review.pending() == []
+    assert len(review.seal({})["findings"]) == 1 and review.pending() == []
 
 
 @pytest.mark.parametrize(
