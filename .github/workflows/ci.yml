@@ -102,6 +102,9 @@ jobs:
       - name: Type check with mypy
         if: needs.plan.outputs.full == 'true'
         run: make typecheck
+      - name: Install packaged runtimes
+        if: needs.plan.outputs.full == 'true'
+        run: make package-check
       - name: Run script unit tests
         if: needs.plan.outputs.full == 'true'
         run: make test-scripts
@@ -267,6 +270,9 @@ jobs:
 
       - name: Type check with mypy
         run: make typecheck
+
+      - name: Install packaged runtimes
+        run: make package-check
 
       - name: Naming grep-gate
         run: make check-naming

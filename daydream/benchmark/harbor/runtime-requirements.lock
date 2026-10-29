@@ -1,6 +1,6 @@
 # Daydream Harbor runtime requirements (generated; do not edit)
 # daydream_version: 0.32.0
-# source_uv_lock_sha256: 22cb6faffc7b2e0fad30ac06e09fea22bc2b616cad08742d6727fd709d3114e3
+# source_uv_lock_sha256: 1079946059e3e238d307f85d71f23f3c379ebfe5bee6a27302bb09721b489c22
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
 # template_version: 5
 
@@ -266,13 +266,13 @@ charset-normalizer==3.5.1 \
     --hash=sha256:fce8cbd4997efeb450bd298b54f755dcdff18d496f7a5ddbb4867c6d7c88fdc3 \
     --hash=sha256:fdb8a068947befafba9952162645dc2fecaeb400e64584829ed5e9b2fbe21a7f
     # via requests
-claude-agent-sdk==0.2.172 \
-    --hash=sha256:48a0439d390334211e6d6351e69aaa5408d351b77e4eb5d1bf161b205a11963b \
-    --hash=sha256:8068f84286925cf15240441fee7e698e6a82c3571a80e306f28d251e882496b2 \
-    --hash=sha256:898757e2404290b6f3be48e7e7698fdf9fb1a81ed77b9c21263b0ba506689ab5 \
-    --hash=sha256:94c8b9346433654f337bb50f16c51ec690ad73193bd92fb01fd63d81421fe0a6 \
-    --hash=sha256:a56860aec16e95bad73d2ce62d9843152d4e0381885651ef72667adb17eca874 \
-    --hash=sha256:d20c8f4fd12880821338ddb918418ef0b2f97c10d5806491e7e2eb766b437725
+claude-agent-sdk==0.2.174 \
+    --hash=sha256:0d46be4e858418227d1d455c7787335f4bed073899f48b657c01cc210683803f \
+    --hash=sha256:2380f28ad19c9f95d2de01d75ad4eeffa1ec2008cb4e35e5bc569de6279d85f9 \
+    --hash=sha256:368699227f4ccb6fff541f4add983854fdd6e95fed5e509264cb079316ae234b \
+    --hash=sha256:728592effdfe63e96fbad7ba3b2ddf642e3aad344e73692b429898fbfcb33f12 \
+    --hash=sha256:7729458ca2e0031e6d67452dd8fdda4ff07b4fcf40c4bfed867c78ae963bdbdd \
+    --hash=sha256:8be611533b7be210791a39716479d7d692e5e3afe8798529b5262db00f470165
     # via daydream
 click==8.5.0 ; sys_platform != 'emscripten' \
     --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \

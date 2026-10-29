@@ -36,7 +36,7 @@ and validation, with routine cleanup and implementation history left out of the 
 ## Validation
 
 ```bash
-make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report + check-naming (the gate)
+make check      # lockcheck + install + lint + deadcode + typecheck + package-check + test + actionlint + coverage-report + check-naming (the gate)
 ```
 
 The pre-push hook checks signatures and runs this gate. Follow

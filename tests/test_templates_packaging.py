@@ -37,6 +37,7 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
         expected_paths.add('daydream/benchmark/harbor/runtime-requirements.lock')
+        expected_paths.add('daydream/benchmark/reviewbench/harbor-runtime.lock')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
             assert 'daydream/benchmark/reviewbench/reviewer-runtime.lock' not in names_in_wheel

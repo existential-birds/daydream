@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-scripts actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
+.PHONY: install lint typecheck test test-scripts actionlint rl-check check lockcheck package-check hooks deadcode coverage-report check-naming
 
 # CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
 PYTEST_WORKERS ?= auto
@@ -10,6 +10,9 @@ install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
 	# need the harbor package from the benchmark extra).
 	uv sync --all-extras
+
+package-check:
+	bash scripts/check-packaged-runtimes.sh
 
 lint:
 	uv run ruff check daydream tests scripts/ci_*.py
@@ -100,7 +103,7 @@ lockcheck:
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you
 # change rl/daydream_review; its vulture scan still runs here via `deadcode`.
-check: lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
+check: lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
 
 # Naming grep-gate (#1093): fails when a project-owned versioned identifier
 # reappears anywhere in tracked files. External tool-protocol version strings
