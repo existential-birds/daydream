@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import fcntl
 import json
 import os
 import shutil
@@ -98,6 +97,7 @@ def validate_credential_stores(reviewer: Path, judge: Path, *,
     for home, role in ((reviewer, "reviewer"), (judge, "judge")):
         if home.is_symlink() or not home.is_dir():
             raise SubscriptionAuthError("dedicated credential directory is unavailable")
+        # Legacy Codex lock files remain admissible but are no longer created or used.
         allowed = ({"auth.json", ".reviewer.lock"} if role == "reviewer" and backend == 'codex'
                    else {"auth.json", "auth.json.lock"})
         if any(path.name not in allowed or path.is_symlink() for path in home.iterdir()):
@@ -117,7 +117,7 @@ def validate_credential_stores(reviewer: Path, judge: Path, *,
 @contextmanager
 def reviewer_credentials(canonical_home: Path, role_home: Path, *,
                           backend: str = 'codex', provider: str | None = None) -> Iterator[Path]:
-    """Link canonical credentials into a disposable role home; serialize Codex, retain Pi native locking."""
+    """Link canonical credentials into a disposable role home without a review-wide lock."""
     if (canonical_home.resolve() == role_home.resolve() or canonical_home.is_symlink()
             or role_home.is_symlink() or not canonical_home.is_dir()):
         raise SubscriptionAuthError("canonical and private reviewer homes must be separate regular directories")
@@ -134,18 +134,12 @@ def reviewer_credentials(canonical_home: Path, role_home: Path, *,
     role_path = role_home / "auth.json"
     if role_path.exists() or role_path.is_symlink():
         raise SubscriptionAuthError("refusing stale reviewer subscription credentials")
-    descriptor = os.open(canonical_home / ".reviewer.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "r+") as lock:
-        owner, current = canonical_home.stat(), os.fstat(lock.fileno())
-        if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
-            os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        validate_subscription_home(canonical_home)
-        role_path.symlink_to((canonical_home / "auth.json").resolve())
-        try:
-            yield role_home
-        finally:
-            role_path.unlink(missing_ok=True)
+    validate_subscription_home(canonical_home)
+    role_path.symlink_to((canonical_home / "auth.json").resolve())
+    try:
+        yield role_home
+    finally:
+        role_path.unlink(missing_ok=True)
 
 
 def subscription_environment(environment: Mapping[str, str]) -> dict[str, str]:

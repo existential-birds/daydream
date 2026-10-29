@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Allow concurrent Codex ReviewBench reviews sharing one canonical credential store without a whole-review lock;
+  retain private role homes, credential persistence and inert legacy lock files
+  ([benchmark #9](https://github.com/existential-birds/code-review-benchmarks/issues/9)).
+
 
 ## [0.32.0] - 2026-10-29
 
