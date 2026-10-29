@@ -20,6 +20,9 @@ daydream benchmark reviewbench harbor-run /private/export \
 
 Pi requires configured `nous`; for Codex use `--backend codex` / `--codex-home`.
 Keep independent native credentials outside exports/jobs. The judge uses `openai-codex` / `gpt-6.1-sol`.
+Concurrent Codex reviews link the same canonical credential file into private role homes without a Daydream
+review-wide lock. Existing regular `.reviewer.lock` files remain inert and need no migration.
+Pi retains its native refresh locking.
 Docker needs the selected architecture, nested sandboxing and exact-host isolation.
 The wheel/hash identifies the candidate; package extensions there. No matching installation is needed.
 Exports freeze reviewer retry, idle, and Codex lifecycle controls for native execution.

@@ -19,7 +19,7 @@ def _wait_for(path: Path, process: subprocess.Popen[str]) -> None:
     deadline = time.monotonic() + 15
     while not path.exists():
         assert process.poll() is None, process.communicate()
-        assert time.monotonic() < deadline
+        assert time.monotonic() < deadline, f'timed out waiting for {path.name}'
         time.sleep(0.01)
 
 
@@ -137,46 +137,80 @@ path.write_text(sys.argv[3])
     assert marker.exists() and writer.returncode == 0
 
 
-def test_native_reviewer_processes_serialize_and_retain_rotation_after_death(tmp_path: Path) -> None:
-    canonical = tmp_path / "canonical"
-    native_auth(canonical)
-    child = tmp_path / "waiter.py"
-    child.write_text('''import fcntl, json, os, pathlib, sys
+@pytest.mark.parametrize('legacy_lock', [False, True])
+def test_native_reviewer_processes_overlap_and_retain_rotation_after_death(
+    tmp_path: Path, legacy_lock: bool,
+) -> None:
+    canonical, judge = tmp_path / 'canonical', tmp_path / 'judge'
+    initial = native_auth(canonical)['tokens']['refresh_token']
+    native_auth(judge, 'judge')
+    lock_path = canonical / '.reviewer.lock'
+    if legacy_lock:
+        lock_path.write_bytes(b'inert legacy lock')
+    harbor_auth.validate_credential_stores(canonical, judge)
+    child = tmp_path / 'reviewer.py'
+    child.write_text('''import json, os, pathlib, sys, time
 from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
-root = pathlib.Path(sys.argv[1])
-with (root/'canonical/.reviewer.lock').open('r+') as lock:
- try:
-  fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
- except BlockingIOError:
-  (root/'blocked').touch()
- else:
-  raise AssertionError('reviewer did not block independent lock acquisition')
-with reviewer_credentials(root/'canonical', root/'second') as home:
- data = json.loads((home/'auth.json').read_text())
- assert data['tokens']['refresh_token'] == 'synthetic-first-rotation'
- data['tokens']['refresh_token'] = 'synthetic-second-rotation'
- (home/'auth.json').write_text(json.dumps(data))
- os._exit(37)
+root, role, initial = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def wait_for(marker):
+ deadline = time.monotonic() + 30
+ while not marker.exists():
+  assert time.monotonic() < deadline, 'reviewer rendezvous expired: ' + marker.name
+  time.sleep(0.01)
+with reviewer_credentials(root/'canonical', root/role) as home:
+ path = home/'auth.json'
+ assert path.is_symlink() and path.resolve() == root/'canonical/auth.json'
+ assert home.stat().st_mode & 0o777 == 0o700
+ (root/(role+'-entered')).touch()
+ wait_for(root/(role+'-rotate'))
+ data = json.loads(path.read_text())
+ assert data['tokens']['refresh_token'] == (initial if role == 'first' else 'synthetic-first-rotation')
+ data['tokens']['refresh_token'] = 'synthetic-'+role+'-rotation'
+ path.write_text(json.dumps(data))
+ (root/(role+'-rotated')).touch()
+ wait_for(root/(role+'-release'))
+ if role == 'second':
+  os._exit(37)
+assert not path.exists() and not path.is_symlink()
 ''')
-    with harbor_auth.reviewer_credentials(canonical, tmp_path / "first") as home:
-        process = subprocess.Popen([sys.executable, str(child), str(tmp_path)],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            _wait_for(tmp_path / 'blocked', process)
-            data = json.loads((home / 'auth.json').read_text())
-            data['tokens']['refresh_token'] = 'synthetic-first-rotation'
-            (home / 'auth.json').write_text(json.dumps(data))
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
-    stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == 37, stdout + stderr
-    with harbor_auth.reviewer_credentials(canonical, tmp_path / 'third') as home:
-        assert json.loads((home / 'auth.json').read_text())['tokens']['refresh_token'] == 'synthetic-second-rotation'
-    assert not (tmp_path / 'first/auth.json').exists()
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        # Neither review can rotate credentials or exit before BOTH have entered.
+        for role in ('first', 'second'):
+            process = subprocess.Popen([sys.executable, str(child), str(tmp_path), role, initial],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            processes.append(process)
+            _wait_for(tmp_path / (role + '-entered'), process)
+        assert all(process.poll() is None for process in processes)
+        # Synthetic writes are ordered; this proves persistence, not OAuth refresh.
+        for role, process in zip(('first', 'second'), processes, strict=True):
+            (tmp_path / (role + '-rotate')).touch()
+            _wait_for(tmp_path / (role + '-rotated'), process)
+        assert all(process.poll() is None for process in processes)
+        for role, process, exit_code in zip(('first', 'second'), processes, (0, 37), strict=True):
+            (tmp_path / (role + '-release')).touch()
+            stdout, stderr = process.communicate(timeout=15)
+            assert process.returncode == exit_code, stdout + stderr
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+        for process in processes:
+            process.communicate(timeout=5)
+    assert not (tmp_path / 'first/auth.json').is_symlink()
+    # Abrupt death bypasses context cleanup; its private link retains canonical state.
+    assert (tmp_path / 'second/auth.json').is_symlink()
+    with pytest.raises(RuntimeError, match='review failed'):
+        with harbor_auth.reviewer_credentials(canonical, tmp_path / 'third') as home:
+            assert json.loads((home / 'auth.json').read_text())['tokens']['refresh_token'] == (
+                'synthetic-second-rotation')
+            raise RuntimeError('review failed')
     assert not (tmp_path / 'third/auth.json').exists()
-    assert {p.name for p in canonical.iterdir()} == {'auth.json', '.reviewer.lock'}
+    assert not (tmp_path / 'third/auth.json').is_symlink()
+    harbor_auth.validate_credential_stores(canonical, judge)
+    assert {p.name for p in canonical.iterdir()} == ({'auth.json', '.reviewer.lock'} if legacy_lock else {'auth.json'})
+    if legacy_lock:
+        assert lock_path.read_bytes() == b'inert legacy lock'
 
 
 @pytest.mark.parametrize('exit_code', [0, 29, 'cancel'])
