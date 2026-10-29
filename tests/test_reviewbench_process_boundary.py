@@ -5,6 +5,7 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import signal
 import sys
 import uuid
@@ -20,7 +21,7 @@ from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 
 
 @pytest.mark.parametrize('interruption', [
-    'timeout', 'cancel', 'repeated_cancel', 'force', 'late_child',
+    'timeout', 'cancel', 'repeated_cancel', 'force', 'late_child', 'finalization_git',
     'collector_timeout', 'collector_transport', 'collector_repeated_cancel',
 ])
 async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
@@ -43,6 +44,20 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         'auth["tokens"]["refresh_token"]="private-cancelled-rotation"\n'
         '(home/"auth.json").write_text(json.dumps(auth))\n' +
         f'Path({str(native_home)!r}).write_text(str(home))\n' + body)
+    logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
+    if interruption == 'finalization_git':
+        real_git = shutil.which('git')
+        assert real_git is not None
+        # A real finalization read may overlap the supervisor's shutdown poll.
+        # Delay only the post-cancellation query, preserving Git and its result.
+        git_wrapper = cli.bin_dir / 'git'
+        git_wrapper.write_text(f'#!{sys.executable}\nimport os,sys,time\nfrom pathlib import Path\n'
+            'if sys.argv[1:] == ["rev-parse","--path-format=absolute","--git-dir","--git-common-dir"] '
+            f'and any(Path({str(logs)!r}).glob("reviewer-cancel-*.json")):\n'
+            f'    Path({str(cli.root / "finalization-git-started")!r}).touch()\n'
+            '    time.sleep(0.2)\n'
+            f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
+        git_wrapper.chmod(0o700)
     child_environment = {**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))}
     collector_failure = (TimeoutError('collector failure secret') if interruption == 'collector_timeout'
@@ -60,7 +75,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             return await super().exec(command, **kwargs)
 
     local = CollectorFailureEnvironment(child_environment, Path(environment['DAYDREAM_RB_REPOSITORY']))
-    logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
     running = asyncio.create_task(agent.run('frozen public task', local, SimpleNamespace()))
     try:
@@ -136,6 +150,8 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         documents = [json.loads((evidence / row['sibling_trajectory_ref']).read_bytes()) for row in siblings]
         assert all(document['session_id'] == root['session_id'] for document in documents)
         assert (logs / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
+        if interruption == 'finalization_git':
+            assert (cli.root / 'finalization-git-started').is_file()
         assert not Path(native_home.read_text()).exists()
         from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 

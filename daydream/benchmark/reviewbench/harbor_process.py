@@ -252,7 +252,6 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
     owned: dict[int, psutil.Process] = {}
     cancellation_at: float | None = None
     force_at: float | None = None
-    signalled: dict[int, psutil.Process] = {}
     try:
         while child.returncode is None:
             owned.update(_descendants(parent, child.pid))
@@ -265,11 +264,8 @@ async def supervise(invocation: str, environment: dict[str, str], outer_timeout:
                 # its writers and export. Children may have independent sessions.
                 child.send_signal(signal.SIGTERM)
                 _signal_owned(owned, signal.SIGTERM)
-                signalled.update(owned)
-            if cancellation_at is not None:
-                newly_owned = {pid: process for pid, process in owned.items() if signalled.get(pid) != process}
-                _signal_owned(newly_owned, signal.SIGTERM)
-                signalled.update(newly_owned)
+                # Later descendants can be Git reads needed to finalize evidence.
+                # Keep discovering them for bounded reaping after exit or grace expiry.
             if cancellation_at is not None and time.monotonic() - cancellation_at >= SHUTDOWN_GRACE_SECONDS:
                 force_at = time.monotonic()
                 receipt['cleanup_outcome'] = 'forced_termination'

@@ -304,7 +304,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         assert argv[argv.index('--thinking') + 1] == 'low'
         assert 'NOUS_API_KEY' not in kwargs['env']
         stage = review_stage_state(Path(argv[-1][1:]).read_text())
-        if stage is None and '--extension' not in argv:
+        if stage is None and 'DAYDREAM_PI_OUTPUT_PACKET' not in kwargs['env']:
             expected_usage.append((110, 50, 10, 0.0003))
             return make_mock_process_from_fixture('simple_text.jsonl')
         expected_usage.append((13, 3, 2, 0.125))
