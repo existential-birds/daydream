@@ -21,6 +21,7 @@ from daydream.host_tools import (
     HostToolFatal,
     HostToolRejected,
 )
+from daydream.host_tools_server import PiHostToolServer
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.harness.fake_clock import FakeClock
 
@@ -509,12 +510,16 @@ async def test_oversized_canonical_result_cannot_be_truncated_into_native_succes
     assert calls == [_RESULT] and binding.cleanup_complete
 
 
-async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return() -> None:
+@pytest.mark.parametrize("fault", ["pending", "eof", "valid", "reply-error"])
+async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return(
+    monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
     """Shutdown joins stalled callbacks without poisoning a permitted live retry.
 
     Complete-frame and installed-Pi settlement tests do not exercise a peer that
-    retains an incomplete body while the owning attempt closes, or repeats
-    cleanup after the next attempt has opened its own callback endpoint.
+    retains an incomplete body while the owning attempt closes, or completes
+    that frame before endpoint shutdown begins. Neither late dispatch nor a
+    transport failure may poison the assignment's permitted retry.
     """
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
@@ -522,19 +527,54 @@ async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return()
         return value
     binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
     binding.configure_schema(_SCHEMA)
-    async with binding.session() as server:
-        endpoint = urlsplit(server.url)
-        reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
-        writer.write((f"POST /submit HTTP/1.1\r\nHost: {endpoint.netloc}\r\n"
-            f"Authorization: {server.packet()['authorization']}\r\n"
-            "Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"id\":").encode())
-        await writer.drain()
-        async with httpx.AsyncClient(base_url=server.url,
-            headers={"Authorization": server.packet()["authorization"]}) as client:
-            assert (await client.get("/status")).status_code == 200
-    assert await asyncio.wait_for(reader.read(), 3) == b""
-    writer.close()
-    await writer.wait_closed()
+    body = json.dumps({"id": "stale", "name": NATIVE_SUBMIT, "arguments": _RESULT, "terminal": True}).encode()
+    reading_body = asyncio.Event()
+    read_body = asyncio.StreamReader.readexactly
+    async def observe_body(reader: asyncio.StreamReader, size: int) -> bytes:
+        if size == len(body):
+            reading_body.set()
+        return await read_body(reader, size)
+    monkeypatch.setattr(asyncio.StreamReader, "readexactly", observe_body)
+    reply = PiHostToolServer._reply
+    async def fail_reply(server: PiHostToolServer, writer: asyncio.StreamWriter,
+                         status: int, value: dict[str, Any]) -> None:
+        if fault == "reply-error" and value.get("code") == "invalid_frame":
+            raise ConnectionResetError("Peer disconnected before the retired frame's error reply")
+        await reply(server, writer, status, value)
+    monkeypatch.setattr(PiHostToolServer, "_reply", fail_reply)
+    writer: asyncio.StreamWriter | None = None
+    try:
+        async with binding.session() as server:
+            async with httpx.AsyncClient(base_url=server.url,
+                headers={"Authorization": server.packet()["authorization"]}) as client:
+                ready = await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})
+                assert ready.json()["ready"]
+            endpoint = urlsplit(server.url)
+            reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
+            writer.write((f"POST /admit HTTP/1.1\r\nHost: {endpoint.netloc}\r\n"
+                f"Authorization: {server.packet()['authorization']}\r\n"
+                f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body[:1])
+            await writer.drain()
+            await asyncio.wait_for(reading_body.wait(), 3)
+            if fault != "pending":
+                binding.close_attempt()
+                with pytest.raises(ValueError, match="cannot start another native attempt"):
+                    async with binding.session():
+                        pytest.fail("a retired endpoint must join before retry")
+                if fault == "valid":
+                    writer.write(body[1:])
+                    await writer.drain()
+                else:
+                    writer.write_eof()
+                await asyncio.wait_for(asyncio.gather(*server._tasks, return_exceptions=True), 3)
+                await asyncio.wait_for(reader.read(), 3)
+                assert not binding.closed and binding.fatal_error is None
+                assert binding.calls == 0 and installed == []
+        assert await asyncio.wait_for(reader.read(), 3) == b""
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
     assert installed == [] and not binding.authority_open and binding.cleanup_complete and server.closed
     async with _endpoint(binding) as client:
         await server.close()

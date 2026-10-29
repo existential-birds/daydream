@@ -82,7 +82,7 @@ class PiHostToolServer:
                 error = HostToolFatal("Native host callback transport failed unexpectedly", code="callback_failed",
                                       preacceptance=not self.binding.possibly_accepted)
                 error.__cause__ = completed.exception()
-                self.binding.fail(error)
+                self._fail(error)
 
         task.add_done_callback(finished)
 
@@ -114,7 +114,9 @@ class PiHostToolServer:
 
     def _fail(self, error: HostToolFatal) -> HostToolFatal:
         # A retired endpoint cannot revoke a newer attempt on the same binding.
-        return error if self._closing else self.binding.fail(error)
+        if self._closing or not self.binding.authority_open:
+            return self.binding.fatal_error or error
+        return self.binding.fail(error)
 
     async def _request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         admitting = complete = False
@@ -157,7 +159,8 @@ class PiHostToolServer:
                         code="invalid_frame")))
                     return
                 body = await reader.readexactly(int(length))
-                if self._closing:
+                if self._closing or (not self.binding.authority_open and not self.binding.accepted
+                                     and self.binding.fatal_error is None):
                     return
                 value = json.loads(body) if body else {}
                 if not isinstance(value, dict):

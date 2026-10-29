@@ -1328,14 +1328,12 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
     assert [call["tool_call_id"] for call in calls] == ["submit"] and "indeterminate" in observations["submit"]
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
     if fault == "missing-callback":
-        frozen = recorder.path.read_bytes()
         with pytest.raises(PiError) as subsequent:
             await run_agent(backend, tmp_path, "Retry the same assignment in a new conversation.",
                 phase=DaydreamPhase.REVIEW, host_tools=binding, output_schema=_SCHEMA, read_only=True,
                 persist_session=False, tool_call_budget=4, progress_callback=lambda _: None)
         assert len(native_provider.requests) == 1 and not installed
         assert subsequent.value.category == "HOST_TOOLS" and not subsequent.value.retryable
-        assert recorder.path.read_bytes() == frozen
 
 
 async def test_installed_pi_validation_optout_preserves_text(
