@@ -378,6 +378,11 @@ binding owns the first terminal failure and cannot reopen after it. `/admit` and
 `/submit` enforce readiness, correlation, authority, deadline and cumulative
 capacity with the same recovery semantics. Frames, arguments, results,
 items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
+Frame, readiness and admission I/O keep their short transport allowance. Terminal
+source validation and submission use the original assignment deadline. Native Pi
+queries its remaining allowance through the authenticated status endpoint and
+subtracts the full round-trip time, without sharing clock origins or renewing
+authority. Lost receipts still prohibit replay and retain incomplete coverage.
 Every real native tool start counts, including failed submissions, with no separate
 eight-call ceiling or hidden nested tool execution.
 

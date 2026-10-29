@@ -1241,6 +1241,80 @@ async def test_native_accepted_state_is_retained_when_terminal_settlement_or_cle
     assert sum((step.get("metrics") or {}).get("prompt_tokens", 0) or 0 for step in trajectory["steps"]) == 10
 
 
+@pytest.mark.parametrize("expires", [False, True], ids=["within-deadline", "expired-during-validation"])
+async def test_native_submission_waits_for_captured_source_validation_without_renewing_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, expires: bool,
+) -> None:
+    """Slow real captured-file reads use the domain deadline, retaining the final admission guard.
+
+    Lost-receipt tests cannot detect a healthy synchronous source validation being
+    mistaken for transport failure before its still-open assignment deadline.
+    """
+    from daydream import host_tools as policy
+    from daydream.git_ops import captured_source as owner
+
+    repo = tmp_path / "source-repo"
+    head = seed_feature_branch(repo, base={"api.py": "VALUE = 0\n"}, feature={"api.py": "VALUE = 1\n"})
+    captured = owner.capture_source(repo, tmp_path / "captured", base_sha=git(repo, "rev-parse", "main"),
+                                    head_sha=head, local=False)
+    submitted = {"verdict": "clean", "findings": []}
+    canonical = {"verdict": "validated", "findings": []}
+    native_provider.turns = [[("submit", "structured_output", submitted)]]
+    installed: list[dict[str, Any]] = []
+    validating = delayed = False
+    validation_started = validation_finished = 0.0
+    read_native = owner._native_entry
+    def slow_read(root: Path, path: str, gitlink: str | None = None) -> Any:
+        nonlocal delayed
+        value = read_native(root, path, gitlink)
+        if validating and not delayed and root == captured.root and path == "api.py":
+            assert value is not None and value[1] == b"VALUE = 1\n"
+            delayed = True
+            if expires:
+                binding.restrict(deadline=time.monotonic() + 0.1, tool_call_budget=None)
+            time.sleep(policy._CALLBACK_TIMEOUT_S + 0.25)
+        return value
+    monkeypatch.setattr(owner, "_native_entry", slow_read)
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        nonlocal validating, validation_started, validation_finished
+        validation_started = time.monotonic()
+        validating = True
+        captured.validate()
+        validating = False
+        validation_finished = time.monotonic()
+        binding.ensure_open()
+        assert value == submitted
+        installed.append(canonical)
+        return canonical
+    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=accept)
+    backend = PiBackend(model="output-model")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
+    try:
+        if expires:
+            with pytest.raises(PiError) as failure:
+                await run_agent(backend, captured.root, "Review the captured source.", phase=DaydreamPhase.REVIEW,
+                    host_tools=binding, output_schema=_SCHEMA, read_only=True, persist_session=False,
+                    tool_call_budget=4, wall_budget_s=30, progress_callback=lambda _: None)
+            assert failure.value.category == "HOST_TOOLS" and failure.value.retryable is False
+            assert binding.fatal_error is not None and binding.fatal_error.code == "deadline_expired"
+        else:
+            result, _, reason = await run_agent(backend, captured.root, "Review the captured source.",
+                phase=DaydreamPhase.REVIEW, host_tools=binding, output_schema=_SCHEMA, read_only=True,
+                persist_session=False, tool_call_budget=4, wall_budget_s=30, progress_callback=lambda _: None)
+            assert reason is None and result == canonical
+        assert delayed and validation_finished - validation_started > policy._CALLBACK_TIMEOUT_S
+        assert installed == ([] if expires else [canonical])
+        assert binding.accepted is not expires
+        assert len(native_provider.requests) == 1
+        assert binding.calls == 1 and binding.cleanup_complete
+        if not expires:
+            assert binding.native_settled
+        assert not binding.authority_open
+    finally:
+        captured.remove()
+
+
 @pytest.mark.parametrize("fault", ["timeout", "disconnect", "uncorrelated-reply", "missing-callback"])
 async def test_native_indeterminate_submission_stops_generation_and_never_replays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider, fault: str,
@@ -1287,6 +1361,8 @@ async def test_native_indeterminate_submission_stops_generation_and_never_replay
     lost_replies: list[dict[str, Any]] = []
     async def lose_accepted_reply(server: PiHostToolServer, writer: asyncio.StreamWriter,
                                   status: int, value: dict[str, Any]) -> None:
+        if fault == "timeout" and "remaining_ms" in value:
+            value = {**value, "remaining_ms": int(timeout_s * 1000)}
         if value.get("accepted") is True:
             assert binding.accepted_result == canonical
             lost_replies.append(value)
