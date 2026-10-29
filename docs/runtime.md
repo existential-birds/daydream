@@ -115,6 +115,8 @@ Ignored files are not implicitly expanded; a separate explicit justified selecti
 is required under the access policy. Dirty supporting helpers outside changed
 targets are captured too. Scope exclusions bound assigned changes while eligible
 supporting context remains available. Complete targets precede prompt bounding.
+Local capture refuses omitted `skip-worktree` paths, including sparse-checkout
+exclusions, before dispatch; materialize those working contents and rerun.
 
 Preparation reads a confined population, materializes its accepted contents, and
 rechecks actual enumeration, file identity and bytes. Detected instability retries

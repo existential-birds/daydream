@@ -112,7 +112,7 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None) -> tuple[st
 
 def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], dict[str, str]]:
     indexed = process._run_git(
-        source, ["ls-files", "--stage", "-z"], capture_bytes=True, retries=0,
+        source, ["ls-files", "--stage", "-t", "-z"], capture_bytes=True, retries=0,
         error_context="local captured source inventory unavailable",
     ).stdout
     tracked = {name for _, _, name in head_entries}
@@ -121,11 +121,15 @@ def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], di
         if not entry:
             continue
         metadata, _, name_bytes = entry.partition(b"\t")
-        mode, oid, _ = metadata.split()
+        tag, mode, oid, _ = metadata.split()
         name = os.fsdecode(name_bytes)
         tracked.add(name)
         if mode == b"160000":
             gitlinks[name] = oid.decode()
+        if tag == b"S" and _native_entry(source, name, gitlinks.get(name)) is None:
+            raise SnapshotPreparationError(
+                "local capture has omitted skip-worktree files; materialize those working contents and rerun the review"
+            )
     paths = tracked | set(queries._list_untracked_z(source))
     selected = sorted((p for p in paths if not _runtime_artifact(p)), key=os.fsencode)
     if len(selected) > immutable._MAX_FILES:

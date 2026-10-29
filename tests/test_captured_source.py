@@ -330,3 +330,57 @@ def test_capture_cleanup_preserves_replaced_storage(source: tuple[Path, str, str
     (another.root / "subject.py").write_text("corrupt but owned")
     another.remove()
     assert not another.root.exists()
+
+
+@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted"])
+def test_local_capture_requires_materialized_skip_worktree_contents(
+    source: tuple[Path, str, str], tmp_path: Path, state: str,
+) -> None:
+    """Sparse omission must fail preparation without erasing real working edits or deletions."""
+    repo, _, _ = source
+    (repo / "visible").mkdir()
+    (repo / "support").mkdir()
+    git(repo, "mv", "subject.py", "visible/subject.py")
+    git(repo, "mv", "helper.py", "support/helper.py")
+    base = commit(repo, "organized source")
+    write_and_stage(repo, "visible/subject.py", "value = 2\n")
+    head = commit(repo, "feature")
+    if state == "cone":
+        git(repo, "sparse-checkout", "init", "--cone", "--sparse-index")
+        git(repo, "sparse-checkout", "set", "visible")
+    elif state == "noncone":
+        git(repo, "sparse-checkout", "set", "--no-cone", "/visible/", "/.gitignore")
+    else:
+        if state != "deleted":
+            git(repo, "update-index", "--skip-worktree", "support/helper.py")
+        if state == "present":
+            (repo / "support/helper.py").write_text("helper = 4\n")
+        else:
+            (repo / "support/helper.py").unlink()
+    flags = git(repo, "ls-files", "-t", "--", "support/helper.py")
+    assert flags == ("H" if state == "deleted" else "S") + " support/helper.py"
+    original_index = (repo / ".git/index").read_bytes()
+    original_refs = git(repo, "show-ref")
+    destination = tmp_path / "captured"
+    if state in {"cone", "noncone", "omitted"}:
+        with pytest.raises(SnapshotPreparationError, match="skip-worktree.*materialize.*rerun"):
+            capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
+        assert not destination.exists()
+    else:
+        captured = capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
+        assert set(captured.files) == {"visible/subject.py", "support/helper.py"}
+        if state == "present":
+            assert captured.read("new", "support/helper.py")[1] == b"helper = 4\n"
+            assert (captured.root / "support/helper.py").read_bytes() == b"helper = 4\n"
+        else:
+            with pytest.raises(PathAbsentError):
+                captured.read("new", "support/helper.py")
+            assert "deleted file mode" in captured.diff
+        captured.validate()
+    assert (repo / ".git/index").read_bytes() == original_index
+    assert git(repo, "show-ref") == original_refs
+    assert (repo / "visible/subject.py").read_bytes() == b"value = 2\n"
+    if state == "present":
+        assert (repo / "support/helper.py").read_bytes() == b"helper = 4\n"
+    else:
+        assert not (repo / "support/helper.py").exists()

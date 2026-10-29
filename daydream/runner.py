@@ -689,6 +689,8 @@ async def _capture_review_workspace(
         except GitError as exc:
             raise GitError("The pinned PR comparison objects are unavailable; fetch its refs and rerun.") from exc
         pinned_pr = replace(pinned_pr, base_sha=base, pr_base_sha=tip)
+    else:
+        base = git_ops.resolve_diff_merge_base(work.repo, work.base_branch, head)
     if committed and git_ops.status_porcelain(work.source).strip():
         print_info(console, "Committed PR review excludes local tracked and untracked edits.")
     destination = operational_worktree_root(owner) / f"review-capture-{uuid.uuid4().hex}"

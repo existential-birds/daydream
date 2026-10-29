@@ -7,6 +7,7 @@ review execution while workspace and Git operations remain real.
 
 from __future__ import annotations
 
+import json
 from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
@@ -22,7 +23,8 @@ from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import git as _git, tracked_source_state
+from tests.test_github_app_integration import _minimal_backend
 from tests.test_workspace import _push_origin_commit_via_sidecar
 
 # --- Helpers ---------------------------------------------------------------
@@ -311,3 +313,53 @@ async def test_review_mode_on_base_branch_does_not_error(
     # _run_loop_deep was reached.
     assert routed["base_branch"] == _git(repo_with_origin, "rev-parse", "main")
     assert routed["head_branch"] == "main"
+
+
+@pytest.mark.parametrize("route,base_kind", [
+    ("in-place", "default"), ("in-place", "named"), ("in-place", "sha"),
+    ("worktree", "default"), ("branch", "default"),
+])
+async def test_local_review_pins_remote_preferred_base_without_upstream(
+    repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, route: str, base_kind: str,
+) -> None:
+    """Capture must retain the diff resolver's base policy, including explicit SHAs.
+
+    Resolver unit tests do not cover the runner taking the workspace's different
+    merge-base as its accepted source and expanding the actual review inventory.
+    """
+    repo = repo_with_origin
+    original_base = _git(repo, "rev-parse", "main")
+    _git(repo, "branch", "--unset-upstream", "main")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
+    _git(repo, "add", "upstream.py")
+    _git(repo, "commit", "-m", "already merged upstream")
+    remote_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "HEAD:main")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-m", "feature change")
+    _git(repo, "push", "origin", "feature")
+    assert _git(repo, "rev-parse", "main") == original_base
+    assert _git(repo, "rev-parse", "origin/main") == remote_tip
+    fake_gh.set_response("pr-list", value=[])
+    backend = _minimal_backend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    before = tracked_source_state(repo)
+    base = original_base if base_kind == "sha" else "main" if base_kind == "named" else None
+    config = RunConfig(target=str(repo), output_mode="review", non_interactive=True, shallow=True,
+                       stack="python", archive=False, base=base, force_worktree=route == "worktree",
+                       branch="feature" if route == "branch" else None)
+
+    assert await runner.run(config) == 0
+
+    assert backend.calls
+    diff = (repo / ".daydream/diff.patch").read_text()
+    coverage = json.loads((repo / ".daydream/deep/review-coverage.json").read_text())
+    expected_base = original_base if base_kind == "sha" else remote_tip
+    assert coverage["analyzed_revision"]["merge_base_sha"] == expected_base
+    assert "diff --git a/feature.py b/feature.py" in diff
+    assert ("diff --git a/upstream.py b/upstream.py" in diff) == (base_kind == "sha")
+    assigned = {path for scope in coverage["planned_scopes"] for path in scope["files"]}
+    assert assigned == ({"feature.py", "upstream.py"} if base_kind == "sha" else {"feature.py"})
+    assert tracked_source_state(repo) == before
