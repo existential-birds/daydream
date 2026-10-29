@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.32.0] - 2026-10-29
+
 ### Added
 
 - **review:** allow review profiles to configure the cumulative staged-review
@@ -34,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
   ordinary Pi defaults are unchanged. This compatible minor feature retains
   committed result schema 1 and extension API 8.
-- Add public ReviewBench reviewers through Harbor ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+- Add public ReviewBench reviewers through Harbor ([#1688](https://github.com/existential-birds/daydream/pull/1688), #92).
+- **benchmark:** make Harbor own the ReviewBench workflow
+- **benchmark:** run public Harbor reviews and judges with Codex subscriptions
 
 ### Changed
 
@@ -42,6 +47,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
 - Simplify ReviewBench source provenance and manifest loading; allow unrelated
   untracked files while rejecting source changes and extra scripts.
+- **backends:** remove redundant transport and helper layers
+- **trajectory:** clarify lifecycle field names
+- **tests:** remove redundant guards and duplicated setup
+- **reviewbench:** reuse shared reviewer dependency lock
+- **redaction:** share structured scanner paths
+- **reviewbench:** reuse Harbor task packager
+- simplify shared helpers and require pre-PR sweeps
+- **reviewbench:** replace custom process tracking and serialization
+- **reviewbench:** retain raw checkpoints without readout machinery
+- **reviewbench:** collapse runtime and contract test layers
+- **reviewbench:** identify candidates by frozen wheels
+- **reviewbench:** simplify native export and contract tests
+- **reviewbench:** remove redundant agent documentation
+- **reviewbench:** consolidate evidence and runtime ownership
+- **benchmark:** use supplied test set for 1616 acceptance
+- **benchmark:** condense agent runbook
+- **benchmark:** separate reviewer and judge authentication
+- **benchmark:** remove redundant ReviewBench machinery
+- **benchmark:** generate pinned seccomp assets during export
+- **benchmark:** remove standalone seccomp license asset
+- **pi:** share native model resolution
 
 ### Fixed
 
@@ -54,7 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkouts while preserving recovery evidence. Keep source and Git ownership
   alive through worktree cleanup, with guarded operations shared by publication,
   recovery and live-code consumers
-  ([#1700](https://github.com/existential-birds/daydream/issues/1700)).
+  ([#1700](https://github.com/existential-birds/daydream/issues/1700), #1716).
 - **review:** bound compressed and reconstructed immutable object populations,
   Git allocations and captured output before validating supplied source
   ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
@@ -81,13 +107,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shutdown and reap allowances.
 - Freeze reviewer retry, idle, and Codex terminal-drain, reap, and cleanup controls in exported profiles and restore
   them for native execution. Regenerate earlier schema-4 exports without these controls.
-
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities
   ([#1701](https://github.com/existential-birds/daydream/issues/1701)).
 - **codex:** constrain staged native output to captured head and merge-base
   revisions, preventing abbreviated citations while preserving source admission.
+- **reviewbench:** preserve finalization reads during shutdown
+- **redaction:** preserve adjacent URL query parameters
+- **reviewbench:** align native runtime with rebased review contracts
+- **ci:** stabilize documentation and interruption checks
+- **reviewbench:** retain execution policy and bound descendant cleanup
+- **redaction:** protect native credentials in evidence and logs
+- **reviewbench:** join writers and retain encodable diagnostics
+- **reviewbench:** retain evidence after collector failures
+- **redaction:** sanitize credentials in decoded JSON keys
+- **redaction:** preserve diagnostic field boundaries across passes
+- **redaction:** remove residual secrets beside retained markers
+- **reviewbench:** preserve diagnostic privacy and native outcomes
+- **reviewbench:** retain evidence when reviewers are interrupted
+- **benchmark:** bind export publication and isolate Pi credentials
+- **reviewbench:** bind reviewer export to captured wheel bytes
+- **reviewbench:** retain interrupted evaluator evidence
+- **benchmark:** average complete test-set rounds
+- **benchmark:** revalidate candidate before publishing reviews
+- **benchmark:** preserve native effort and sandbox bounds
+- **benchmark:** preserve competing profile exports
+- **benchmark:** isolate public adapter imports
+- **benchmark:** freeze packaged executable extensions
+- **benchmark:** retain joined review and judge evidence
+- **benchmark:** exclude verifier sources from reviewer images
+- **benchmark:** validate native sandbox and serialize subscription refresh
+- **benchmark:** finalize native evidence before Harbor publication
+- **benchmark:** require retained public job verification
+- **benchmark:** reuse shared atomic writer for subscription auth
+- **benchmark:** preserve host ownership across subscription handoff
+- **benchmark:** bind local Harbor jobs to the supplied metric
+- **benchmark:** keep admission callback compatible with dead-code gate
+- **benchmark:** preserve refresh recovery and timed trial budgets
+- **benchmark:** preserve Pi inputs and renamed source coordinates
+- **backends:** preserve embedded execution input hashing
+- **runtime:** align frozen Pi manifest identity
+- **benchmark:** preserve frozen provider and source verification
+- **benchmark:** preserve native review profile resolution
+- **trajectory:** redact active request evidence
+- **benchmark:** retain native configuration and usage evidence
+- **benchmark:** publish evaluator evidence atomically
 
 ### Removed
 
