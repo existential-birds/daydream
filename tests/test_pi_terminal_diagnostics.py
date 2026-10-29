@@ -32,6 +32,8 @@ async def test_pi_failure_records_redacted_process_tail_after_cleanup(
 
     Mock process replays cannot prove late merged output is drained or that
     exit/cleanup observations describe the actual process on both paths.
+    The graceful child ignores repeated SIGTERM during interpreter shutdown
+    so cleanup still observes its promised zero exit.
     """
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -39,6 +41,7 @@ async def test_pi_failure_records_redacted_process_tail_after_cleanup(
     child.write_text(f"#!{sys.executable}\n" + '''
 import json, signal, sys, time
 def stop(*_):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print('late cleanup diagnostic', file=sys.stderr, flush=True)
     raise SystemExit(0)
 signal.signal(signal.SIGTERM, stop)
