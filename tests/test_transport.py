@@ -15,8 +15,6 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     TransportExitError,
 )
 from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
@@ -29,21 +27,20 @@ def emit_lines(*lines: str, exit_code: int = 0, to_stderr: str = "") -> str:
     stderr_part = f"print({to_stderr!r}, file=sys.stderr)" if to_stderr else ""
     return "import sys\n" + body + stderr_part + f"\nraise SystemExit({exit_code})\n"
 
-async def test_transport_writes_stdin_then_closes() -> None:
+@pytest.mark.parametrize("stdin_data", [b"prompt\n", b"", None])
+async def test_transport_wires_stdin_and_closes_pipes(stdin_data: bytes | None) -> None:
     child = (
-        "import sys\n"
+        "import json, os, stat, sys\n"
         'data = sys.stdin.read()\n'
-        'print(json.dumps({"echo": data}))\n'
+        'print(json.dumps({"echo": data, "piped": stat.S_ISFIFO(os.fstat(0).st_mode)}))\n'
         "raise SystemExit(0)\n"
-    ).replace("import sys\n", "import json, sys\n", 1)
-    t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", child], stdin_mode=StdinMode.PIPE,
-        stdin_data=b"prompt\n",
     )
+    t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", child], stdin_data=stdin_data)
     await t.start()
     events = [json.loads(line) async for line in t.lines(timeout_for_line=lambda: 5.0)]
-    assert events == [{"echo": "prompt\n"}]
+    assert events == [{"echo": (stdin_data or b"").decode(), "piped": stdin_data is not None}]
     assert await t.wait() == 0
-    assert t.stdin_closed is True
+    assert t.stdin_closed is (stdin_data is not None)
 
 async def test_transport_nonzero_exit_raises_exit_error() -> None:
     t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", emit_lines("not json", exit_code=3)],)
@@ -61,7 +58,7 @@ async def test_transport_stderr_drain_task_feeds_sink() -> None:
     diagnostics: list[str] = []
     t = CliTransport(limit=LIMIT, cli="fake",
         argv=[sys.executable, "-c", emit_lines('{"a":1}', '{"b":2}', to_stderr="boom")],
-        stderr_policy=StderrPolicy.DRAIN_TASK, stderr_sink=diagnostics.append,
+        stderr_sink=diagnostics.append,
     )
     await t.start()
     events = [json.loads(line) async for line in t.lines(timeout_for_line=lambda: 5.0)]

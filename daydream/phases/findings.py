@@ -369,8 +369,6 @@ def _validate_agent_source_uids(
             )
             continue
         issues = record_issues_or_empty(loaded)
-        if not isinstance(issues, list):
-            continue
         for record in issues:
             if isinstance(record, dict):
                 uid = record_uid(record)

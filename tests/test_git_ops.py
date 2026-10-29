@@ -255,6 +255,9 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
     """Every unsafe key must appear in the complete rejection of one real inherited environment."""
     repo = tmp_path / "source"
     _init_repo(repo)
+    # This test snapshots every metadata byte. Background maintenance can
+    # remove its transient lock while copytree or the byte checks read it.
+    _git(repo, "config", "maintenance.auto", "false")
     write_and_stage(repo, "app.py", b"VALUE = 1\n")
     _commit(repo, "initial")
     (repo / "app.py").write_bytes(b"VALUE = 2\n")

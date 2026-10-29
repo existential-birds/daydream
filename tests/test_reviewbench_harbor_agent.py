@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+import asyncio
+import errno
+import hashlib
+import json
+import os
+import shlex
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from daydream import git_ops, runner
+from daydream.benchmark.reviewbench.harbor_agent import DaydreamPublicReviewAgent
+from daydream.benchmark.reviewbench.harbor_entrypoint import main
+from daydream.trajectory import RUNS_DIRNAME
+from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import commit, git
+from tests.harness.reviewbench import public_input
+
+
+@pytest.mark.parametrize('stage', ['setup', 'run', 'preflight'])
+async def test_public_agent_python_startup_cannot_import_reviewed_repository_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    environment = public_input(tmp_path)
+    repository = Path(environment['DAYDREAM_RB_REPOSITORY'])
+    marker = tmp_path / 'reviewed-python-executed'
+    for name in ('daydream', 'daydream_ext'):
+        package = repository / name
+        package.mkdir()
+        (package / '__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(marker))
+            + ').write_text("reviewed package executed")\nraise RuntimeError("hostile source imported")\n')
+    git(repository, 'add', 'daydream', 'daydream_ext')
+    head = commit(repository, 'reviewed hostile package names')
+    git(repository, 'update-ref', 'refs/reviewbench/head', head)
+    inputs = Path(environment['DAYDREAM_RB_INPUTS'])
+    pr = json.loads((inputs / 'pr.json').read_text())
+    pr['head'] = head
+    (inputs / 'pr.json').write_text(json.dumps(pr))
+    (inputs / 'diff.patch').write_text(git_ops.diff_paths(repository, pr['base'], head, ['.'], merge_base_diff=True))
+    profile_path = inputs / 'daydream-profile.json'
+    profile = json.loads(profile_path.read_text())
+    profile['pr'] = pr
+    profile['profile_sha256'] = hashlib.sha256(json.dumps(
+        {key: value for key, value in profile.items() if key != 'profile_sha256'},
+        sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    profile_path.write_text(json.dumps(profile))
+    # Setup only checks CLI availability; this stand-in cannot run inference.
+    binary = tmp_path / 'bin' / 'codex'
+    binary.parent.mkdir()
+    binary.write_text(f'#!{sys.executable}\nraise SystemExit("unexpected CLI execution")\n')
+    binary.chmod(0o755)
+    (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
+    child_environment = {**os.environ, **environment, 'PYTHONPATH': str(repository),
+                         'PATH': os.pathsep.join((str(binary.parent), os.environ['PATH']))}
+
+    class Environment:
+        async def exec(self, command: str, **kwargs: Any) -> Any:
+            arguments = shlex.split(command)
+            assert arguments[0] == 'python'
+            # Harbor's image resolves `python` to its installed environment.
+            # Execute those actual arguments with this test environment's Python.
+            arguments[0] = sys.executable
+            if stage == 'preflight':
+                bootstrap = ('import asyncio,errno,sys\n'
+                    'from daydream.benchmark.reviewbench import harbor_process as owner\n'
+                    'async def fail(*args,**kwargs):\n'
+                    '    raise OSError(errno.EMFILE,"private-startup-canary")\n'
+                    'owner.asyncio.create_subprocess_exec=fail\n'
+                    'sys.argv=["supervisor",*sys.argv[1:]]\nraise SystemExit(owner.main())\n')
+                arguments = [sys.executable, '-I', '-c', bootstrap, *arguments[4:]]
+            child = await asyncio.create_subprocess_exec(*arguments, cwd=repository, env=child_environment,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=30)
+            return SimpleNamespace(return_code=child.returncode, stdout=stdout.decode(), stderr=stderr.decode())
+
+    logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
+    agent = DaydreamPublicReviewAgent(logs_dir=logs)
+    monkeypatch.setattr(agent, 'version', lambda: '0.0.0-host')
+    if stage == 'setup':
+        await agent.setup(Environment())
+    else:
+        with pytest.raises(RuntimeError, match='native reviewer failed'):
+            await agent.run('supplied task', Environment(), SimpleNamespace())
+        text = (logs / 'reviewer-entrypoint.log').read_text()
+        if stage == 'preflight':
+            receipt = json.loads((logs / 'reviewer-process.json').read_text())
+            assert receipt['startup_error'] == 'OSError' and receipt['child_returncode'] is None
+            assert receipt['errno'] == errno.EMFILE and 'private-startup-canary' not in text
+        else:
+            assert 'SubscriptionAuthError' in text
+    assert not marker.exists()
+    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+
+
+@pytest.mark.parametrize('fault', [
+    'schema', 'profile', 'patch', 'refs', 'origin', 'dirty', 'stale', 'stale_trajectory', 'auth',
+    'execution_missing', 'execution_unknown', 'execution_bool', 'execution_negative',
+    'execution_nan', 'execution_retry', 'execution_zero',
+])
+async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_inference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
+) -> None:
+    environment = public_input(tmp_path)
+    prior_archive = os.environ.get('DAYDREAM_ARCHIVE_DIR')
+    inputs = Path(environment['DAYDREAM_RB_INPUTS'])
+    if fault in {'schema', 'profile'} or fault.startswith('execution_'):
+        profile_path = inputs / 'daydream-profile.json'
+        profile = json.loads(profile_path.read_text())
+        if fault == 'schema':
+            profile['schema'] = 1
+            policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
+            profile['profile_sha256'] = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'))
+                                                      .encode()).hexdigest()
+        elif fault == 'profile':
+            profile['reviewer']['model'] = 'unfrozen-model'
+        else:
+            execution = profile['reviewer']['execution']
+            if fault == 'execution_missing':
+                del profile['reviewer']['execution']
+            elif fault == 'execution_unknown':
+                execution['unknown'] = 'unadmitted control'
+            elif fault == 'execution_bool':
+                execution['stream_idle_timeout_s'] = True
+            elif fault == 'execution_negative':
+                execution['pi_response_idle_timeout_s'] = -1
+            elif fault == 'execution_nan':
+                execution['codex_terminal_drain_timeout_s'] = float('nan')
+            elif fault == 'execution_retry':
+                execution['retry_policy']['attempts'] = 0.5
+            else:
+                execution['codex_cleanup_timeout_s'] = 0
+            policy = {key: value for key, value in profile.items() if key != 'profile_sha256'}
+            profile['profile_sha256'] = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'))
+                                                      .encode()).hexdigest()
+        profile_path.write_text(json.dumps(profile))
+    elif fault == 'patch':
+        (inputs / 'diff.patch').write_text('unrelated supplied patch')
+    elif fault == 'refs':
+        git(Path(environment['DAYDREAM_RB_REPOSITORY']), 'update-ref', '-d', 'refs/reviewbench/base')
+    elif fault == 'origin':
+        git(Path(environment['DAYDREAM_RB_REPOSITORY']), 'remote', 'add', 'origin', 'https://github.com/other/repo')
+    elif fault == 'dirty':
+        (Path(environment['DAYDREAM_RB_REPOSITORY']) / 'untracked.py').write_text('unfrozen source')
+    elif fault == 'stale_trajectory':
+        trajectory = Path(environment['DAYDREAM_RB_EVIDENCE']).parent / 'trajectory.json'
+        trajectory.parent.mkdir(parents=True)
+        trajectory.write_text('previous-native-trajectory')
+    elif fault == 'stale':
+        output = Path(environment['DAYDREAM_RB_OUTPUT'])
+        output.parent.mkdir()
+        output.write_text('previous-evidence')
+    else:
+        (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('invalid public task reached generation transport')
+
+    monkeypatch.setattr(runner, 'create_backend', forbidden)
+    assert await main(environment) == 1
+    assert os.environ.get('DAYDREAM_ARCHIVE_DIR') == prior_archive
+    output = Path(environment['DAYDREAM_RB_OUTPUT'])
+    if fault == 'stale':
+        assert output.read_text() == 'previous-evidence'
+    else:
+        assert not output.exists()
+    if fault == 'stale_trajectory':
+        assert trajectory.read_text() == 'previous-native-trajectory'
+
+
+async def test_native_storage_failure_retains_diagnostics_without_manufacturing_atif(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+    artifact_runtime_root: Path,
+) -> None:
+    environment = public_input(tmp_path)
+    mkdir = Path.mkdir
+    rejected: list[Path] = []
+
+    def read_only_private_storage(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.parent.name == RUNS_DIRNAME and path.is_relative_to(artifact_runtime_root):
+            rejected.append(path)
+            raise OSError(errno.EROFS, 'private artifact storage is read-only')
+        mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'mkdir', read_only_private_storage)
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('artifact owner preflight failure reached model generation')
+
+    monkeypatch.setattr(runner, 'create_backend', forbidden)
+    assert await main(environment) == 1
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    record = json.loads((evidence / 'execution.json').read_text())
+    assert len(rejected) == 1
+    assert record['status'] == 'failed' and record['terminal_result'] is None
+    assert 'native reviewer raised OSError' in record['diagnostics']
+    assert any('did not produce a finalized terminal result' in reason for reason in record['diagnostics'])
+    assert any('native trajectory unavailable' in reason for reason in record['diagnostics'])
+    assert not (evidence / 'trajectory.json').exists()
+    assert not (evidence.parent / 'trajectory.json').exists()
+    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+    assert 'FileNotFoundError' not in capsys.readouterr().err

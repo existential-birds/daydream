@@ -14,6 +14,14 @@ from daydream.review_profile import ResolvedProfile
 OutputMode = Literal["loop", "comment", "review", "diagram"]
 
 
+@dataclass(frozen=True)
+class FrozenAuthorDescription:
+    """Supplied author context bound to a frozen source revision by an embedder."""
+
+    head_sha: str
+    description: str
+
+
 @dataclass
 class RunConfig:
     """Configuration for a run. Phase overrides take precedence over file defaults; see README for CLI fields."""
@@ -43,6 +51,7 @@ class RunConfig:
     fix_model: str | None = None
     test_model: str | None = None
     exploration_context: ExplorationContext | None = None
+    frozen_author_description: FrozenAuthorDescription | None = None
     exploration_model: str | None = None
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None

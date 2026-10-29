@@ -55,7 +55,6 @@ from daydream.backends import (
     TurnEndEvent,
     _admit_json_value,
     _admit_native_unix_ms,
-    _new_generation_id,
     _parsed_nonnegative_float,
     _parsed_nonnegative_int,
     resolve_fanout_concurrency,
@@ -68,8 +67,6 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
     raise_for_exit,
     reap,
@@ -162,40 +159,19 @@ def _pi_process_exit_message(stderr_lines: list[str], returncode: int) -> str:
     return process_exit_message(display="Pi", returncode=returncode, lines=stderr_lines)
 
 
-def _read_pi_default_model(path: Path) -> str | None:
-    """Read Pi's configured default model, ignoring malformed settings."""
-    try:
-        with path.open(encoding="utf-8") as settings_file:
-            settings = json.load(settings_file)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-    model = settings.get("defaultModel") if isinstance(settings, dict) else None
-    return model.strip() if isinstance(model, str) and model.strip() else None
-
-
-_AMBIENT_AGENT_DIR = object()
-
-
 def _configured_pi_model(
-    cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR
+    cwd: Path, *, execution_input: BackendExecutionInput | None = None,
 ) -> str | None:
-    """Resolve defaultModel with project settings taking precedence over global settings."""
-    if agent_dir is _AMBIENT_AGENT_DIR:
-        resolved_agent_dir: Path | None = Path(
+    """Resolve frozen defaults, otherwise project settings before global settings."""
+    if execution_input is not None:
+        if execution_input.pi_settings is not None:
+            return execution_input.pi_settings.get("defaultModel")
+        agent_dir = execution_input.pi_agent_dir
+    else:
+        agent_dir = Path(
             os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent")
         )
-    else:
-        assert agent_dir is None or isinstance(agent_dir, Path)
-        resolved_agent_dir = agent_dir
-    settings_paths = [cwd / ".pi" / "settings.json"]
-    if resolved_agent_dir is not None:
-        settings_paths.append(resolved_agent_dir / "settings.json")
-    for settings_path in settings_paths:
-        model = _read_pi_default_model(settings_path)
-        if model:
-            return model
-    return None
+    return native_pi_settings(cwd, agent_dir=agent_dir).get("defaultModel")
 
 
 @dataclass(frozen=True)
@@ -212,6 +188,23 @@ def _selection_digest(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
         return None
+
+
+def native_pi_settings(cwd: Path, *, agent_dir: Path | None) -> dict[str, str]:
+    """Project only nonsecret model defaults with Pi's project/global precedence."""
+    result: dict[str, str] = {}
+    paths = ([] if agent_dir is None else [agent_dir / "settings.json"]) + [cwd / ".pi" / "settings.json"]
+    for path in paths:
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(settings, dict):
+            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel"):
+                value = settings.get(key)
+                if isinstance(value, str) and value.strip():
+                    result[key] = value.strip()
+    return result
 
 
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
@@ -544,23 +537,6 @@ def _tool_completion_metadata(event: dict[str, Any], *, output_control: bool = F
                       or structured.get('truncated') is True or result.get('truncated') is True)}
 
 
-def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
-    """Pull token + cost fields out of a Pi ``AssistantMessage``.
-
-    Returns ``input``, ``output``, ``cacheRead``, ``cacheWrite`` (ints or None)
-    and ``cost_total`` (float or None). Never raises — every field is optional.
-    """
-    usage = message.get("usage") or {}
-    cost = usage.get("cost") or {}
-    return {
-        "input": usage.get("input"),
-        "output": usage.get("output"),
-        "cacheRead": usage.get("cacheRead"),
-        "cacheWrite": usage.get("cacheWrite"),
-        "cost_total": cost.get("total"),
-    }
-
-
 def _schema_instruction(schema: dict[str, Any]) -> str:
     """Append the schema for excluded modes that retain prose serialization."""
     return (
@@ -595,6 +571,56 @@ def _write_prompt_attachment(text: str, attachments: ExitStack | AsyncExitStack)
     return path
 
 
+def native_pi_provider(
+    cwd: Path, *, execution_input: BackendExecutionInput | None, configured_model: str | None,
+    model_override: str | None, model: str,
+) -> str | None:
+    """Resolve the native provider once using the same policy as process dispatch."""
+    frozen_settings = None if execution_input is None else execution_input.pi_settings
+    provider = (
+        execution_input.pi_provider
+        if execution_input is not None
+        else os.environ.get("PI_PROVIDER")
+    )
+    if provider is None and frozen_settings is not None:
+        provider = frozen_settings.get("defaultProvider")
+        if (provider is None and configured_model is not None
+                and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None):
+            raise PiError("Case Pi provider conflicts with unavailable operator provider", category="AUTH_CONFIG")
+    if provider is None and configured_model is None:
+        provider = _PI_DEFAULT_PROVIDER
+        if model_override is not None and model.casefold().startswith("glm-"):
+            _warn_migration_mismatch_once(
+                f"glm-pin:{model}",
+                "Explicit model %r is a z.ai-hosted GLM model, but the "
+                "Pi backend now defaults to the %s provider and "
+                "PI_PROVIDER is unset; the pinned model will fail at "
+                "runtime unless PI_PROVIDER=zai is set or the model is "
+                "migrated to the %s registry.",
+                model,
+                _PI_DEFAULT_PROVIDER,
+                _PI_DEFAULT_PROVIDER,
+            )
+    elif (
+        model_override is None and configured_model is None
+        and provider and provider != _PI_DEFAULT_PROVIDER
+    ):
+        _warn_migration_mismatch_once(
+            f"fallback-provider:{provider}",
+            "PI_PROVIDER=%r is set with no configured model, so the Pi "
+            "backend falls back to %r, which is served by the %s "
+            "provider; if %r does not serve that model the run will "
+            "fail at runtime. Unset PI_PROVIDER or set it to %s to "
+            "adopt the new default, or configure a model explicitly.",
+            provider,
+            model,
+            _PI_DEFAULT_PROVIDER,
+            provider,
+            _PI_DEFAULT_PROVIDER,
+        )
+    return provider
+
+
 class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
@@ -626,14 +652,7 @@ class PiBackend:
         self._configured_cache: tuple[Path, str | None] | None = None
         configured: str | None = None
         if model is None and cwd is not None:
-            configured = _configured_pi_model(
-                cwd,
-                agent_dir=(
-                    execution_input.pi_agent_dir
-                    if execution_input is not None
-                    else _AMBIENT_AGENT_DIR
-                ),
-            )
+            configured = _configured_pi_model(cwd, execution_input=execution_input)
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
         if execution_input is not None:
@@ -769,7 +788,7 @@ class PiBackend:
     async def _require_native_version(self, command: str, expected: str, cwd: Path,
                                       environment: dict[str, str], binding: HostToolBinding) -> None:
         probe = CliTransport(command, [command, "--version"], limit=4096, env=environment, cwd=str(cwd),
-                             stderr_policy=StderrPolicy.DRAIN_TASK)
+                             stderr_sink=lambda _line: None)
         self._transports.append(probe)
         probe_failed = False
         try:
@@ -893,55 +912,16 @@ class PiBackend:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
-                configured_model = _configured_pi_model(
-                    cwd,
-                    agent_dir=(
-                        self._execution_input.pi_agent_dir
-                        if self._execution_input is not None
-                        else _AMBIENT_AGENT_DIR
-                    ),
-                )
+                configured_model = _configured_pi_model(cwd, execution_input=self._execution_input)
         self.model = self._model_override or ("pi-native" if review_context else configured_model or DEFAULT_PI_MODEL)
-        if self._model_override is not None or (review_context is None and configured_model is None):
+        frozen_settings = (None if self._execution_input is None or review_context is not None
+                           else self._execution_input.pi_settings)
+        if self._model_override is not None or (review_context is None
+                and (configured_model is None or frozen_settings is not None)):
             args.extend(["--model", self.model])
-        provider = (
-            self._execution_input.pi_provider
-            if self._execution_input is not None
-            else os.environ.get("PI_PROVIDER")
-        )
-        if review_context is not None:
-            provider = review_context.provider
-        if review_context is None and provider is None and configured_model is None:
-            provider = _PI_DEFAULT_PROVIDER
-            if self._model_override is not None and self.model.casefold().startswith("glm-"):
-                _warn_migration_mismatch_once(
-                    f"glm-pin:{self.model}",
-                    "Explicit model %r is a z.ai-hosted GLM model, but the "
-                    "Pi backend now defaults to the %s provider and "
-                    "PI_PROVIDER is unset; the pinned model will fail at "
-                    "runtime unless PI_PROVIDER=zai is set or the model is "
-                    "migrated to the %s registry.",
-                    self.model,
-                    _PI_DEFAULT_PROVIDER,
-                    _PI_DEFAULT_PROVIDER,
-                )
-        elif (
-            review_context is None and self._model_override is None and configured_model is None
-            and provider and provider != _PI_DEFAULT_PROVIDER
-        ):
-            _warn_migration_mismatch_once(
-                f"fallback-provider:{provider}",
-                "PI_PROVIDER=%r is set with no configured model, so the Pi "
-                "backend falls back to %r, which is served by the %s "
-                "provider; if %r does not serve that model the run will "
-                "fail at runtime. Unset PI_PROVIDER or set it to %s to "
-                "adopt the new default, or configure a model explicitly.",
-                provider,
-                self.model,
-                _PI_DEFAULT_PROVIDER,
-                provider,
-                _PI_DEFAULT_PROVIDER,
-            )
+        provider = (review_context.provider if review_context is not None else native_pi_provider(
+            cwd, execution_input=self._execution_input, configured_model=configured_model,
+            model_override=self._model_override, model=self.model))
 
         child_env = (
             self._execution_input.child_environment()
@@ -958,6 +938,10 @@ class PiBackend:
             thinking = review_context.thinking
             child_env["PI_CODING_AGENT_DIR"] = str(review_context.agent_dir)
             args.append("--no-context-files")
+        if thinking is None and frozen_settings is not None:
+            thinking = frozen_settings.get("defaultThinkingLevel")
+            if thinking is None and native_pi_settings(cwd, agent_dir=None).get("defaultThinkingLevel") is not None:
+                raise PiError("Case Pi thinking conflicts with unavailable operator effort", category="AUTH_CONFIG")
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:
@@ -1104,12 +1088,12 @@ class PiBackend:
             nonlocal last_model, last_provider
             last_model = message.get("responseModel") or message.get("model") or last_model
             last_provider = message.get("provider") or last_provider
-            usage = _extract_usage(message)
-            inp = usage["input"]
-            outp = usage["output"]
-            cached = usage["cacheRead"]
-            created = usage["cacheWrite"]
-            cost = usage["cost_total"]
+            usage = message.get("usage") or {}
+            inp = usage.get("input")
+            outp = usage.get("output")
+            cached = usage.get("cacheRead")
+            created = usage.get("cacheWrite")
+            cost = (usage.get("cost") or {}).get("total")
             if isinstance(inp, int):
                 inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
                 total_input = (total_input or 0) + inp
@@ -1344,9 +1328,7 @@ class PiBackend:
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_mode=StdinMode.PIPE if tools_disabled else StdinMode.DEVNULL,
                 stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(process_cwd),
@@ -1482,7 +1464,7 @@ class PiBackend:
                         # Host-observed only — never relabeled as provider
                         # request start; the native start comes from the
                         # completed message's Unix-ms timestamp at message_end.
-                        open_generation_id = _new_generation_id()
+                        open_generation_id = str(uuid.uuid4())
                         last_generation_id = open_generation_id
                         generation_start_ns = time.time_ns()
                         if lifecycle is not None:

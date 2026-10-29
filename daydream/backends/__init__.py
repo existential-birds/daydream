@@ -14,7 +14,6 @@ import math
 import os
 import re
 import unicodedata
-import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field, fields
 from functools import partial
@@ -124,11 +123,15 @@ class BackendExecutionInput:
     codex_process_reap_timeout_s: float = 5.0
     codex_cleanup_timeout_s: float = 10.0
     pi_hosted_read_only: bool = False
+    # Frozen embedded reviews retain the operator's Pi defaults in another cwd.
+    pi_settings: Mapping[str, str] | None = field(default=None, kw_only=True, repr=False, hash=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "_environment", MappingProxyType(dict(self._environment))
         )
+        if self.pi_settings is not None:
+            object.__setattr__(self, "pi_settings", MappingProxyType(dict(self.pi_settings)))
         for allowance in (self.codex_terminal_drain_timeout_s, self.codex_process_reap_timeout_s,
                           self.codex_cleanup_timeout_s):
             if type(allowance) not in {int, float} or not math.isfinite(allowance) or allowance <= 0:
@@ -296,12 +299,9 @@ _DIAG_JSON_VALUE = "config_json_value_rejected"
 _DIAG_TIMESTAMP_TYPE = "config_timestamp_type_rejected"
 _DIAG_TIMESTAMP_RANGE = "config_timestamp_range_rejected"
 
-# Unicode format/bidi-control categories (Cf includes LRM/RLM and the bidi
-# isolates/overrides) plus the non-ASCII line/paragraph separators. Controls
-# (Cc) are rejected separately; ordinary printable text passes.
-_BIDI_FORMAT_CATEGORIES = frozenset({"Cf"})
-_LINE_SEPARATOR_CATEGORIES = frozenset({"Zl", "Zp"})
-_CONTROL_CATEGORIES = frozenset({"Cc"})
+# Reject controls, format/bidi characters (Cf includes LRM/RLM and the bidi
+# isolates/overrides), and non-ASCII line/paragraph separators.
+_CONTROL_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 # POSIX + Windows absolute-path spellings, and the drive/UNC prefixes that
 # reveal a host filesystem location. Model namespace slashes (``org/model``,
@@ -320,14 +320,9 @@ class EvidenceDiagnostic:
 def _has_unicode_controls(value: str) -> bool:
     """Reject C0/C1 controls and bidi/line-separator format characters."""
     return any(
-        unicodedata.category(ch) in _CONTROL_CATEGORIES | _BIDI_FORMAT_CATEGORIES | _LINE_SEPARATOR_CATEGORIES
+        unicodedata.category(ch) in _CONTROL_CATEGORIES
         for ch in value
     )
-
-
-def _changed_by_redaction(value: str) -> bool:
-    """Reject telemetry identity labels that contain credential-shaped text."""
-    return redact_structured_text(value) != value
 
 
 def _is_private_path(value: str) -> bool:
@@ -357,7 +352,7 @@ def _admit_identity_label(
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_TOO_LONG, context)
     if _has_unicode_controls(value):
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_UNSAFE_CHARS, context)
-    if _changed_by_redaction(value):
+    if redact_structured_text(value) != value:
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_REDACTED, context)
     if _is_private_path(value):
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_PRIVATE_PATH, context)
@@ -429,21 +424,6 @@ def _admit_json_value(value: Any, depth: int = 0) -> tuple[Any, EvidenceDiagnost
     return None, EvidenceDiagnostic(_DIAG_JSON_VALUE, "json_type")
 
 
-class _AdmissionBase:
-    """Reject malformed controls at construction using the built-in field declarations.
-
-    Adapters instead omit unsafe runtime evidence and emit fixed diagnostics.
-    """
-
-    def __post_init__(self) -> None:
-        self._validate()
-
-    def _validate(self) -> None:
-        checks = next(_CONFIG_CHECKS[base] for base in type(self).__mro__ if base in _CONFIG_CHECKS)
-        for name, check in checks:
-            check(getattr(self, name), name)
-
-
 def _require_bool(value: Any, field: str) -> None:
     """Reject a non-``bool`` value at construction."""
     if value is None or type(value) is bool:
@@ -479,10 +459,11 @@ def _require_literal(value: Any, field: str, *, allowed: tuple[str, ...]) -> Non
 
 
 @dataclass(frozen=True)
-class EffectiveRequestConfig(_AdmissionBase):
+class EffectiveRequestConfig:
     """Effective request controls: None means absent, never an inferred default.
 
-    Construction rejects invalid types/ranges/modes; adapters omit unsafe evidence.
+    Construction rejects malformed controls using the built-in field declarations;
+    adapters instead omit unsafe runtime evidence and emit fixed diagnostics.
     """
 
     finalization: bool | None = field(default=None, kw_only=True)
@@ -493,6 +474,10 @@ class EffectiveRequestConfig(_AdmissionBase):
     continuation_mode: Literal["fresh", "resume", "fork"] | None = None
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
 
+    def __post_init__(self) -> None:
+        checks = next(_CONFIG_CHECKS[base] for base in type(self).__mro__ if base in _CONFIG_CHECKS)
+        for name, check in checks:
+            check(getattr(self, name), name)
 
 
 @dataclass(frozen=True)
@@ -511,7 +496,6 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     hooks_enabled: bool | None = None
 
 
-
 @dataclass(frozen=True)
 class CodexRequestConfig(EffectiveRequestConfig):
     """Codex-only effective controls (bounded values; paths/stdin/env absent)."""
@@ -520,7 +504,6 @@ class CodexRequestConfig(EffectiveRequestConfig):
     experimental_json: bool | None = None
     native_output_schema: bool | None = None
     read_only_isolation: bool | None = None
-
 
 
 @dataclass(frozen=True)
@@ -533,7 +516,6 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_skills: bool | None = None
     schema_emulated: bool | None = None
     no_extensions: bool | None = field(default=None, kw_only=True)
-
 
 
 @dataclass(frozen=True)
@@ -573,7 +555,6 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     vars_count: int | None = None
 
 
-
 _ConfigCheck = Callable[[Any, str], None]
 
 
@@ -604,6 +585,14 @@ _CONFIG_CHECKS = {
         EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, PiRequestConfig, OspreyRequestConfig,
     )
 }
+
+
+def request_config_controls(config: EffectiveRequestConfig) -> dict[str, Any]:
+    """Project exact built-in controls; custom subclasses may contain secrets.
+
+    Persistence and export owners must still redact their complete evidence.
+    """
+    return {name: getattr(config, name) for name, _check in _CONFIG_CHECKS.get(type(config), ())}
 
 
 @dataclass
@@ -777,11 +766,6 @@ class TurnEndEvent:
 # these events. Correlation is host invocation-local: a generation ID never
 # claims provider identity, and a late native response ID attaches to the
 # matching end without ever replacing the correlator.
-
-
-def _new_generation_id() -> str:
-    """Mint one bounded host invocation-local generation correlation ID."""
-    return str(uuid.uuid4())
 
 
 @dataclass(frozen=True)

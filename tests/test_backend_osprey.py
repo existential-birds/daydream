@@ -35,7 +35,7 @@ from daydream.backends.osprey import (
     OspreyUnsupportedOption,
 )
 from daydream.trajectory import DaydreamPhase
-from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
+from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner, install_fake_cli_process
 from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
@@ -82,17 +82,12 @@ async def _collect(
     stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
     workspace: Path = Path("/repo"),
 ) -> tuple[list[AgentEvent], FakeCliSpawner]:
-    spawner = FakeCliSpawner()
-    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-        proc = FakeCliProcess(
-            [json.dumps(line) for line in lines], exit_code=returncode, stderr_lines=stderr_lines,
-            stderr_held_open=stderr_held_open, stdout_reader=stdout_reader, stderr_reader=stderr_reader,
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        spawner = install_fake_cli_process(
+            monkeypatch, backend.osprey_binary, lines=[json.dumps(line) for line in lines],
+            exit_code=returncode, stderr_lines=stderr_lines, stderr_held_open=stderr_held_open,
+            stdout_reader=stdout_reader, stderr_reader=stderr_reader,
         )
-        spawner.procs.append(proc)
-        spawner.argvs.append(tuple(str(a) for a in args))
-        spawner.kwargs.append(kwargs)
-        return proc
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [
             event
             async for event in backend.execute(

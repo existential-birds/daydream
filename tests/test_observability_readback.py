@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, cast
 
+import anyio
 import pytest
 
 from tests.harness.git_helpers import commit, git, init_repo
@@ -430,15 +431,22 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     ls_section = result["destinations"]["langsmith"]
     assert ls_section["root_id"] == "root-1" and ls_section["trace_id"] == "trace-1"
 
-def test_langsmith_ambiguous_root_rejected(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("ambiguous", "terminal"),
+    [(True, _verifier.DISPOSITION_AMBIGUOUS_ROOT), (False, _verifier.DISPOSITION_NOT_FOUND)],
+    ids=["ambiguous", "empty"],
+)
+def test_langsmith_discovery_distinguishes_absence_from_ambiguity(
+    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
+    ambiguous: bool, terminal: str,
 ) -> None:
+    """Zero discovered runs is an honest absence (vendor ingest window), never root ambiguity."""
     receipt = _write_receipt(tmp_path, destinations=["langsmith"])
     project = json.loads(receipt.read_text())["langsmith_project"]
 
     def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         payload = json.loads(record["body"])
-        if "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
+        if not ambiguous or "id" in payload or payload.get("filter", "").startswith("eq(trace_id"):
             return _empty_runs()
         runs = [_ls_run("root-a", trace_id="trace-a"), _ls_run("root-b", trace_id="trace-b")]
         return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
@@ -447,7 +455,7 @@ def test_langsmith_ambiguous_root_rejected(
     fake_vendor.respond("POST", "/runs/query", query)
     result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_AMBIGUOUS_ROOT
+    assert result["terminal"] == terminal
 
 def test_langsmith_unstable_tree_fails_closed(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -546,9 +554,9 @@ class _LoopbackPeer:
             pass
 
 @pytest.mark.parametrize("trickle", [False, True])
-def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
-    """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
-    receipt = _write_receipt(tmp_path)
+async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
+    receipt = _receipt(destinations=["honeyhive"])
+    matrix = _verifier.load_matrix(FIXTURES / "readback-matrix.json")
     peer = _LoopbackPeer(trickle=trickle)
     # Cold HTTPX transport imports and TLS context construction are synchronous
     # and can exhaust the tiny budget under parallel coverage before any socket
@@ -565,22 +573,17 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
         monkeypatch.setenv("HH_API_URL", peer.base_url)
         monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
         monkeypatch.setenv("DAYDREAM_TRACE_TO", "honeyhive")
-        receipt_data = json.loads(receipt.read_text())
-        receipt_data["destinations"] = ["honeyhive"]
-        receipt.write_text(json.dumps(receipt_data), encoding="utf-8")
-        result_path = tmp_path / "result.json"
         started = time.monotonic()
-        exit_code = _run_verify(receipt, result_path, budget_s=0.12)
+        result = await _verifier._verify(receipt, matrix, 0.12)
         elapsed = time.monotonic() - started
-        assert elapsed < 0.35, f"verifier took {elapsed:.3f}s with a 0.12s budget"
-        assert exit_code != 0
-        result = json.loads(result_path.read_text())
+        assert elapsed < 0.35, f"readback took {elapsed:.3f}s with a 0.12s budget"
+        assert result["stored_contract_passed"] is False
         assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
         # Bound peer-observed closure independently of verifier return.
         peer.close()
         deadline = time.monotonic() + 2.0
         while not peer.connections and time.monotonic() < deadline:
-            time.sleep(0.02)
+            await anyio.sleep(0.02)
         assert peer.connections, "peer never accepted a connection"
         accepted_at, closed_at = peer.connections[0]
         assert closed_at - accepted_at < 1.0, (
@@ -843,21 +846,6 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
     rows = _verifier.compare_stored(data, matrix, acceptance_kind="sanitized_protocol_replay")
     assert any(r.get("field") == "honeyhive.rows[0].gen_ai.response.model" for r in rows)
 
-def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
-    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Zero discovered runs is an honest absence (vendor ingest window), never reported as root ambiguity."""
-    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
-    project = json.loads(receipt.read_text())["langsmith_project"]
-
-    def query(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
-        return _empty_runs()
-
-    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
-    fake_vendor.respond("POST", "/runs/query", query)
-    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
-    result = json.loads(result_path.read_text())
-    assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 
 def test_replay_then_verify_end_to_end_on_fake_vendors(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]

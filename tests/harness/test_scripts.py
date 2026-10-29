@@ -7,10 +7,14 @@ for host resolution — never that a builder was merely called.
 """
 
 import json
+from pathlib import Path
 
 from daydream.backends import ResultEvent, TextEvent
+from daydream.backends.codex import CodexBackend
 from daydream.phases import FEEDBACK_SCHEMA
-from tests.harness.scripts import build_codex_jsonl_for_phase, drive_codex
+from tests.harness.codex_replay import make_mock_process
+from tests.harness.process_replay import replay_process
+from tests.harness.scripts import build_codex_jsonl_for_phase
 
 
 async def test_parse_phase_structured_output_roundtrip() -> None:
@@ -18,7 +22,10 @@ async def test_parse_phase_structured_output_roundtrip() -> None:
         "structured_output": {"issues": [{"id": 1, "description": "x", "file": "a.py", "line": 1}]},
     }
     lines = build_codex_jsonl_for_phase(script)
-    events = await drive_codex(lines, output_schema=FEEDBACK_SCHEMA)
+    events, _ = await replay_process(
+        CodexBackend(model="codex-test-model"), make_mock_process(lines), Path("/tmp"), "go",
+        output_schema=FEEDBACK_SCHEMA,
+    )
     result = next(e for e in events if isinstance(e, ResultEvent))
     assert result.structured_output is None
     text = next(event.text for event in events if isinstance(event, TextEvent))

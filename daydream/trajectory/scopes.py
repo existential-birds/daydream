@@ -57,8 +57,9 @@ async def fork_scope(
     parent: TrajectoryRecorder, descriptor: str, dispatch: DispatchHandle | None = None,
 ) -> AsyncIterator[TrajectoryRecorder]:
     """Bind a child recorder and fold only successfully written child evidence."""
-    from daydream.trajectory.recorder import TrajectoryRecorder
+    from daydream.trajectory.recorder import TrajectoryRecorder, _admitted_descriptor
 
+    descriptor = _admitted_descriptor(descriptor)
     identity: ForkIdentity | None = None
     if dispatch is not None:
         if dispatch._recorder is not parent:
@@ -121,7 +122,7 @@ async def fork_scope(
                     prompt_tokens=child._final_totals["prompt"],
                     completion_tokens=child._final_totals["completion"],
                     cached_tokens=child._final_totals["cached"],
-                    cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
+                    cost_usd=child._final_totals["cost"],
                 )
                 child.parent._folded_fork_totals = True
                 sibling_ref = child.parent._logical_child_trajectory_ref(child.path)

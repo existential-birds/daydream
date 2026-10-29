@@ -1473,7 +1473,8 @@ async def test_native_codex_conversation_records_delivery_shapes_and_correlated_
     assert not any(isinstance(event, (GenerationStartEvent, GenerationEndEvent)) for event in events)
     document = json.loads(recorder.path.read_text())
     steps = [step for step in document["steps"] if step["source"] == "agent"]
-    assert [step["message"] for step in steps] == expected_text
+    assert [json.loads(step["message"]) for step in steps[:-1]] == [json.loads(text) for text in expected_text[:-1]]
+    assert steps[-1]["message"] == "Verified"
     assert steps[0]["reasoning_content"] == "I will inspect"
     assert [call["tool_call_id"] for call in steps[0]["tool_calls"]] == ["shell", "patch", "read", "write"]
     assert {result["source_call_id"] for result in steps[0]["observation"]["results"]} == set(results)

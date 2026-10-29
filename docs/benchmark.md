@@ -1,48 +1,52 @@
-# Private PR benchmarks
+# Review benchmarks
 
-Read before operating or changing the Harbor benchmark. Install the `benchmark`
-extra in Daydream's environment. The supported runtime is local Docker Desktop
-on macOS with live nftables preflight; custom bridges/proxies, air-gapped Business
-containers, OrbStack, Linux/cloud hosts, and public-network fallbacks are unsupported.
-The reviewer is Pi; reviewer and judge use OpenRouter through separate allowlists.
-Live runs send private source to that provider: the operator must accept its
-handling/retention policy before launch. Paid Oracle and judge-calibration runs
-are never executed in CI.
+## Public ReviewBench
 
-## Workflow
-
-Use `daydream benchmark COMMAND --help` for flags. Keep the workspace private.
+Install the packaged [Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock), Node 20+,
+and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
+Tracked source must match that commit; extra files under `scripts/` are rejected.
+Unrelated untracked files elsewhere are allowed.
+Export performs no inference; model/judge runs require separate authorization.
+Keep inputs/results outside capture/training and use fresh paths:
 
 ```bash
-daydream benchmark init ~/bench --repo OWNER/REPO --reviewer-host openrouter.ai --judge-host openrouter.ai
-daydream benchmark import-prs ~/bench --pr 123
-daydream benchmark curate ~/bench --case CASE_ID
-daydream benchmark validate ~/bench
-daydream benchmark build-harbor ~/bench --daydream-wheel dist/daydream.whl
-daydream benchmark run ~/bench --oracle --yes
-daydream benchmark run ~/bench --yes
-daydream benchmark objective ~/bench --run-id RUN_ID --json -
+daydream benchmark reviewbench harbor-export /private/export \
+  --source ~/ReviewBench --wheel /path/to/candidate.whl --rounds 3 \
+  --platform linux/arm64 -- --backend pi /path/to/operator-config-root
+daydream benchmark reviewbench harbor-run /private/export \
+  --reviewer-pi-home /private/reviewer-auth --pi-home /private/judge-auth \
+  --jobs-dir /private/jobs --job-name comparison --set test --rounds 3
 ```
 
-Curate gold explicitly; prioritization and resolved/outdated signals are advisory.
-Exact inline acceptance requires the derived authoring anchor at the selected
-original head, usable location/title, and neither outdated nor dismissed state.
-Re-anchored or unavailable evidence needs manual editing. Refresh preserves
-curation. Frozen tasks require current canonical task approval before compilation.
-`validate` exits 0 for ready, 2 for valid but incomplete, and 1 for corrupt.
+Pi requires configured `nous`; for Codex use `--backend codex` / `--codex-home`.
+Keep independent native credentials outside exports/jobs. The judge uses `openai-codex` / `gpt-6.1-sol`.
+Docker needs the selected architecture, nested sandboxing and exact-host isolation.
+The wheel/hash identifies the candidate; package extensions there. No matching installation is needed.
+Exports freeze reviewer retry, idle, and Codex lifecycle controls for native execution.
+`--set test`: supplied 25; `--set full`: all 219; repeated `--task EXACT_NAME`: a subset.
+Harbor owns rounds/timeouts; supplied scoring/checkers own results. Use fresh schema-4 wheels/exports;
+regenerate earlier exports without frozen execution controls and preserve old evidence.
+Ordinary timeout cancellation joins writers and exports partial root/child trajectories, phase cancellation events,
+native output, `execution.json`, and process receipts. Cleanup retains a 20-second graceful shutdown allowance;
+forced termination can leave detailed review evidence unavailable. New runs create no periodic checkpoint artifacts;
+preserve historical artifacts.
 
-The Oracle receipt must match the compiled lock before a normal benchmark run;
-allowlist/profile/lock changes invalidate it. `calibrate-judge` is optional
-agreement analysis against an unverified fixture, never a correctness or run gate.
+## Private Harbor benchmark
 
-## Trust and results
+Requires the `benchmark` extra, macOS Docker Desktop and live nftables preflight; no network/runtime fallback.
+Pi reviewer/judge use separate OpenRouter allowlists. Authorize private-source transmission under provider policy;
+paid Oracle/calibration runs stay outside CI.
+Workflow: `init WORKSPACE --repo OWNER/REPO` → `import-prs` → `curate` → `validate` → `build-harbor` → `run --oracle --yes` → `run --yes` → `objective --run-id RUN_ID`.
 
-Gold is hidden from the reviewer. Credentials remain runtime capabilities, outside
-compiled tasks and trajectories. The environment declaration is
-[daydream/benchmark/harbor/env_policy.py](../daydream/benchmark/harbor/env_policy.py).
-Only an explicit trusted control-plane candidate profile or packaged default is
-admitted; ambient and target repository profiles cannot alter it. Pin wheel,
-compiled lock, candidate, model/backend, judge, and scoring identities.
+- Curate gold explicitly: advisory signals are not approval. Compilation requires canonical task approval;
+  re-anchored/unavailable evidence needs manual editing. Hide gold from reviewers; keep credentials outside tasks/evidence.
+- Pin wheel/model/judge/scoring identities and locks; admit only control-plane or packaged profiles.
+  Profile/allowlist/lock changes invalidate the Oracle receipt; regenerate it before normal runs.
+- `objective` reads exact completed ledgered runs. Cleanup-pending runs/verifier errors are ineligible.
+  `aggregate` pools compatible TP/FP/FN before micro metrics; never average F1. Calibration is advisory.
+- Preserve sealed transactions: `import-prs --refresh` recovers stale inputs; inspect `upgrade --dry-run` first.
+  Private mirror required; unreplayable cases stay unready. `clean --derived` keeps source/gold; `--all --yes` deletes them.
+
 Normal Harbor runs require an explicit, nonblank `DAYDREAM_REVIEW_MODEL` with the
 exact operator-selected OpenRouter model ID; its spelling is preserved unchanged.
 
@@ -67,29 +71,6 @@ Unsupported backends and oversized plans fail explicitly. This adapter does not
 authorize fixing, posting, archive/upload/training, or claim comprehensive native
 parity; #1639 owns that migration. Ordinary candidate publication remains supported.
 
-`objective` reads an exact completed ledgered run; it invokes no models.
-`aggregate` pools completed compatible runs from a manifest:
-
-```json
-{"schema_version": 1, "entries": [{"workspace": "/private/bench", "run_id": "RUN_ID"}]}
-```
-
-Pool TP/FP/FN before deriving micro precision/recall/F1; never average repository
-F1. Missing, duplicated, incompatible, or comparison-ineligible runs refuse the
-whole suite. Outputs contain opaque identities/counts, no private source or gold.
-Location/severity axes cover matched pairs only and do not affect reward. Absent
-axes add no scored pairs; exported rates remain zero. `location_pairs_scored` and
-`severity_pairs_scored` distinguish no evidence from measured performance. See
-[objective](../daydream/benchmark/harbor/objective.py) for the output schema.
-
-## Recovery
-
-Writes are locked, atomic, and journaled. Preserve the before/after transaction
-boundary rather than hand-editing sealed snapshots. Unreplayable cases cannot be
-promoted by curation. Use `import-prs --refresh` for stale inputs and
-`upgrade --dry-run` before upgrading legacy provenance; verification requires the
-private mirror and never stamps unproven ready state. Authored gold stays intact.
-
-`clean --derived` removes disposable caches/jobs/trajectories while preserving
-source/gold; `clean --all --yes` also deletes curated material. Cleanup-pending
-runs are not complete objectives. Verifier errors make comparisons ineligible.
+Owners: [CLI](../daydream/benchmark/cli.py), [environment](../daydream/benchmark/harbor/env_policy.py),
+[curation](../daydream/benchmark/curation.py), [storage](../daydream/benchmark/storage.py),
+[run gates](../daydream/benchmark/harbor/run.py), [aggregation](../daydream/benchmark/harbor/objective.py).

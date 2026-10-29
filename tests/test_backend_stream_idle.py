@@ -21,7 +21,7 @@ import anyio
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import AgentEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends._subprocess import (
     DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
     DEFAULT_STREAM_IDLE_TIMEOUT_S,
@@ -106,8 +106,11 @@ async def test_silent_stream_trips_idle_timeout_and_reaps_subprocess(
     """Pi silence ends its turn at the exact configured idle window and reaps the child."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
+    seen: list[AgentEvent] = []
     with pytest.raises(StreamStalledError) as excinfo:
-        await drain(PiBackend(model="test-model"), tmp_path)
+        async for event in PiBackend(model="test-model").execute(tmp_path, "do the thing"):
+            seen.append(event)
+    assert not any(isinstance(event, (ResultEvent, MetricsEvent)) for event in seen)
     assert excinfo.value.cli == "pi"
     assert excinfo.value.timeout_s == float(TINY_WINDOW)
     assert excinfo.value.retryable is True

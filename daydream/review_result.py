@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field as dataclass_field
 from enum import StrEnum
 from typing import Any
 
@@ -18,6 +18,26 @@ from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
+from daydream.run_context import current_run_context
+
+
+@dataclass(frozen=True)
+class FinalizedReview:
+    """Callback-owned copies of terminal evidence, findings and usage; missing delivery is unavailable analysis."""
+
+    terminal_result: dict[str, Any]
+    items: list[dict[str, Any]]
+    usage: dict[str, Any] = dataclass_field(default_factory=dict)
+
+
+def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
+                             *, usage: dict[str, Any] | None = None) -> None:
+    """Deliver frozen authority at the native terminal validation boundary."""
+    context = current_run_context()
+    handler = None if context is None else context.review_result_handler
+    if handler is not None:
+        validate_terminal_result(result)
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(usage or {})))
 
 
 class ReasonCode(StrEnum):

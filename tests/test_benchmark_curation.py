@@ -613,6 +613,7 @@ def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_pat
     assert isinstance(rejected.value, bm.StaleStateError)
     assert path.read_bytes() == before  # a rejected mutation writes nothing
     cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
 
 

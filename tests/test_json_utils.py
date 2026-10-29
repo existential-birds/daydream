@@ -115,6 +115,7 @@ def test_staged_decoder_consumes_outer_spans_and_bounds_packaging(
 
 
 class TestAtomicWritePrimitives:
+
     def test_mode_knob_is_umask_immune_and_survives_replacement(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "private.json"
         umask = os.umask(0o077)

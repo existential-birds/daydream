@@ -33,8 +33,6 @@ from daydream.backends import (
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     raise_for_exit,
     reap,
     teardown,
@@ -514,8 +512,6 @@ class OspreyBackend:
             transport = CliTransport(
                 "osprey",
                 command,
-                stdin_mode=StdinMode.DEVNULL,
-                stderr_policy=StderrPolicy.DRAIN_TASK,
                 stderr_sink=_stderr_diagnostic_sink(stderr_lines),
                 # Repair non-UTF-8 tool output inside valid JSON rather than aborting.
                 decode_errors="replace",

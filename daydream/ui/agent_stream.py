@@ -20,7 +20,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.redaction import redact_structured_text, redact_value
+from daydream.redaction import redact_native_auth_value, redact_structured_text, redact_value
 from daydream.run_context import InteractionPolicy
 from daydream.ui.agent_text import AgentTextRenderer
 from daydream.ui.messages import print_cost, print_warning
@@ -36,6 +36,7 @@ from daydream.ui.tools import (
 
 def _summarize_input(input_data: dict[str, Any], name: str) -> str:
     """One-line summary of tool input for log output."""
+    input_data = redact_native_auth_value(input_data)
     if not input_data:
         return ""
     # The COMPLETE selected string is redacted before any [:_BASH_COMMAND_MAX_CHARS]
@@ -95,7 +96,7 @@ class AgentDisplay:
         self.tools = LiveToolPanelRegistry(console, policy.quiet)
         self.text = AgentTextRenderer(console)
         self.tool_names: dict[str, str] = {}
-        self.callback_parts: list[str] = []
+        self.text_parts: list[str] = []
 
     async def _notify(self, text: Text) -> None:
         if self.callback is not None:
@@ -103,10 +104,18 @@ class AgentDisplay:
             if inspect.isawaitable(result):
                 await result
 
+    def finish_log_text(self) -> None:
+        """Drain one complete log block synchronously, including during cancellation."""
+        if self.log_mode and self.text_parts:
+            text = "".join(self.text_parts)
+            self.text_parts.clear()
+            _print_log(text)
+
     async def flush(self) -> None:
-        if self.callback is not None and self.callback_parts:
-            text = "".join(self.callback_parts)
-            self.callback_parts.clear()
+        self.finish_log_text()
+        if self.callback is not None and self.text_parts:
+            text = redact_structured_text("".join(self.text_parts))
+            self.text_parts.clear()
             last_line = text.strip().split("\n")[-1]
             if last_line:
                 await self._notify(format_callback_text(last_line))
@@ -122,7 +131,7 @@ class AgentDisplay:
             self._log(event)
         elif self.callback is not None:
             if isinstance(event, TextEvent):
-                self.callback_parts.append(event.text)
+                self.text_parts.append(event.text)
             elif isinstance(event, ToolStartEvent):
                 self.tools.note_call(event.id, event.name, event.input)
                 label = self.tools.resolve_call_label(event.name, event.input)
@@ -134,7 +143,7 @@ class AgentDisplay:
 
     def _log(self, event: AgentEvent) -> None:
         if isinstance(event, TextEvent):
-            _print_log(event.text)
+            self.text_parts.append(event.text)
         elif isinstance(event, ThinkingEvent):
             _print_log(f"[thinking] {event.text}")
         elif isinstance(event, ToolStartEvent):
@@ -180,12 +189,15 @@ class AgentDisplay:
             print_warning(self.console, live)
 
     async def aborted(self, reason: str) -> None:
+        await self.flush()
         await self._status(f"[aborted] {reason}", f"[budget] aborted: {reason}", f"Turn aborted: {reason}")
 
     async def retry(self, message: str) -> None:
+        await self.flush()
         await self._status(f"[retry] {message}", f"[retry] {message}", message)
 
     def finish(self) -> None:
+        self.finish_log_text()
         if self.callback is None and not self.log_mode:
             self._finish_text()
             self.tools.finish_all()

@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted; hosted defaults are `nous` / `deepseek/deepseek-v4.1-flash-1017`, while
   ordinary Pi defaults are unchanged. This compatible minor feature retains
   committed result schema 1 and extension API 8.
+- Add public ReviewBench reviewers through Harbor ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
+
+### Changed
+
+- Replace unreleased benchmark commands with `harbor-export`/`harbor-run` and
+  wheel-based candidate identity. Fresh schema-4 exports/wheels are required; no version bump.
+- Simplify ReviewBench source provenance and manifest loading; allow unrelated
+  untracked files while rejecting source changes and extra scripts.
 
 ### Fixed
 
@@ -65,12 +73,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- Redact native API-key and OAuth credentials in quoted log prose with embedded payloads; preserve native
+  budgets/scoring, cancellation, and final evidence export without separate session archives or readout machinery.
+- Honor ReviewBench's declared Harbor timeout plus cleanup/output collection time, including budgets over one hour;
+  leave the execution transport uncapped when the declared timeout is unavailable.
+- Discover and reap late pipe-holding reviewer descendants during forced and fallback cleanup within the existing
+  shutdown and reap allowances.
+- Freeze reviewer retry, idle, and Codex terminal-drain, reap, and cleanup controls in exported profiles and restore
+  them for native execution. Regenerate earlier schema-4 exports without these controls.
+
 - Honor configured staged-review deadlines and retain bounded large-review source
   attribution through export and posting; pack original inline assignments into
   bounded dispatches without changing their frozen identities
   ([#1701](https://github.com/existential-birds/daydream/issues/1701)).
 - **codex:** constrain staged native output to captured head and merge-base
   revisions, preventing abbreviated citations while preserving source admission.
+
+### Removed
+
+- Remove public ReviewBench's periodic interruption checkpoints and `daydream/benchmark/reviewbench/diagnostics.py`.
+  Ordinary timeout export remains; forced termination can leave detailed review evidence unavailable.
+  Remove `RunnerExecutionInput.on_trajectory_snapshot`; embedded callers must stop passing this argument.
 
 ## [0.31.0] - 2026-10-26
 

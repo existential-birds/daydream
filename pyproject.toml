@@ -29,6 +29,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
     "opentelemetry-semantic-conventions-ai==0.5.1",
     "requests>=2.32,<3",
+    "psutil>=7,<8",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ dev = [
     "types-protobuf>=7.35.1.20260906",
     "pytest-cov==7.1.0",  # exact pin: fail_under comparisons depend on reproducible coverage tool behavior (#932)
     "vulture>=2.13",
+    "types-psutil>=7,<8",
 ]
 
 [project.scripts]
@@ -75,6 +77,11 @@ include = [
     "daydream/atif/NOTICE",
     "daydream/benchmark/harbor/templates/**",
     "daydream/benchmark/harbor/runtime-requirements.lock",
+    "daydream/benchmark/reviewbench/judge_auth.mjs",
+    "daydream/benchmark/reviewbench/reviewer_auth.mjs",
+    "daydream/benchmark/reviewbench/pi-reviewer/*.json",
+    "daydream/benchmark/reviewbench/harbor-runtime.in",
+    "daydream/benchmark/reviewbench/harbor-runtime.lock",
 ]
 
 [tool.mypy]
@@ -102,7 +109,7 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 # Harbor ships without py.typed; no stub package exists. Narrow per-module,
 # not blanket-library, so future typed releases are picked up automatically.
-module = ["harbor.models.*", "harbor.agents.base", "harbor.utils.env", "harbor.environments.docker.*", "harbor.environments.base"]
+module = ["harbor.models.*", "harbor.agents.base", "harbor.utils.env", "harbor.environments.docker.*", "harbor.environments.base", "harbor.publisher.packager"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

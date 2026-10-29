@@ -11,9 +11,11 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -72,6 +74,7 @@ from daydream.phases.inputs import (
     _git_branch,
     _git_log,
 )
+from daydream.review_result import FinalizedReview
 from daydream.run_artifacts import (
     _finalize_run_artifacts,
     _open_recorder,
@@ -88,9 +91,7 @@ from daydream.run_config import (
     _resolved_reasoning_effort,
 )
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
-from daydream.trajectory import (
-    DaydreamRunFlow,
-)
+from daydream.trajectory import DaydreamRunFlow
 from daydream.ui import (
     NEON_THEME,
     phase_subtitle,
@@ -125,6 +126,10 @@ class RunnerExecutionInput:
 
     backend: BackendExecutionInput = field(repr=False, compare=False)
     github: github_app.GitHubExecutionInput = field(repr=False, compare=False)
+    backends: Mapping[str, BackendExecutionInput | None] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "backends", MappingProxyType(dict(self.backends)))
 
 
 def _resolve_backend(
@@ -286,8 +291,10 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 async def run(
     config: RunConfig | None = None, *, private_roots: PrivateRootLocations | None = None,
     execution: RunnerExecutionInput | None = None,
+    review_result_handler: Callable[[FinalizedReview], None] | None = None,
 ) -> int:
-    """Open a workspace and execute the selected daydream flow."""
+    """Execute a flow, delivering callback-owned review evidence before publication.
+    Missing delivery is unavailable analysis; callback errors fail the flow. Return the workflow exit code."""
     if config is None:
         config = RunConfig()
     if config.dataset_capture_disabled:
@@ -305,11 +312,12 @@ async def run(
 
         def create_for_context(
             flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None,
+            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None,
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-                execution_input=backend_execution,
+                execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
+                effort_override=effort_override,
             )
 
         backend_factory = create_for_context
@@ -329,13 +337,14 @@ async def run(
         interactive=_resolve_interactive(config),
         quiet=quiet,
         log_mode=config.log_mode,
-    ))
+    ), review_result_handler=review_result_handler)
     with bind_run_context(run_context):
         try:
             return await _run_with_context(
                 config, private_roots=private_roots, run_context=run_context,
                 backend_factory=backend_factory,
-                backend_execution=None if execution is None else execution.backend,
+                backend_execution=(None if execution is None else execution.backends.get(
+                    _resolved_backend_name(config, "per_stack_review"), execution.backend)),
                 github_execution=None if execution is None else execution.github,
             )
         except anyio.get_cancelled_exc_class():

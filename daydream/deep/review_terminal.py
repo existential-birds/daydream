@@ -19,7 +19,7 @@ from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.review_budget import render_review_warnings, review_warnings
-from daydream.review_result import ReasonCode
+from daydream.review_result import ReasonCode, deliver_finalized_review
 from daydream.trajectory import get_current_recorder
 from daydream.ui import print_warning
 
@@ -122,6 +122,10 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     ctx.data["terminal_review_result"] = result
     ctx.data['terminal_review_items'] = items
     ctx.data['terminal_review_held'] = held
+    # Embedded evaluation consumes the same validated result as publication,
+    # before optional rendering, without inventing a live GitHub PR target.
+    recorder = get_current_recorder()
+    deliver_finalized_review(result, items, usage={} if recorder is None else recorder.review_usage())
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
     except (OSError, ValueError, TypeError, RecursionError, ArtifactSourceUnavailableError) as exc:

@@ -37,6 +37,10 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
+    from daydream.benchmark.reviewbench import harbor_cli
+
+    reviewbench = sub.add_parser('reviewbench', help='supplied ReviewBench through Harbor')
+    harbor_cli.add_parsers(reviewbench.add_subparsers(dest='reviewbench_command', required=True))
 
     init_p = sub.add_parser("init", help="create a private benchmark workspace")
     init_p.add_argument("dir", type=Path, help="workspace directory (must be empty/absent)")
@@ -580,7 +584,24 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     """
 
     parser = _build_benchmark_parser()
+    native_args: list[str] = []
+    if argv[:2] == ['reviewbench', 'harbor-export'] and '--' in argv:
+        boundary = argv.index('--')
+        argv, native_args = argv[:boundary], argv[boundary + 1:]
     args = parser.parse_args(argv)
+    if args.subcommand == 'reviewbench':
+        import subprocess
+
+        from daydream.benchmark.reviewbench import harbor_cli
+        from daydream.review_profile import ProfileError
+
+        if args.reviewbench_command == 'harbor-export':
+            args.native_args = native_args
+        try:
+            return harbor_cli.handle(args)
+        except (OSError, ValueError, KeyError, TypeError, ProfileError, git_ops.GitError,
+                subprocess.CalledProcessError) as exc:
+            return _fail(f'ReviewBench: {exc}')
     sub = args.subcommand
     if sub is None:
         parser.print_help()
