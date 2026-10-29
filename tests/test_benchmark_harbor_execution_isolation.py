@@ -5,7 +5,9 @@ import asyncio
 import json
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError
 from typing import Any
 
 import pytest
@@ -211,7 +213,13 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
 async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(
     tmp_path: Path, fake_gh: FakeGh, native_provider: _NativeProvider,
 ) -> None:
-    """Distinct operator contexts and sessions must survive concurrent native calls."""
+    """Concurrent in-process native calls must retain distinct operator contexts.
+
+    Harbor containers own separate callback loops. Sharing a loop here lets one
+    review's synchronous capture/fsync work expire its sibling's native callback,
+    hiding the shared-environment/configuration regression this journey owns.
+    The provider barrier proves both workers reach native work concurrently.
+    """
     case, first, _ = _compiled_case(tmp_path, fake_gh)
     second = tmp_path / "second-repo"
     shutil.copytree(first, second, symlinks=True)
@@ -229,9 +237,27 @@ async def test_concurrent_harbor_reviews_keep_execution_and_artifacts_private(
         environment = _environment(case, repo, root, config)
         environment["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] = str(profile)
         environments.append(environment)
-    native_provider.choose = answer_review
+    native_started = Barrier(2, timeout=10)
+
+    def answer_concurrently(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        assignment = assignment_from_request(request)
+        if assignment["kind"] == "discovery" and not any(
+            message["role"] == "tool" for message in request["messages"]
+        ):
+            try:
+                native_started.wait()
+            except BrokenBarrierError:
+                raise RuntimeError("Both concurrent Harbor native contexts did not reach the provider") from None
+        return answer_review(request)
+
+    native_provider.choose = answer_concurrently
     before = dict(os.environ)
-    assert await asyncio.gather(*(entrypoint.main(environment) for environment in environments)) == [0, 0]
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        results = await asyncio.gather(*(
+            asyncio.get_running_loop().run_in_executor(workers, asyncio.run, entrypoint.main(environment))
+            for environment in environments
+        ))
+    assert results == [0, 0]
     assert dict(os.environ) == before
     sessions: set[str] = set()
     for name in ("first", "second"):
