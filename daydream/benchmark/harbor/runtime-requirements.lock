@@ -1,6 +1,6 @@
 # Daydream Harbor runtime requirements (generated; do not edit)
-# daydream_version: 0.31.0
-# source_uv_lock_sha256: 481159a60a73ff04d3ae882a56b5291af20876d68979723b9426a3d90421576c
+# daydream_version: 0.32.0
+# source_uv_lock_sha256: 22cb6faffc7b2e0fad30ac06e09fea22bc2b616cad08742d6727fd709d3114e3
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
 # template_version: 5
 
