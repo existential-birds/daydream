@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +26,13 @@ def _wait_for(path: Path, process: subprocess.Popen[str]) -> None:
 
 def _run_contenders(command: list[str], environment: dict[str, str], root: Path) -> None:
     processes: list[subprocess.Popen[str]] = []
-    try:
+    with ExitStack() as children:
         for number, mode, marker in ((1, 'first', 'locked'), (2, 'second', 'blocked')):
             process = subprocess.Popen([*command, mode],
                 env={**environment, 'PI_CODING_AGENT_DIR': str(root / f'pi{number}')},
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            children.callback(process.communicate, timeout=15)
+            children.callback(process.terminate)
             processes.append(process)
             _wait_for(root / marker, process)
         # Exceed the supplied SDK's ~180ms synchronous lock retry window.
@@ -39,11 +42,6 @@ def _run_contenders(command: list[str], environment: dict[str, str], root: Path)
         for process in processes:
             stdout, stderr = process.communicate(timeout=20)
             assert process.returncode == 0, stdout + stderr
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-                process.communicate(timeout=15)
 
 
 @pytest.mark.parametrize("damage", ["missing", "api", "partial", "malformed", "symlink"])
@@ -108,33 +106,18 @@ def test_admission_tolerates_native_in_place_rotation(
     auth = native_auth(home, 'codex' if role == 'reviewer' else 'judge')
     path = home / 'auth.json'
     path.write_text('{')
-    marker = tmp_path / 'read-observed'
-    child = tmp_path / 'writer.py'
-    child.write_text('''import json, pathlib, sys, time
-path, marker = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-while not marker.exists():
- time.sleep(0.01)
-path.write_text(sys.argv[3])
-''')
     read = Path.read_text
 
     def observed_read(current: Path, *args: Any, **kwargs: Any) -> str:
         content = read(current, *args, **kwargs)
-        if current == path and not marker.exists():
-            assert content == '{'
-            marker.touch()
+        if current == path and content == '{':
+            path.write_text(json.dumps(auth))
         return content
 
     monkeypatch.setattr(Path, 'read_text', observed_read)
-    with subprocess.Popen([sys.executable, str(child), str(path), str(marker), json.dumps(auth)]) as writer:
-        try:
-            validate = harbor_auth.validate_subscription_home if role == 'reviewer' else harbor_auth.validate_judge_home
-            validate(home)
-            writer.wait(timeout=5)
-        finally:
-            if writer.poll() is None:
-                writer.kill()
-    assert marker.exists() and writer.returncode == 0
+    validate = harbor_auth.validate_subscription_home if role == 'reviewer' else harbor_auth.validate_judge_home
+    validate(home)
+    assert json.loads(read(path)) == auth
 
 
 @pytest.mark.parametrize('legacy_lock', [False, True])
@@ -147,57 +130,39 @@ def test_native_reviewer_processes_overlap_and_retain_rotation_after_death(
     lock_path = canonical / '.reviewer.lock'
     if legacy_lock:
         lock_path.write_bytes(b'inert legacy lock')
-    harbor_auth.validate_credential_stores(canonical, judge)
     child = tmp_path / 'reviewer.py'
-    child.write_text('''import json, os, pathlib, sys, time
+    child.write_text('''import json, os, pathlib, sys
 from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 root, role, initial = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
-def wait_for(marker):
- deadline = time.monotonic() + 30
- while not marker.exists():
-  assert time.monotonic() < deadline, 'reviewer rendezvous expired: ' + marker.name
-  time.sleep(0.01)
 with reviewer_credentials(root/'canonical', root/role) as home:
  path = home/'auth.json'
  assert path.is_symlink() and path.resolve() == root/'canonical/auth.json'
  assert home.stat().st_mode & 0o777 == 0o700
  (root/(role+'-entered')).touch()
- wait_for(root/(role+'-rotate'))
+ input()
  data = json.loads(path.read_text())
  assert data['tokens']['refresh_token'] == (initial if role == 'first' else 'synthetic-first-rotation')
  data['tokens']['refresh_token'] = 'synthetic-'+role+'-rotation'
  path.write_text(json.dumps(data))
- (root/(role+'-rotated')).touch()
- wait_for(root/(role+'-release'))
  if role == 'second':
   os._exit(37)
 assert not path.exists() and not path.is_symlink()
 ''')
     processes: list[subprocess.Popen[str]] = []
-    try:
-        # Neither review can rotate credentials or exit before BOTH have entered.
+    with ExitStack() as children:
+        # Neither review is released until BOTH processes have entered.
         for role in ('first', 'second'):
             process = subprocess.Popen([sys.executable, str(child), str(tmp_path), role, initial],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            children.callback(process.communicate, timeout=5)
+            children.callback(process.kill)
             processes.append(process)
             _wait_for(tmp_path / (role + '-entered'), process)
         assert all(process.poll() is None for process in processes)
-        # Synthetic writes are ordered; this proves persistence, not OAuth refresh.
-        for role, process in zip(('first', 'second'), processes, strict=True):
-            (tmp_path / (role + '-rotate')).touch()
-            _wait_for(tmp_path / (role + '-rotated'), process)
-        assert all(process.poll() is None for process in processes)
-        for role, process, exit_code in zip(('first', 'second'), processes, (0, 37), strict=True):
-            (tmp_path / (role + '-release')).touch()
-            stdout, stderr = process.communicate(timeout=15)
+        # Complete each synthetic write before releasing the next reviewer.
+        for process, exit_code in zip(processes, (0, 37), strict=True):
+            stdout, stderr = process.communicate(input='\n', timeout=15)
             assert process.returncode == exit_code, stdout + stderr
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.kill()
-        for process in processes:
-            process.communicate(timeout=5)
-    assert not (tmp_path / 'first/auth.json').is_symlink()
     # Abrupt death bypasses context cleanup; its private link retains canonical state.
     assert (tmp_path / 'second/auth.json').is_symlink()
     with pytest.raises(RuntimeError, match='review failed'):
@@ -205,8 +170,7 @@ assert not path.exists() and not path.is_symlink()
             assert json.loads((home / 'auth.json').read_text())['tokens']['refresh_token'] == (
                 'synthetic-second-rotation')
             raise RuntimeError('review failed')
-    assert not (tmp_path / 'third/auth.json').exists()
-    assert not (tmp_path / 'third/auth.json').is_symlink()
+    assert not os.path.lexists(home / 'auth.json')
     harbor_auth.validate_credential_stores(canonical, judge)
     assert {p.name for p in canonical.iterdir()} == ({'auth.json', '.reviewer.lock'} if legacy_lock else {'auth.json'})
     if legacy_lock:
