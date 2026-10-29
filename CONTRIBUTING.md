@@ -95,6 +95,7 @@ The focused targets, all run from the repo root:
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; without `ACTIONLINT_REQUIRE_DOCKER`, a missing daemon skips with a note (exit 0); with it set, a missing daemon fails |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
+| `make package-check` | Build the wheel and install each shipped ReviewBench runtime lock in a fresh environment; check dependencies and installed entrypoints |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
 | `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a manually dispatched job while RL work is paused (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
 
@@ -107,7 +108,7 @@ make check
 which runs, in order:
 
 ```text
-lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
+lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
 ```
 
 This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
