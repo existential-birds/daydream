@@ -134,8 +134,10 @@ pinned base. True rename paths, deletion old sides, explicit absence, binary and
 header-only metadata remain represented. Ordinary capture admits at most 100,000
 entries and 256 MiB per side; text lookup retains the existing 8 MiB limit, so
 larger native files remain captured while optional textual context is unavailable.
-Symlinks/submodules retain metadata without native traversal or expansion. This
-materialization is not an OS sandbox. Native configuration/trust/authentication
+Symlinks/submodules retain metadata without native traversal or expansion. Initialized
+submodules use their final checked-out commit; uninitialized directories retain the
+recorded gitlink commit. Nested dirty files are not captured. This materialization
+is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
 Local program results use schema 3 and terminal/coverage version 2; committed

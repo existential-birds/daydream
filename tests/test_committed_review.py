@@ -632,6 +632,11 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert result.output_installed and not result.complete
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
     assert value['schema_version'] == 3 and value['terminal_result']['schema_version'] == 2
+    validate_committed_result(value)
+    legacy_result = deepcopy(value)
+    legacy_result['schema_version'] = 1
+    with pytest.raises(ValueError, match='result version does not match captured source identity'):
+        validate_committed_result(legacy_result)
     assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
     assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
     assert value['terminal_result']['analysis_state'] == 'incomplete'

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import zlib
@@ -70,6 +71,18 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None) -> tuple[st
         elif stat.S_ISDIR(before.st_mode):
             if gitlink is None:
                 return None
+            queries._require_git_path_confined(root, path)
+            nested = root / path
+            try:
+                (nested / ".git").lstat()
+            except FileNotFoundError:
+                pass  # Uninitialized gitlinks retain their recorded commit.
+            else:
+                git_dir, common = immutable._source_git_dir(nested)
+                head = immutable._source_head(git_dir, common)
+                if len(head) != len(gitlink) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+                    raise GitError("captured gitlink HEAD metadata is malformed")
+                gitlink = head
             mode, body = "160000", gitlink.encode()
         elif stat.S_ISREG(before.st_mode):
             if before.st_size > immutable._MAX_SOURCE_BYTES:

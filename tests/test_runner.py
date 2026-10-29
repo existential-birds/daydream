@@ -1060,11 +1060,10 @@ async def test_deep_run_mints_app_identity_before_posting_path(
     assert environment is not None and environment["GH_TOKEN"] == "installation-token"
     assert payloads, "deep flow never posted its review"
 
-@pytest.mark.usefixtures("patch_workspace")
 async def test_review_run_does_not_mint_app_identity(
     monkeypatch: pytest.MonkeyPatch,
     silence_runner_ui: None,  # noqa: F841  # noqa
-    tmp_path: Path, make_config: Callable[..., RunConfig],
+    feature_branch_repo: Path, make_config: Callable[..., RunConfig],
 ) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
@@ -1079,7 +1078,7 @@ async def test_review_run_does_not_mint_app_identity(
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
     monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
-    rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
+    rc = await runner.run(make_config(feature_branch_repo, output_mode="review", pr_repo="acme/widgets"))
     assert rc == 0
 
 async def test_owner_preflight_failure_never_reaches_identity_or_backend(
@@ -1539,6 +1538,13 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
 ) -> None:
     """A read-only run cannot clear either overlapping posting credential."""
     repositories = {name: _feature_repo(tmp_path / name) for name in ("first", "second", "reader")}
+    for name, path in repositories.items():
+        (path / "app.py").write_text(f"VALUE = 2\nRUN_SUBJECT = {name!r}\n")
+        _git(path, "add", "app.py")
+        _commit(path, "identify review subject")
+    subjects = {(path / "app.py").read_text(): name for name, path in repositories.items()}
+    def subject(repo: Path) -> str:
+        return subjects[(repo / "app.py").read_text()]
     ext_dir.write_module(
         "from daydream import git_ops\n"
         "from daydream.extensions import FlowStep\n"
@@ -1552,8 +1558,15 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
         "    registry.register_phase(FlowStep(name='auth-probe', run=auth_probe))\n"
         "    registry.insert_after('deep', anchor='intent', step='auth-probe')\n"
     )
-    labels = {path: name for name, path in repositories.items()}
     heads = {name: git_ops.head_sha(path) for name, path in repositories.items()}
+    bases = {name: _git(path, "rev-parse", "main") for name, path in repositories.items()}
+    pr_rows = {
+        name: {
+            "number": 41, "headRefOid": heads[name], "headRefName": "feature", "baseRefName": "main",
+            "headRepository": {"name": name}, "headRepositoryOwner": {"login": "acme"},
+            "url": f"https://github.com/acme/{name}/pull/41",
+        } for name in repositories
+    }
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "fake-private-key")
     monkeypatch.setenv("GH_TOKEN", "personal-token")
@@ -1564,26 +1577,26 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
     posted: dict[str, dict[str, Any]] = {}
     real_run = subprocess.run
     def mint(repo_dir: Path, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        name = labels[repo_dir]
+        name = subject(repo_dir)
         minted[name] += 1
         return SimpleNamespace(
             token=f"installation-{name}-{minted[name]}", identity=f"{name}-app[bot]",
-            # Force one refresh at the first post-review GitHub request.
+            # Force one refresh at the first authenticated GitHub request.
             expires_at=0.0 if minted[name] == 1 else 4_102_444_800.0,
         )
     def github_subprocess(args: list[str], *pargs: Any, **kwargs: Any) -> Any:
         if not args or args[0] != "gh":
             return real_run(args, *pargs, **kwargs)
-        name = labels[Path(kwargs["cwd"])]
+        name = subject(Path(kwargs["cwd"]))
         env = kwargs.get("env")
         token = None if env is None else env.get("GH_TOKEN")
         requests.append((name, tuple(args[1:3]), token))
         if args[1:3] == ["pr", "list"]:
-            output = json.dumps([{
-                "number": 41, "headRefOid": heads[name], "headRefName": "feature", "baseRefName": "main",
-                "headRepository": {"name": name}, "headRepositoryOwner": {"login": "acme"},
-                "url": f"https://github.com/acme/{name}/pull/41",
-            }])
+            output = json.dumps([pr_rows[name]])
+        elif args[1:3] == ["pr", "view"]:
+            output = json.dumps(pr_rows[name])
+        elif args[1:3] == ["api", f"repos/acme/{name}/pulls/41"]:
+            output = json.dumps({"head": {"sha": heads[name]}, "base": {"sha": bases[name]}})
         elif args[1:3] == ["repo", "view"]:
             output = f"acme/{name}"
         elif args[1:3] == ["api", "/user"]:
@@ -1599,7 +1612,7 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
         async def execute(
             self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
-            name = labels[cwd]
+            name = subject(cwd)
             entered[name].set()
             if name != "reader":
                 await release.wait()
@@ -1654,7 +1667,7 @@ async def test_runner_recovers_pi_temporary_capacity_and_retains_review(
 
     async def respond(cwd: Path, prompt: str, *args: Any) -> AsyncIterator[AgentEvent]:
         calls.append(cwd)
-        assert (cwd / ".git").is_file(), "the backend must execute in the real temporary worktree"
+        assert (cwd / ".git").is_dir(), "the backend must execute in the independent captured repository"
         assert (cwd / "main.py").read_text() == "def hello():\n    return 'universe'\n"
         if len(calls) == 1:
             category = _pi_error_category(message)
@@ -1674,6 +1687,7 @@ async def test_runner_recovers_pi_temporary_capacity_and_retains_review(
     assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before
     assert "Sample issue" in (feature_branch_repo / REVIEW_OUTPUT_FILE).read_text()
     assert calls[0] == calls[1] != feature_branch_repo.resolve()
+    assert not calls[0].exists(), "the captured repository must be removed after the completed review"
     trajectory = json.loads(trajectory_path.read_text())
     attempts = [step for step in trajectory["steps"]
                 if step["source"] == "agent" and step.get("extra", {}).get("daydream_phase") == "intent"]

@@ -17,7 +17,6 @@ from typing import Any, cast
 
 import pytest
 
-from daydream import pr_review
 from daydream.artifact_visibility import (
     artifact_dir_for,
     open_artifact_session,
@@ -95,6 +94,20 @@ def _current_sequence_builder(**kwargs: Any) -> str:
 class _CapturedPost:
     gh: FakeGh
 
+    def serve_target(self, target: Path) -> None:
+        """Pin lookup and publication to the fixture repository's real commits."""
+        head = git(target, "rev-parse", "HEAD")
+        base = git(target, "rev-parse", "main")
+        self.gh.serve_pr_view({
+            "number": 123, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
+            "headRefOid": head, "url": "https://github.com/acme/widgets/pull/123",
+            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+            "headRepositoryOwner": {"login": "acme"},
+        })
+        self.gh.set_response("GET", "repos/acme/widgets/pulls/123", {
+            "head": {"sha": head}, "base": {"sha": base},
+        })
+
     @property
     def payloads(self) -> list[dict[str, Any]]:
         return [call.payload for call in self.gh.calls("POST", "repos/acme/widgets/pulls/123/reviews")]
@@ -104,15 +117,9 @@ class _CapturedPost:
         return str(self.payloads[-1]["body"])
 
 @pytest.fixture
-def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
-    """Capture the real review payload, mocking only PR lookup and gh submission."""
+def captured_post(fake_gh: FakeGh) -> _CapturedPost:
+    """Capture the real review payload through consistent fake GitHub responses."""
     captured = _CapturedPost(fake_gh)
-    fake_pr = pr_review.PRInfo(
-        number=123, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature", owner="acme",
-        repo="widgets", url="https://example/pr/123",
-    )
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr)
-
     fake_gh.set_response("POST", "repos/acme/widgets/pulls/123/reviews",
         {"html_url": "https://example/pr/123#review-1"},
     )
@@ -136,6 +143,7 @@ def review_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
     async def _run(target: Path, *, specs: dict[str, list[dict[str, Any]]] | None = None, session_id: str | None = None,
         fail: frozenset[str] = frozenset(), **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
+        captured_post.serve_target(target)
         stub = install_stub_backend(monkeypatch, target)
         stub.diagram_specs = specs or {}
         stub.diagram_session_id = session_id
@@ -782,6 +790,7 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     silence(monkeypatch)
 
     target = dr.build_cross_module_repo(tmp_path)
+    captured_post.serve_target(target)
     shared: list[dict[str, Any]] = []
 
     def factory(name: str, model: str | None = None, **_kwargs: Any) -> StubBackend:

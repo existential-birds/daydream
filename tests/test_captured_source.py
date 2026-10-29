@@ -219,25 +219,60 @@ def test_capture_integrity_never_falls_back_to_original(
 def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
     source: tuple[Path, str, str], tmp_path: Path,
 ) -> None:
-    """Unsupported text entries retain patch identity without exposing linked native contents."""
-    repo, base, head = source
+    """Working gitlink HEAD, unlike its index entry, binds metadata without exposing nested contents."""
+    repo, _, _ = source
+    module_origin = tmp_path / "module-origin"
+    init_repo(module_origin)
+    write_and_stage(module_origin, "secret.py", "nested = 0\n")
+    module_base = commit(module_origin, "module base")
+    write_and_stage(module_origin, "secret.py", "nested = 1\n")
+    module_head = commit(module_origin, "module feature")
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "--", str(module_origin), "module")
+    git(repo / "module", "checkout", "--detach", module_base)
+    git(repo, "add", "module")
+    base = commit(repo, "gitlink base")
+    write_and_stage(repo, "subject.py", "value = 2\n")
+    head = commit(repo, "feature after gitlink base")
     (repo / "linked.py").symlink_to(tmp_path / "private.py")
     (tmp_path / "private.py").write_text("outside")
     (repo / ".daydream").symlink_to(tmp_path / "private.py")
     git(repo, "add", "linked.py")
-    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{head},module")
-    (repo / "module").mkdir()
-    (repo / "module/secret.py").write_text("nested")
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{module_base},uninitialized")
+    (repo / "uninitialized").mkdir()
+    (repo / "uninitialized/secret.py").write_text("uninitialized nested bytes")
+    unchanged = capture_source(repo, tmp_path / "unchanged", base_sha=base, head_sha=head, local=True)
+    assert set(unchanged.files) == {"linked.py", "subject.py", "uninitialized"}
+    git(repo / "module", "checkout", "--detach", module_head)
+    (repo / "module/secret.py").write_text("dirty nested bytes")
+    original_index = (repo / ".git/index").read_bytes()
+    original_refs = git(repo, "show-ref")
+    module_index = (repo / ".git/modules/module/index").read_bytes()
+    module_refs = git(repo / "module", "show-ref")
     captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
+    assert set(captured.files) == {"linked.py", "module", "subject.py", "uninitialized"}
+    assert f"-Subproject commit {module_base}\n+Subproject commit {module_head}\n" in captured.diff
+    assert captured.source_id != unchanged.source_id
     assert not (captured.root / ".daydream").exists()
     assert not (captured.root / "linked.py").exists()
     assert not (captured.root / "module").exists()
+    assert not (captured.root / "uninitialized").exists()
     assert "120000" in git(captured.root, "ls-tree", "HEAD", "linked.py")
-    assert "160000" in git(captured.root, "ls-tree", "HEAD", "module")
-    for path in ("linked.py", "module", "../private.py"):
+    assert f"160000 commit {module_head}" in git(captured.root, "ls-tree", "HEAD", "module")
+    assert f"160000 commit {module_base}" in git(captured.root, "ls-tree", "HEAD", "uninitialized")
+    for path in ("linked.py", "module", "uninitialized", "../private.py"):
         with pytest.raises(FrozenSourceRejected):
             captured.read("new", path)
+    with pytest.raises(FrozenSourceRejected):
+        captured.read("old", "module")
     captured.validate()
+    assert git(repo, "rev-parse", "HEAD") == head
+    assert git(repo, "show-ref") == original_refs
+    assert (repo / ".git/index").read_bytes() == original_index
+    assert git(repo / "module", "rev-parse", "HEAD") == module_head
+    assert git(repo / "module", "show-ref") == module_refs
+    assert (repo / ".git/modules/module/index").read_bytes() == module_index
+    assert (repo / "module/secret.py").read_text() == "dirty nested bytes"
+    assert (repo / "uninitialized/secret.py").read_text() == "uninitialized nested bytes"
     (repo / ".daydream").unlink()
     (repo / ".daydream").symlink_to(tmp_path / "different-private-target")
     repeated = capture_source(repo, tmp_path / "repeated", base_sha=base, head_sha=head, local=True)
