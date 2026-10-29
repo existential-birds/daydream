@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -92,13 +91,7 @@ def _project_documents(
     shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
     seen: set[Path] = set()
     for document in write_snapshot.documents:
-        payload = json.loads(document.json_bytes)
-        if (
-            not isinstance(payload, dict)
-            or payload.get("trajectory_id") != document.trajectory_id
-            or payload.get("session_id") != session_id
-        ):
-            raise ValueError("invalid frozen trajectory document identity")
+        document.validated_payload(session_id)
         if document.trajectory_id == write_snapshot.root_trajectory_id:
             destination = root_path
         else:
