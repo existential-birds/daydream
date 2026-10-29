@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
+  so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
 
 

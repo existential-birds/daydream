@@ -2,8 +2,10 @@
 
 ## Public ReviewBench
 
-Install the packaged [Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock), Node 20+,
-and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
+Install the host's Daydream wheel and its packaged
+[Harbor lock](../daydream/benchmark/reviewbench/harbor-runtime.lock) together:
+`uv pip install -r /path/to/harbor-runtime.lock /path/to/daydream.whl`.
+Install Node 20+ and ReviewBench at `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` with `npm ci`.
 Tracked source must match that commit; extra files under `scripts/` are rejected.
 Unrelated untracked files elsewhere are allowed.
 Export performs no inference; model/judge runs require separate authorization.

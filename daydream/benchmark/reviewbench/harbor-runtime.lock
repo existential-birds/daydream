@@ -45,7 +45,7 @@ cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
 charset-normalizer==3.5.2
     # via requests
-claude-agent-sdk==0.2.167
+claude-agent-sdk==0.2.174
     # via daydream (pyproject.toml)
 click==8.5.0
     # via

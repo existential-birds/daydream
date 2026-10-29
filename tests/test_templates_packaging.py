@@ -11,9 +11,11 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from email import message_from_bytes
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from daydream import config
 from daydream.benchmark.harbor import package as harbor_package
@@ -26,7 +28,7 @@ _SINGLE_TEMPLATE_PATH = "daydream/templates/workflows/single/daydream.yml"
 
 
 def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build a real wheel to check packaged paths and canonical workflow names."""
+    """Check shipped resources and their SDK compatibility with the wheel metadata."""
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["uv", "build", "--wheel", "--out-dir", tmp], cwd=_REPO_ROOT, check=True, capture_output=True,)
         wheels = list(Path(tmp).glob("*.whl"))
@@ -36,9 +38,25 @@ def test_templates_and_native_tools_present_in_built_wheel(monkeypatch: pytest.M
         expected_paths.add('daydream/backends/pi_structured_output.ts')
         expected_paths.add('daydream/backends/pi_host_tools.ts')
         expected_paths.add('daydream/backends/pi_diagnostics.ts')
-        expected_paths.add('daydream/benchmark/harbor/runtime-requirements.lock')
+        runtime_locks = (
+            'daydream/benchmark/harbor/runtime-requirements.lock',
+            'daydream/benchmark/reviewbench/harbor-runtime.lock',
+        )
+        expected_paths.update(runtime_locks)
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
+            metadata, = (name for name in names_in_wheel if name.endswith('.dist-info/METADATA'))
+            distribution = message_from_bytes(zf.read(metadata))
+            requirements = [Requirement(value) for value in distribution.get_all('Requires-Dist', [])]
+            sdk_requirement, = (requirement for requirement in requirements if requirement.name == 'claude-agent-sdk')
+            for lock in runtime_locks:
+                sdk_pin, = (
+                    Requirement(line.removesuffix(' \\'))
+                    for line in zf.read(lock).decode('utf-8').splitlines()
+                    if line.startswith('claude-agent-sdk==')
+                )
+                version, = (specifier.version for specifier in sdk_pin.specifier if specifier.operator == '==')
+                assert version in sdk_requirement.specifier, f'{lock}: {sdk_pin} does not satisfy {sdk_requirement}'
             assert 'daydream/benchmark/reviewbench/reviewer-runtime.lock' not in names_in_wheel
             # Seccomp assets are generated at export, not shipped as copied JSON.
             assert not any(name.endswith(('harbor-seccomp.json', 'harbor-seccomp-provenance.json'))
