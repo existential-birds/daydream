@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.git_ops import immutable, queries
+from daydream.git_ops import immutable, process, queries
 from daydream.git_ops.captured_source import capture_source
 from daydream.git_ops.models import GitError, PathAbsentError, SnapshotPreparationError
 from daydream.git_ops.source import FrozenSourceRejected
@@ -189,12 +189,17 @@ def test_capture_retries_working_population_change_during_enumeration(
     assert captured.read("new", "appeared.py")[1] == b"appeared = 1\n"
 
 
-@pytest.mark.parametrize("corruption", ["bytes", "missing", "population", "metadata", "storage"])
+@pytest.mark.parametrize("corruption", [
+    "bytes", "missing", "population", "metadata", "storage", "index", "skip", "assume", "stages", "intent",
+])
 def test_capture_integrity_never_falls_back_to_original(
     source: tuple[Path, str, str], tmp_path: Path, corruption: str,
 ) -> None:
     """Required damaged capture evidence stays a failure even while original bytes remain available."""
     repo, base, head = source
+    if corruption == "intent":
+        write_and_stage(repo, "empty.bin", b"")
+        head = commit(repo, "empty file")
     captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
     if corruption == "bytes":
         (captured.root / "subject.py").write_text("tampered")
@@ -204,13 +209,29 @@ def test_capture_integrity_never_falls_back_to_original(
         (captured.root / "injected.py").write_text("tampered")
     elif corruption == "metadata":
         (captured.root / ".git/HEAD").write_text(base + "\n")
+    elif corruption == "index":
+        old_oid = git(captured.root, "rev-parse", f"{base}:subject.py")
+        git(captured.root, "update-index", "--cacheinfo", f"100644,{old_oid},subject.py")
+    elif corruption in {"skip", "assume"}:
+        flag = "--skip-worktree" if corruption == "skip" else "--assume-unchanged"
+        git(captured.root, "update-index", flag, "subject.py")
+    elif corruption == "stages":
+        oid = git(captured.root, "rev-parse", "HEAD:subject.py")
+        git(captured.root, "update-index", "--force-remove", "subject.py")
+        process._run_git(captured.root, ["update-index", "--index-info"], retries=0,
+                         input_text=f"100644 {oid} 1\tsubject.py\n", error_context="test index stages failed")
+    elif corruption == "intent":
+        inventory = git(captured.root, "ls-files", "-t", "-v", "--stage", "-z")
+        git(captured.root, "update-index", "--force-remove", "empty.bin")
+        git(captured.root, "add", "--intent-to-add", "--", "empty.bin")
+        assert git(captured.root, "ls-files", "-t", "-v", "--stage", "-z") == inventory
     else:
         old_objects = captured.root / ".git/old-objects"
         (captured.root / ".git/objects").rename(old_objects)
         shutil.copytree(old_objects, captured.root / ".git/objects")
     with pytest.raises(GitError):
         captured.validate()
-    if corruption in {"bytes", "missing", "metadata", "storage"}:
+    if corruption != "population":
         with pytest.raises(GitError):
             captured.read("new", "subject.py")
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
@@ -384,3 +405,21 @@ def test_local_capture_requires_materialized_skip_worktree_contents(
         assert (repo / "support/helper.py").read_bytes() == b"helper = 4\n"
     else:
         assert not (repo / "support/helper.py").exists()
+
+
+def test_capture_allows_native_index_stat_refresh(source: tuple[Path, str, str], tmp_path: Path) -> None:
+    """Allowed native Git inspection may refresh index stat/cache bytes without changing source."""
+    repo, base, head = source
+    original_index = (repo / ".git/index").read_bytes()
+    original_refs = git(repo, "show-ref")
+    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
+    frozen_index = (captured.root / ".git/index").read_bytes()
+    inventory = git(captured.root, "ls-files", "-t", "-v", "--stage", "-z")
+    assert git(captured.root, "status", "--porcelain", env={"GIT_OPTIONAL_LOCKS": "1"}) == ""
+    assert (captured.root / ".git/index").read_bytes() != frozen_index
+    assert git(captured.root, "ls-files", "-t", "-v", "--stage", "-z") == inventory
+    assert captured.read("new", "subject.py")[1] == b"value = 1\n"
+    captured.validate()
+    assert (repo / ".git/index").read_bytes() == original_index
+    assert git(repo, "show-ref") == original_refs
+    assert (repo / "subject.py").read_bytes() == b"value = 1\n"

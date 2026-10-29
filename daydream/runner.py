@@ -685,7 +685,7 @@ async def _capture_review_workspace(
         if mode == "comment" and tip is None:
             raise GitError("The target PR base could not be pinned; fetch its refs and rerun.")
         try:
-            base = git_ops.resolve_diff_merge_base(work.repo, config.base or tip or work.base_branch, head)
+            base = git_ops.resolve_diff_merge_base(work.repo, config.base or tip or pinned_pr.base_sha, head)
         except GitError as exc:
             raise GitError("The pinned PR comparison objects are unavailable; fetch its refs and rerun.") from exc
         pinned_pr = replace(pinned_pr, base_sha=base, pr_base_sha=tip)

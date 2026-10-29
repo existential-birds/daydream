@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import pytest
 from rich.console import Console
 
 from daydream import git_ops, runner
 from daydream.backends import ResultEvent, TextEvent
+from daydream.findings import load_findings_artifact
 from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
@@ -363,3 +364,69 @@ async def test_local_review_pins_remote_preferred_base_without_upstream(
     assigned = {path for scope in coverage["planned_scopes"] for path in scope["files"]}
     assert assigned == ({"feature.py", "upstream.py"} if base_kind == "sha" else {"feature.py"})
     assert tracked_source_state(repo) == before
+
+
+@pytest.mark.parametrize("tip_available,explicit_base,mode", [
+    (False, False, "review"), (True, False, "review"),
+    (False, True, "review"), (False, False, "comment"),
+])
+async def test_findings_export_keeps_pr_base_when_optional_tip_is_unavailable(
+    repo_with_origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+    tip_available: bool, explicit_base: bool, mode: Literal["review", "comment"],
+) -> None:
+    """Export binds the PR comparison even when its optional REST tip cannot be read.
+
+    Lookup/export unit tests bypass workspace capture; comment-mode tests require
+    base-tip evidence and therefore never exercise this optional export fallback.
+    """
+    repo = repo_with_origin
+    main = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "-b", "release")
+    (repo / "release.py").write_text("RELEASE = 1\n")
+    _git(repo, "add", "release.py")
+    _git(repo, "commit", "-m", "release branch change")
+    release = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-m", "feature change")
+    head = _git(repo, "rev-parse", "HEAD")
+    fake_gh.serve_pr_view({
+        "number": 42, "headRefName": "feature", "baseRefName": "release", "headRefOid": head,
+        "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/42",
+    })
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/42",
+                         {"head": {"sha": head}, "base": {"sha": release}} if tip_available
+                         else {"__error__": "base-tip request unavailable"})
+    backend = _minimal_backend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    before = tracked_source_state(repo)
+    output = tmp_path / "findings.json"
+    config = RunConfig(target=str(repo), output_mode=mode, findings_out=str(output), pr_number=42,
+                       non_interactive=True, shallow=True, stack="python", archive=False,
+                       base=main if explicit_base else None)
+    errors: list[str] = []
+    monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
+
+    result = await runner.run(config)
+
+    assert tracked_source_state(repo) == before
+    if mode == "comment":
+        assert result == 1 and not backend.calls and not output.exists()
+        assert any("PR base could not be pinned" in message for message in errors)
+        assert not fake_gh.calls("POST", "repos/acme/widgets/pulls/42/reviews")
+        return
+    assert result == 0 and backend.calls
+    artifact = load_findings_artifact(output, expected_repo="acme/widgets", expected_pr_number=42,
+                                     expected_head_sha=head)
+    assert artifact.analysis_complete and artifact.terminal_result is not None
+    revision = artifact.terminal_result["analyzed_revision"]
+    assert revision["head_sha"] == head
+    assert revision["merge_base_sha"] == (main if explicit_base else release)
+    assert revision.get("pr_base_sha") == (release if tip_available else None)
+    diff = (repo / ".daydream/diff.patch").read_text()
+    assert "diff --git a/feature.py b/feature.py" in diff
+    assert ("diff --git a/release.py b/release.py" in diff) == explicit_base
+    assigned = {path for scope in artifact.terminal_result["planned_scopes"] for path in scope["files"]}
+    assert assigned == ({"feature.py", "release.py"} if explicit_base else {"feature.py"})

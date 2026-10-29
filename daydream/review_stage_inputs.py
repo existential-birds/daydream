@@ -160,7 +160,10 @@ class StageInputFactory:
 
     def _revalidate_canonical(self) -> None:
         if self.captured_source is not None:
-            self.captured_source.validate()
+            try:
+                self.captured_source.validate()
+            except (GitError, OSError) as exc:
+                raise inputs.SanctionedInputUnavailable('captured source changed or is unavailable') from exc
         for expected in self.canonical:
             if self._canonical(expected.label, expected.path) != expected:
                 raise inputs.SanctionedInputUnavailable(f"sanctioned input {expected.label!r} changed after capture")

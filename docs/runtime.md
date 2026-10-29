@@ -124,7 +124,9 @@ at most three times, then asks the operator to stop concurrent writers and rerun
 This is not an instantaneous filesystem-wide transaction. Preparation never changes
 source refs, index or user files. Native regular files and canonical supporting
 references read the same private source after preparation; later original edits
-cannot change that subject. Required missing/corrupt input prevents dispatch;
+cannot change that subject. Private index stat/cache refresh is permitted; indexed
+paths, modes, blobs, stages and semantic flags remain bound to the accepted source.
+Required missing/corrupt input prevents dispatch;
 later integrity failure retains admitted findings and unfinished coverage. Optional
 absent/unsupported context remains explicitly unavailable, with no committed or
 live-byte substitution. Work blocked by unavailable input cannot count as complete.

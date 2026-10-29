@@ -874,11 +874,13 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
         path.write_text(json.dumps(evidence))
     stub.calls.clear()
     damaged_bytes = path.read_bytes() if path.exists() else None
+    report = multi_stack_target / '.review-output.md'
+    report_bytes = report.read_bytes()
     assert await run(make_config(multi_stack_target, start_at="merge",
                                 pr_number=pr.number)) == 1
     assert _review_surface_prompts(stub.calls) == []
     assert (path.read_bytes() if path.exists() else None) == damaged_bytes
-    assert (multi_stack_target / '.review-output.md').is_file()
+    assert report.read_bytes() == report_bytes
 
 
 @pytest.mark.parametrize("recovery", ["resume", "cache"])

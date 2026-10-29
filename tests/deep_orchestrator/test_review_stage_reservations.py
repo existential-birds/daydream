@@ -11,11 +11,12 @@ from typing import Any
 
 import pytest
 
-from daydream import review_result
+from daydream import git_ops, review_result
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
 from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
+from daydream.prompt_budget import SanctionedInputUnavailable
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     StagedBackend,
@@ -254,7 +255,8 @@ async def test_native_correction_admits_only_the_valid_whole_stage(
         assert str(HANDOFF_MAX_BYTES) in diagnostic and 'cumulative' in diagnostic and 'shorten' in diagnostic
 
 
-@pytest.mark.parametrize('fault', ['corrupt-canonical', 'delete-canonical', 'target-capacity', 'handoff-capacity',
+@pytest.mark.parametrize('fault', ['corrupt-canonical', 'delete-canonical', 'corrupt-captured-source',
+                                 'target-capacity', 'handoff-capacity',
                                  'last-call-handoff-capacity',
                                  'handoff-byte-capacity', 'triage-byte-capacity', 'triage-byte-correction',
                                  'closed-contradiction'])
@@ -315,6 +317,9 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             original.write_bytes(original.read_bytes() + b'permanently changed input\n')
         elif fault == 'delete-canonical':
             original.unlink()
+        elif fault == 'corrupt-captured-source':
+            captured = backend.calls[-1]['cwd'] / 'api.py'
+            captured.write_bytes(captured.read_bytes() + b'permanently changed source\n')
         elif fault == 'target-capacity':
             # Earlier publication remains valid, but no new required target ID
             # can fit the shared allocation, even without evidence or prose.
@@ -379,8 +384,10 @@ async def test_native_stage_capacity_and_input_failure_preserve_prior_admission(
             'evidence_incomplete' if contradiction else
             'capacity_exhausted' if fault.endswith('capacity') else 'input_unavailable') and fatal.preacceptance is True
         if not fault.endswith('capacity') and not contradiction:
-            assert type(fatal.__cause__).__name__ == 'SanctionedInputUnavailable'
-            assert 'canonical-diff' in str(fatal)
+            assert isinstance(fatal.__cause__, SanctionedInputUnavailable)
+            assert ('captured source' if fault == 'corrupt-captured-source' else 'canonical-diff') in str(fatal)
+            if fault == 'corrupt-captured-source':
+                assert isinstance(fatal.__cause__.__cause__, git_ops.GitError)
         assert 'Changing the submission cannot resolve' in str(fatal)
         assert str(review.repo) not in str(fatal)
     if triage:

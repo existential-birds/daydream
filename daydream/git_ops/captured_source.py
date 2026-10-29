@@ -271,8 +271,24 @@ class CapturedSource:
     def _check_metadata(self) -> None:
         current = tuple(immutable._regular(self.root / ".git" / name, limit=16 * 1024 * 1024)
                         for name in ("HEAD", "config", "index"))
-        if current != self._metadata:
+        if current[:2] != self._metadata[:2]:
             raise GitError("captured source Git metadata integrity failed")
+        if current[2] == self._metadata[2]:
+            return
+        # Native Git inspection may refresh stat/cache fields. Its index must
+        # retain the accepted paths, blobs, modes, stages and visibility flags.
+        expected = b"".join(f"H {mode} {oid} 0\t{name}\0".encode()
+                            for mode, oid, name in sorted(self._after, key=lambda entry: os.fsencode(entry[2])))
+        with immutable.inert_git_context(self.root):
+            index = process._run_git(self.root, ["ls-files", "-t", "-v", "--stage", "-z"], capture_bytes=True,
+                max_output_bytes=16 * 1024 * 1024, error_context="captured source index unavailable").stdout
+            if index != expected:
+                raise GitError("captured source index integrity failed")
+            # Intent-to-add on an accepted empty file has identical ls-files
+            # rows, but hides that file from this independently checked view.
+            process._run_git(self.root, ["diff-index", "--cached", "--quiet", "--ita-invisible-in-index",
+                "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", self._after_revision, "--"],
+                max_output_bytes=4096, error_context="captured source index integrity failed")
 
     def read(self, side: str, path: str) -> tuple[str, bytes]:
         self.revision_for(side)
