@@ -510,10 +510,11 @@ async def test_oversized_canonical_result_cannot_be_truncated_into_native_succes
 
 
 async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return() -> None:
-    """Shutdown revokes authority and joins a real stalled HTTP request before evidence can freeze.
+    """Shutdown joins stalled callbacks without poisoning a permitted live retry.
 
     Complete-frame and installed-Pi settlement tests do not exercise a peer that
-    retains an incomplete body while the owning invocation closes.
+    retains an incomplete body while the owning attempt closes, or repeats
+    cleanup after the next attempt has opened its own callback endpoint.
     """
     installed: list[Any] = []
     def accept(value: dict[str, Any]) -> dict[str, Any]:
@@ -535,3 +536,11 @@ async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return()
     writer.close()
     await writer.wait_closed()
     assert installed == [] and not binding.authority_open and binding.cleanup_complete and server.closed
+    async with _endpoint(binding) as client:
+        await server.close()
+        assert binding.authority_open
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        assert (await client.post("/admit", json={"id": "retry", "name": NATIVE_SUBMIT,
+            "arguments": _RESULT, "terminal": True})).json()["allowed"]
+        assert (await client.post("/submit", json={"id": "retry", "arguments": _RESULT})).json()["accepted"]
+    assert installed == [_RESULT] and binding.calls == 1 and binding.cleanup_complete

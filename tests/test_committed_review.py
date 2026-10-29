@@ -41,6 +41,7 @@ from daydream.review_source_refs import source_options
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
+from tests.harness.fake_clock import FakeClock
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     commit,
@@ -146,6 +147,39 @@ async def _submit(review: Review, kind: str, value: dict[str, Any]) -> dict[str,
         return binding.submit("terminal", value)
 
 
+@pytest.mark.parametrize("boundary", ["before-start", "between-attempts"])
+async def test_assignment_stays_current_until_explicit_closure(
+    review_inputs: StageInputFactory, boundary: str,
+) -> None:
+    """An idle transport cannot replace still-authorized challenge work.
+
+    Existing admission races begin inside a session; they miss the closed
+    transport before startup and between live retry attempts.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    await _submit(review, "discovery", _discovery(review_inputs))
+    prior = review.pending()
+    binding, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    if boundary == "between-attempts":
+        with pytest.raises(PiError, match="transient"):
+            async with binding.session():
+                raise PiError("transient native failure")
+    with pytest.raises(ValueError, match="active assignment"):
+        review.assignment("challenge", deadline=clock.monotonic() + 30)
+    assert review.pending() == prior
+    binding.close_authority()
+    replacement, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    with pytest.raises(HostToolFatal, match="closed"):
+        async with binding.session():
+            pytest.fail("closed assignment reopened")
+    async with replacement.session():
+        value = {"verdicts": [_verdict(review_inputs, prior[0])], "claims": []}
+        replacement.admit("replacement", "structured_output", value, terminal=True)
+        replacement.submit("replacement", value)
+    sealed = review.seal({})
+    assert len(sealed["findings"]) == 1 and review.pending() == []
+
+
 @pytest.mark.parametrize(
     "change", ["claim", "trigger", "consequence", "file", "line", "grounds", "evidence_refs", "synthesis", "title"]
 )
@@ -194,6 +228,7 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
                     stale = {"verdicts": [verdict], "claims": []}
                     stale_binding.admit("stale", "structured_output", stale, terminal=True)
                     stale_binding.submit("stale", stale)
+            stale_binding.close_authority()
             assert review.pending() == pending
         rejection = _verdict(review_inputs, pending[0], verdict="rejected",
                              grounds="The captured caller guards zero before division.")
@@ -265,7 +300,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 @pytest.mark.parametrize(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
-        "cancelled",
+        "cancelled", "preparation",
         "report-stage", "bundle-stage", "too-many-assignments", "hub-export", "hosted-output-install",
         "hosted-bundle-install",
     ]
@@ -279,7 +314,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
 ) -> None:
     """Real host/Git/output/recorder composition preserves work across execution failures.
 
-    Distinct rows cover cancellation usage, typed terminal quota, protected allowances, pre-dispatch
+    Distinct rows cover cancellation usage, preparation time, typed terminal quota, protected allowances, pre-dispatch
     refusals, pipeline-only strategy fallback, and real locked-worktree cleanup.
     Native journeys separately own transport/history/accounting.
     """
@@ -291,6 +326,19 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     challenge_started = asyncio.Event()
     bindings: list[HostToolBinding] = []
     locked_captures: list[Path] = []
+    if challenge == "preparation":
+        fake = FakeClock(monotonic_value=100).install(monkeypatch)
+        real_open = os.open
+
+        def charge_preparation(path: Any, *args: Any, **kwargs: Any) -> int:
+            nonlocal injected
+            fd = real_open(path, *args, **kwargs)
+            if not injected and Path(path).name == "diff.patch":
+                injected = True
+                fake.advance(10)
+            return fd
+
+        monkeypatch.setattr(os, "open", charge_preparation)
 
     def remove_locked_captures() -> None:
         for captured in locked_captures:
@@ -523,12 +571,15 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge != "setup":
         assert dispatches[1]["allocation"] == 5
         assert dispatches[1]["deadline"] > dispatches[0]["deadline"]
-    complete = challenge == "exhausted"
+    if challenge == "preparation":
+        assert injected
+        assert [d["deadline"] for d in dispatches] == [145, 190]
+    complete = challenge in {"exhausted", "preparation"}
     assert result.complete is complete
     assert value["terminal_result"]["analysis_state"] == (
-        "complete" if challenge == "exhausted" or output_failure else "incomplete"
+        "complete" if complete or output_failure else "incomplete"
     )
-    confirmed = challenge in {"exhausted", "accepted-then-failed"} or output_failure
+    confirmed = complete or challenge == "accepted-then-failed" or output_failure
     assert len(value["findings"]) == int(confirmed)
     assert value["claims"][0]["disposition"] == ("confirmed" if confirmed else "unresolved")
     assert value["execution"][0]["accepted"]

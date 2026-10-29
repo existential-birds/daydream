@@ -78,7 +78,7 @@ class PiHostToolServer:
 
         def finished(completed: asyncio.Task[None]) -> None:
             self._tasks.discard(completed)
-            if not completed.cancelled() and completed.exception() is not None:
+            if not self._closing and not completed.cancelled() and completed.exception() is not None:
                 error = HostToolFatal("Native host callback transport failed unexpectedly", code="callback_failed",
                                       preacceptance=not self.binding.possibly_accepted)
                 error.__cause__ = completed.exception()
@@ -110,8 +110,11 @@ class PiHostToolServer:
         return response
 
     def _fatal(self, message: str, *, code: policy.HostToolFailureCode) -> HostToolFatal:
-        return self.binding.fail(HostToolFatal(message, code=code,
-                                               preacceptance=not self.binding.possibly_accepted))
+        return self._fail(HostToolFatal(message, code=code, preacceptance=not self.binding.possibly_accepted))
+
+    def _fail(self, error: HostToolFatal) -> HostToolFatal:
+        # A retired endpoint cannot revoke a newer attempt on the same binding.
+        return error if self._closing else self.binding.fail(error)
 
     async def _request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         admitting = complete = False
@@ -154,6 +157,8 @@ class PiHostToolServer:
                         code="invalid_frame")))
                     return
                 body = await reader.readexactly(int(length))
+                if self._closing:
+                    return
                 value = json.loads(body) if body else {}
                 if not isinstance(value, dict):
                     raise ValueError("expected object")
@@ -217,7 +222,7 @@ class PiHostToolServer:
                 failure = HostToolFatal("Invalid bounded native host request cannot be correlated safely",
                                         code="invalid_frame", preacceptance=not self.binding.possibly_accepted)
                 failure.__cause__ = exc
-                error = self.binding.fail(failure)
+                error = self._fail(failure)
                 await self._reply(writer, 400, self._error(error, submission_id))
             else:
                 await self._reply(writer, 400, {"error": "Invalid bounded host frame"})
@@ -227,7 +232,7 @@ class PiHostToolServer:
             failure = HostToolFatal("Native host callback failed unexpectedly", code="callback_failed",
                                     preacceptance=not self.binding.possibly_accepted)
             failure.__cause__ = exc
-            error = self.binding.fail(failure)
+            error = self._fail(failure)
             # Unexpected callback failure may have crossed the acceptance boundary;
             # keep its native result generic and prohibit replay via the binding.
             try:
@@ -235,8 +240,8 @@ class PiHostToolServer:
             except OSError:
                 pass
         finally:
-            if admitting and not complete:
-                self.binding.close_authority()
+            if admitting and not complete and not self._closing:
+                self.binding.close_attempt()
             self._writers.discard(writer)
             writer.close()
             try:
@@ -245,8 +250,9 @@ class PiHostToolServer:
                 pass
 
     async def close(self) -> None:
+        if not self._closing:
+            self.binding.close_attempt()
         self._closing = True
-        self.binding.close_authority()
         if self._server is not None:
             self._server.close()
             # Python's server wait_closed also waits for active clients. End

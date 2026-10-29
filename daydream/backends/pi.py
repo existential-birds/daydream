@@ -1231,7 +1231,7 @@ class PiBackend:
                 return
             cleaned_up = True
             if host_tools is not None:
-                host_tools.close_authority()
+                host_tools.close_attempt()
             try:
                 if transport is not None:
                     process_running_at_cleanup = transport.returncode is None
@@ -1741,7 +1741,7 @@ class PiBackend:
                     saw_native_settlement = True
                     if host_tools is not None:
                         host_tools.native_settled = True
-                        host_tools.close_authority()
+                        host_tools.close_attempt()
 
                 # Streaming updates only retain content-free progress here;
                 # full output events still come from message_end/tool_execution_end.

@@ -1,7 +1,7 @@
-"""Invocation-local synchronous admission for native Pi review submissions.
+"""Synchronous admission for one live native Pi review assignment.
 
 Pi owns ordinary reads and tool execution. This binding owns one domain callback,
-its original deadline and cumulative allowance, and the short-lived transport.
+its original deadline and cumulative allowance across short-lived transports.
 Acceptance runs on the event-loop thread without an await, so authority closure
 and state installation have an unambiguous order.
 """
@@ -144,7 +144,7 @@ def _submission_schema_error(arguments: Any, schema: dict[str, Any] | None) -> s
 
 
 class HostToolBinding:
-    """One review acceptance callback with attempt-local native correlation."""
+    """One review capability with cumulative limits and attempt-local correlation."""
 
     def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]],
                  allowed_tools: Set[str] | None = None) -> None:
@@ -155,6 +155,7 @@ class HostToolBinding:
         self.deadline = float(deadline)
         self.calls = self.rejections = 0
         self.authority_open = self.native_settled = self.cleanup_complete = False
+        self.closed = False
         self.fatal_error: HostToolFatal | None = None
         self._accept = accept
         self._allowed_tools = frozenset(allowed_tools) if allowed_tools is not None else None
@@ -188,6 +189,10 @@ class HostToolBinding:
     def allowed_tools(self) -> frozenset[str] | None:
         return self._allowed_tools
 
+    @property
+    def remaining_tool_calls(self) -> int | None:
+        return None if self._call_limit is None else max(0, self._call_limit - self.calls)
+
     def configure_schema(self, schema: dict[str, Any]) -> None:
         """Bind readiness and native argument validation to the model-facing schema."""
         if self._session_active or self.possibly_accepted:
@@ -212,7 +217,7 @@ class HostToolBinding:
         if clock.monotonic() >= self.deadline:
             raise self._fatal("Host-tool absolute deadline expired", code="deadline_expired",
                               preacceptance=preacceptance)
-        if not self.authority_open:
+        if self.closed or not self.authority_open:
             raise self._fatal("Host-tool authority is closed", code="authority_closed", preacceptance=preacceptance)
 
     def ensure_open(self) -> None:
@@ -346,6 +351,8 @@ class HostToolBinding:
 
         if self.fatal_error is not None:
             raise self.fatal_error
+        if self.closed:
+            raise self._fatal("Host-tool authority is closed", code="authority_closed")
         if self._session_active or self.possibly_accepted or self._cleanup_failed:
             raise ValueError("host-tool binding cannot start another native attempt")
         if clock.monotonic() >= self.deadline:
@@ -368,7 +375,7 @@ class HostToolBinding:
             self._check_open()
             yield server
         finally:
-            self.close_authority()
+            self.close_attempt()
             with anyio.CancelScope(shield=True):
                 try:
                     async with asyncio.timeout(_CLEANUP_TIMEOUT_S):
@@ -386,7 +393,7 @@ class HostToolBinding:
         try:
             return await asyncio.shield(task)
         except BaseException:
-            self.close_authority()
+            self.close_attempt()
             joined = False
             try:
                 with anyio.CancelScope(shield=True):
@@ -423,6 +430,11 @@ class HostToolBinding:
         self.cleanup_complete = False
 
     def close_authority(self) -> None:
-        """Synchronous revocation precedes every shutdown await."""
+        """Permanently revoke the capability before joining native resources."""
+        self.closed = True
+        self.close_attempt()
+
+    def close_attempt(self) -> None:
+        """Revoke this transport; a permitted live retry keeps cumulative policy."""
         self.authority_open = False
         self._pending.clear()
