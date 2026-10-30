@@ -602,8 +602,9 @@ async def run_deep(
     except GitTimeoutError as exc:
         print_error(console, "Git Timeout", f"git timed out under load: {exc}")
         return 1
-    except GitError:
-        diff = None
+    except GitError as exc:
+        print_error(console, "Git Error", str(exc))
+        return 1
     else:
         if config.findings_out is not None and work.captured_source is None:
             try:

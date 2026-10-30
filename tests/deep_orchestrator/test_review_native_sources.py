@@ -13,6 +13,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
+from daydream.deep import orchestrator
 from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
@@ -30,37 +31,59 @@ from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBa
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
 
 
-async def test_local_capture_instability_refuses_dispatch_without_changing_the_source(
+@pytest.mark.usefixtures('fake_gh')
+@pytest.mark.parametrize('failure', ['capture', 'accepted-source'])
+async def test_local_capture_failures_refuse_dispatch_without_changing_the_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failure: str,
 ) -> None:
-    """Capture retries alone miss a runner dispatching models after preparation fails."""
+    """Preparation and later setup failures need an actionable cause before model dispatch."""
     repo = tmp_path / 'unstable_local'
     seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': 'VALUE = 1\n'})
     review = ReviewRun(repo, tmp_path, monkeypatch)
     before = tracked_source_state(repo)
     index = (repo / '.git/index').read_bytes()
-    enumerate_untracked = queries._list_untracked_z
-    observed = []
+    observed: list[Path] = []
+    if failure == 'capture':
+        enumerate_untracked = queries._list_untracked_z
 
-    def concurrent_write(source: Path) -> list[str]:
-        paths = enumerate_untracked(source)
-        if source == repo:
-            observed.append(source)
-            path = source / 'api.py'
-            # Real writes with unchanged bytes still invalidate observations
-            # accepted before this enumeration/materialization boundary.
-            path.write_bytes(path.read_bytes())
-        return paths
+        def concurrent_write(source: Path) -> list[str]:
+            paths = enumerate_untracked(source)
+            if source == repo:
+                observed.append(source)
+                path = source / 'api.py'
+                # Real writes with unchanged bytes still invalidate observations
+                # accepted before this enumeration/materialization boundary.
+                path.write_bytes(path.read_bytes())
+            return paths
 
-    monkeypatch.setattr(queries, '_list_untracked_z', concurrent_write)
+        monkeypatch.setattr(queries, '_list_untracked_z', concurrent_write)
+    else:
+        setup = orchestrator.run_deep
+
+        async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
+            assert work.captured_source is not None and work.repo != repo
+            observed.append(work.repo)
+            (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
+            return await setup(config, work, *args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
     assert await review.run(findings_out=None) == 1
     from tests.harness.console import collapse_panel_text
 
-    assert 'stop concurrent writers and rerun the review' in collapse_panel_text(capsys)
-    assert len(observed) > 1 and review.backend.calls == []
+    message = ('stop concurrent writers and rerun the review' if failure == 'capture'
+               else 'captured native source integrity failed')
+    assert message in collapse_panel_text(capsys)
+    assert review.backend.calls == []
+    if failure == 'capture':
+        assert len(observed) > 1
+    else:
+        assert len(observed) == 1 and not observed[0].exists()
     assert (repo / '.git/index').read_bytes() == index
     assert tracked_source_state(repo) == before
     assert not review.output.exists()
+    assert not (repo / '.review-output.md').exists()
+    assert not (repo / '.daydream/deep/review-coverage.json').exists()
 
 
 @pytest.mark.parametrize('cancelled', [False, True], ids=['final-working', 'net-cancellation'])
