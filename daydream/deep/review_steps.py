@@ -154,8 +154,8 @@ def _log_reuse_summary(ctx: FlowContext) -> None:
     reuse = DeepState(ctx.data).reuse_cache
     if reuse is None:
         return
-    if not review_cache_enabled(ctx.config):
-        logger.info("Review reuse: disabled (--no-review-cache)")
+    if not reuse.enabled or not review_cache_enabled(ctx.config):
+        logger.info("Review reuse: disabled")
         return
     try:
         logger.info(_reuse_summary_line(reuse.provenance()))
@@ -214,7 +214,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
         reuse.record(
             "exploration",
             outcome="disabled",
-            reason="review cache disabled for this run (--no-review-cache)",
+            reason=("review cache disabled for captured source" if ctx.work.captured_source is not None
+                    else "review cache disabled by configuration"),
         )
 
     exploration_dir: Path | None = None

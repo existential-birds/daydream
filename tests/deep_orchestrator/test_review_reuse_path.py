@@ -576,13 +576,20 @@ async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
 
 
 
+@pytest.mark.parametrize("captured", [False, True], ids=["configuration", "captured-source"])
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    caplog: pytest.LogCaptureFixture, captured: bool, fake_gh: FakeGh,
 ) -> None:
-    """--no-review-cache disables store reads/writes and pre-scan reuse, recording the bypass."""
+    """Configuration and capture disable reuse and report the actual bypass reason.
+
+    Capture tests protect frozen review bytes but miss a cache-disabled run
+    reporting an active cache and attributing the bypass to an unpassed flag.
+    """
     # The real pre-scan must be live for the bypass to be observable: the warm
     # run leaves a cache-key on disk, so a disabled run that still consulted the
     # pre-scan cache would emit no exploration specialist calls.
+    fake_gh.set_response("pr-list", value=[])
     stub = install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
     profile = independent_exploration_profile()
     assert await run(make_config(multi_stack_target, review_profile=profile)) == 0
@@ -590,16 +597,24 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
     entries_before = sorted(p.name for p in (store / "entries").iterdir())
     assert entries_before, "the warm run must have populated the store"
     stub.calls.clear()
-    assert await run(make_config(multi_stack_target, review_profile=profile, review_cache_enabled=False)) == 0
+    caplog.clear()
+    options = {"output_mode": "review"} if captured else {"review_cache_enabled": False}
+    with caplog.at_level(logging.INFO, logger="daydream.deep.review_steps"):
+        assert await run(make_config(multi_stack_target, review_profile=profile, **options)) == 0
     assert _count_review_prompts(stub.calls) > 0, "a disabled run must do the work"
     assert _count_unit_prompts(stub.calls, "dependency-tracer") > 0, (
-        "--no-review-cache must bypass the exploration pre-scan cache and recompute it"
+        "disabled reuse must bypass the exploration pre-scan cache and recompute it"
     )
     assert sorted(p.name for p in (store / "entries").iterdir()) == entries_before
     latest = _latest_provenance(multi_stack_target / ".daydream" / "deep")
     units = cast(dict[str, dict[str, object]], latest["units"])
     assert units["exploration"]["outcome"] == "disabled"
     assert any(v["outcome"] == "disabled" for v in units.values())
+    assert units["exploration"]["reason"] == (
+        "review cache disabled for captured source" if captured else "review cache disabled by configuration"
+    )
+    summary = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Review reuse:")]
+    assert summary == ["Review reuse: disabled"]
 
 
 _ATTRIBUTION_DAMAGE = ["attribution-target", "attribution-path", "attribution-range", "attribution-part",
