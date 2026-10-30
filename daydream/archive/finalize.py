@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -181,21 +182,23 @@ def finalize_archive_run(
             run_dir=assembly_dir,
         )
         target_dir = artifacts.root
-        try:
-            git_ctx = (
-                code_workspace.run(partial(capture_git_context, code_workspace.path))
-                if code_workspace is not None
-                else capture_git_context(work.repo if work is not None else target_dir)
-            )
-        except ArtifactSourceUnavailableError:
-            git_ctx = GitContext(
-                branch=work.head_branch if work is not None else None,
-                head_sha=work.head_sha if work is not None else None,
-            )
-        if work is not None:
-            git_ctx.base_branch = work.base_branch
-            if git_ctx.base_sha is None:
-                git_ctx.base_sha = work.base_sha
+        if work is not None and work.review_git_context is not None:
+            git_ctx = work.review_git_context
+        else:
+            try:
+                git_ctx = (
+                    code_workspace.run(partial(capture_git_context, code_workspace.path))
+                    if code_workspace is not None
+                    else capture_git_context(work.repo if work is not None else target_dir)
+                )
+            except ArtifactSourceUnavailableError:
+                git_ctx = GitContext(
+                    branch=work.head_branch if work is not None else None,
+                    head_sha=work.head_sha if work is not None else None,
+                )
+            if work is not None:
+                git_ctx = replace(git_ctx, base_branch=work.base_branch,
+                                  base_sha=work.base_sha if git_ctx.base_sha is None else git_ctx.base_sha)
         frozen = snapshot_trajectories(write_snapshot)
         evaluation: dict[str, Any] | None = None
         if config.run_eval and recorder_provenance.run_flow is not DaydreamRunFlow.DIAGRAM:

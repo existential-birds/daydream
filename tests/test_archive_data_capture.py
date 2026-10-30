@@ -9,7 +9,7 @@ import json
 import re
 import sqlite3
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import closing
 from dataclasses import replace
 from io import StringIO
@@ -857,8 +857,9 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
 class _JoinedArtifactEvidenceBackend(StubBackend):
     """Exercise sanctioned artifact reads at the external backend boundary."""
 
-    def __init__(self, target: Path) -> None:
+    def __init__(self, target: Path, *, after_capture: Callable[[], None] | None = None) -> None:
         super().__init__(target)
+        self.after_capture = after_capture
         self.private_intent_paths: list[Path] = []
         self.private_intent_payloads: list[bytes] = []
         self.python_sanctioned_entries: list[tuple[tuple[str, Path], ...]] = []
@@ -866,6 +867,9 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
         self.python_entry_visibility: list[tuple[bool, bool]] = []
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        if self.after_capture is not None:
+            after_capture, self.after_capture = self.after_capture, None
+            after_capture()
         lowered = prompt.lower()
         if "understand the intent of these changes" in lowered:
             # Exercise exact private-pointer transport with a complete artifact
@@ -928,12 +932,42 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
             yield event
 
 
+@pytest.mark.parametrize("committed", [False, True], ids=["local", "committed"])
 async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, artifact_runtime_root: Path,
+    fake_gh: FakeGh, tmp_path: Path, committed: bool,
 ) -> None:
+    """Freeze archive identity with the accepted subject, independently of live Git metadata."""
+    target = multi_stack_target
+    base = git(target, "rev-parse", "main")
+    original_head = git(target, "rev-parse", "HEAD")
+    if committed:
+        git(target, "checkout", "-b", "reviewed-pr")
+        (target / "api.py").write_text("def hello():\n    return 'pinned PR'\n")
+        git(target, "add", "api.py")
+        git(target, "commit", "-m", "fixture: independent PR head")
+    reviewed_head = git(target, "rev-parse", "HEAD")
+    git(target, "checkout", "feature")
+    git(target, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    (target / "api.py").write_text("def hello():\n    return 'local working contents'\n")
+    (target / "local-only.py").write_text("LOCAL = True\n")
+    original_index = git(target, "ls-files", "--stage")
+    fake_gh.set_response("repo-view", value="acme/widgets")
+    fake_gh.serve_pr_view({
+        "number": 7, "state": "OPEN", "headRefName": "reviewed-pr", "baseRefName": "main",
+        "headRefOid": reviewed_head, "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": "",
+    })
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/7", {"head": {"sha": reviewed_head}, "base": {"sha": base}})
+
+    def change_original_metadata() -> None:
+        git(target, "remote", "set-url", "origin", "https://github.com/acme/later.git")
+        git(target, "branch", "-m", "later-feature")
+        git(target, "branch", "-m", "main", "later-main")
+
     silence(monkeypatch)
     force_interactive(monkeypatch)
-    backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
+    backend = _JoinedArtifactEvidenceBackend(target, after_capture=change_original_metadata)
     backend.parse_by_stack = {"python": {"severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 1,
             "description": "Python private-artifact rationale control",
         },
@@ -949,6 +983,8 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     exit_code = await run(RunConfig(
             target=str(multi_stack_target), output_mode="review", assume="no", non_interactive=True, cleanup=False,
             archive=True, run_eval=True, shallow_fanout_threshold=0,
+            pr_number=7 if committed else None,
+            findings_out=str(tmp_path / "findings.json") if committed else None,
         )
     )
     assert exit_code == 0
@@ -981,6 +1017,37 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     assert manifest["session_id"] == private_relative.parts[2]
     assert evaluation["daydream_dir"] == str(multi_stack_target / ".daydream")
+    changed_files = ["App.tsx", "README.md", "api.py", *([] if committed else ["local-only.py"])]
+    branch = "reviewed-pr" if committed else "feature"
+    assert manifest["git"] == {
+        "source_path": str(target), "remote_url": "https://github.com/acme/widgets", "repo_slug": "acme/widgets",
+        "branch": branch, "base_branch": "main", "head_sha": reviewed_head,
+    }
+    assert manifest["code_context"] == {
+        "head_sha": reviewed_head, "base_branch": "main", "branch": branch, "base_sha": base,
+        "changed_files": changed_files,
+    }
+    with closing(sqlite3.connect(archive_dir / "index.db")) as connection:
+        assert connection.execute(
+            "SELECT remote_url, repo_slug, branch, base_branch, head_sha, base_sha, changed_files FROM runs"
+        ).fetchall() == [(
+            "https://github.com/acme/widgets", "acme/widgets", branch, "main", reviewed_head, base,
+            json.dumps(changed_files),
+        )]
+    coverage = json.loads((run_dir / "deep/review-coverage.json").read_text())
+    revision = coverage["analyzed_revision"]
+    assert (revision["head_sha"], revision["merge_base_sha"]) == (reviewed_head, base)
+    assert bool(revision.get("source_id")) is not committed
+    assert coverage["run_id"] == manifest["session_id"]
+    diff = (run_dir / "diff.patch").read_text()
+    assert ("local-only.py" in diff) is not committed
+    assert ("local working contents" in diff) is not committed
+    assert ("pinned PR" in diff) is committed
+    assert git(target, "rev-parse", "HEAD") == original_head
+    assert git(target, "ls-files", "--stage") == original_index
+    assert git(target, "branch", "--show-current") == "later-feature"
+    assert git(target, "rev-parse", "later-main") == base
+    assert git(target, "remote", "get-url", "origin") == "https://github.com/acme/later.git"
 
     python_trajectory = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
     python_completed_ids = {result["source_call_id"]

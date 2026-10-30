@@ -1,6 +1,6 @@
 """Capture target-repository identity with independent, five-second Git queries."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from daydream import git_ops
@@ -8,9 +8,9 @@ from daydream.archive.git_safe import normalize_remote_url
 from daydream.git_ops import BranchNotFoundError, GitError
 
 
-@dataclass
+@dataclass(frozen=True)
 class GitContext:
-    """Credential-free repository identity at archive time.
+    """Credential-free repository identity retained for archiving.
 
     Unresolved merge bases are None; changed_files is empty when the merge base
     or diff is unavailable.
@@ -22,7 +22,7 @@ class GitContext:
     base_branch: str | None = None
     head_sha: str | None = None
     base_sha: str | None = None
-    changed_files: list[str] = field(default_factory=list)
+    changed_files: tuple[str, ...] = ()
 
 
 def capture_git_context(target_dir: Path) -> GitContext:
@@ -40,35 +40,33 @@ def capture_git_context(target_dir: Path) -> GitContext:
         # credential-stripped. Identity alone is None for hosts outside the
         # allowlist, but the credential-stripped canonical URL is still kept.
         if canonical_url is not None:
-            ctx.remote_url = canonical_url
-            if repo_slug is not None:
-                ctx.repo_slug = repo_slug
+            ctx = replace(ctx, remote_url=canonical_url, repo_slug=repo_slug)
 
     try:
-        ctx.branch = git_ops.current_branch(target_dir)
+        ctx = replace(ctx, branch=git_ops.current_branch(target_dir))
     except GitError:
-        ctx.branch = None
+        pass
 
     try:
-        ctx.head_sha = git_ops.head_sha(target_dir)
+        ctx = replace(ctx, head_sha=git_ops.head_sha(target_dir))
     except GitError:
-        ctx.head_sha = None
+        pass
 
     try:
-        ctx.base_branch = git_ops.default_branch(target_dir)
+        ctx = replace(ctx, base_branch=git_ops.default_branch(target_dir))
     except (BranchNotFoundError, GitError):
-        ctx.base_branch = None
+        pass
 
     if ctx.base_branch and ctx.head_sha:
         try:
-            ctx.base_sha = git_ops.merge_base(target_dir, ctx.base_branch, ctx.head_sha)
+            ctx = replace(ctx, base_sha=git_ops.merge_base(target_dir, ctx.base_branch, ctx.head_sha))
         except GitError:
-            ctx.base_sha = None
+            pass
 
     if ctx.base_sha and ctx.head_sha:
         try:
-            ctx.changed_files = git_ops.diff_name_only(target_dir, ctx.base_sha, ctx.head_sha)
+            ctx = replace(ctx, changed_files=tuple(git_ops.diff_name_only(target_dir, ctx.base_sha, ctx.head_sha)))
         except GitError:
-            ctx.changed_files = []
+            pass
 
     return ctx

@@ -30,6 +30,7 @@ from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
 
 if TYPE_CHECKING:
+    from daydream.archive.git_context import GitContext
     from daydream.git_ops.captured_source import CapturedSource
     from daydream.pr_review import PRInfo
 
@@ -80,6 +81,7 @@ class WorkContext:
     ``base_sha`` is the merge-base, ``head_branch`` is None for detached HEAD,
     and both SHA anchors are None only for explicitly admitted unborn Improve.
     ``run_id`` identifies ephemeral paths and intent files.
+    ``review_git_context`` retains reviewed provenance independently of capture storage.
     """
 
     repo: Path
@@ -93,6 +95,7 @@ class WorkContext:
     ownership: WorkspaceOwnership | None = field(default=None, kw_only=True, repr=False, compare=False)
     captured_source: CapturedSource | None = field(default=None, kw_only=True, repr=False, compare=False)
     review_pr: PRInfo | None = field(default=None, kw_only=True, repr=False, compare=False)
+    review_git_context: GitContext | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.base_sha is None) != (self.head_sha is None):

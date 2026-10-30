@@ -655,6 +655,7 @@ async def _capture_review_workspace(
     github_execution: github_app.GitHubExecutionInput,
 ) -> AsyncIterator[WorkContext]:
     """Hold accepted review bytes through execution and artifact finalization."""
+    from daydream.archive.git_context import capture_git_context
     from daydream.deep.orchestrator import _resolve_mode
     from daydream.git_ops.captured_source import capture_source
 
@@ -693,13 +694,23 @@ async def _capture_review_workspace(
         base = git_ops.resolve_diff_merge_base(work.repo, work.base_branch, head)
     if committed and git_ops.status_porcelain(work.source).strip():
         print_info(console, "Committed PR review excludes local tracked and untracked edits.")
+    capture_context = partial(capture_git_context, work.source)
+    git_context = (
+        work.ownership.source_code.run(capture_context) if work.ownership is not None else capture_context()
+    )
     destination = operational_worktree_root(owner) / f"review-capture-{uuid.uuid4().hex}"
     captured = capture_source(work.repo, destination, base_sha=base,
                               head_sha=head, local=not committed, exclude=config.ignore_paths)
     try:
         captured.validate()
+        review_git_context = replace(
+            git_context, head_sha=head, base_sha=base, changed_files=captured.files,
+            branch=pinned_pr.head_ref if pinned_pr is not None else config.branch or work.head_branch,
+            base_branch=config.base or (pinned_pr.base_ref if pinned_pr is not None else work.base_branch),
+        )
         yield replace(work, repo=captured.root, captured_source=captured, review_pr=pinned_pr,
-                      head_sha=head, base_sha=base, base_branch=base, is_ephemeral=True)
+                      head_sha=head, base_sha=base, base_branch=base, is_ephemeral=True,
+                      review_git_context=review_git_context)
     finally:
         try:
             captured.remove()
