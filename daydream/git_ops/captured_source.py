@@ -115,7 +115,7 @@ def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], di
         source, ["ls-files", "--stage", "-t", "-z"], capture_bytes=True, retries=0,
         error_context="local captured source inventory unavailable",
     ).stdout
-    tracked = {name for _, _, name in head_entries}
+    tracked: set[str] = set()
     gitlinks = {name: oid for mode, oid, name in head_entries if mode == "160000"}
     for entry in indexed.split(b"\0"):
         if not entry:

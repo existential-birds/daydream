@@ -423,3 +423,48 @@ def test_capture_allows_native_index_stat_refresh(source: tuple[Path, str, str],
     assert (repo / ".git/index").read_bytes() == original_index
     assert git(repo, "show-ref") == original_refs
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
+
+
+@pytest.mark.parametrize("state", ["removed-ignored", "removed-visible", "tracked-ignored"])
+def test_capture_current_population_excludes_only_untracked_ignored_bytes(
+    source: tuple[Path, str, str], tmp_path: Path, state: str,
+) -> None:
+    """Index removal revokes ignored after-content without losing old-side evidence or eligible working files."""
+    repo, base, head = source
+    if state != "removed-visible":
+        (repo / ".gitignore").write_text("helper.py\n")
+    before = capture_source(repo, tmp_path / "before", base_sha=base, head_sha=head, local=True)
+    if state != "tracked-ignored":
+        git(repo, "rm", "--cached", "--", "helper.py")
+    original_index = (repo / ".git/index").read_bytes()
+    original_refs = git(repo, "show-ref")
+    unchanged = capture_source(repo, tmp_path / "unchanged", base_sha=base, head_sha=head, local=True)
+    if state == "removed-ignored":
+        assert unchanged.source_id != before.source_id
+        assert "helper.py" in unchanged.files
+        assert "diff --git a/helper.py b/helper.py\ndeleted file mode 100644\n" in unchanged.diff
+        assert unchanged.read("old", "helper.py")[1] == b"helper = 0\n"
+        with pytest.raises(PathAbsentError):
+            unchanged.read("new", "helper.py")
+        assert not (unchanged.root / "helper.py").exists()
+    else:
+        assert unchanged.source_id == before.source_id
+        assert unchanged.diff == before.diff
+        assert unchanged.read("new", "helper.py")[1] == b"helper = 0\n"
+    (repo / "helper.py").write_text("helper = 4\n")
+    dirty = capture_source(repo, tmp_path / "dirty", base_sha=base, head_sha=head, local=True)
+    if state == "removed-ignored":
+        assert dirty.source_id == unchanged.source_id
+        assert dirty.diff == unchanged.diff
+        with pytest.raises(PathAbsentError):
+            dirty.read("new", "helper.py")
+        assert not (dirty.root / "helper.py").exists()
+    else:
+        assert dirty.source_id != unchanged.source_id
+        assert "helper.py" in dirty.files
+        assert dirty.read("new", "helper.py")[1] == b"helper = 4\n"
+        assert (dirty.root / "helper.py").read_bytes() == b"helper = 4\n"
+    assert (repo / ".git/index").read_bytes() == original_index
+    assert git(repo, "show-ref") == original_refs
+    assert git(repo, "rev-parse", "HEAD") == head
+    assert (repo / "helper.py").read_bytes() == b"helper = 4\n"
