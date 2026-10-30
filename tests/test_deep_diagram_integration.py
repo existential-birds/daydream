@@ -96,17 +96,7 @@ class _CapturedPost:
 
     def serve_target(self, target: Path) -> None:
         """Pin lookup and publication to the fixture repository's real commits."""
-        head = git(target, "rev-parse", "HEAD")
-        base = git(target, "rev-parse", "main")
-        self.gh.serve_pr_view({
-            "number": 123, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
-            "headRefOid": head, "url": "https://github.com/acme/widgets/pull/123",
-            "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-            "headRepositoryOwner": {"login": "acme"},
-        })
-        self.gh.set_response("GET", "repos/acme/widgets/pulls/123", {
-            "head": {"sha": head}, "base": {"sha": base},
-        })
+        self.gh.serve_open_pr(target, number=123)
 
     @property
     def payloads(self) -> list[dict[str, Any]]:

@@ -443,18 +443,19 @@ class FakeGh:
         """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
         self.set_response("pr-view", value=response)
 
-    def serve_open_pr(self, target: Path) -> None:
+    def serve_open_pr(self, target: Path, *, number: int = 7) -> None:
         """Serve an open acme/widgets PR with the fixture's real head and base tip."""
         from tests.harness.git_helpers import git
 
         head = git(target, "rev-parse", "HEAD")
-        self.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
+        self.serve_pr_view({"number": number, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
                 "headRefOid": head,
                 "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-                "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": "",
+                "headRepositoryOwner": {"login": "acme"},
+                "url": f"https://github.com/acme/widgets/pull/{number}", "body": "",
             }
         )
-        self.set_response("GET", "repos/acme/widgets/pulls/7", {
+        self.set_response("GET", f"repos/acme/widgets/pulls/{number}", {
             "head": {"sha": head}, "base": {"sha": git(target, "rev-parse", "main")},
         })
 

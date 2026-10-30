@@ -342,18 +342,22 @@ def test_cli_requested_branch_ignores_current_checkout_pr(
     }
     current_pr = {**requested_pr, "number": 7, "headRefOid": current_head, "headRefName": "feature",
                   "url": "https://github.com/acme/widgets/pull/7"}
-    transport.gh.set_response("pr-list", value=[requested_pr])
     transport.gh.set_response("GET", "repos/acme/widgets/pulls/73", {
         "head": {"sha": requested_head}, "base": {"sha": base},
     })
     request = subprocess.run
 
-    def route_pr_view(args: Any, *positional: Any, **kwargs: Any) -> Any:
+    def route_pr_lookup(args: Any, *positional: Any, **kwargs: Any) -> Any:
         if isinstance(args, (list, tuple)) and args[:3] == ["gh", "pr", "view"]:
             transport.gh.serve_pr_view(requested_pr if args[3] == "73" else current_pr)
+        elif isinstance(args, (list, tuple)) and args[:3] == ["gh", "pr", "list"]:
+            branch = args[args.index("--head") + 1]
+            transport.gh.set_response("pr-list", value=[
+                pr for pr in (requested_pr, current_pr) if pr["headRefName"] == branch
+            ])
         return request(args, *positional, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", route_pr_view)
+    monkeypatch.setattr(subprocess, "run", route_pr_lookup)
     model_heads: list[str] = []
 
     def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
