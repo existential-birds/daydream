@@ -29,10 +29,17 @@ from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, R
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.review_result import record_pool, review_coverage
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_orchestrator import _merge_item, _run_deep
+
+
+@pytest.fixture(autouse=True)
+def _no_open_pr(fake_gh: FakeGh) -> None:
+    fake_gh.set_response("pr-list", value=[])
+
 
 # Reconstruct Pi's prose-without-JSON response shape from run
 # c48ca322-eb7d-4634-9fc3-fddbf349bacd. Original prose was not archived;

@@ -28,9 +28,15 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from tests.harness import diagram_repos as dr
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git, seed_feature_branch
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, review_stage_state
+
+
+@pytest.fixture(autouse=True)
+def _no_open_pr(fake_gh: FakeGh) -> None:
+    fake_gh.set_response("pr-list", value=[])
 
 
 class DiagramBarrierBackend(StubBackend):
