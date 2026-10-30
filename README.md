@@ -39,6 +39,9 @@ daydream --review --backend codex --base main /path/to/project
 Deep multi-stack review is the default. Use `--shallow` for a single pass,
 `--help` for common options, and `--help-all` for configuration and advanced flags.
 Reports land in `.review-output.md`; trajectories in `.daydream/runs/<id>/`.
+Report-only local review uses the captured net base-to-final-working change,
+including nonignored untracked files. PR comments exclude local edits and use a
+[pinned committed subject](docs/runtime.md#captured-local-source).
 Wait for finalization before reading artifacts. Incomplete reviews retain findings
 and are labeled incomplete. `daydream setup` installs a self-hosted GitHub bot.
 

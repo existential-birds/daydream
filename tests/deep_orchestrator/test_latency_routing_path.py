@@ -336,7 +336,8 @@ async def test_precision_overlap_reuses_successful_shard_after_real_sibling_fail
     monkeypatch.setattr(backend, "execute", provider)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     config = empty_review_config(multi_stack_target, tmp_path / "partial-overlap.json", precision_mode=True,
-        latency_profile="balanced", review_profile=independent_alternatives_profile(), review_cache_enabled=True)
+        output_mode="loop", assume="no", latency_profile="balanced",
+        review_profile=independent_alternatives_profile(), review_cache_enabled=True)
     async def drive() -> None:
         assert await run(config) == 0
 

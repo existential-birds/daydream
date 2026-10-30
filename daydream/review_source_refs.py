@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.git_ops.models import GitError, PathAbsentError
 from daydream.git_ops.source import FrozenSourceRejected, frozen_source
@@ -16,6 +16,9 @@ from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_text
 from daydream.repository_paths import git_observed_path_is_confined
+
+if TYPE_CHECKING:
+    from daydream.git_ops.captured_source import CapturedSource
 
 SOURCE_REFS_MAX_BYTES = 8192
 _SUPPORTING_SOURCE_MAX_BYTES = 64 * 1024
@@ -58,6 +61,23 @@ def _sha(body: str | bytes) -> str:
     return hashlib.sha256(body.encode('utf-8') if isinstance(body, str) else body).hexdigest()
 
 
+def source_revision(revision: Mapping[str, Any], side: str) -> str:
+    """Keep actual HEAD provenance separate from captured working-content identity."""
+    identity: str = revision['merge_base_sha'] if side == 'old' else revision.get('source_id', revision['head_sha'])
+    return identity
+
+
+def _source_contents(root: Path, revision: Mapping[str, Any], side: str, path: str,
+                     captured_source: CapturedSource | None) -> tuple[str, bytes]:
+    if captured_source is not None:
+        if captured_source.revision_for(side) != source_revision(revision, side):
+            raise GitError('captured source differs from analyzed revision')
+        return captured_source.read(side, path)
+    if 'source_id' in revision:
+        raise GitError('captured working source is unavailable; restart review')
+    return frozen_source(root, source_revision(revision, side), path)
+
+
 def source_id(reference: dict[str, Any]) -> str:
     """Name one exact host-assigned identity independently of the model's basis claim."""
     identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
@@ -81,6 +101,7 @@ def canonicalize_source_selectors(
     selectors: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
     source_root: Path, require_assigned: bool = True,
     source_aliases: Mapping[str, str] | None = None,
+    captured_source: CapturedSource | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve a complete selection atomically against frozen assignment/Git identities.
 
@@ -139,9 +160,9 @@ def canonicalize_source_selectors(
                     raise HostToolRejected(
                         f'{field}: path must remain inside the repository; choose a confined repository path '
                         'or remove this optional supporting selector.')
-                pinned_revision = revision['merge_base_sha' if side == 'old' else 'head_sha']
+                pinned_revision = source_revision(revision, side)
                 try:
-                    _, contents = frozen_source(source_root, pinned_revision, path)
+                    _, contents = _source_contents(source_root, revision, side, path, captured_source)
                 except (FrozenSourceRejected, PathAbsentError) as exc:
                     raise HostToolRejected(
                         f'{field}: no available regular blob at the pinned revision; choose a regular file '
@@ -176,7 +197,8 @@ def canonicalize_source_selectors(
         # Canonical evidence has its own retained bounds and contract, independent
         # of the smaller model-facing selector schema.
         if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,
-                                    require_assigned=require_assigned, raise_unavailable=True):
+                                    require_assigned=require_assigned, raise_unavailable=True,
+                                    captured_source=captured_source):
             raise HostToolRejected(
                 f'evidence_refs: canonical references must fit four items and {SOURCE_REFS_MAX_BYTES} UTF-8 '
                 'bytes in total; remove optional supporting selectors or use fewer assigned selectors.')
@@ -235,7 +257,7 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
     identity = {'artifact_sha256': artifact_sha256, 'part_sha256': _sha(diff),
                 'basis': 'supplied_diff', 'role': 'assigned'}
     paths = {'old': old_path, 'new': new_path}
-    revisions = {'old': revision['merge_base_sha'], 'new': revision['head_sha']}
+    revisions = {side: source_revision(revision, side) for side in ('old', 'new')}
     refs: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     if assignment['kind'] == 'continuation' and body is not None:
@@ -280,7 +302,8 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
             offset = assignment['fragment_offset']
             source = body.encode('utf-8') if isinstance(body, str) else body
             metadata = source[offset:offset + assignment['fragment_bytes']]
-        refs.append({**identity, 'revision': revision['head_sha'], 'path': assignment['file'], 'side': 'diff',
+        refs.append({**identity, 'revision': source_revision(revision, 'diff'),
+                     'path': assignment['file'], 'side': 'diff',
                      'source_range': None, 'fragment': {'offset': offset,
                      'bytes': len(metadata), 'sha256': _sha(metadata)}})
     return {'source_refs': refs, 'source_options': source_options(refs), 'source_summary': summaries,
@@ -289,7 +312,7 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
 
 def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
                          source_root: Path | None = None, require_assigned: bool = True,
-                         raise_unavailable: bool = False) -> bool:
+                         raise_unavailable: bool = False, captured_source: CapturedSource | None = None) -> bool:
     """Validate all references before admission; labels assert basis, not execution."""
     if not validates_schema(refs, SOURCE_REFS_SCHEMA):
         return False
@@ -327,11 +350,11 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
                 or ref['side'] not in {'old', 'new'} or not isinstance(ref['source_range'], dict)
                 or not git_observed_path_is_confined(source_root, ref['path'])):
             return False
-        expected_revision = revision['merge_base_sha' if ref['side'] == 'old' else 'head_sha']
+        expected_revision = source_revision(revision, ref['side'])
         if ref['revision'] != expected_revision:
             return False
         try:
-            _, contents = frozen_source(source_root, expected_revision, ref['path'])
+            _, contents = _source_contents(source_root, revision, ref['side'], ref['path'], captured_source)
         except (GitError, OSError, UnicodeError, ValueError) as exc:
             if raise_unavailable:
                 raise HostToolFatal(

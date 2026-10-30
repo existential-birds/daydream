@@ -13,7 +13,7 @@ import json
 import secrets
 from typing import Any
 
-from daydream import host_tools as policy
+from daydream import clock, host_tools as policy
 from daydream.host_tools import HostToolBinding, HostToolFatal, HostToolRejected
 
 
@@ -124,7 +124,7 @@ class PiHostToolServer:
         submitting = False
         submission_id: Any = None
         try:
-            async with asyncio.timeout(policy._CALLBACK_TIMEOUT_S):
+            async with asyncio.timeout(policy._CALLBACK_TIMEOUT_S) as request_timeout:
                 try:
                     head = await reader.readuntil(b"\r\n\r\n")
                 except asyncio.LimitOverrunError:
@@ -182,7 +182,11 @@ class PiHostToolServer:
                     raise
                 if method == "GET" and path == "/status":
                     self.binding.ensure_open()
-                    await self._reply(writer, 200, {"ready": self.ready})
+                    # Node timers use signed 32-bit milliseconds. This is a
+                    # projection of the original deadline, never a new allowance.
+                    remaining_ms = min(2_147_483_647,
+                                       max(0, int((self.binding.deadline - clock.monotonic()) * 1000)))
+                    await self._reply(writer, 200, {"ready": self.ready, "remaining_ms": remaining_ms})
                     return
                 if method != "POST":
                     await self._reply(writer, 405, self._error(self._fatal(
@@ -207,6 +211,11 @@ class PiHostToolServer:
                     await self._reply(writer, 200, {"id": submission_id, "allowed": True})
                     return
                 if path == "/submit":
+                    if not self.binding.accepted:
+                        # Frame/control I/O stays short; synchronous source
+                        # validation and admission use the assignment's deadline.
+                        request_timeout.reschedule(asyncio.get_running_loop().time()
+                            + max(0.0, self.binding.deadline - clock.monotonic()))
                     result = self.binding.submit(value.get("id"), value.get("arguments"))
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "accepted": True, "result": result})

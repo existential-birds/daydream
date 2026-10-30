@@ -154,8 +154,8 @@ def _log_reuse_summary(ctx: FlowContext) -> None:
     reuse = DeepState(ctx.data).reuse_cache
     if reuse is None:
         return
-    if not review_cache_enabled(ctx.config):
-        logger.info("Review reuse: disabled (--no-review-cache)")
+    if not reuse.enabled or not review_cache_enabled(ctx.config):
+        logger.info("Review reuse: disabled")
         return
     try:
         logger.info(_reuse_summary_line(reuse.provenance()))
@@ -203,7 +203,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
     # unit in the run, so it is recorded as run provenance (MH5/MH16) even when
     # the review cache itself is disabled.
     reuse = deep_state.reuse_cache
-    reuse_enabled = reuse is not None and review_cache_enabled(ctx.config)
+    reuse_enabled = reuse is not None and reuse.enabled and review_cache_enabled(ctx.config)
 
     def _record_exploration(outcome: str, reason: str) -> None:
         if reuse is None or not reuse_enabled:
@@ -214,7 +214,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
         reuse.record(
             "exploration",
             outcome="disabled",
-            reason="review cache disabled for this run (--no-review-cache)",
+            reason=("review cache disabled for captured source" if ctx.work.captured_source is not None
+                    else "review cache disabled by configuration"),
         )
 
     exploration_dir: Path | None = None
@@ -329,7 +330,8 @@ async def _step_intent(ctx: FlowContext) -> None:
         elif config.pr_number is not None:
             try:
                 pr_view = git_ops.gh_pr_view(
-                    target_dir, config.pr_number, auth=ctx.github_execution.auth
+                    work.source if work.captured_source is not None else target_dir,
+                    config.pr_number, auth=ctx.github_execution.auth
                 )
             except git_ops.GitError as exc:
                 print_warning(

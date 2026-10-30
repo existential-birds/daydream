@@ -6,7 +6,9 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 
 ## Terminal review findings contract
 
-Ordinary `--findings-out` uses schema version 2 with `terminal_result` version 1.
+Ordinary `--findings-out` uses schema version 2 with committed `terminal_result` version 1.
+Local captured review coverage uses terminal version 2 and a distinct `source_id`;
+commit-bound findings envelopes reject that identity instead of relabeling it.
 Immutable PR exports use schema 3, retaining original PR provenance separately
 from the materialized analyzed revision (see [immutable PR inputs](#immutable-pr-inputs)).
 Diagram artifacts carry no review coverage; unsupported schemas are rejected.
@@ -44,8 +46,9 @@ same published UTF-8 field accounting; trimming preserves every retained decisio
 Producer and poster versions must support this policy together. Larger plans can
 still exhaust these fixed bounds and retain truthful incomplete coverage.
 
-Ordinary commit-bound capture requires a clean checkout and an initially matching
-live publication target. Later PR advancement does not invalidate captured analysis
+Ordinary commit-bound capture pins repository, PR, comparison and head independently
+and visibly excludes local tracked/untracked edits. Dirtiness does not block it.
+Later PR advancement does not invalidate captured analysis
 or its export. Immutable input performs no initial live lookup. Publication always
 requires an independently trusted target. Use a unique, initially
 absent output path per invocation; replacement requires a known expected run ID
@@ -54,9 +57,10 @@ because a failed replacement may preserve an older complete artifact.
 ## Committed-review request/result
 
 `daydream.committed_review.run_committed_review(CommittedReviewRequest(source, base))`
-reviews a captured committed diff through native Pi. It excludes working-tree edits,
-external diff drivers and text conversion; native regular files must match raw Git
-blobs, including under checkout filters/EOL conversion. Plans over 512 assignment
+reviews a captured committed diff through native Pi. `local=True` selects the net
+base-to-final-working change described below. Committed capture excludes working-tree
+edits, external diff drivers and text conversion; inert materialization supplies raw
+Git blobs even when the original checkout uses filters/EOL conversion. Plans over 512 assignment
 parts are refused before dispatch.
 
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
@@ -93,6 +97,70 @@ native settlement/cleanup, completeness, output, capture and delivery are separa
 Explicit unsupported exports fail before dispatch. Immutable PR exports use the
 same artifact session as described below. Ordinary CLI routing/default cutover
 and external delivery remain separate integration work.
+
+### Captured local source
+
+[`git_ops.captured_source`](../daydream/git_ops/captured_source.py) owns accepted
+before/after contents, eligible population, scope, full target inventory and native
+materialization. Ordinary review mode uses this same owner; comment and commit-bound
+`--findings-out` select an independently pinned committed PR subject instead, with a
+visible exclusion notice when the checkout is dirty. Improve retains its separate
+audit-workspace population policy. Fixing-flow migration is outside this contract.
+
+Local capture compares the pinned merge base with final working bytes, combining
+committed and later tracked edits. The index is not another change layer. Undone
+edits disappear, staged files use their final working contents, and nonignored
+untracked files join the eligible population. Generated Daydream artifacts stay out.
+Ignored files are not implicitly expanded; a separate explicit justified selection
+is required under the access policy. Dirty supporting helpers outside changed
+targets are captured too. Scope exclusions bound assigned changes while eligible
+supporting context remains available. Complete targets precede prompt bounding.
+Local capture refuses omitted `skip-worktree` paths, including sparse-checkout
+exclusions, before dispatch; materialize those working contents and rerun.
+
+Preparation reads a confined population, materializes its accepted contents, and
+rechecks actual enumeration, file identity and bytes. Detected instability retries
+at most three times, then asks the operator to stop concurrent writers and rerun.
+This is not an instantaneous filesystem-wide transaction. Preparation never changes
+source refs, index or user files. Native regular files and canonical supporting
+references read the same private source after preparation; later original edits
+cannot change that subject. Private index stat/cache refresh is permitted; indexed
+paths, modes, blobs, stages and semantic flags remain bound to the accepted source.
+Required missing/corrupt input prevents dispatch;
+later integrity failure retains admitted findings and unfinished coverage. Optional
+absent/unsupported context remains explicitly unavailable, with no committed or
+live-byte substitution. Work blocked by unavailable input cannot count as complete.
+
+Local `AnalyzedRevision.head_sha` remains real HEAD provenance. `source_id` binds
+the accepted before/after contents, modes, eligible population and exclusions;
+new-side canonical references use that identity, while old-side references use the
+pinned base. True rename paths, deletion old sides, explicit absence, binary and
+header-only metadata remain represented. Ordinary capture admits at most 100,000
+entries and 256 MiB per side; text lookup retains the existing 8 MiB limit, so
+larger native files remain captured while optional textual context is unavailable.
+Symlinks/submodules retain metadata without native traversal or expansion. Initialized
+submodules use their final checked-out commit; uninitialized directories retain the
+recorded gitlink commit. Nested dirty files are not captured. This materialization
+is not an OS sandbox. Native configuration/trust/authentication
+still resolve in the original project, while native cwd/read/search use the capture.
+
+Local program results use schema 3 and terminal/coverage version 2; committed
+results 1, immutable results 2 and their committed terminal version 1 stay distinct.
+Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
+Private stage/cache contract 15 invalidates older cache entries. Captured review
+paths reject `--start-at` and do not restore judgment shards: a complete shard
+marker does not establish that its enclosing review completed. Stopped reviews
+restart; retained evidence cannot restore assignment authority. Replace incompatible
+inputs by starting a new review; no historical converter is provided. The optional
+request/revision fields retain extension API 8. This changes local review semantics
+under the current `0.y.z` policy and requires release notes; package version bumps
+remain release work. Admission before heavy allocation and queued memory lifetime
+remain separately owned by #1711.
+
+Run-record capture keeps `head_sha` as real provenance and retains local `source_id`
+in the task and final state. `captured_working` identifies its population policy;
+legacy committed/tracked scope labels cannot stand in for it. Current run-record
+readers validate this binding; earlier readers reject the new fields/population.
 
 ### Hosted operator policy
 
@@ -312,6 +380,11 @@ binding owns the first terminal failure and cannot reopen after it. `/admit` and
 `/submit` enforce readiness, correlation, authority, deadline and cumulative
 capacity with the same recovery semantics. Frames, arguments, results,
 items, request concurrency and cleanup are bounded; overflow rejects whole payloads.
+Frame, readiness and admission I/O keep their short transport allowance. Terminal
+source validation and submission use the original assignment deadline. Native Pi
+queries its remaining allowance through the authenticated status endpoint and
+subtracts the full round-trip time, without sharing clock origins or renewing
+authority. Lost receipts still prohibit replay and retain incomplete coverage.
 Every real native tool start counts, including failed submissions, with no separate
 eight-call ceiling or hidden nested tool execution.
 

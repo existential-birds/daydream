@@ -81,6 +81,10 @@ async def post_review_to_pr_from_report(
     diagram_blocks: str | None = None,
     review_warnings: tuple[str, ...] = (),
     review_summary: str | None = None,
+    captured_pr: PRInfo | None = None,
+    snapshot_diff: str | None = None,
+    review_complete: bool = True,
+    publication_dir: Path | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -119,6 +123,10 @@ async def post_review_to_pr_from_report(
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
         review_summary=review_summary,
+        captured_pr=captured_pr,
+        snapshot_diff=snapshot_diff,
+        review_complete=review_complete,
+        publication_dir=publication_dir,
         run_context=run_context,
         auth=auth,
     )
@@ -335,10 +343,10 @@ def capture_pr_base_tip(
 
 
 def find_open_pr(
-    target_dir: Path, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
+    target_dir: Path, *, branch: str | None = None, auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PRInfo | None:
     """Find the branch's open PR; return None for absence and raise GitError on failure."""
-    branch = git_ops.current_branch(target_dir)
+    branch = git_ops.current_branch(target_dir) if branch is None else branch
     if not branch:
         return None
     rows = git_ops.gh_pr_list_for_branch(target_dir, branch, auth=auth)
@@ -907,6 +915,17 @@ def _resolve_pr(
     return pr
 
 
+def _validate_publication_target(target_dir: Path, captured: PRInfo, *, auth: GitHubAuth) -> None:
+    """Independently recheck the PR endpoints without replacing reviewed identity."""
+    current = find_pr_by_number(target_dir, captured.number, auth=auth)
+    fields = ("number", "owner", "repo", "head_sha", "base_ref", "head_ref", "head_repo")
+    if current is None or any(getattr(current, key) != getattr(captured, key) for key in fields):
+        raise GitError("The target PR changed after capture; rerun the committed review before posting.")
+    base_tip = capture_pr_base_tip(target_dir, current, auth=auth)
+    if captured.pr_base_sha is None or base_tip != captured.pr_base_sha:
+        raise GitError("The target PR base changed or is unavailable; rerun the committed review before posting.")
+
+
 @bind_resolved_run_context
 async def _post(
     target_dir: Path,
@@ -921,19 +940,37 @@ async def _post(
     diagram_blocks: str | None = None,
     review_warnings: tuple[str, ...] = (),
     review_summary: str | None = None,
+    captured_pr: PRInfo | None = None,
+    snapshot_diff: str | None = None,
+    review_complete: bool = True,
+    publication_dir: Path | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
     run_context = resolve_run_context(run_context)
+    publication_dir = target_dir if publication_dir is None else publication_dir
+    pr: PRInfo | None
     try:
-        pr = _resolve_pr(target_dir, console, pr_number, auth=auth)
+        if captured_pr is not None:
+            if snapshot_diff is None:
+                raise GitError("Pinned committed publication requires its captured diff.")
+            _validate_publication_target(publication_dir, captured_pr, auth=auth)
+            pr = captured_pr
+        else:
+            pr = _resolve_pr(publication_dir, console, pr_number, auth=auth)
     except GitError as exc:
         print_error(console, "PR Lookup Failed", str(exc))
         return PostStatus.FAILED
     if pr is None:
         return PostStatus.NO_PR
 
-    classified = classify(target_dir, pr, issues, auth=auth, renderers=renderers)
+    try:
+        classified = classify(target_dir, pr, issues, auth=auth, renderers=renderers, snapshot_diff=snapshot_diff)
+    except GitError:
+        if captured_pr is None or snapshot_diff is None:
+            raise
+        classified = classify(target_dir, pr, issues, auth=auth, renderers=renderers,
+                              snapshot_diff=snapshot_diff, frozen_only=True)
     if (
         classified.is_empty()
         and not approve_on_clean
@@ -952,7 +989,7 @@ async def _post(
         f"{len(classified.file_level)} file-level, "
         f"{len(classified.body_only)} folded into body"
     )
-    clean = not review_warnings and _is_clean_review(classified, approve_on_clean)
+    clean = review_complete and not review_warnings and _is_clean_review(classified, approve_on_clean)
     event_note = " — will post event: APPROVE" if clean else ""
     print_info(console, f"PR #{pr.number}: {summary}{event_note}")
 
@@ -979,9 +1016,15 @@ async def _post(
         review_warnings=review_warnings,
         review_summary=review_summary,
     )
+    if captured_pr is not None:
+        try:
+            _validate_publication_target(publication_dir, captured_pr, auth=auth)
+        except GitError as exc:
+            print_error(console, "PR Target Changed", str(exc))
+            return PostStatus.FAILED
     result = post_classified_review(
         plan,
-        transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
+        transport=GitHubReviewTransport(target_dir=publication_dir, auth=auth),
     )
     if result.folded_file_level:
         print_warning(

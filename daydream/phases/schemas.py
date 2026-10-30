@@ -77,9 +77,9 @@ def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str,
 
 
 def review_stage_generation_schema(canonical_schema: dict[str, Any], revision: dict[str, Any]) -> dict[str, Any]:
-    """Constrain native generation to frozen commits without changing admission."""
+    """Constrain native generation to captured source identities without changing admission."""
     schema = copy.deepcopy(canonical_schema)
-    revisions = [revision.get(key) for key in ('head_sha', 'merge_base_sha')]
+    revisions = [revision.get('source_id', revision.get('head_sha')), revision.get('merge_base_sha')]
     if all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) for value in revisions):
         schema['properties']['targets']['items']['properties']['evidence_refs']['items']['properties'][
             'revision']['enum'] = list(dict.fromkeys(revisions))

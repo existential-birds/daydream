@@ -2,6 +2,7 @@
 import copy
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -117,11 +118,16 @@ def test_corrupt_coverage_is_a_controlled_validation_failure(bad: Any) -> None:
         ReviewCoverage.from_dict(bad)
 
 
-def test_checked_roundtrip_and_immutable_terminal() -> None:
+@pytest.mark.parametrize('local', [False, True])
+def test_checked_roundtrip_and_immutable_terminal(local: bool) -> None:
+    """Working identity survives retention; committed-only round trips cannot catch lost local provenance."""
     c = review_coverage(files=("a.py", "b.py"))
+    if local:
+        c.revision = replace(c.revision, source_id='e' * 64)
     references: list[dict[str, Any]] = [{
         'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
-        'revision': c.revision.merge_base_sha, 'path': 'a.py', 'side': 'old',
+        'revision': c.revision.source_id if local else c.revision.merge_base_sha,
+        'path': 'a.py', 'side': 'new' if local else 'old',
         'source_range': {'start': 2, 'end': 3}, 'fragment': None,
         'basis': 'supplied_diff', 'role': 'assigned',
     }]
@@ -141,6 +147,11 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
     assert c.scopes['python']['target_decisions'] == retained, 'later failures retain admitted attribution'
     restored = ReviewCoverage.from_dict(c.to_dict())
     assert restored.to_dict() == c.to_dict()
+    assert c.to_dict()['schema_version'] == (2 if local else 1)
+    incompatible = c.to_dict()
+    incompatible['schema_version'] = 1 if local else 2
+    with pytest.raises(ValueError, match='version does not match'):
+        ReviewCoverage.from_dict(incompatible)
     legacy = c.to_dict()
     legacy['stack_outcomes'][0]['target_decisions'][0]['reason'] = 'TOKEN=x'
     normalized = ReviewCoverage.from_dict(legacy).scopes['python']['target_decisions'][0]

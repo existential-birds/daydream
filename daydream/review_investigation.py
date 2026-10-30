@@ -8,9 +8,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream import agent, clock
+
+if TYPE_CHECKING:
+    from daydream.git_ops.captured_source import CapturedSource
 from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend, codex_lifecycle_diagnostic
 from daydream.backends.pi import PiBackend
@@ -62,7 +65,7 @@ from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 14
+STAGED_REVIEW_CONTRACT = 15
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -146,6 +149,7 @@ class ReviewInvestigation:
         self.failure_class: str | None = None
         self.failure_reasons: list[ReasonCode] = []
         self._source_root: Path | None = None
+        self._captured_source: CapturedSource | None = None
         self._canonicalize_sources: Callable[..., list[dict[str, Any]]] | None = None
         self._continuable_failure = False
 
@@ -178,10 +182,12 @@ class ReviewInvestigation:
 
     async def run(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
         stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
-        canonicalize_sources: Callable[..., list[dict[str, Any]]] | None = None, **agent_kwargs: Any,
+        canonicalize_sources: Callable[..., list[dict[str, Any]]] | None = None,
+        captured_source: CapturedSource | None = None, **agent_kwargs: Any,
     ) -> tuple[dict[str, Any], str | None]:
         """Fresh calls share hard bounds; advisory targets cannot abort useful work."""
         self._source_root = cwd
+        self._captured_source = captured_source
         self._canonicalize_sources = canonicalize_sources
         # One invocation clamp covers preparation, every stage and all retries.
         # Passing only a relative wall allowance to run_agent would renew it after
@@ -714,7 +720,8 @@ class ReviewInvestigation:
             valid_refs = validate_source_refs(
                 target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
                 revision=self.revision, source_root=self._source_root,
-                require_assigned=target['status'] == 'reviewed', raise_unavailable=native_sources)
+                require_assigned=target['status'] == 'reviewed', raise_unavailable=native_sources,
+                captured_source=self._captured_source)
             if not valid_refs:
                 self.assertion_failure_class = 'source_attribution'
                 return None, 'evidence_incomplete'

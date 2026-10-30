@@ -430,7 +430,9 @@ def _post_kwargs(answer: str | None = "yes", **overrides: Any) -> dict[str, Any]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('complete', [False, True], ids=['unfinished', 'complete'])
 async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
+                                                          complete: bool,
 ) -> None:
     clean = pr_review.ClassifiedIssues(
         inline=[_inline(line=1)],
@@ -438,9 +440,53 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
     )
     captured = _stub_post(monkeypatch, pr, clean)
 
-    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs(approve_on_clean=True))
-    assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
+    status = await pr_review._post(tmp_path, [_POST_ISSUE],
+                                  **_post_kwargs(approve_on_clean=True, review_complete=complete))
+    assert captured["plan"].event is (pr_review.ReviewEvent.APPROVE if complete else pr_review.ReviewEvent.COMMENT)
     assert status == pr_review.PostStatus.POSTED
+
+
+@pytest.mark.parametrize('movement', [None, 'head', 'base', 'repository'])
+async def test_pinned_publication_revalidates_and_places_the_captured_comparison(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path, movement: str | None,
+) -> None:
+    """Real placement covers dirty bytes; prior _post tests replaced classification and missed reanchoring."""
+    row, base, head = _local_pr_row(git_repo)
+    pinned = PRInfo(number=7, owner='o', repo='r', base_sha=base, pr_base_sha=base, head_sha=head,
+                    base_ref='main', head_ref='feature', url=row['url'])
+    snapshot = git_ops.diff_paths(git_repo, base, head, ['.'])
+    (git_repo / 'feature.py').write_text('value = "LOCAL_ONLY"\n' * 10)
+    (git_repo / 'untracked.py').write_text('LOCAL_ONLY = True\n')
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    lookups = 0
+
+    def current(*_a: Any, **_k: Any) -> PRInfo:
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1 or movement is None:
+            return pinned
+        if movement == 'head':
+            return replace(pinned, head_sha=base)
+        if movement == 'base':
+            return replace(pinned, pr_base_sha=head)
+        return replace(pinned, owner='other')
+
+    monkeypatch.setattr(pr_review, 'find_pr_by_number', current)
+    monkeypatch.setattr(pr_review, 'post_classified_review', _recording_fake_submit(captured))
+    issue = ParsedIssue(path='feature.py', line=1, title='Pinned defect', body='value = 1',
+                        severity='medium', confidence='HIGH')
+    status = await pr_review._post(git_repo, [issue], **_post_kwargs(
+        post=True, captured_pr=pinned, snapshot_diff=snapshot, publication_dir=git_repo))
+    assert lookups == 2
+    if movement:
+        assert status is pr_review.PostStatus.FAILED and not captured
+    else:
+        plan = captured['plan']
+        assert status is pr_review.PostStatus.POSTED
+        assert plan.pr == pinned and [(item.path, item.line) for item in plan.inline] == [('feature.py', 1)]
+        assert not plan.file_level and not plan.body_only
+    assert (git_repo / 'feature.py').read_text() == 'value = "LOCAL_ONLY"\n' * 10
+    assert (git_repo / 'untracked.py').read_text() == 'LOCAL_ONLY = True\n'
 
 
 @pytest.mark.asyncio

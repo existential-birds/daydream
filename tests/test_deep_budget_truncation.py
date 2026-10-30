@@ -151,7 +151,12 @@ async def test_review_budget_stop_emits_partial_findings(
 
     if phase == "merge":
         stub.exhaust = False
-        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge",)) == 0
+        retained = out.read_bytes()
+        calls_before_restart = len(stub.calls)
+        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge")) == 1
+        assert out.read_bytes() == retained and len(stub.calls) == calls_before_restart
+        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out))) == 0
+        assert len(stub.calls) > calls_before_restart
         assert not json.loads(out.read_text()).get("review_warnings")
 
 async def test_single_stack_alternatives_timeout_still_emits_findings(
@@ -169,7 +174,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     artifact = json.loads(out.read_text())
     assert artifact["review_warnings"] == ["alternatives: tool_call_budget_exceeded"]
 
-async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_resume(
+async def test_admitted_interaction_findings_survive_triage_cutoff_and_fresh_restart(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
 
@@ -198,17 +203,27 @@ async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_res
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
-    for start_at in (None, "merge"):
-        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at=start_at,)) == 0
+    run_ids: list[str] = []
+    for attempt in range(2):
+        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out))) == 0
         saved = json.loads((multi_stack_target / ".daydream/deep/stack-structure-records.json").read_text())
-        assert saved["issues"], "findings admitted before triage cutoff must survive adjudication and resume"
+        assert saved["issues"], "findings admitted before triage cutoff must survive adjudication"
         assert saved["incomplete"] is True
         published = json.loads(out.read_text())
         assert published["findings"]
         terminal = published["terminal_result"]
+        run_ids.append(terminal["run_id"])
         assert terminal["analysis_state"] == "incomplete"
         scope = next(row for row in terminal["stack_outcomes"] if row["scope_id"] == "structure")
         assert scope["status"] == "incomplete"
         assert scope["partial_evidence"] is True
         assert scope["reason_codes"] == ["host_tool_budget_exhaustion"]
         assert any("structure" in warning for warning in published["review_warnings"])
+        if attempt == 0:
+            retained = out.read_bytes()
+            calls = len(backend.calls)
+            assert await run(make_config(
+                multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge",
+            )) == 1
+            assert out.read_bytes() == retained and len(backend.calls) == calls
+    assert len(set(run_ids)) == 2

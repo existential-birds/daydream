@@ -1,8 +1,8 @@
 """Real-path test for GitHub App identity (01-app-identity).
 
 Enters from runner.run() with a real temp git repo, real filesystem, real event
-loop. Mocks only the Backend (no real AI) and the github_app network helpers
-(no real GitHub). Asserts observable banner output and run-owned auth behavior.
+loop. Uses the fake gh transport and Backend (no real AI), with token minting
+stubbed. Asserts observable banner output and run-owned auth behavior.
 """
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ from daydream.backends import ResultEvent, TextEvent
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.harness.backend import ScriptedBackend
-from tests.harness.fake_gh import block_real_gh
+from tests.harness.fake_gh import FakeGh
 from tests.harness.stub_backend import review_stage_result
 
 
 @pytest.fixture(autouse=True)
-def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    block_real_gh(monkeypatch)
+def _fake_github(fake_gh: FakeGh, feature_branch_repo: Path) -> None:
+    fake_gh.serve_open_pr(feature_branch_repo)
 
 
 def _minimal_backend() -> ScriptedBackend:
@@ -67,7 +67,7 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo: Path, 
     # without a real git remote (the temp repo has none).
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="comment", shallow=True, stack="python", quiet=False,
-                       pr_repo="myorg/myrepo")
+                       pr_repo="acme/widgets")
 
     # Pin a wide recording console so the identity line is captured at the
     # rendered content level, independent of terminal width / TTY / Live state.

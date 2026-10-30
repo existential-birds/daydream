@@ -443,16 +443,21 @@ class FakeGh:
         """Make ``gh pr view`` emit *response* and feed ``gh pr list``."""
         self.set_response("pr-view", value=response)
 
-    def serve_open_pr(self, target: Path) -> None:
-        """Serve an open acme/widgets PR using the fixture repository's real HEAD."""
-        from daydream import git_ops
+    def serve_open_pr(self, target: Path, *, number: int = 7) -> None:
+        """Serve an open acme/widgets PR with the fixture's real head and base tip."""
+        from tests.harness.git_helpers import git
 
-        self.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
-                "headRefOid": git_ops.head_sha(target),
+        head = git(target, "rev-parse", "HEAD")
+        self.serve_pr_view({"number": number, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
+                "headRefOid": head,
                 "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-                "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": "",
+                "headRepositoryOwner": {"login": "acme"},
+                "url": f"https://github.com/acme/widgets/pull/{number}", "body": "",
             }
         )
+        self.set_response("GET", f"repos/acme/widgets/pulls/{number}", {
+            "head": {"sha": head}, "base": {"sha": git(target, "rev-parse", "main")},
+        })
 
     def serve_secret_list(self, names: list[str]) -> None:
         self.set_response("secret-list", value=names)

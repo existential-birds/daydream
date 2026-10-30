@@ -294,7 +294,7 @@ def snapshot_index(repo: Path) -> IndexSnapshot:
     tree = process._run_git(repo, ["write-tree"], timeout=30, error_context=f"git write-tree failed in {repo}")
     changed = process._run_git(
         repo,
-        ["diff", "--cached", "--name-only", "-z", "HEAD"],
+        ["diff", "--cached", "--name-only", "-z", "HEAD", "--"],
         capture_bytes=True,
         error_context=f"git diff --cached failed in {repo}",
     )

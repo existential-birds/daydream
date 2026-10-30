@@ -213,6 +213,51 @@ def test_invalid_mutations_are_withheld(store: LocalRecordStore, kind: str, raw:
     assert len(read.runs) == len(read.observations) == 1
 
 
+@pytest.mark.parametrize('fault', [None, 'scope', 'untracked', 'missing-source', 'final-source',
+                                 'final-head', 'committed-final'])
+def test_captured_source_record_binding_is_validated_before_storage(
+    store: LocalRecordStore, fault: str | None,
+) -> None:
+    """Producer round trips miss a consumer accepting mismatched source/population identities."""
+    digest = hashlib.sha256(b'').hexdigest()
+    task: dict[str, Any] = {
+        'analyzed_revision': {'head_sha': 'h' * 40, 'merge_base_sha': 'b' * 40,
+                              'diff_key': digest, 'source_id': 'd' * 64},
+        'diff': '', 'diff_sha256': digest,
+        'repository': {'repo_slug': None, 'remote_url': None, 'host': None},
+        'pr': {'number': None, 'repo': None}, 'changed_files': [],
+        'input_scope': 'captured_working', 'dirty_tracked': None, 'untracked_files_included': True,
+    }
+    final = {'head_sha': 'h' * 40, 'source_id': 'd' * 64}
+    record = run_record('captured-run', original_task={'status': 'available', 'value': task},
+                        final_state={'status': 'available', 'value': final})
+    parse_run(record)  # Each fault starts from an independently valid current-format record.
+    if fault == 'scope':
+        task['input_scope'] = 'committed'
+    elif fault == 'untracked':
+        task['untracked_files_included'] = False
+    elif fault == 'missing-source':
+        del task['analyzed_revision']['source_id']
+    elif fault == 'final-source':
+        final['source_id'] = 'e' * 64
+    elif fault == 'final-head':
+        final['head_sha'] = 'x' * 40
+    elif fault == 'committed-final':
+        del task['analyzed_revision']['source_id']
+        task.update(input_scope='committed', untracked_files_included=False)
+    if fault is None:
+        assert store.commit_run(record).committed
+        retained = next(run for run in store.read_records()['runs'] if run['run_id'] == 'captured-run')
+        assert retained['original_task']['value']['analyzed_revision'] == task['analyzed_revision']
+        assert retained['final_state']['value'] == final
+    else:
+        before = {path: path.read_bytes() for path in store.root.rglob('*.jsonl')}
+        with pytest.raises(StoreError, match='invalid_or_unknown_record_schema'):
+            store.commit_run(record)
+        assert {path: path.read_bytes() for path in store.root.rglob('*.jsonl')} == before
+        assert len(store.read_records()['runs']) == 1
+
+
 @pytest.mark.parametrize("unsafe", ["alias", "missing/.."])
 def test_unsafe_storage_is_refused(tmp_path: Path, store: LocalRecordStore, unsafe: str) -> None:
     with pytest.raises(StoreError, match="record_too_large"):

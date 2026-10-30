@@ -474,6 +474,16 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
 
     run_markdown = run_info.markdown
     result = ctx.data.get("terminal_review_result")
+    if deep_state.mode == "comment":
+        from daydream.pr_review import PRInfo
+
+        pinned = ctx.data.get("analyzed_pr")
+        if not isinstance(pinned, PRInfo):
+            print_warning(console, "Committed PR target was not captured; rerun the review before posting.")
+            return Stop(1)
+        pr_kwargs.update(captured_pr=pinned, snapshot_diff=ctx.data["snapshot_diff"],
+                         publication_dir=ctx.work.source)
+    pr_kwargs["review_complete"] = isinstance(result, dict) and result.get("analysis_state") == "complete"
     try:
         pr_kwargs["review_summary"] = render_github_review_context(result, review_warnings=warnings)
     except (OSError, ValueError, TypeError, RecursionError) as exc:

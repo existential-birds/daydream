@@ -504,12 +504,17 @@ async def test_persisted_source_assertions_are_bounded_and_redacted(
     assert python['review_context'] == context
     assert saved['originating_run_id'] == data['terminal_result']['run_id']
     assert saved['analyzed_revision'] == python['analyzed_revision'] == data['terminal_result']['analyzed_revision']
-    stages_before_reuse = len(review.backend.stages)
-    reused = await review.finish('python', review_cache_enabled=True)
-    assert len(review.backend.stages) == stages_before_reuse, 'optional rationale must not elicit another review'
-    assert context_path.read_bytes() == original_bytes
-    restored = next(scope for scope in reused['review_context']['scopes'] if scope['scope_id'] == 'python')
-    assert restored == python and reused['terminal_result']['run_id'] != data['terminal_result']['run_id']
+    stages_before_restart = len(review.backend.stages)
+    restarted = await review.finish('python', review_cache_enabled=True)
+    assert len(review.backend.stages) == 2 * stages_before_restart, 'captured reviews must dispatch fresh stages'
+    regenerated = json.loads(context_path.read_bytes())
+    assert len(context_path.read_bytes()) <= 65536
+    assert regenerated['review_context'] == context
+    assert regenerated['originating_run_id'] == restarted['terminal_result']['run_id']
+    assert regenerated['originating_run_id'] != saved['originating_run_id']
+    restored = next(scope for scope in restarted['review_context']['scopes'] if scope['scope_id'] == 'python')
+    assert restored['review_context'] == python['review_context']
+    assert restored['analyzed_revision'] == python['analyzed_revision']
 
 
 async def test_optional_supporting_paths_are_confined_without_rejecting_valid_decisions(
