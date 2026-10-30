@@ -98,10 +98,10 @@ def test_public_content_parser_requires_exact_keys(shape: str) -> None:
 
 def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType) -> None:
     key = "case-validation-parity"
-    merged = {"file": "src/cache.py", "line": 3, "description": "Tenant omitted",
-              "rationale": "Responses cross tenants", "severity": "high"}
+    content = {"title": "Tenant omitted", "body": "Tenant omitted\n\n**Severity:** high\n\nResponses cross tenants",
+               "severity": "high", "path": "src/cache.py", "start_line": 3, "end_line": 3}
     candidate_artifact = candidate.build_candidate_artifact(
-        key, candidate.build_candidate_findings([merged, merged], case_id=key)
+        key, [content | {"candidate_id": vc.derive_candidate_id(key, content, ordinal)} for ordinal in range(2)]
     )
     findings: list[dict[str, Any]] = [
         {"finding_id": "a" * 64, "title": "Cache key omits tenant", "body": "Wrong tenant",
@@ -118,7 +118,8 @@ def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType)
     assert candidate_artifact["findings"][0]["candidate_id"] != candidate_artifact["findings"][1]["candidate_id"]
     other_key = "case-another-review"
     second_artifact = candidate.build_candidate_artifact(
-        other_key, candidate.build_candidate_findings([merged, merged], case_id=other_key)
+        other_key,
+        [content | {"candidate_id": vc.derive_candidate_id(other_key, content, ordinal)} for ordinal in range(2)],
     )
     copied_verifier.validate_candidate_artifact(second_artifact)
     second_gold = build.build_gold_list(findings, key=other_key)

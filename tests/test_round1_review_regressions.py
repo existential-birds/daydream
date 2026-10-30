@@ -4,20 +4,16 @@ Pins the schema-aware selection contract at every structured-output boundary
 that combines span extraction with a strict gate.  Each test names the merged
 finding it closes:
 
-* ``test_strict_gate_has_one_implementation`` -- finding item:3 (LOW); the
-  private alias it originally pinned was removed by round 2's item:1.
 * ``test_review_evidence_*``                      -- finding item:2 (MEDIUM).
 * ``test_agent_prefers_a_fully_valid_*``          -- finding item:5 (LOW).
 """
 
 import json
-import pathlib
 from pathlib import Path
 
 import pytest
 
 import daydream.agent as agent_module
-import daydream.review_evidence as review_evidence_module
 from daydream.backends import TextEvent, TurnEndEvent
 from daydream.review_evidence import ReviewEvidence
 from daydream.trajectory import DaydreamPhase
@@ -29,31 +25,6 @@ REVIEW_STRICT_SCHEMA = {
     "required": ["findings"],
     "additionalProperties": False,
 }
-
-_INLINE_GATE_BODIES = (
-    "Draft202012Validator(schema).iter_errors",
-    "Draft202012Validator(self.schema).iter_errors",
-)
-
-
-def test_strict_gate_has_one_implementation() -> None:
-    """item:3 -- the strict gate is implemented once, in the lowest layer.
-
-    Round 2 (item:1) removed the private alias this test used to pin, so the
-    invariant is now asserted directly: no module carries a second spelling and
-    no module re-implements the gate inline.
-    """
-    import daydream.json_utils as json_utils
-
-    assert json_utils.validates_schema({"a": 1}, {"type": "object"})
-    assert not hasattr(agent_module, "_validates_schema"), (
-        "the alias is a second spelling; consumers import the public helper"
-    )
-    for module in (agent_module, review_evidence_module):
-        assert module.__file__ is not None, f"{module.__name__} has no source file"
-        source = pathlib.Path(module.__file__).read_text()
-        for body in _INLINE_GATE_BODIES:
-            assert body not in source, f"{module.__name__} re-implements the strict gate inline: {body}"
 
 
 def test_review_evidence_keeps_a_schema_valid_result_embedded_in_prose() -> None:

@@ -1,6 +1,6 @@
-"""Build privacy-safe Harbor candidates from canonical merged findings. Reuse verifier
-identity/cap rules. Typed failures distinguish missing/corrupt input, invalid findings,
-size limits, and write errors.
+"""Build privacy-safe Harbor candidates from sealed committed-review results.
+Reuse verifier identity/cap rules. Typed failures distinguish invalid or incomplete
+results, unsupported locations, size limits, and write errors.
 """
 
 from __future__ import annotations
@@ -12,11 +12,10 @@ from typing import Any
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.committed_review_model import CommittedReviewResult, validate_committed_result
 from daydream.json_utils import atomic_write_bytes, umask_derived_mode
-from daydream.pr_review import extract_item_fields
 
 
 class CandidateError(Exception):
-    """Candidate failure with a stable kind, also used for missing/corrupt merged output."""
+    """Candidate failure with a stable kind."""
 
     def __init__(self, message: str, *, kind: str) -> None:
         super().__init__(message)
@@ -34,59 +33,6 @@ def _candidate_title(description: str) -> str:
     if len(first_line) <= 500:
         return first_line
     return first_line[:497].rstrip() + "..."
-
-
-def _assemble_body(fields: Any) -> str:
-    """Join description, severity/confidence badges, and distinct rationale into a nonblank
-    body.
-    """
-    parts: list[str] = []
-    if fields.description:
-        parts.append(fields.description)
-    if fields.severity:
-        parts.append(f"**Severity:** {fields.severity}")
-    if fields.confidence:
-        parts.append(f"**Confidence:** {fields.confidence}")
-    if fields.rationale and fields.rationale != fields.description:
-        parts.append(fields.rationale)
-    return "\n\n".join(parts)
-
-
-def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> list[dict[str, Any]]:
-    """Project canonical findings without inventing locations. Skip missing files,
-    nonpositive/noninteger lines, and blank title/body. Derive ids with opaque case salt
-    and per-identical-content ordinals in merged order, normalizing nullable tuple
-    values like the verifier.
-    """
-    findings: list[dict[str, Any]] = []
-    groups: dict[tuple[object, ...], int] = {}
-    for raw in items:
-        fields = extract_item_fields(raw)
-        if fields is None:
-            continue
-        if fields.line_int is None or fields.line_int < 1:
-            continue
-        title = _candidate_title(fields.description)
-        body = _assemble_body(fields)
-        if not title.strip() or not body.strip():
-            continue
-        entry_input = {
-            "title": title,
-            "body": body,
-            "severity": fields.severity,
-            "path": fields.path,
-            "start_line": fields.line_int,
-            "end_line": fields.line_int,
-        }
-        try:
-            entry = vc.parse_finding_content(entry_input)
-        except vc.VerifierError as exc:
-            raise CandidateError(
-                f"cannot build candidate finding: {exc}", kind="invalid_finding"
-            ) from exc
-        entry["candidate_id"] = vc.assign_candidate_id(case_id, entry, groups)
-        findings.append(entry)
-    return findings
 
 
 def build_candidate_artifact(

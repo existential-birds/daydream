@@ -10,38 +10,22 @@ instead of degrading to ``Any``. Runtime never imports this module -- it is
 not packaged (see ``[tool.hatch.build.targets.wheel]``) and no code path
 references it.
 
-Listing the names in ``__all__`` is what makes each one a re-export under
-mypy's implicit-reexport rule (``strict`` disables bare re-export).
+Explicit self-alias imports declare re-exports under mypy's strict rules.
+The canonical module remains the sole owner of their signatures.
 """
 
 from daydream.benchmark.harbor.verifier_core import (
-    MAX_ARTIFACT_BYTES,
-    GoldFinding,
-    Reward,
-    Verdict,
-    VerifierError,
-    maximum_matching,
-    retained_edges,
-    reward_details,
-    reward_to_json,
-    score_review,
-    validate_candidate_artifact,
-    validate_exact_keys,
-    validate_gold_set,
+    MAX_ARTIFACT_BYTES as MAX_ARTIFACT_BYTES,
+    GoldFinding as GoldFinding,
+    Reward as Reward,
+    Verdict as Verdict,
+    VerifierError as VerifierError,
+    maximum_matching as maximum_matching,
+    retained_edges as retained_edges,
+    reward_details as reward_details,
+    reward_to_json as reward_to_json,
+    score_review as score_review,
+    validate_candidate_artifact as validate_candidate_artifact,
+    validate_exact_keys as validate_exact_keys,
+    validate_gold_set as validate_gold_set,
 )
-
-__all__ = [
-    "MAX_ARTIFACT_BYTES",
-    "GoldFinding",
-    "Reward",
-    "Verdict",
-    "VerifierError",
-    "maximum_matching",
-    "retained_edges",
-    "reward_details",
-    "reward_to_json",
-    "score_review",
-    "validate_candidate_artifact",
-    "validate_exact_keys",
-    "validate_gold_set",
-]

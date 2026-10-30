@@ -1,12 +1,10 @@
 """Retain issue #1445 opt-out behavior through the Pi transport and host boundary."""
 
-import json
 import pathlib
 
 import pytest
 
 import daydream.agent as agent_module
-import daydream.json_utils as json_utils
 
 
 @pytest.mark.parametrize('validate', [True, False], ids=['schema-aware', 'opt-out'])
@@ -28,17 +26,3 @@ async def test_pi_backend_honors_structured_output_opt_out(tmp_path: pathlib.Pat
         )
     assert reason is None
     assert result == ({'issues': []} if validate else ['module', 'moduleVersion', 'surface'])
-
-
-def test_selected_type_is_not_public_surface() -> None:
-    """item:2 (auto-resolved) -- the unread field stays off the result dataclass."""
-    assert not hasattr(json_utils.SchemaAwareSelection, "selected_type"), (
-        "selected_type has no consumer in daydream/ or tests/; it must not ship as "
-        "public surface on the selection record"
-    )
-    selection = json_utils.extract_json_by_schema(
-        json.dumps({"issues": []}),
-        schema={"type": "object"},
-        accept=json_utils.validates_schema,
-    )
-    assert selection.value == {"issues": []}

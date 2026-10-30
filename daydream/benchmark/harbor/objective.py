@@ -449,7 +449,6 @@ def _bind_identity(
     except importlib.metadata.PackageNotFoundError as exc:  # pragma: no cover
         raise ObjectiveError(f"run {run_id!r}: harbor package metadata not found") from exc
 
-    judge_template = calibrate._load_judge_template()
     profile_digest = entry.get("profile_digest") or env.get(
         "DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"
     )
@@ -491,7 +490,7 @@ def _bind_identity(
             if env.get("DAYDREAM_JUDGE_PROVIDER")
             else ""
         ),
-        verifier_template_sha256=calibrate._render_judge_prompt_digest(judge_template),
+        verifier_template_sha256=calibrate._render_judge_prompt_digest(),
         threshold=verifier_core.CONFIDENCE_THRESHOLD,
         attempts=attempts,
     )

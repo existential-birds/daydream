@@ -115,7 +115,7 @@ def test_preflight_reports_each_unsafe_host_privacy_and_runtime_setting(tmp_path
     errs = run_mod._preflight(
         _ws(tmp_path, uploads="enabled"), oracle=True,
         env=_env(DAYDREAM_JUDGE_BASE_URL="http://evil.example", DAYDREAM_REVIEW_BASE_URL="http://other.example"),
-        docker_ok=lambda: False,
+        docker_ok=lambda: _pkg.DockerNetworkPolicyCapability(supported=False),
     )
     assert set(errs) == {
         "judge host 'evil.example' is not in the compiled judge allowed_hosts policy (['127.0.0.1'])",
