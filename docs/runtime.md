@@ -131,6 +131,30 @@ later integrity failure retains admitted findings and unfinished coverage. Optio
 absent/unsupported context remains explicitly unavailable, with no committed or
 live-byte substitution. Work blocked by unavailable input cannot count as complete.
 
+Capture streams physical object files and regular working leaves in 1 MiB chunks.
+The private native tree is the sole working-content spool; acceptance retains
+fingerprints and SHA-256 digests rather than file bodies. One bounded raw Git
+reader per materialization/verification operation checks object framing and OIDs,
+drains stderr, enforces a shared deadline, and joins before dispatch/finalization.
+Full validation covers both separately admitted sides (up to 512 MiB of unique
+blob payload), native contents/population/modes, semantic index and storage.
+Selected textual reads retain their independent limit. Private creation conflicts
+and replacements are refused without deleting competing bytes.
+
+Each native submission resolves its complete prospective payload through its
+existing stage-input factory. Callback-local host facts avoid repeated supporting
+body reads; the resolver closes before one complete capture/canonical-input check.
+Only then does Review synchronously recheck original authority/deadline and install.
+Empty selectors and sibling callbacks get the same final guard. Standalone/stored
+reference checks, preparation, and terminal validation remain independent; no
+validation success survives a callback. The writable capture is not a sandbox.
+
+Full history still consumes private disk and the existing 2 GiB/100,000-physical-file
+admission budget. Each source side retains its 256 MiB/100,000-entry policy. Python
+payload buffers are fixed-size; Git may reconstruct a whole admitted blob, and
+concurrent readers multiply native memory. Manifest/diff memory remains bounded by
+its existing policies. See the [measurements and reproduction commands](performance/captured-source.md).
+
 Local `AnalyzedRevision.head_sha` remains real HEAD provenance. `source_id` binds
 the accepted before/after contents, modes, eligible population and exclusions;
 new-side canonical references use that identity, while old-side references use the

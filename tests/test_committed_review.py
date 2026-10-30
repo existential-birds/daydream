@@ -27,6 +27,7 @@ from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, Review, run_committed_review
 from daydream.committed_review_model import planned_work_id, validate_committed_result
 from daydream.deep.detection import StackAssignment
+from daydream.git_ops.captured_source import capture_source
 from daydream.host_tools import HostToolBinding, HostToolCallBudgetExceeded, HostToolFatal, HostToolRejected
 from daydream.hosted_review import HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
@@ -83,10 +84,11 @@ def review_inputs(tmp_path: Path) -> StageInputFactory:
         "api.py": "VALUE = 1\nOTHER = 1\n" + "# unchanged context\n" * 12 + "SECOND = 1\n"
         + "# unchanged context\n" * 12 + "THIRD = 1\n",
         "caller.py": "VALUE = 1\nOTHER = 1\n",
+        "support/helper.py": "SUPPORT = True\n",
     }
     seed_feature_branch(repo, base=base_contents,
                         feature={name: contents.replace("= 1", "= 0") for name, contents in base_contents.items()})
-    return _inputs(repo, tmp_path / "inputs", sorted(base_contents))
+    return _inputs(repo, tmp_path / "inputs", ["api.py", "caller.py"])
 
 
 def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) -> StageInputFactory:
@@ -235,7 +237,7 @@ async def test_challenge_applies_to_semantic_revision_and_synthesis_but_not_titl
         review.assignment("challenge", deadline=clock.monotonic() + 30)
 
 
-@pytest.mark.parametrize("fault", ["invalid-selector", "shared-capacity", "deadline", "closed"])
+@pytest.mark.parametrize("fault", ["invalid-selector", "shared-capacity", "deadline", "closed", "capture-integrity"])
 async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     review_inputs: StageInputFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +248,10 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     Existing native correction tests exercise a single stage; they do not protect
     a previously accepted claim/revision while a complete later update is rejected.
     """
+    if fault == "capture-integrity":
+        review_inputs.captured_source = capture_source(
+            review_inputs.work.repo, review_inputs.canonical[0].path.parent / "capture",
+            base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
     review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
     await _submit(review, "discovery", _discovery(review_inputs))
     prior = review.pending()
@@ -268,6 +274,9 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
 
             def close_during_source_read(path: Any, *args: Any, **kwargs: Any) -> int:
                 nonlocal injected
+                if fault == "capture-integrity" and path == "caller.py":
+                    injected = True
+                    raise OSError("final native integrity read failed")
                 fd = real_open(path, *args, **kwargs)
                 if Path(path) == review_inputs.canonical[0].path and not injected:
                     injected = True
@@ -277,10 +286,12 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
                         binding.close_authority()
                 return fd
 
-            if fault in {"deadline", "closed"}:
+            if fault in {"deadline", "closed", "capture-integrity"}:
                 patching.setattr(os, "open", close_during_source_read)
             with pytest.raises((HostToolRejected, HostToolFatal)) as caught:
                 binding.submit("terminal", update)
+        if fault == "capture-integrity":
+            assert injected and isinstance(caught.value, HostToolFatal) and caught.value.code == 'input_unavailable'
         if fault in {"deadline", "closed"}:
             assert isinstance(caught.value, HostToolFatal)
             assert injected and caught.value.code == ("deadline_expired" if fault == "deadline" else "authority_closed")
@@ -578,15 +589,17 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
             validate_committed_result(corrupted)
 
 
+@pytest.mark.parametrize('corruption', ['assigned-delete', 'support-bytes'])
 @pytest.mark.parametrize('new_concern', [False, True], ids=['after-final-challenge', 'before-fresh-challenge'])
 async def test_local_capture_corruption_retains_challenged_findings_and_unfinished_work(
     review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
-    new_concern: bool,
+    new_concern: bool, corruption: str,
 ) -> None:
     """Owner integrity tests miss corruption between admitted findings and a fresh challenge.
 
-    Delete real captured source after a challenge admits one confirmed concern and
-    discovers another. Required later work must stop without consulting intact live bytes.
+    Corrupt assigned or unchanged excluded support after a challenge admits a
+    confirmed concern. Later submission/terminal checks must preserve that finding
+    and unfinished work without consulting intact live bytes.
     """
     repo = review_inputs.work.source
     original = tracked_source_state(repo)
@@ -621,12 +634,16 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
             kwargs['investigation_budget'].observed_tool_starts += binding.calls
             binding.native_settled = True
         if assignment['kind'] == 'challenge':
-            (cwd / 'api.py').unlink()
+            if corruption == 'assigned-delete':
+                (cwd / 'api.py').unlink()
+            else:
+                (cwd / 'support/helper.py').write_text('SUPPORT = False\n')
         return accepted, None, None
 
     monkeypatch.setattr(committed_review, 'agent', SimpleNamespace(run_agent=execute, console=agent.console))
     result = await run_committed_review(CommittedReviewRequest(
         repo, review_inputs.revision['merge_base_sha'], local=True, limits=ReviewLimits(90, 12, 12),
+        config=RunConfig(backend='pi', output_mode='review', ignore_paths=['support']),
     ))
     value = result.to_dict()
     assert result.output_installed and not result.complete
@@ -643,6 +660,8 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     assert value['terminal_result']['reason_codes'] == (
         ['backend_failure', 'evidence_incomplete'] if new_concern else ['evidence_incomplete'])
     assert len(value['claims']) == (2 if new_concern else 1) and len(value['findings']) == 1
+    assert value['findings'][0]['uid'] == calls[1]['claims'][0]['uid']
+    assert all(part['file'] != 'support/helper.py' for part in calls[0]['assignments'])
     assert value['findings'][0]['payload']['file'] == 'api.py'
     assert value['findings'][0]['payload']['evidence_refs'] == value['claims'][0]['payload']['evidence_refs']
     if new_concern:
@@ -1452,3 +1471,47 @@ async def test_immutable_synthetic_bundle_rejects_attested_extra_commit_history(
         await run_committed_review(CommittedReviewRequest(
             source, base, hosted_policy=policy, immutable_input=identity, immutable_bundle=bundle))
     assert attempts == [] and not policy.output_dir.exists()
+
+@pytest.mark.parametrize("corrupt", [False, True])
+async def test_empty_selectors_still_validate_captured_source(
+    review_inputs: StageInputFactory, tmp_path: Path, corrupt: bool,
+) -> None:
+    """A valid unfinished judgment cannot evade the final guard by submitting no source selectors."""
+    capture = capture_source(review_inputs.work.repo, tmp_path / "captured",
+        base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
+    review_inputs.captured_source = capture
+    review = Review(review_inputs, "empty", deadline=clock.monotonic() + 60)
+    value = _discovery(review_inputs)
+    value['claims'] = []
+    for target in value['targets']:
+        target.update(status='not_reviewed', reason='Source work remains unfinished.', evidence_refs=[])
+    if corrupt:
+        (capture.root / 'caller.py').write_text('corrupt after preparation\n')
+        with pytest.raises(HostToolFatal) as caught:
+            await _submit(review, 'discovery', value)
+        assert caught.value.code == 'input_unavailable'
+    else:
+        await _submit(review, 'discovery', value)
+    sealed = review.seal({})
+    assert sealed['terminal_result']['analysis_state'] == ('failed' if corrupt else 'incomplete')
+    assert sealed['claims'] == []
+
+
+async def test_sibling_submission_revalidates_after_prior_acceptance(
+    review_inputs: StageInputFactory, tmp_path: Path,
+) -> None:
+    """A sibling cannot reuse successful source validation after intervening native corruption."""
+    capture = capture_source(review_inputs.work.repo, tmp_path / "captured",
+        base_sha=review_inputs.revision['merge_base_sha'], head_sha=review_inputs.revision['head_sha'], local=False)
+    review_inputs.captured_source = capture
+    first = Review(review_inputs, 'first', deadline=clock.monotonic() + 60)
+    sibling = Review(review_inputs, 'sibling', deadline=clock.monotonic() + 60)
+    await _submit(first, 'discovery', _discovery(review_inputs))
+    prior = first.pending()
+    (capture.root / 'caller.py').write_text('changed between callbacks\n')
+    with pytest.raises(HostToolFatal) as caught:
+        await _submit(sibling, 'discovery', _discovery(review_inputs))
+    assert caught.value.code == 'input_unavailable'
+    assert first.pending() == prior
+    assert len(first.seal({})['claims']) == 1
+    assert sibling.seal({})['claims'] == []
