@@ -48,14 +48,20 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
     if interruption == 'finalization_git':
         real_git = shutil.which('git')
         assert real_git is not None
-        # A real finalization read may overlap the supervisor's shutdown poll.
-        # Delay only the post-cancellation query, preserving Git and its result.
+        # Delay the real executable-provenance read across shutdown polling.
+        # Its caller tolerates Git failures, so require successful completion too.
         git_wrapper = cli.bin_dir / 'git'
-        git_wrapper.write_text(f'#!{sys.executable}\nimport os,sys,time\nfrom pathlib import Path\n'
-            'if sys.argv[1:] == ["rev-parse","--path-format=absolute","--git-dir","--git-common-dir"] '
+        git_wrapper.write_text(f'#!{sys.executable}\nimport os,subprocess,sys,time\nfrom pathlib import Path\n'
+            'if sys.argv[1:] == ["rev-parse","HEAD"] '
             f'and any(Path({str(logs)!r}).glob("reviewer-cancel-*.json")):\n'
             f'    Path({str(cli.root / "finalization-git-started")!r}).touch()\n'
             '    time.sleep(0.2)\n'
+            f'    result = subprocess.run([{real_git!r}, *sys.argv[1:]])\n'
+            '    if result.returncode == 0:\n'
+            f'        Path({str(cli.root / "finalization-git-completed")!r}).touch()\n'
+            '    if result.returncode < 0:\n'
+            '        os.kill(os.getpid(), -result.returncode)\n'
+            '    raise SystemExit(result.returncode)\n'
             f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
         git_wrapper.chmod(0o700)
     child_environment = {**os.environ, **environment,
@@ -152,6 +158,7 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         assert (logs / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
         if interruption == 'finalization_git':
             assert (cli.root / 'finalization-git-started').is_file()
+            assert (cli.root / 'finalization-git-completed').is_file()
         assert not Path(native_home.read_text()).exists()
         from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 
