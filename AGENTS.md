@@ -46,15 +46,8 @@ Run `make rl-check` separately when changing `rl/daydream_review`; it is outside
 
 ## Local PR reviews
 
-Run Daydream reviews during development with the Pi backend:
-
-```bash
-daydream --comment --backend pi --non-interactive --capture-data <target>
-```
-
-Leave `--model` unset so the configured backend default applies. Omit `--yes`,
-which review modes reject. `--comment` publishes to the PR, so run it only when
-a review is requested.
+Run Daydream reviews during development with
+[the command in CONTRIBUTING.md](CONTRIBUTING.md#shared-agent-skill-workflow).
 
 ## Testing standard (mandatory)
 
