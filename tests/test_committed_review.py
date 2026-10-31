@@ -1053,7 +1053,7 @@ def test_immutable_source_retains_the_documented_per_tree_blob_boundary(tmp_path
 
 
 @pytest.mark.parametrize("outcome", ["complete", "attributes", "legal-ref", "packed", "empty", "no-diff", "partial",
-                                    "native-failure", "install-failure"])
+                                    "native-failure", "install-failure", "copy-cancel"])
 async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operator_policy: HostedReviewPolicy, fake_gh: FakeGh, outcome: str,
 ) -> None:
@@ -1197,6 +1197,45 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
             for name in names:
                 analysis_boundaries.setattr(owner, name, forbidden)
         analysis_boundaries.setattr(type(os.environ), "get", no_github_credentials)
+        if outcome == "copy-cancel":
+            import asyncio
+
+            cancellation = asyncio.CancelledError("cancel during immutable object copy")
+            fdopen = os.fdopen
+            preserved: list[Path] = []
+            original_index = (repo / ".git/index").read_bytes()
+
+            def cancel_copy(fd: int, *args: Any, **kwargs: Any) -> Any:
+                stream = fdopen(fd, *args, **kwargs)
+                write = stream.write
+
+                def write_then_cancel(body: bytes) -> int:
+                    written = int(write(body))
+                    if not preserved:
+                        prepared, = (policy.private_base / "immutable-inputs").iterdir()
+                        leaf = next(p for p in (prepared / ".git/objects").glob("*/*")
+                                    if p.stat().st_ino == os.fstat(fd).st_ino)
+                        parent = leaf.parent.with_name("preserved-parent")
+                        leaf.parent.rename(parent)
+                        witness = parent / "witness"
+                        witness.write_bytes(b"competing immutable bytes")
+                        preserved.append(witness)
+                        raise cancellation
+                    return written
+
+                if args and args[0] == "wb":
+                    stream.write = write_then_cancel
+                return stream
+
+            analysis_boundaries.setattr(os, "fdopen", cancel_copy)
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await run_committed_review(review_request)
+            assert caught.value is cancellation
+            assert len(preserved) == 1 and preserved[0].read_bytes() == b"competing immutable bytes"
+            assert not seen and not attempts and not marker.exists()
+            assert (repo / "api.py").read_bytes() == b"VALUE = 0\n"
+            assert (repo / ".git/index").read_bytes() == original_index
+            return
         if outcome == "install-failure":
             from daydream.artifact_visibility import ArtifactVisibilityError
             from daydream.findings import load_findings_artifact

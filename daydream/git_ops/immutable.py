@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NoReturn
 
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError
@@ -135,6 +135,13 @@ class _SourceChanged(GitError):
 class _StorageConflict(GitError):
     """Private storage contains competing bytes that cleanup must preserve."""
 
+    def reraise(self) -> NoReturn:
+        """Propagate after declining cleanup, preserving an original cancellation."""
+        primary = self.__cause__
+        if primary is not None and not isinstance(primary, Exception):
+            raise primary from None
+        raise self
+
 
 class _PrivateFileExists(_StorageConflict):
     """An existing leaf may be verified only by the object publisher."""
@@ -185,9 +192,14 @@ def _parent(root: Path, relative: str, *, create: bool = False,
             raise
         try:
             yield descriptors[-1], parts[-1]
-        except OSError:
+        except _StorageConflict:
+            raise
+        except BaseException as error:
             if private:
-                validate_bindings()
+                try:
+                    validate_bindings()
+                except _StorageConflict as conflict:
+                    raise conflict from error
             raise
         else:
             validate_bindings()
@@ -212,13 +224,18 @@ def _exclusive_file(root: Path, relative: str) -> Iterator[BinaryIO]:
                 current = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
                     raise _StorageConflict("private source file was replaced")
-            except BaseException:
+            except _StorageConflict:
+                raise
+            except BaseException as error:
                 try:
                     current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-                    if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
-                        os.unlink(name, dir_fd=parent)
+                    if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+                        raise _StorageConflict("private source file was replaced")
+                    os.unlink(name, dir_fd=parent)
                 except FileNotFoundError:
                     pass
+                except (OSError, _StorageConflict):
+                    raise _StorageConflict("private source file was replaced or cleanup is unavailable") from error
                 raise
 
 
@@ -499,5 +516,10 @@ def prepare_immutable_source(
             (destination / ".git" / "HEAD").write_text(local["head_sha"] + "\n")
             _git(destination, "read-tree", local["head_sha"])
             yield destination
-    finally:
+    except _StorageConflict as conflict:
+        conflict.reraise()
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+    else:
         shutil.rmtree(destination)

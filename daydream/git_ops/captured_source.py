@@ -74,16 +74,40 @@ class _NativeEntry:
 
 @contextmanager
 def _regular_leaf(parent: int, name: str, before: os.stat_result, *, private: bool = False) -> Iterator[BinaryIO]:
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except OSError as exc:
+        if private:
+            raise immutable._StorageConflict("captured private spool is unavailable") from exc
+        raise
     with os.fdopen(fd, "rb") as stream:
         failure = immutable._StorageConflict if private else _UnstableSource
         message = "captured private spool was replaced or changed" if private else _RERUN
-        if _fingerprint(os.fstat(stream.fileno())) != _fingerprint(before):
-            raise failure(message)
-        yield stream
-        if (_fingerprint(os.fstat(stream.fileno())) != _fingerprint(before)
-                or _fingerprint(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _fingerprint(before)):
-            raise failure(message)
+
+        def validate_leaf() -> None:
+            try:
+                if (_fingerprint(os.fstat(stream.fileno())) != _fingerprint(before)
+                        or _fingerprint(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _fingerprint(before)):
+                    raise failure(message)
+            except OSError as exc:
+                if private:
+                    raise immutable._StorageConflict("captured private spool is unavailable") from exc
+                raise
+
+        validate_leaf()
+        try:
+            yield stream
+        except immutable._StorageConflict:
+            raise
+        except BaseException as error:
+            if private:
+                try:
+                    validate_leaf()
+                except immutable._StorageConflict as conflict:
+                    raise conflict from error
+            raise
+        else:
+            validate_leaf()
 
 
 def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorithm: str = "sha1",
@@ -92,11 +116,15 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                   consume: Callable[[bytes], object] | None = None, private: bool = True) -> _NativeEntry | None:
     """Hash confined regular leaves in fixed chunks; only tiny metadata retains bytes."""
     _selector(path)
+    failure = immutable._StorageConflict if private else _UnstableSource
+    message = "captured private spool was replaced or changed" if private else _RERUN
     found = False
     try:
         with immutable._parent(root, path, private=private) as (parent, name), ExitStack() as stack:
             before = os.stat(name, dir_fd=parent, follow_symlinks=False)
             found = True
+            if private and not stat.S_ISREG(before.st_mode):
+                raise immutable._StorageConflict("captured private spool was replaced or changed")
             body = b""
             if stat.S_ISLNK(before.st_mode):
                 mode, body = "120000", os.fsencode(os.readlink(name, dir_fd=parent))
@@ -118,6 +146,8 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                 mode, body = "160000", gitlink.encode()
             elif stat.S_ISREG(before.st_mode):
                 if before.st_size > immutable._MAX_SOURCE_BYTES:
+                    if private:
+                        raise immutable._StorageConflict("captured private spool exceeds the accepted size")
                     raise GitError("captured source file exceeds the supported 256 MiB capture limit")
                 mode = "100755" if before.st_mode & stat.S_IXUSR else "100644"
                 stream = stack.enter_context(_regular_leaf(parent, name, before, private=private))
@@ -133,7 +163,7 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                     if _fingerprint(info) != compare_fingerprint:
                         raise immutable._StorageConflict("captured private spool was replaced or changed")
                     if not stat.S_ISREG(info.st_mode) or info.st_size != before.st_size:
-                        raise _UnstableSource(_RERUN)
+                        raise failure(message)
                     spool_fingerprint = _fingerprint(info)
                     other = stack.enter_context(_regular_leaf(other_parent, other_name, info, private=True))
                 digest = hashlib.sha256()
@@ -142,7 +172,7 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                 while remaining:
                     chunk = stream.read(min(immutable._CHUNK_BYTES, remaining))
                     if not chunk:
-                        raise _UnstableSource(_RERUN)
+                        raise failure(message)
                     remaining -= len(chunk)
                     digest.update(chunk)
                     oid.update(chunk)
@@ -151,11 +181,11 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                     if other is not None and other.read(len(chunk)) != chunk:
                         if _fingerprint(os.fstat(other.fileno())) != compare_fingerprint:
                             raise immutable._StorageConflict("captured private spool was replaced or changed")
-                        raise _UnstableSource(_RERUN)
+                        raise failure(message)
                     if consume is not None:
                         consume(chunk)
                 if stream.read(1) or (other is not None and other.read(1)):
-                    raise _UnstableSource(_RERUN)
+                    raise failure(message)
                 if output is not None:
                     os.fchmod(output.fileno(), 0o755 if mode == "100755" else 0o644)
                     output.flush()
@@ -166,12 +196,14 @@ def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorith
                 raise FrozenSourceRejected("captured source entry is not a regular file, symlink or gitlink")
             after = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if _fingerprint(before) != _fingerprint(after):
-                raise _UnstableSource(_RERUN)
+                raise failure(message)
             oid_text = body.decode() if mode == "160000" else _blob_digest(body, algorithm)
             return _NativeEntry(mode, oid_text, len(body), hashlib.sha256(body).hexdigest(), _fingerprint(after), body)
     except immutable._SourceChanged as exc:
         raise _UnstableSource(_RERUN) from exc
     except (FileNotFoundError, NotADirectoryError) as exc:
+        if private:
+            raise immutable._StorageConflict("captured private spool is unavailable") from exc
         if found:
             raise _UnstableSource(_RERUN) from exc
         return None
@@ -455,7 +487,7 @@ class CapturedSource:
             except OSError as exc:
                 raise GitError("captured native source is unavailable") from exc
             if native is None or (native.mode, native.oid) != (mode, oid):
-                raise GitError("captured native source integrity failed")
+                raise immutable._StorageConflict("captured native source integrity failed")
         return oid, body
 
     def validate(self) -> None:
@@ -485,7 +517,7 @@ class CapturedSource:
                 continue
             native = _native_entry(self.root, name, algorithm=algorithm)
             if native is None or native.mode != mode or native.oid != oid:
-                raise GitError("captured native source integrity failed")
+                raise immutable._StorageConflict("captured native source integrity failed")
         actual: set[str] = set()
         for directory, dirs, names in os.walk(self.root, followlinks=False):
             parent = Path(directory)
@@ -615,8 +647,8 @@ def capture_source(
                         for name in ("HEAD", "config", "index")))
                 captured.validate()
                 return captured
-        except immutable._StorageConflict:
-            raise
+        except immutable._StorageConflict as conflict:
+            conflict.reraise()
         except (_UnstableSource, OSError) as exc:
             if not _storage_matches(destination, owned_directories):
                 raise GitError("captured source storage was replaced; preserving competing bytes") from exc

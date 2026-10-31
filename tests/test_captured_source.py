@@ -7,6 +7,7 @@ cannot establish; source consumers exercise dispatch and coverage separately.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -673,15 +674,25 @@ def test_capture_verifies_both_separately_admitted_sides(
     assert captured.read("new", "both.bin")[1] == new
 
 
-@pytest.mark.parametrize("kind", ["blob", "tree", "existing-tree", "native", "parent", "parent-open", "parent-create"])
+@pytest.mark.parametrize("kind", [
+    "blob", "tree", "existing-tree", "native", "parent", "parent-open", "parent-create",
+    "parent-source", "parent-cancel",
+    "leaf-source", "leaf-cancel", "read-truncated", "read-cancel", "read-symlink", "read-missing",
+])
 def test_capture_preserves_competing_object_bytes(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
     """Loose-object publication must neither replace a competing leaf nor erase it during refusal cleanup."""
+    import asyncio
+
     repo, base, head = source
     expected_source = "value = 1\n" if kind == "existing-tree" else "value = 345\n"
     (repo / "subject.py").write_text(expected_source)
-    if kind == "parent-create":
+    private_io = kind in {
+        "parent-source", "parent-cancel", "leaf-source", "leaf-cancel", "read-truncated", "read-cancel",
+        "read-symlink", "read-missing",
+    }
+    if kind == "parent-create" or private_io:
         (repo / "fresh").mkdir()
         (repo / "fresh/new.py").write_text(expected_source)
     tree_oid = git(repo, "rev-parse", "HEAD^{tree}")
@@ -691,6 +702,7 @@ def test_capture_preserves_competing_object_bytes(
     link = os.link
     competing: list[Path] = []
     create_failures: list[FileNotFoundError] = []
+    cancellation = asyncio.CancelledError("cancel during actual private write")
 
     def preserve_parent(parent: Path) -> None:
         preserved = parent.with_name("preserved-parent")
@@ -698,6 +710,13 @@ def test_capture_preserves_competing_object_bytes(
         witness = preserved / "witness"
         witness.write_bytes(expected)
         competing.append(witness)
+
+    def replace_leaf(leaf: Path) -> Path:
+        prior = leaf.with_name("prior-new.py")
+        leaf.rename(prior)
+        leaf.write_bytes(expected)
+        competing.append(leaf)
+        return prior
 
     def competing_link(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
         parent = next((destination / ".git/objects").glob("*/" + str(src)))
@@ -712,6 +731,57 @@ def test_capture_preserves_competing_object_bytes(
         link(src, dst, *args, **kwargs)
 
     opened = os.open
+    fdopen = os.fdopen
+    stat = os.stat
+
+    def competing_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if (path == "new.py" and (destination / ".git/index").is_file() and not competing
+                and kwargs.get("dir_fd") is not None
+                and os.fstat(kwargs["dir_fd"]).st_ino == (destination / "fresh").stat().st_ino):
+            leaf = destination / "fresh/new.py"
+            leaf.rename(leaf.with_name("prior-new.py"))
+            witness = leaf.with_name("witness")
+            witness.write_bytes(expected)
+            competing.append(witness)
+            if kind == "read-symlink":
+                leaf.symlink_to("witness")
+        return stat(path, *args, **kwargs)
+
+    def competing_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        stream = fdopen(fd, *args, **kwargs)
+        write = stream.write
+        read = stream.read
+
+        def competing_write(body: bytes) -> int:
+            written = int(write(body))
+            leaf = destination / "fresh/new.py"
+            if leaf.exists() and os.fstat(fd).st_ino == leaf.stat().st_ino and not competing:
+                if kind.startswith("parent"):
+                    preserve_parent(leaf.parent)
+                else:
+                    replace_leaf(leaf)
+                if kind.endswith("cancel"):
+                    raise cancellation
+                (repo / "fresh/new.py").write_text("value = 67890\n")
+            return written
+
+        def competing_read(size: int = -1) -> bytes:
+            leaf = destination / "fresh/new.py"
+            if ((destination / ".git/index").is_file() and leaf.exists()
+                    and os.fstat(fd).st_ino == leaf.stat().st_ino and not competing):
+                prior = replace_leaf(leaf)
+                if kind == "read-truncated":
+                    prior.write_bytes(b"")
+                else:
+                    read(size)
+                    raise cancellation
+            return bytes(read(size))
+
+        if args and args[0] == "wb" and not kind.startswith("read"):
+            stream.write = competing_write
+        elif args and args[0] == "rb" and kind.startswith("read"):
+            stream.read = competing_read
+        return stream
 
     def competing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         if kind == "parent-create" and path == "new.py" and flags & os.O_CREAT and not competing:
@@ -747,30 +817,45 @@ def test_capture_preserves_competing_object_bytes(
                 competing.extend((destination / ".git/objects").glob("*/" + path))
         return opened(path, flags, *args, **kwargs)
 
-    if kind in {"blob", "parent"}:
+    if kind in {"read-symlink", "read-missing"}:
+        monkeypatch.setattr(os, "stat", competing_stat)
+    elif private_io:
+        monkeypatch.setattr(os, "fdopen", competing_fdopen)
+    elif kind in {"blob", "parent"}:
         monkeypatch.setattr(os, "link", competing_link)
     else:
         monkeypatch.setattr(os, "open", competing_open)
-    with pytest.raises(GitError, match=None if kind.startswith("parent") else "conflicts|replaced"):
+    failure = asyncio.CancelledError if kind.endswith("cancel") else GitError
+    message = None if kind.startswith("parent") or private_io else "conflicts|replaced"
+    with pytest.raises(failure, match=message) as caught:
         capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
     assert len(competing) == 1 and competing[0].read_bytes() == expected
     assert (repo / "subject.py").read_text() == expected_source
-    if kind == "parent-create":
-        assert len(create_failures) == 1
-        assert (repo / "fresh/new.py").read_text() == expected_source
+    if kind == "parent-create" or private_io:
+        assert len(create_failures) == (1 if kind == "parent-create" else 0)
+        assert (repo / "fresh/new.py").read_text() == (
+            "value = 67890\n" if kind.endswith("source") else expected_source)
+    if kind.startswith(("leaf", "read")):
+        assert (destination / "fresh/prior-new.py").read_bytes() == (
+            b"" if kind == "read-truncated" else expected_source.encode())
+    if kind == "read-symlink":
+        assert (destination / "fresh/new.py").is_symlink()
+    if kind.endswith("cancel"):
+        assert caught.value is cancellation
 
 
-@pytest.mark.parametrize("phase", ["compression", "comparison", "comparison-stat"])
+@pytest.mark.parametrize("phase", ["compression", "comparison", "comparison-stat", "compression-symlink"])
 def test_capture_rejects_identical_byte_spool_replacement(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
     """Equal content cannot authorize a different private spool inode during local acceptance."""
     repo, base, head = source
-    expected = b"value = 4321\n" if phase == "compression" else b"value = 1\n"
+    expected = b"value = 4321\n" if phase.startswith("compression") else b"value = 1\n"
     (repo / "subject.py").write_bytes(expected)
     destination = tmp_path / "captured"
     opened, stat = os.open, os.stat
     replaced = comparison_started = False
+    open_errors: list[int | None] = []
 
     def replace_private() -> None:
         nonlocal replaced
@@ -778,7 +863,10 @@ def test_capture_rejects_identical_byte_spool_replacement(
         target = destination / "subject.py"
         body = target.read_bytes() if phase != "comparison-stat" else b"competing changed spool bytes"
         target.rename(destination / "prior-subject")
-        target.write_bytes(body)
+        if phase == "compression-symlink":
+            target.symlink_to("prior-subject")
+        else:
+            target.write_bytes(body)
 
     def replace_spool(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         nonlocal comparison_started
@@ -791,7 +879,12 @@ def test_capture_rejects_identical_byte_spool_replacement(
         if (path == "subject.py" and not flags & os.O_CREAT and private_parent
                 and not replaced and phase != "comparison-stat"):
             replace_private()
-        return opened(path, flags, *args, **kwargs)
+        try:
+            return opened(path, flags, *args, **kwargs)
+        except OSError as exc:
+            if phase == "compression-symlink" and private_parent and path == "subject.py":
+                open_errors.append(exc.errno)
+            raise
 
     def replace_at_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
         parent = kwargs.get("dir_fd")
@@ -805,12 +898,15 @@ def test_capture_rejects_identical_byte_spool_replacement(
     monkeypatch.setattr(os, "open", replace_spool)
     if phase == "comparison-stat":
         monkeypatch.setattr(os, "stat", replace_at_stat)
-    with pytest.raises(GitError, match="spool was replaced"):
+    with pytest.raises(GitError, match="spool (was replaced|is unavailable)"):
         capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
     assert replaced
     assert (destination / "subject.py").read_bytes() == (
         b"competing changed spool bytes" if phase == "comparison-stat" else expected)
     assert (destination / "prior-subject").read_bytes() == expected
+    if phase == "compression-symlink":
+        assert (destination / "subject.py").is_symlink()
+        assert open_errors == [errno.ELOOP]
 
 
 
