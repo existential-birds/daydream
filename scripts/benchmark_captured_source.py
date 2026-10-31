@@ -571,7 +571,7 @@ def recorded_fixture(source, head, base):
             for row in rows:
                 if not row:
                     continue
-                metadata, rawpath = row.split(b"\t")
+                metadata, rawpath = row.split(b"\t", 1)
                 mode, kind, oid = metadata.split()
                 if mode == b"160000":
                     continue
