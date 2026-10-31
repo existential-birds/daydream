@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import stat
@@ -179,15 +180,21 @@ def _scripted_cli_runner(responses: Any) -> tuple[Any, Any]:
 
     class FakeProc:
         returncode = 0
-        stdout = ""
+
+        def __init__(self, payload: dict[str, str]) -> None:
+            self.stdout = asyncio.StreamReader()
+            self.stdout.feed_data(json.dumps(payload).encode("utf-8"))
+            self.stdout.feed_eof()
+
+        async def wait(self) -> int:
+            return self.returncode
 
     i = [0]
 
     async def runner(self: Any, argv: Any, env: Any) -> Any:
         payload = {"result": json.dumps(responses[i[0] % len(responses)])}
         i[0] += 1
-        FakeProc.stdout = json.dumps(payload)
-        return FakeProc()
+        return FakeProc(payload)
 
     return runner, i
 

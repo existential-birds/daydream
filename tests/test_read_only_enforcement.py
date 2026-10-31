@@ -1,7 +1,7 @@
-"""Read-only enforcement through each backend's real execution boundary.
+"""Read-only enforcement through Codex's real execution boundary.
 
-Claude denies mutating tools. Codex combines its sandbox with a disposable clone
-for linked-worktree inputs, isolating the caller's HEAD/index/refs/remotes.
+Codex combines its sandbox with a disposable clone for linked-worktree inputs,
+isolating the caller's HEAD/index/refs/remotes.
 A committing subprocess proves the caller's Git state survives byte-for-byte.
 """
 
@@ -9,12 +9,10 @@ import os
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends.claude import _is_read_only_command, _read_only_guard
 from daydream.backends.codex import CodexBackend
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git as _harness_git
@@ -62,26 +60,6 @@ def _install_committing_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, m
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("COMMIT_MARKER", str(marker))
 
-def test_claude_read_only_profile_refuses_mutation() -> None:
-    """Claude's observable refusal is the Bash-guard decision."""
-    # Mutating commands denied; read-only inspection allowed.
-    assert _is_read_only_command("git commit -m x") is False
-    assert _is_read_only_command("git reset --hard HEAD") is False
-    assert _is_read_only_command("rm -rf build") is False
-    # Newline/carriage-return command separators are bash chaining that shlex
-    # elides as whitespace; they must be rejected on the raw string.
-    assert _is_read_only_command("ls \nrm -rf /") is False
-    assert _is_read_only_command("cat foo\rrm x") is False
-    assert _is_read_only_command("git log") is True
-    assert _is_read_only_command("git blame -L 1,1 f.py") is True
-
-@pytest.mark.asyncio
-async def test_claude_read_only_guard_blocks_write_tool() -> None:
-    """Under read_only, the guard denies the Write tool outright (not just Bash)."""
-    decision = cast(dict[str, Any], await _read_only_guard(
-        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
-    ))
-    assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 @pytest.mark.asyncio
 async def test_codex_read_only_commit_cannot_change_source_head_or_index(

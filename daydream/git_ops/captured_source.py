@@ -15,11 +15,15 @@ import re
 import shutil
 import stat
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
+from uuid import uuid4
 
 from daydream.git_ops import immutable, process, queries, snapshot
+from daydream.git_ops.immutable import _fingerprint
 from daydream.git_ops.models import GitError, PathAbsentError, SnapshotPreparationError
 from daydream.git_ops.source import FrozenSourceRejected, _validate_commit
 
@@ -39,8 +43,11 @@ def _directory_identity(path: Path) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
-def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
-    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+def _storage_matches(root: Path, identities: dict[str, tuple[int, int]]) -> bool:
+    try:
+        return all(_directory_identity(root / p) == identity for p, identity in identities.items())
+    except (OSError, GitError):
+        return False
 
 
 def _runtime_artifact(path: str) -> bool:
@@ -54,60 +61,152 @@ def _selector(path: str) -> None:
         raise FrozenSourceRejected("invalid captured source selector")
 
 
-def _native_entry(root: Path, path: str, gitlink: str | None = None) -> tuple[str, bytes, tuple[int, ...]] | None:
-    """Read a confined leaf through no-follow directory descriptors."""
-    _selector(path)
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+@dataclass(frozen=True)
+class _NativeEntry:
+    mode: str
+    oid: str
+    size: int
+    digest: str
+    fingerprint: tuple[int, ...]
+    metadata: bytes = b""
+    spool_fingerprint: tuple[int, ...] | None = field(default=None, compare=False)
+
+
+@contextmanager
+def _regular_leaf(parent: int, name: str, before: os.stat_result, *, private: bool = False) -> Iterator[BinaryIO]:
     try:
-        parts = path.split("/")
-        for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = child
-        name = parts[-1]
-        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if stat.S_ISLNK(before.st_mode):
-            mode, body = "120000", os.fsencode(os.readlink(name, dir_fd=descriptor))
-        elif stat.S_ISDIR(before.st_mode):
-            if gitlink is None:
-                return None
-            queries._require_git_path_confined(root, path)
-            nested = root / path
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    except OSError as exc:
+        if private:
+            raise immutable._StorageConflict("captured private spool is unavailable") from exc
+        raise
+    with os.fdopen(fd, "rb") as stream:
+        failure = immutable._StorageConflict if private else _UnstableSource
+        message = "captured private spool was replaced or changed" if private else _RERUN
+
+        def validate_leaf() -> None:
             try:
-                (nested / ".git").lstat()
-            except FileNotFoundError:
-                pass  # Uninitialized gitlinks retain their recorded commit.
-            else:
-                git_dir, common = immutable._source_git_dir(nested)
-                head = immutable._source_head(git_dir, common)
-                if len(head) != len(gitlink) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
-                    raise GitError("captured gitlink HEAD metadata is malformed")
-                gitlink = head
-            mode, body = "160000", gitlink.encode()
-        elif stat.S_ISREG(before.st_mode):
-            if before.st_size > immutable._MAX_SOURCE_BYTES:
-                raise GitError("captured source file exceeds the supported 256 MiB capture limit")
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
-            with os.fdopen(fd, "rb") as stream:
-                opened = os.fstat(stream.fileno())
-                if _fingerprint(opened) != _fingerprint(before):
-                    raise _UnstableSource(_RERUN)
-                body = stream.read(immutable._MAX_SOURCE_BYTES + 1)
-                if _fingerprint(os.fstat(stream.fileno())) != _fingerprint(before):
-                    raise _UnstableSource(_RERUN)
-            if len(body) != before.st_size:
-                raise _UnstableSource(_RERUN)
-            mode = "100755" if before.st_mode & stat.S_IXUSR else "100644"
+                if (_fingerprint(os.fstat(stream.fileno())) != _fingerprint(before)
+                        or _fingerprint(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _fingerprint(before)):
+                    raise failure(message)
+            except OSError as exc:
+                if private:
+                    raise immutable._StorageConflict("captured private spool is unavailable") from exc
+                raise
+
+        validate_leaf()
+        try:
+            yield stream
+        except immutable._StorageConflict:
+            raise
+        except BaseException as error:
+            if private:
+                try:
+                    validate_leaf()
+                except immutable._StorageConflict as conflict:
+                    raise conflict from error
+            raise
         else:
-            raise FrozenSourceRejected("captured source entry is not a regular file, symlink or gitlink")
-        after = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if _fingerprint(before) != _fingerprint(after):
-            raise _UnstableSource(_RERUN)
-        return mode, body, _fingerprint(after)
-    except (FileNotFoundError, NotADirectoryError):
+            validate_leaf()
+
+
+def _native_entry(root: Path, path: str, gitlink: str | None = None, *, algorithm: str = "sha1",
+                  spool: Path | None = None, compare: Path | None = None,
+                  compare_fingerprint: tuple[int, ...] | None = None,
+                  consume: Callable[[bytes], object] | None = None, private: bool = True) -> _NativeEntry | None:
+    """Hash confined regular leaves in fixed chunks; only tiny metadata retains bytes."""
+    _selector(path)
+    failure = immutable._StorageConflict if private else _UnstableSource
+    message = "captured private spool was replaced or changed" if private else _RERUN
+    found = False
+    try:
+        with immutable._parent(root, path, private=private) as (parent, name), ExitStack() as stack:
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            found = True
+            if private and not stat.S_ISREG(before.st_mode):
+                raise immutable._StorageConflict("captured private spool was replaced or changed")
+            body = b""
+            if stat.S_ISLNK(before.st_mode):
+                mode, body = "120000", os.fsencode(os.readlink(name, dir_fd=parent))
+            elif stat.S_ISDIR(before.st_mode):
+                if gitlink is None:
+                    return None
+                queries._require_git_path_confined(root, path)
+                nested = root / path
+                try:
+                    (nested / ".git").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    git_dir, common = immutable._source_git_dir(nested)
+                    head = immutable._source_head(git_dir, common)
+                    if len(head) != len(gitlink) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+                        raise GitError("captured gitlink HEAD metadata is malformed")
+                    gitlink = head
+                mode, body = "160000", gitlink.encode()
+            elif stat.S_ISREG(before.st_mode):
+                if before.st_size > immutable._MAX_SOURCE_BYTES:
+                    if private:
+                        raise immutable._StorageConflict("captured private spool exceeds the accepted size")
+                    raise GitError("captured source file exceeds the supported 256 MiB capture limit")
+                mode = "100755" if before.st_mode & stat.S_IXUSR else "100644"
+                stream = stack.enter_context(_regular_leaf(parent, name, before, private=private))
+                output = stack.enter_context(immutable._exclusive_file(spool, path)) if spool else None
+                other = None
+                spool_fingerprint = None
+                if compare is not None:
+                    try:
+                        other_parent, other_name = stack.enter_context(immutable._parent(compare, path))
+                        info = os.stat(other_name, dir_fd=other_parent, follow_symlinks=False)
+                    except OSError as exc:
+                        raise immutable._StorageConflict("captured private spool is unavailable") from exc
+                    if _fingerprint(info) != compare_fingerprint:
+                        raise immutable._StorageConflict("captured private spool was replaced or changed")
+                    if not stat.S_ISREG(info.st_mode) or info.st_size != before.st_size:
+                        raise failure(message)
+                    spool_fingerprint = _fingerprint(info)
+                    other = stack.enter_context(_regular_leaf(other_parent, other_name, info, private=True))
+                digest = hashlib.sha256()
+                oid = hashlib.new(algorithm, b"blob " + str(before.st_size).encode() + b"\0")
+                remaining = before.st_size
+                while remaining:
+                    chunk = stream.read(min(immutable._CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise failure(message)
+                    remaining -= len(chunk)
+                    digest.update(chunk)
+                    oid.update(chunk)
+                    if output is not None:
+                        output.write(chunk)
+                    if other is not None and other.read(len(chunk)) != chunk:
+                        if _fingerprint(os.fstat(other.fileno())) != compare_fingerprint:
+                            raise immutable._StorageConflict("captured private spool was replaced or changed")
+                        raise failure(message)
+                    if consume is not None:
+                        consume(chunk)
+                if stream.read(1) or (other is not None and other.read(1)):
+                    raise failure(message)
+                if output is not None:
+                    os.fchmod(output.fileno(), 0o755 if mode == "100755" else 0o644)
+                    output.flush()
+                    spool_fingerprint = _fingerprint(os.fstat(output.fileno()))
+                return _NativeEntry(mode, oid.hexdigest(), before.st_size, digest.hexdigest(), _fingerprint(before),
+                                    spool_fingerprint=spool_fingerprint)
+            else:
+                raise FrozenSourceRejected("captured source entry is not a regular file, symlink or gitlink")
+            after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if _fingerprint(before) != _fingerprint(after):
+                raise failure(message)
+            oid_text = body.decode() if mode == "160000" else _blob_digest(body, algorithm)
+            return _NativeEntry(mode, oid_text, len(body), hashlib.sha256(body).hexdigest(), _fingerprint(after), body)
+    except immutable._SourceChanged as exc:
+        raise _UnstableSource(_RERUN) from exc
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if private:
+            raise immutable._StorageConflict("captured private spool is unavailable") from exc
+        if found:
+            raise _UnstableSource(_RERUN) from exc
         return None
-    finally:
-        os.close(descriptor)
 
 
 def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], dict[str, str]]:
@@ -126,7 +225,7 @@ def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], di
         tracked.add(name)
         if mode == b"160000":
             gitlinks[name] = oid.decode()
-        if tag == b"S" and _native_entry(source, name, gitlinks.get(name)) is None:
+        if tag == b"S" and _native_entry(source, name, gitlinks.get(name), private=False) is None:
             raise SnapshotPreparationError(
                 "local capture has omitted skip-worktree files; materialize those working contents and rerun the review"
             )
@@ -141,19 +240,52 @@ def _population(source: Path, head_entries: list[_Entry]) -> tuple[list[str], di
 
 def _copy_objects(common: Path, target: Path) -> None:
     before = {relative: _fingerprint(path.lstat()) for path, relative in immutable._object_files(common)}
-    immutable._copy_objects(common, target)
+    try:
+        immutable._copy_objects(common, target)
+    except immutable._SourceChanged as exc:
+        raise _UnstableSource(_RERUN) from exc
     after = {relative: _fingerprint(path.lstat()) for path, relative in immutable._object_files(common)}
     if before != after:
         raise _UnstableSource(_RERUN)
 
 
+def _verify_object(root: Path, oid: str, raw_size: int, algorithm: str) -> None:
+    """Verify an existing loose object through pinned descriptors and bounded inflation."""
+    relative = f".git/objects/{oid[:2]}/{oid[2:]}"
+    try:
+        with immutable._parent(root, relative) as (parent, name):
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise immutable._StorageConflict("captured source object conflicts with existing bytes")
+            with _regular_leaf(parent, name, info, private=True) as stream:
+                decoder = zlib.decompressobj()
+                digest = hashlib.new(algorithm)
+                size = 0
+                while chunk := stream.read(immutable._CHUNK_BYTES):
+                    while True:
+                        raw = decoder.decompress(chunk, immutable._CHUNK_BYTES)
+                        size += len(raw)
+                        if size > raw_size or decoder.unused_data:
+                            raise immutable._StorageConflict("captured source object conflicts with existing bytes")
+                        digest.update(raw)
+                        chunk = decoder.unconsumed_tail
+                        if not chunk and len(raw) < immutable._CHUNK_BYTES:
+                            break
+                if not decoder.eof or size != raw_size or digest.hexdigest() != oid:
+                    raise immutable._StorageConflict("captured source object conflicts with existing bytes")
+    except (zlib.error, OSError) as exc:
+        raise immutable._StorageConflict("captured source object conflicts with existing bytes") from exc
+
+
 def _object(root: Path, kind: str, body: bytes, algorithm: str) -> str:
     raw = kind.encode() + b" " + str(len(body)).encode() + b"\0" + body
     oid = hashlib.new(algorithm, raw).hexdigest()
-    path = root / ".git" / "objects" / oid[:2] / oid[2:]
-    if not path.exists():
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(zlib.compress(raw))
+    relative = f".git/objects/{oid[:2]}/{oid[2:]}"
+    try:
+        with immutable._exclusive_file(root, relative) as output:
+            output.write(zlib.compress(raw))
+    except immutable._PrivateFileExists:
+        _verify_object(root, oid, len(raw), algorithm)
     return oid
 
 
@@ -176,62 +308,105 @@ def _blob_digest(body: bytes, algorithm: str) -> str:
     return hashlib.new(algorithm, b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
 
 
-def _blobs(root: Path, oids: list[str], algorithm: str) -> Iterator[tuple[str, bytes]]:
-    """Read bounded raw blob batches without filters, text conversion or checkout."""
-    for offset in range(0, len(oids), 16):
-        batch = oids[offset:offset + 16]
-        metadata = process._run_git(root, ["cat-file", "--batch-check"], capture_bytes=True,
-            input_text="\n".join(batch) + "\n", timeout=30,
-            error_context="captured source blob metadata unavailable").stdout.splitlines()
-        if len(metadata) != len(batch):
-            raise GitError("captured source blob metadata is incomplete")
-        sizes = []
-        for oid, row in zip(batch, metadata, strict=True):
-            fields = row.split()
-            if (len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit()
-                    or int(fields[2]) > immutable._MAX_SOURCE_BYTES):
-                raise GitError("captured source blob metadata exceeds the supported bounds")
-            sizes.append(int(fields[2]))
-        # `show` concatenates raw blobs in argument order, including duplicates.
-        # Metadata input stays small; body output uses the subprocess byte bound.
-        raw = process._run_git(root, ["show", "--no-ext-diff", "--no-textconv", "--no-color", *batch, "--"],
-            capture_bytes=True, timeout=30, max_output_bytes=sum(sizes),
-            error_context="captured source blobs unavailable").stdout
-        cursor = 0
-        for oid, size in zip(batch, sizes, strict=True):
-            body = raw[cursor:cursor + size]
-            cursor += size
-            if len(body) != size or _blob_digest(body, algorithm) != oid:
-                raise GitError("captured source blob integrity failed")
-            yield oid, body
-        if cursor != len(raw):
-            raise GitError("captured source blob population integrity failed")
+class _BlobReader:
+    """One raw reader per operation, with independent request and payload bounds."""
+
+    def __init__(self, transport: process._GitStream, algorithm: str, *, total: int, count: int,
+                 limit: int = immutable._MAX_SOURCE_BYTES) -> None:
+        self.transport, self.algorithm = transport, algorithm
+        self.remaining, self.requests, self.limit = total, count, limit
+
+    def read(self, oid: str, consume: Callable[[bytes], object]) -> None:
+        if self.requests <= 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid):
+            raise GitError("captured source blob request exceeds the supported bounds")
+        self.requests -= 1
+        self.transport.send(oid.encode() + b"\n")
+        fields = self.transport.line().split()
+        if (len(fields) != 3 or fields[:2] != [oid.encode(), b"blob"] or not fields[2].isdigit()
+                or len(fields[2]) > 12):
+            raise GitError("captured source blob metadata is malformed or missing")
+        size = int(fields[2])
+        if size > self.limit:
+            raise FrozenSourceRejected("captured source exceeds the bounded retrieval limit")
+        if size > self.remaining:
+            raise GitError("captured source blob population exceeds the supported size")
+        self.remaining -= size
+        digest = hashlib.new(self.algorithm, b"blob " + str(size).encode() + b"\0")
+        remaining = size
+        while remaining:
+            chunk = self.transport.read(min(immutable._CHUNK_BYTES, remaining))
+            if not chunk:
+                raise GitError("captured source blob is truncated")
+            remaining -= len(chunk)
+            digest.update(chunk)
+            consume(chunk)
+        if self.transport.read(1) != b"\n" or digest.hexdigest() != oid:
+            raise GitError("captured source blob integrity failed")
+
+
+@contextmanager
+def _blob_reader(root: Path, algorithm: str, *, total: int, count: int,
+                 limit: int = immutable._MAX_SOURCE_BYTES) -> Iterator[_BlobReader]:
+    with process._stream_git(root, ["cat-file", "--batch"]) as transport:
+        yield _BlobReader(transport, algorithm, total=total, count=count, limit=limit)
 
 
 def _blob(root: Path, oid: str, algorithm: str) -> bytes:
-    size = process._run_git(root, ['cat-file', '-s', oid], timeout=30,
-                            error_context='captured source blob size unavailable').stdout.strip()
-    if not size.isdecimal():
-        raise GitError('captured source blob metadata is malformed')
-    if int(size) > immutable._MAX_BLOB_BYTES:
-        raise FrozenSourceRejected('captured source exceeds the bounded retrieval limit')
-    body = process._run_git(
-        root, ["cat-file", "blob", oid], capture_bytes=True, timeout=30,
-        error_context="captured source blob unavailable", max_output_bytes=immutable._MAX_BLOB_BYTES + 4096,
-    ).stdout
-    if len(body) > immutable._MAX_BLOB_BYTES or _blob_digest(body, algorithm) != oid:
-        raise GitError("captured source blob integrity failed")
-    return body
+    body = bytearray()
+    with _blob_reader(root, algorithm, total=immutable._MAX_BLOB_BYTES, count=1,
+                      limit=immutable._MAX_BLOB_BYTES) as reader:
+        reader.read(oid, body.extend)
+    return bytes(body)
 
 
 def _materialize(root: Path, entries: list[_Entry], algorithm: str) -> None:
     regular = [entry for entry in entries if entry[0] in {"100644", "100755"}]
-    bodies = _blobs(root, [oid for _, oid, _ in regular], algorithm)
-    for (mode, _, name), (_, body) in zip(regular, bodies, strict=True):
-        target = root / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(body)
-        target.chmod(0o755 if mode == "100755" else 0o644)
+    with _blob_reader(root, algorithm, total=immutable._MAX_SOURCE_BYTES, count=len(regular)) as reader:
+        for mode, oid, name in regular:
+            with immutable._exclusive_file(root, name) as stream:
+                reader.read(oid, stream.write)
+                os.fchmod(stream.fileno(), 0o755 if mode == "100755" else 0o644)
+
+
+def _spooled_blob(root: Path, path: str, accepted: _NativeEntry, algorithm: str) -> None:
+    """Compress the sole native spool into an exclusively created loose object."""
+    relative = f".git/objects/{accepted.oid[:2]}/{accepted.oid[2:]}"
+    header = b"blob " + str(accepted.size).encode() + b"\0"
+    if os.path.lexists(root / relative):
+        _verify_object(root, accepted.oid, len(header) + accepted.size, algorithm)
+        return
+    temporary = relative + "." + uuid4().hex
+    with immutable._exclusive_file(root, temporary) as output:
+        compressor = zlib.compressobj()
+        output.write(compressor.compress(header))
+
+        def compress(chunk: bytes) -> None:
+            output.write(compressor.compress(chunk))
+
+        try:
+            current = _native_entry(root, path, algorithm=algorithm, consume=compress)
+        except _UnstableSource as exc:
+            raise immutable._StorageConflict("captured private spool was replaced or changed") from exc
+        if current is not None and current.fingerprint != accepted.spool_fingerprint:
+            raise immutable._StorageConflict("captured private spool was replaced or changed")
+        if (current is None or current.mode != accepted.mode or current.oid != accepted.oid
+                or current.digest != accepted.digest or current.size != accepted.size):
+            raise immutable._StorageConflict("captured private spool integrity failed")
+        output.write(compressor.flush())
+        output.flush()
+        owned = os.fstat(output.fileno())
+        with immutable._parent(root, relative) as (parent, name):
+            # link is an atomic no-replace publication. This link is private;
+            # no original source inode is borrowed. Competing bytes survive.
+            try:
+                os.link(Path(temporary).name, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+            except FileExistsError:
+                _verify_object(root, accepted.oid, len(header) + accepted.size, algorithm)
+    with immutable._parent(root, temporary) as (parent, name):
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (info.st_dev, info.st_ino) != (owned.st_dev, owned.st_ino):
+            raise immutable._StorageConflict("captured private object temporary was replaced")
+        os.unlink(name, dir_fd=parent)
 
 
 @dataclass(frozen=True)
@@ -308,11 +483,11 @@ class CapturedSource:
             body = _blob(self.root, oid, "sha256" if len(self.head_sha) == 64 else "sha1")
         if side == "new":
             try:
-                native = _native_entry(self.root, path)
+                native = _native_entry(self.root, path, algorithm="sha256" if len(self.head_sha) == 64 else "sha1")
             except OSError as exc:
                 raise GitError("captured native source is unavailable") from exc
-            if native is None or native[:2] != (mode, body):
-                raise GitError("captured native source integrity failed")
+            if native is None or (native.mode, native.oid) != (mode, oid):
+                raise immutable._StorageConflict("captured native source integrity failed")
         return oid, body
 
     def validate(self) -> None:
@@ -332,15 +507,17 @@ class CapturedSource:
                 raise GitError("captured native source revision changed")
             algorithm = "sha256" if len(self.head_sha) == 64 else "sha1"
             oids = list(dict.fromkeys(oid for mode, oid, _ in (*self._before, *self._after) if mode != "160000"))
-            for _ in _blobs(self.root, oids, algorithm):
-                pass
+            with _blob_reader(self.root, algorithm, total=2 * immutable._MAX_SOURCE_BYTES,
+                              count=len(oids)) as reader:
+                for oid in oids:
+                    reader.read(oid, lambda chunk: None)
         expected = {name for mode, _, name in self._after if mode in {"100644", "100755"}}
         for mode, oid, name in self._after:
             if name not in expected:
                 continue
-            native = _native_entry(self.root, name)
-            if native is None or native[0] != mode or _blob_digest(native[1], algorithm) != oid:
-                raise GitError("captured native source integrity failed")
+            native = _native_entry(self.root, name, algorithm=algorithm)
+            if native is None or native.mode != mode or native.oid != oid:
+                raise immutable._StorageConflict("captured native source integrity failed")
         actual: set[str] = set()
         for directory, dirs, names in os.walk(self.root, followlinks=False):
             parent = Path(directory)
@@ -383,10 +560,12 @@ def capture_source(
     scope = sorted(set(p.rstrip("/") for p in exclude or []))
     for attempt in range(_ATTEMPTS):
         destination.mkdir(mode=0o700, parents=True)
+        owned_directories = {".": _directory_identity(destination)}
         try:
             with immutable.inert_git_context(destination):
                 algorithm = "sha256" if len(head_sha) == 64 else "sha1"
                 immutable._git(destination, "init", "--template=", "--object-format=" + algorithm, ".")
+                owned_directories.update((p, _directory_identity(destination / p)) for p in (".git", ".git/objects"))
                 _copy_objects(common, destination / ".git/objects")
                 _validate_commit(destination, base_sha)
                 _validate_commit(destination, head_sha)
@@ -396,7 +575,8 @@ def capture_source(
                 if any(_runtime_artifact(name) for _, _, name in (*before, *committed_after)):
                     raise GitError("captured source contains tracked generated Daydream artifacts")
                 population: list[str] = []
-                observed: dict[str, tuple[str, bytes, tuple[int, ...]] | None] = {}
+                observed: dict[str, _NativeEntry | None] = {}
+                established = {oid for mode, oid, _ in (*before, *committed_after) if mode != "160000"}
                 if local:
                     if immutable._source_head(git_dir, common) != head_sha:
                         raise _UnstableSource(_RERUN)
@@ -404,15 +584,20 @@ def capture_source(
                     after = []
                     total = 0
                     for path in population:
-                        native = observed[path] = _native_entry(source, path, gitlinks.get(path))
+                        native = observed[path] = _native_entry(source, path, gitlinks.get(path),
+                                                              algorithm=algorithm, spool=destination, private=False)
                         if native is None:
                             continue
-                        mode, body, _ = native
-                        total += len(body)
+                        total += native.size
                         if total > immutable._MAX_SOURCE_BYTES:
                             raise GitError("captured source population exceeds the supported 256 MiB limit")
-                        oid = body.decode() if mode == "160000" else _object(destination, "blob", body, algorithm)
-                        after.append((mode, oid, path))
+                        if native.mode in {"100644", "100755"}:
+                            if native.oid not in established:
+                                _spooled_blob(destination, path, native, algorithm)
+                        elif native.mode == "120000":
+                            _object(destination, "blob", native.metadata, algorithm)
+                        established.add(native.oid)
+                        after.append((native.mode, native.oid, path))
                     tree = _tree(destination, after, algorithm)
                     commit = (f"tree {tree}\nparent {head_sha}\nauthor Daydream <source@daydream.invalid> 0 +0000\n"
                               "committer Daydream <source@daydream.invalid> 0 +0000\n\nCaptured local source\n")
@@ -422,13 +607,19 @@ def capture_source(
                 else:
                     after = committed_after
                     after_revision = head_sha
-                _materialize(destination, after, algorithm)
+                if not local:
+                    _materialize(destination, after, algorithm)
                 if local:
                     final_population, final_gitlinks = _population(source, committed_after)
                     if final_population != population or _directory_identity(source) != source_identity:
                         raise _UnstableSource(_RERUN)
                     for path in population:
-                        if _native_entry(source, path, final_gitlinks.get(path)) != observed[path]:
+                        accepted = observed[path]
+                        spool_fingerprint = accepted.spool_fingerprint if accepted else None
+                        final = _native_entry(source, path, final_gitlinks.get(path), algorithm=algorithm,
+                            compare=destination if spool_fingerprint is not None else None,
+                            compare_fingerprint=spool_fingerprint, private=False)
+                        if final != accepted:
                             raise _UnstableSource(_RERUN)
                     if (_population(source, committed_after)[0] != population
                             or immutable._source_head(git_dir, common) != head_sha
@@ -456,11 +647,17 @@ def capture_source(
                         for name in ("HEAD", "config", "index")))
                 captured.validate()
                 return captured
+        except immutable._StorageConflict as conflict:
+            conflict.reraise()
         except (_UnstableSource, OSError) as exc:
+            if not _storage_matches(destination, owned_directories):
+                raise GitError("captured source storage was replaced; preserving competing bytes") from exc
             shutil.rmtree(destination)
             if attempt + 1 == _ATTEMPTS:
                 raise SnapshotPreparationError(_RERUN) from exc
         except BaseException:
+            if not _storage_matches(destination, owned_directories):
+                raise
             shutil.rmtree(destination)
             raise
     raise AssertionError("capture retry loop exhausted")

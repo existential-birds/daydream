@@ -17,7 +17,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NoReturn
 
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError
@@ -124,6 +124,121 @@ def _regular_file(path: Path, *, limit: int) -> Iterator[tuple[BinaryIO, int]]:
         raise GitError("immutable source evidence is unavailable") from exc
 
 
+def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+class _SourceChanged(GitError):
+    """A confined source changed during copying; callers may retry a fresh capture."""
+
+
+class _StorageConflict(GitError):
+    """Private storage contains competing bytes that cleanup must preserve."""
+
+    def reraise(self) -> NoReturn:
+        """Propagate after declining cleanup, preserving an original cancellation."""
+        primary = self.__cause__
+        if primary is not None and not isinstance(primary, Exception):
+            raise primary from None
+        raise self
+
+
+class _PrivateFileExists(_StorageConflict):
+    """An existing leaf may be verified only by the object publisher."""
+
+
+# Payload buffers are independent of the admitted leaf/store size.
+_CHUNK_BYTES = 1024 * 1024
+
+
+@contextmanager
+def _parent(root: Path, relative: str, *, create: bool = False,
+            private: bool = True) -> Iterator[tuple[int, str]]:
+    """Pin every parent and reject symlink/replacement races before returning."""
+    descriptors: list[int] = []
+    bindings: list[tuple[int, str, int]] = []
+    failure = _StorageConflict if private else _SourceChanged
+
+    def validate_bindings() -> None:
+        try:
+            for parent, part, child in bindings:
+                info = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                opened = os.fstat(child)
+                if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise failure("immutable source parent changed during reading")
+            info, opened = root.lstat(), os.fstat(descriptors[0])
+            if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                raise failure("immutable source root changed during reading")
+        except OSError as exc:
+            raise failure("immutable source parent binding is unavailable") from exc
+
+    try:
+        try:
+            descriptors.append(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+            parts = relative.split("/")
+            for part in parts[:-1]:
+                parent = descriptors[-1]
+                if create:
+                    try:
+                        os.mkdir(part, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                descriptors.append(child)
+                bindings.append((parent, part, child))
+        except OSError as exc:
+            if private:
+                raise _StorageConflict("immutable source private parent is unavailable") from exc
+            raise
+        try:
+            yield descriptors[-1], parts[-1]
+        except _StorageConflict:
+            raise
+        except BaseException as error:
+            if private:
+                try:
+                    validate_bindings()
+                except _StorageConflict as conflict:
+                    raise conflict from error
+            raise
+        else:
+            validate_bindings()
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+@contextmanager
+def _exclusive_file(root: Path, relative: str) -> Iterator[BinaryIO]:
+    """Create private bytes without replacing a competing leaf; preserve replacements."""
+    with _parent(root, relative, create=True) as (parent, name):
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        except FileExistsError as exc:
+            raise _PrivateFileExists("private source creation conflicts with existing bytes") from exc
+        with os.fdopen(fd, "wb") as stream:
+            owned = os.fstat(stream.fileno())
+            try:
+                yield stream
+                stream.flush()
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+                    raise _StorageConflict("private source file was replaced")
+            except _StorageConflict:
+                raise
+            except BaseException as error:
+                try:
+                    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+                        raise _StorageConflict("private source file was replaced")
+                    os.unlink(name, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                except (OSError, _StorageConflict):
+                    raise _StorageConflict("private source file was replaced or cleanup is unavailable") from error
+                raise
+
+
 def _regular(path: Path, *, limit: int) -> bytes:
     with _regular_file(path, limit=limit) as (stream, size):
         content = stream.read(size + 1)
@@ -221,11 +336,30 @@ def _object_files(common: Path) -> Iterator[tuple[Path, Path]]:
 
 
 def _copy_objects(common: Path, target: Path) -> None:
+    total = 0
     for path, relative in _object_files(common):
-        body = _regular(path, limit=_MAX_OBJECT_BYTES)
-        destination = target / relative
-        destination.parent.mkdir(exist_ok=True)
-        destination.write_bytes(body)
+        with _parent(common / "objects", relative.as_posix(), private=False) as (parent, name):
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as source, _exclusive_file(target, relative.as_posix()) as destination:
+                opened = os.fstat(source.fileno())
+                if not stat.S_ISREG(opened.st_mode) or _fingerprint(opened) != _fingerprint(before):
+                    raise _SourceChanged("immutable source object changed during copying")
+                total += before.st_size
+                if total > _MAX_OBJECT_BYTES:
+                    raise GitError("immutable source object population exceeds the supported size")
+                remaining = before.st_size
+                while remaining:
+                    chunk = source.read(min(_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        raise _SourceChanged("immutable source object was truncated")
+                    destination.write(chunk)
+                    remaining -= len(chunk)
+                if source.read(1) or _fingerprint(os.fstat(source.fileno())) != _fingerprint(before):
+                    raise _SourceChanged("immutable source object changed during copying")
+                after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if _fingerprint(after) != _fingerprint(before):
+                    raise _SourceChanged("immutable source object changed during copying")
 
 
 def _git(repo: Path, *args: str, retries: int = 0) -> str:
@@ -382,5 +516,10 @@ def prepare_immutable_source(
             (destination / ".git" / "HEAD").write_text(local["head_sha"] + "\n")
             _git(destination, "read-tree", local["head_sha"])
             yield destination
-    finally:
+    except _StorageConflict as conflict:
+        conflict.reraise()
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+    else:
         shutil.rmtree(destination)

@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
+import threading
 import tracemalloc
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
@@ -19,6 +21,7 @@ from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import canonicalize_source_selectors, source_id
+from daydream.review_stage_inputs import StageInputFactory
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     InvestigationRun,
@@ -137,6 +140,26 @@ async def test_local_runner_uses_one_capture_for_diff_targets_and_supporting_rea
         assert {path for scope in result['planned_scopes'] for path in scope['files']} == {'api.py', 'new.py'}
     assert (repo / '.git/index').read_bytes() == index
     assert git(repo, 'rev-parse', 'HEAD') == original_head
+
+
+async def test_preparation_validates_off_the_loop_while_submission_stays_synchronous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fake backends have no setup timers, so a full validation on the loop stalls nothing they can observe."""
+    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
+    review.backend = NativeStageBackend(review.repo)
+    validations: list[tuple[str, bool]] = []
+    revalidate = StageInputFactory._revalidate_canonical
+
+    def observed(factory: StageInputFactory) -> None:
+        caller = sys._getframe(1).f_code.co_name
+        validations.append((caller, threading.current_thread() is threading.main_thread()))
+        revalidate(factory)
+
+    monkeypatch.setattr(StageInputFactory, '_revalidate_canonical', observed)
+    assert await review.run() == 0
+    assert {('__init__', False), ('prepare', False), ('admit_submission', True)} <= set(validations)
+    assert not {caller for caller, on_loop in validations if on_loop and caller in {'__init__', 'prepare'}}
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])

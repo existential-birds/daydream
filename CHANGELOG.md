@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stream captured review sources with bounded Python payload buffers and one raw
+  Git reader per operation. Native submissions perform one complete integrity
+  check before atomic admission, reducing capture memory and repeated validation
+  work while retaining preparation and terminal checks
+  ([#1710](https://github.com/existential-birds/daydream/issues/1710)).
+
 - Review local changes as one captured net base-to-working comparison, including
   nonignored untracked files and dirty supporting context. Native browsing and
   canonical references share accepted source; unstable capture fails before model

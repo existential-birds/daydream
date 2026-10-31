@@ -7,8 +7,11 @@ cannot establish; source consumers exercise dispatch and coverage separately.
 
 from __future__ import annotations
 
+import errno
+import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +28,7 @@ def source(tmp_path: Path) -> tuple[Path, str, str]:
     init_repo(repo)
     write_and_stage(repo, "subject.py", "value = 0\n")
     write_and_stage(repo, "helper.py", "helper = 0\n")
+    write_and_stage(repo, "unchanged/helper.py", "support = 0\n")
     write_and_stage(repo, ".gitignore", "ignored/\n")
     base = commit(repo, "base")
     write_and_stage(repo, "subject.py", "value = 1\n")
@@ -78,17 +82,35 @@ def test_capture_net_final_bytes_and_population_identity(source: tuple[Path, str
     assert added.source_id != population.source_id
 
 
-def test_capture_uses_working_bytes_after_staging(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """The net patch and native files share accepted final bytes rather than staged bytes."""
+@pytest.mark.parametrize(("path", "edited"), [
+    ("subject.py", False), ("subject.py", True), ("added.py", False), ("added.bin", False),
+], ids=["staged-final", "edited-after-staging", "added-staged", "large-staged"])
+def test_capture_uses_working_bytes_after_staging(
+    source: tuple[Path, str, str], tmp_path: Path, path: str, edited: bool,
+) -> None:
+    """Final bytes may reuse staged loose blobs; later edits still supersede the index.
+
+    The edited-after-staging row misses reuse of a copied non-endpoint object.
+    A large compressed staged blob also exercises incremental existing-object reads.
+    """
     repo, base, head = source
-    write_and_stage(repo, "subject.py", "value = 2\n")
-    (repo / "subject.py").write_text("value = 3\n")
+    staged = b"\0" + b"x" * (2 * 1024**2 + 17) if path.endswith(".bin") else b"value = 2\n"
+    working = b"value = 3\n" if edited else staged
+    write_and_stage(repo, path, staged)
+    (repo / path).write_bytes(working)
     captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
-    assert "+value = 3\n" in captured.diff
-    assert "+value = 2\n" not in captured.diff
-    assert captured.read("old", "subject.py")[1] == b"value = 0\n"
-    assert captured.read("new", "subject.py")[1] == b"value = 3\n"
-    assert (captured.root / "subject.py").read_bytes() == b"value = 3\n"
+    assert path in captured.files
+    if not path.endswith(".bin"):
+        assert "+" + working.decode() in captured.diff
+    if edited:
+        assert "+value = 2\n" not in captured.diff
+    if path == "subject.py":
+        assert captured.read("old", path)[1] == b"value = 0\n"
+    else:
+        with pytest.raises(PathAbsentError):
+            captured.read("old", path)
+    assert captured.read("new", path)[1] == working
+    assert (captured.root / path).read_bytes() == working
 
 
 def test_committed_capture_ignores_original_checkout_bytes(source: tuple[Path, str, str], tmp_path: Path) -> None:
@@ -111,26 +133,48 @@ def test_committed_capture_ignores_original_checkout_bytes(source: tuple[Path, s
     assert captured.read("old", "subject.py")[1] == b"value = 0\n"
 
 
+@pytest.mark.parametrize("change", ["bytes", "parent", "symlink", "missing"])
 @pytest.mark.parametrize("persistent", [False, True])
 def test_capture_retries_actual_materialization_instability(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool,
+    change: str,
 ) -> None:
     """Concurrent writes around actual copying retry finitely and never accept torn source."""
     repo, base, head = source
     destination = tmp_path / "captured"
-    original = Path.write_bytes
+    relative = "unchanged/helper.py" if change == "parent" else "subject.py"
+    changed = "helper.py" if change in {"symlink", "missing"} else relative
+    if change in {"symlink", "missing"}:
+        (repo / changed).unlink()
+        if change == "symlink":
+            (repo / changed).symlink_to("subject.py")
+    original = os.fdopen
     writes = 0
 
-    def changing_write(path: Path, body: bytes) -> int:
-        nonlocal writes
-        written = original(path, body)
-        if path == destination / "subject.py":
-            writes += 1
-            if persistent or writes == 1:
-                original(repo / "subject.py", f"value = {writes + 10}\n".encode())
-        return written
+    def changing_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        stream = original(fd, *args, **kwargs)
+        write = stream.write
 
-    monkeypatch.setattr(Path, "write_bytes", changing_write)
+        def changing_write(body: bytes) -> int:
+            nonlocal writes
+            written = int(write(body))
+            target = destination / relative
+            if target.exists() and os.fstat(fd).st_ino == target.stat().st_ino:
+                writes += 1
+                if persistent or writes == 1:
+                    if change == "parent":
+                        (repo / "unchanged").rename(tmp_path / f"prior-parent-{writes}")
+                        (repo / "unchanged").mkdir()
+                    if change in {"symlink", "missing"}:
+                        (repo / changed).unlink(missing_ok=True)
+                    (repo / changed).write_bytes(f"value = {writes + 10}\n".encode())
+            return written
+
+        if args and args[0] == "wb":
+            stream.write = changing_write
+        return stream
+
+    monkeypatch.setattr(os, "fdopen", changing_fdopen)
     if persistent:
         with pytest.raises(SnapshotPreparationError, match="stop concurrent writers and rerun"):
             capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
@@ -139,7 +183,48 @@ def test_capture_retries_actual_materialization_instability(
     else:
         captured = capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
         assert writes == 2
-        assert captured.read("new", "subject.py")[1] == b"value = 11\n"
+        assert captured.read("new", changed)[1] == b"value = 11\n"
+
+
+@pytest.mark.parametrize("fault", ["missing-spool", "cancel-replaced-storage", "spool-disappears"])
+def test_capture_private_write_failure_preserves_subject_and_primary_error(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Private write failure cannot turn a present source into an accepted deletion or erase cancellation."""
+    import asyncio
+
+    repo, base, head = source
+    destination = tmp_path / "captured"
+    expected_body = b"value = 2\n" if fault == "spool-disappears" else b"value = 1\n"
+    (repo / "subject.py").write_bytes(expected_body)
+    original = os.open
+    writes = 0
+
+    def failing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal writes
+        if path == "subject.py" and flags & os.O_CREAT:
+            writes += 1
+            if fault == "cancel-replaced-storage":
+                (destination / ".git/objects").rename(destination / ".git/preserved-objects")
+                raise asyncio.CancelledError("cancel during private write")
+            if fault != "spool-disappears":
+                raise FileNotFoundError("private spool disappeared")
+        if fault == "spool-disappears" and isinstance(path, str) and "." in path and len(path) > 65:
+            (destination / "subject.py").rename(destination / "preserved-subject.py")
+            (destination / "witness").write_bytes(b"competing bytes")
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    expected = (asyncio.CancelledError if fault == "cancel-replaced-storage" else
+                GitError if fault == "spool-disappears" else SnapshotPreparationError)
+    with pytest.raises(expected):
+        capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
+    assert writes == (3 if fault == "missing-spool" else 1)
+    assert (repo / "subject.py").read_bytes() == expected_body
+    assert destination.exists() == (fault != "missing-spool")
+    if fault == "spool-disappears":
+        assert (destination / "preserved-subject.py").read_bytes() == expected_body
+        assert (destination / "witness").read_bytes() == b"competing bytes"
 
 
 def test_capture_retries_object_population_change_during_copy(
@@ -191,6 +276,7 @@ def test_capture_retries_working_population_change_during_enumeration(
 
 @pytest.mark.parametrize("corruption", [
     "bytes", "missing", "population", "metadata", "storage", "index", "skip", "assume", "stages", "intent",
+    "support-bytes", "support-mode", "support-missing", "support-parent",
 ])
 def test_capture_integrity_never_falls_back_to_original(
     source: tuple[Path, str, str], tmp_path: Path, corruption: str,
@@ -200,8 +286,23 @@ def test_capture_integrity_never_falls_back_to_original(
     if corruption == "intent":
         write_and_stage(repo, "empty.bin", b"")
         head = commit(repo, "empty file")
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
-    if corruption == "bytes":
+    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True,
+                              exclude=["unchanged"])
+    captured.validate()  # A preceding success must never authorize later corruption.
+    if corruption.startswith("support-"):
+        helper = captured.root / "unchanged/helper.py"
+        if corruption == "support-bytes":
+            info = helper.stat()
+            helper.write_bytes(b"support = 9\n")
+            os.utime(helper, ns=(info.st_atime_ns, info.st_mtime_ns))
+        elif corruption == "support-mode":
+            helper.chmod(0o755)
+        elif corruption == "support-missing":
+            helper.unlink()
+        else:
+            (captured.root / "unchanged").rename(captured.root / "moved-support")
+            (captured.root / "unchanged").symlink_to(repo / "unchanged", target_is_directory=True)
+    elif corruption == "bytes":
         (captured.root / "subject.py").write_text("tampered")
     elif corruption == "missing":
         (captured.root / "subject.py").unlink()
@@ -231,7 +332,7 @@ def test_capture_integrity_never_falls_back_to_original(
         shutil.copytree(old_objects, captured.root / ".git/objects")
     with pytest.raises(GitError):
         captured.validate()
-    if corruption != "population":
+    if corruption != "population" and not corruption.startswith("support-"):
         with pytest.raises(GitError):
             captured.read("new", "subject.py")
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
@@ -303,14 +404,15 @@ def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
 def test_capture_raw_duplicate_and_empty_blobs(source: tuple[Path, str, str], tmp_path: Path) -> None:
     """Raw batching preserves binary duplicate and zero-length payload boundaries."""
     repo, base, _ = source
-    write_and_stage(repo, "a.bin", b"\0duplicate\xff\n")
-    write_and_stage(repo, "b.bin", b"\0duplicate\xff\n")
+    payload = b"\0duplicate\xff\n" * 100_003
+    write_and_stage(repo, "a.bin", payload)
+    write_and_stage(repo, "b.bin", payload)
     write_and_stage(repo, "empty.bin", b"")
     head = commit(repo, "raw files")
     captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=False)
     for name in ("a.bin", "b.bin"):
-        assert (captured.root / name).read_bytes() == b"\0duplicate\xff\n"
-        assert captured.read("new", name)[1] == b"\0duplicate\xff\n"
+        assert (captured.root / name).read_bytes() == payload
+        assert captured.read("new", name)[1] == payload
     assert (captured.root / "empty.bin").read_bytes() == b""
     captured.validate()
 
@@ -353,7 +455,7 @@ def test_capture_cleanup_preserves_replaced_storage(source: tuple[Path, str, str
     assert not another.root.exists()
 
 
-@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted"])
+@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted", "deleted-directory"])
 def test_local_capture_requires_materialized_skip_worktree_contents(
     source: tuple[Path, str, str], tmp_path: Path, state: str,
 ) -> None:
@@ -372,14 +474,16 @@ def test_local_capture_requires_materialized_skip_worktree_contents(
     elif state == "noncone":
         git(repo, "sparse-checkout", "set", "--no-cone", "/visible/", "/.gitignore")
     else:
-        if state != "deleted":
+        if not state.startswith("deleted"):
             git(repo, "update-index", "--skip-worktree", "support/helper.py")
         if state == "present":
             (repo / "support/helper.py").write_text("helper = 4\n")
+        elif state == "deleted-directory":
+            shutil.rmtree(repo / "support")
         else:
             (repo / "support/helper.py").unlink()
     flags = git(repo, "ls-files", "-t", "--", "support/helper.py")
-    assert flags == ("H" if state == "deleted" else "S") + " support/helper.py"
+    assert flags == ("H" if state.startswith("deleted") else "S") + " support/helper.py"
     original_index = (repo / ".git/index").read_bytes()
     original_refs = git(repo, "show-ref")
     destination = tmp_path / "captured"
@@ -468,3 +572,369 @@ def test_capture_current_population_excludes_only_untracked_ignored_bytes(
     assert git(repo, "show-ref") == original_refs
     assert git(repo, "rev-parse", "HEAD") == head
     assert (repo / "helper.py").read_bytes() == b"helper = 4\n"
+
+@pytest.mark.parametrize("fault", [
+    "valid", "missing", "wrong-oid", "wrong-type", "truncated", "terminator", "extra", "nonzero",
+    "stderr", "timeout", "setup", "sink", "cancel",
+])
+def test_streamed_blob_protocol_reaps_child_on_every_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Real duplex pipes prove framing, stderr/deadline bounds and cleanup even before reader setup completes.
+
+    Existing buffered subprocess tests have no request writes, object framing or
+    failing consumer, so cannot catch these lifecycle/duplex regressions.
+    """
+    import asyncio
+    import hashlib
+    import subprocess
+    import sys
+
+    from daydream.git_ops.captured_source import _BlobReader
+
+    body = b"raw\r\n\0\xff" * 20_003
+    oid = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+    script = (
+        "import os,sys,time\n"
+        "fault=sys.argv[1]\n"
+        "oid=sys.stdin.buffer.readline().strip()\n"
+        "body=b'raw\\r\\n\\0\\xff'*20003\n"
+        "if fault=='timeout': time.sleep(60)\n"
+        "if fault=='stderr': sys.stderr.buffer.write(b'x'*65537);sys.stderr.buffer.flush()\n"
+        "header=oid+b' blob '+str(len(body)).encode()+b'\\n'\n"
+        "if fault=='missing': header=oid+b' missing\\n'\n"
+        "if fault=='wrong-oid': header=b'0'*40+b' blob '+str(len(body)).encode()+b'\\n'\n"
+        "if fault=='wrong-type': header=oid+b' tree '+str(len(body)).encode()+b'\\n'\n"
+        "for part in (header[:7],header[7:]):\n"
+        " sys.stdout.buffer.write(part);sys.stdout.buffer.flush()\n"
+        "if fault=='truncated': sys.stdout.buffer.write(body[:30]);sys.exit(0)\n"
+        "sys.stdout.buffer.write(body);sys.stdout.buffer.write(b'x' if fault=='terminator' else b'\\n')\n"
+        "if fault=='extra': sys.stdout.buffer.write(b'extra')\n"
+        "sys.stdout.buffer.flush()\n"
+        "if fault=='nonzero': sys.exit(7)\n"
+        "sys.stdin.buffer.read()\n"
+    )
+    children: list[subprocess.Popen[Any]] = []
+    launch = subprocess.Popen
+
+    def launch_child(argv: Any, *args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        child = launch([sys.executable, "-I", "-c", script, fault], *args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch_child)
+    if fault == "setup":
+        def unavailable_nonblocking(fd: int, blocking: bool) -> None:
+            raise RuntimeError("pipe setup failed")
+        monkeypatch.setattr(os, "set_blocking", unavailable_nonblocking)
+    sink = tmp_path / "accepted-bytes"
+    def consume(chunk: bytes) -> None:
+        with sink.open("ab") as output:
+            output.write(chunk)
+        if fault == "sink":
+            raise OSError("destination write failed")
+        if fault == "cancel":
+            raise asyncio.CancelledError("cancel during actual write")
+
+    def read() -> None:
+        with process._stream_git(tmp_path, ["cat-file", "--batch"],
+                                 timeout=0.2 if fault == "timeout" else 5) as transport:
+            _BlobReader(transport, "sha1", total=len(body), count=1).read(oid, consume)
+
+    if fault == "valid":
+        read()
+        assert sink.read_bytes() == body
+    else:
+        expected = (asyncio.CancelledError if fault == "cancel" else RuntimeError if fault == "setup"
+                    else GitError)
+        with pytest.raises(expected):
+            read()
+    assert len(children) == 1
+    child = children[0]
+    assert child.returncode is not None
+    with pytest.raises(ProcessLookupError):
+        os.kill(child.pid, 0)
+    assert all(stream is not None and stream.closed for stream in (child.stdin, child.stdout, child.stderr))
+
+
+def test_capture_verifies_both_separately_admitted_sides(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two legal endpoint populations may exceed a single-side payload budget together."""
+    repo, _, _ = source
+    old, new = b"\0" + b"a" * 750, b"\0" + b"b" * 750
+    write_and_stage(repo, "both.bin", old)
+    base = commit(repo, "old binary")
+    write_and_stage(repo, "both.bin", new)
+    head = commit(repo, "new binary")
+    monkeypatch.setattr(immutable, "_MAX_SOURCE_BYTES", 1024)
+    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=False)
+    captured.validate()
+    assert captured.read("old", "both.bin")[1] == old
+    assert captured.read("new", "both.bin")[1] == new
+
+
+@pytest.mark.parametrize("kind", [
+    "blob", "tree", "existing-tree", "native", "parent", "parent-open", "parent-create",
+    "parent-source", "parent-cancel",
+    "leaf-source", "leaf-cancel", "read-truncated", "read-cancel", "read-symlink", "read-missing",
+])
+def test_capture_preserves_competing_object_bytes(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    """Loose-object publication must neither replace a competing leaf nor erase it during refusal cleanup."""
+    import asyncio
+
+    repo, base, head = source
+    expected_source = "value = 1\n" if kind == "existing-tree" else "value = 345\n"
+    (repo / "subject.py").write_text(expected_source)
+    private_io = kind in {
+        "parent-source", "parent-cancel", "leaf-source", "leaf-cancel", "read-truncated", "read-cancel",
+        "read-symlink", "read-missing",
+    }
+    if kind == "parent-create" or private_io:
+        (repo / "fresh").mkdir()
+        (repo / "fresh/new.py").write_text(expected_source)
+    tree_oid = git(repo, "rev-parse", "HEAD^{tree}")
+    destination = tmp_path / "captured"
+    expected = ((repo / ".git/objects" / tree_oid[:2] / tree_oid[2:]).read_bytes()
+                if kind == "existing-tree" else b"competing object bytes")
+    link = os.link
+    competing: list[Path] = []
+    create_failures: list[FileNotFoundError] = []
+    cancellation = asyncio.CancelledError("cancel during actual private write")
+
+    def preserve_parent(parent: Path) -> None:
+        preserved = parent.with_name("preserved-parent")
+        parent.rename(preserved)
+        witness = preserved / "witness"
+        witness.write_bytes(expected)
+        competing.append(witness)
+
+    def replace_leaf(leaf: Path) -> Path:
+        prior = leaf.with_name("prior-new.py")
+        leaf.rename(prior)
+        leaf.write_bytes(expected)
+        competing.append(leaf)
+        return prior
+
+    def competing_link(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        parent = next((destination / ".git/objects").glob("*/" + str(src)))
+        if kind == "parent":
+            link(src, dst, *args, **kwargs)
+            if not competing:
+                preserve_parent(parent.parent)
+            return
+        target = parent.with_name(str(dst))
+        target.write_bytes(b"competing object bytes")
+        competing.append(target)
+        link(src, dst, *args, **kwargs)
+
+    opened = os.open
+    fdopen = os.fdopen
+    stat = os.stat
+
+    def competing_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if (path == "new.py" and (destination / ".git/index").is_file() and not competing
+                and kwargs.get("dir_fd") is not None
+                and os.fstat(kwargs["dir_fd"]).st_ino == (destination / "fresh").stat().st_ino):
+            leaf = destination / "fresh/new.py"
+            leaf.rename(leaf.with_name("prior-new.py"))
+            witness = leaf.with_name("witness")
+            witness.write_bytes(expected)
+            competing.append(witness)
+            if kind == "read-symlink":
+                leaf.symlink_to("witness")
+        return stat(path, *args, **kwargs)
+
+    def competing_fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+        stream = fdopen(fd, *args, **kwargs)
+        write = stream.write
+        read = stream.read
+
+        def competing_write(body: bytes) -> int:
+            written = int(write(body))
+            leaf = destination / "fresh/new.py"
+            if leaf.exists() and os.fstat(fd).st_ino == leaf.stat().st_ino and not competing:
+                if kind.startswith("parent"):
+                    preserve_parent(leaf.parent)
+                else:
+                    replace_leaf(leaf)
+                if kind.endswith("cancel"):
+                    raise cancellation
+                (repo / "fresh/new.py").write_text("value = 67890\n")
+            return written
+
+        def competing_read(size: int = -1) -> bytes:
+            leaf = destination / "fresh/new.py"
+            if ((destination / ".git/index").is_file() and leaf.exists()
+                    and os.fstat(fd).st_ino == leaf.stat().st_ino and not competing):
+                prior = replace_leaf(leaf)
+                if kind == "read-truncated":
+                    prior.write_bytes(b"")
+                else:
+                    read(size)
+                    raise cancellation
+            return bytes(read(size))
+
+        if args and args[0] == "wb" and not kind.startswith("read"):
+            stream.write = competing_write
+        elif args and args[0] == "rb" and kind.startswith("read"):
+            stream.read = competing_read
+        return stream
+
+    def competing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if kind == "parent-create" and path == "new.py" and flags & os.O_CREAT and not competing:
+            parent = destination / "fresh"
+            parent.rmdir()
+            parent.mkdir()
+            witness = parent / "witness"
+            witness.write_bytes(expected)
+            competing.append(witness)
+            try:
+                return opened(path, flags, *args, **kwargs)
+            except FileNotFoundError as exc:
+                create_failures.append(exc)
+                raise
+        if (kind == "parent-open" and flags & os.O_DIRECTORY and isinstance(path, str) and len(path) == 2
+                and (destination / "subject.py").exists() and not competing):
+            preserve_parent(destination / ".git/objects" / path)
+        if (kind == "existing-tree" and path == tree_oid[2:] and not flags & os.O_CREAT
+                and (destination / "subject.py").exists() and not competing):
+            target = destination / ".git/objects" / tree_oid[:2] / tree_oid[2:]
+            target.rename(target.with_name("preserved-object"))
+            target.write_bytes(expected)
+            competing.append(target)
+        if ((kind == "tree" and isinstance(path, str) and len(path) == 38
+             and (destination / "subject.py").exists() or kind == "native" and path == "subject.py")
+                and flags & os.O_CREAT):
+            fd = opened(path, flags, *args, **kwargs)
+            os.write(fd, b"competing object bytes")
+            os.close(fd)
+            if kind == "native":
+                competing.append(destination / "subject.py")
+            else:
+                competing.extend((destination / ".git/objects").glob("*/" + path))
+        return opened(path, flags, *args, **kwargs)
+
+    if kind in {"read-symlink", "read-missing"}:
+        monkeypatch.setattr(os, "stat", competing_stat)
+    elif private_io:
+        monkeypatch.setattr(os, "fdopen", competing_fdopen)
+    elif kind in {"blob", "parent"}:
+        monkeypatch.setattr(os, "link", competing_link)
+    else:
+        monkeypatch.setattr(os, "open", competing_open)
+    failure = asyncio.CancelledError if kind.endswith("cancel") else GitError
+    message = None if kind.startswith("parent") or private_io else "conflicts|replaced"
+    with pytest.raises(failure, match=message) as caught:
+        capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
+    assert len(competing) == 1 and competing[0].read_bytes() == expected
+    assert (repo / "subject.py").read_text() == expected_source
+    if kind == "parent-create" or private_io:
+        assert len(create_failures) == (1 if kind == "parent-create" else 0)
+        assert (repo / "fresh/new.py").read_text() == (
+            "value = 67890\n" if kind.endswith("source") else expected_source)
+    if kind.startswith(("leaf", "read")):
+        assert (destination / "fresh/prior-new.py").read_bytes() == (
+            b"" if kind == "read-truncated" else expected_source.encode())
+    if kind == "read-symlink":
+        assert (destination / "fresh/new.py").is_symlink()
+    if kind.endswith("cancel"):
+        assert caught.value is cancellation
+
+
+@pytest.mark.parametrize("phase", ["compression", "comparison", "comparison-stat", "compression-symlink"])
+def test_capture_rejects_identical_byte_spool_replacement(
+    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
+) -> None:
+    """Equal content cannot authorize a different private spool inode during local acceptance."""
+    repo, base, head = source
+    expected = b"value = 4321\n" if phase.startswith("compression") else b"value = 1\n"
+    (repo / "subject.py").write_bytes(expected)
+    destination = tmp_path / "captured"
+    opened, stat = os.open, os.stat
+    replaced = comparison_started = False
+    open_errors: list[int | None] = []
+
+    def replace_private() -> None:
+        nonlocal replaced
+        replaced = True
+        target = destination / "subject.py"
+        body = target.read_bytes() if phase != "comparison-stat" else b"competing changed spool bytes"
+        target.rename(destination / "prior-subject")
+        if phase == "compression-symlink":
+            target.symlink_to("prior-subject")
+        else:
+            target.write_bytes(body)
+
+    def replace_spool(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal comparison_started
+        parent = kwargs.get("dir_fd")
+        if (path == "subject.py" and not flags & os.O_CREAT and parent is not None
+                and os.fstat(parent).st_ino == repo.stat().st_ino and (destination / "subject.py").exists()):
+            comparison_started = True
+        private_parent = (parent is not None and destination.exists()
+                          and os.fstat(parent).st_ino == destination.stat().st_ino)
+        if (path == "subject.py" and not flags & os.O_CREAT and private_parent
+                and not replaced and phase != "comparison-stat"):
+            replace_private()
+        try:
+            return opened(path, flags, *args, **kwargs)
+        except OSError as exc:
+            if phase == "compression-symlink" and private_parent and path == "subject.py":
+                open_errors.append(exc.errno)
+            raise
+
+    def replace_at_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        parent = kwargs.get("dir_fd")
+        target = destination / "subject.py"
+        private_parent = (parent is not None and destination.exists()
+                          and os.fstat(parent).st_ino == destination.stat().st_ino)
+        if path == "subject.py" and target.exists() and private_parent and comparison_started and not replaced:
+            replace_private()
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", replace_spool)
+    if phase == "comparison-stat":
+        monkeypatch.setattr(os, "stat", replace_at_stat)
+    with pytest.raises(GitError, match="spool (was replaced|is unavailable)"):
+        capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
+    assert replaced
+    assert (destination / "subject.py").read_bytes() == (
+        b"competing changed spool bytes" if phase == "comparison-stat" else expected)
+    assert (destination / "prior-subject").read_bytes() == expected
+    if phase == "compression-symlink":
+        assert (destination / "subject.py").is_symlink()
+        assert open_errors == [errno.ELOOP]
+
+
+
+def test_physical_copy_rechecks_actual_aggregate_byte_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Files growing after enumeration cannot exceed the physical-store budget while being copied.
+
+    Existing physical-store refusal covers a stable oversized store; it misses
+    two individually legal leaves whose reopened sizes exceed the total together.
+    """
+    common, destination = tmp_path / "git", tmp_path / "copied"
+    destination.mkdir()
+    paths = []
+    for char in ('a', 'b'):
+        path = common / 'objects' / (char * 2) / (char * 38)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'x')
+        paths.append(path)
+    stat = os.stat
+
+    def growing_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path in ('a' * 38, 'b' * 38) and 'dir_fd' in kwargs:
+            original = next(p for p in paths if p.name == path)
+            if original.stat().st_size == 1:
+                original.write_bytes(b'x' * 800)
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(immutable, '_MAX_OBJECT_BYTES', 1000)
+    monkeypatch.setattr(os, 'stat', growing_stat)
+    with pytest.raises(GitError, match='object population exceeds'):
+        immutable._copy_objects(common, destination)
+    assert sum(path.stat().st_size for path in destination.glob('*/*')) <= 1000

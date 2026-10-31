@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import uuid
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -48,7 +49,7 @@ from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, Unsuppor
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.json_utils import canonical_json
-from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
@@ -59,6 +60,7 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
+from daydream.review_source_refs import _SubmissionSources
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -112,13 +114,14 @@ class Review:
             ["challenge"] if self.assignments else ["no_diff"],
         )
 
-    def _refs(self, selectors: Any, *, target: str | None = None, required: bool = True) -> list[dict[str, Any]]:
+    def _refs(self, sources: _SubmissionSources, selectors: Any, *,
+              target: str | None = None, required: bool = True) -> list[dict[str, Any]]:
         refs = [ref for part in self.assignments if target is None or part["target_id"] == target
                 for ref in part["source_refs"]]
-        return self.inputs.canonicalize_source_selectors(selectors, refs, require_assigned=required)
+        return sources.canonicalize(selectors, refs, require_assigned=required)
 
-    def _claim(self, claim: dict[str, Any], claims: dict[str, dict[str, Any]]) -> None:
-        claim["payload"]["evidence_refs"] = self._refs(claim["payload"]["evidence_refs"])
+    def _claim(self, sources: _SubmissionSources, claim: dict[str, Any], claims: dict[str, dict[str, Any]]) -> None:
+        claim["payload"]["evidence_refs"] = self._refs(sources, claim["payload"]["evidence_refs"])
         payload = claim["payload"]
         if payload["file"] not in {p["file"] for p in self.assignments}:
             raise HostToolRejected("claim.payload.file: choose a file from the complete changed-target inventory")
@@ -163,66 +166,80 @@ class Review:
         schema = assignment_schema(kind, selectors=True)
 
         def accept(value: dict[str, Any]) -> dict[str, Any]:
-            claims = deepcopy(self._claims)
-            canonical = deepcopy(value)
-            targets = canonical["targets"] if kind == "discovery" else deepcopy(self._targets)
-            if kind == "discovery":
-                identifiers = [t["target_id"] for t in value["targets"]]
-                if len(set(identifiers)) != len(identifiers) or set(identifiers) != {
-                    p["target_id"] for p in self.assignments
-                }:
-                    raise HostToolRejected("targets: submit each assigned target_id exactly once")
-                for target in targets:
-                    if target["status"] == "not_reviewed" and not target["reason"].strip():
-                        raise HostToolRejected("targets.reason: explain unfinished work")
-                    target["evidence_refs"] = self._refs(
-                        target["evidence_refs"], target=target["target_id"], required=target["status"] == "reviewed"
-                    )
-                if any(c["uid"] for c in value["claims"]):
-                    raise HostToolRejected("discovery.claims: new concerns require empty uid and revision=0")
-            else:
-                seen: set[str] = set()
-                for verdict in canonical["verdicts"]:
-                    uid = verdict["uid"]
-                    if uid in seen or revisions.get(uid) != verdict["revision"]:
-                        raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
-                    seen.add(uid)
-                    if not verdict["grounds"].strip():
-                        raise HostToolRejected("verdicts.grounds: retain substantive counterevidence or uncertainty")
-                    verdict["evidence_refs"] = self._refs(verdict["evidence_refs"])
-                    claim = claims[uid]
-                    claim["challenge_evidence"].append(verdict)
-                    claim["disposition"] = verdict["verdict"]
-                if any(c["uid"] and c["uid"] not in revisions for c in value["claims"]):
-                    raise HostToolRejected("claims: revisions may change only currently assigned claims")
-            changed: set[str] = set()
-            for submitted in canonical["claims"]:
-                if submitted["uid"] and submitted["uid"] in changed:
-                    raise HostToolRejected("claims: update a retained uid at most once per submission")
-                changed.add(submitted["uid"])
-                self._claim(submitted, claims)
-            # HostToolBinding copies this canonical result before returning it to native code.
-            canonical["claims"] = list(claims.values())
-            try:
-                jsonschema.validate(canonical, assignment_schema(kind, selectors=False, retained=True))
-            except jsonschema.ValidationError as exc:
-                raise HostToolRejected("claims: canonical retention limit exceeded; reduce optional proposals") from exc
-            if any(len(canonical_json(value).encode()) > _MAX_RESULT_BYTES
-                   for value in (canonical, {"targets": targets, "claims": canonical["claims"]})):
-                raise HostToolRejected("retained review exceeds shared byte capacity; reduce optional material")
-            try:
-                self._coverage.check_target_decisions_budget("committed", targets)
-            except ValueError as exc:
-                raise HostToolRejected("targets: reduce reasons/attribution to shared coverage capacity") from exc
-            # No await, I/O, or model decision between final checks and installation.
             binding.ensure_open()
-            if self._sealed or self._binding is not binding or clock.monotonic() >= self.deadline:
-                raise HostToolFatal("Review authority has closed", code="authority_closed")
-            if self._claims is not claims_snapshot or kind == "discovery" and self._discovered:
-                raise HostToolFatal("Assignment revisions changed before installation", code="authority_closed")
-            self._targets, self._claims = targets, claims
-            self._discovered |= kind == "discovery"
-            return canonical
+
+            def prepare(sources: _SubmissionSources) -> Callable[[], dict[str, Any]]:
+                claims = deepcopy(self._claims)
+                canonical = deepcopy(value)
+                targets = canonical["targets"] if kind == "discovery" else deepcopy(self._targets)
+                if kind == "discovery":
+                    identifiers = [t["target_id"] for t in value["targets"]]
+                    if len(set(identifiers)) != len(identifiers) or set(identifiers) != {
+                        p["target_id"] for p in self.assignments
+                    }:
+                        raise HostToolRejected("targets: submit each assigned target_id exactly once")
+                    for target in targets:
+                        if target["status"] == "not_reviewed" and not target["reason"].strip():
+                            raise HostToolRejected("targets.reason: explain unfinished work")
+                        target["evidence_refs"] = self._refs(
+                            sources, target["evidence_refs"], target=target["target_id"],
+                            required=target["status"] == "reviewed"
+                        )
+                    if any(c["uid"] for c in value["claims"]):
+                        raise HostToolRejected("discovery.claims: new concerns require empty uid and revision=0")
+                else:
+                    seen: set[str] = set()
+                    for verdict in canonical["verdicts"]:
+                        uid = verdict["uid"]
+                        if uid in seen or revisions.get(uid) != verdict["revision"]:
+                            raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
+                        seen.add(uid)
+                        if not verdict["grounds"].strip():
+                            raise HostToolRejected(
+                                "verdicts.grounds: retain substantive counterevidence or uncertainty")
+                        verdict["evidence_refs"] = self._refs(sources, verdict["evidence_refs"])
+                        claim = claims[uid]
+                        claim["challenge_evidence"].append(verdict)
+                        claim["disposition"] = verdict["verdict"]
+                    if any(c["uid"] and c["uid"] not in revisions for c in value["claims"]):
+                        raise HostToolRejected("claims: revisions may change only currently assigned claims")
+                changed: set[str] = set()
+                for submitted in canonical["claims"]:
+                    if submitted["uid"] and submitted["uid"] in changed:
+                        raise HostToolRejected("claims: update a retained uid at most once per submission")
+                    changed.add(submitted["uid"])
+                    self._claim(sources, submitted, claims)
+                # HostToolBinding copies this canonical result before returning it to native code.
+                canonical["claims"] = list(claims.values())
+                try:
+                    jsonschema.validate(canonical, assignment_schema(kind, selectors=False, retained=True))
+                except jsonschema.ValidationError as exc:
+                    raise HostToolRejected(
+                        "claims: canonical retention limit exceeded; reduce optional proposals") from exc
+                if any(len(canonical_json(value).encode()) > _MAX_RESULT_BYTES
+                       for value in (canonical, {"targets": targets, "claims": canonical["claims"]})):
+                    raise HostToolRejected("retained review exceeds shared byte capacity; reduce optional material")
+                try:
+                    self._coverage.check_target_decisions_budget("committed", targets)
+                except ValueError as exc:
+                    raise HostToolRejected("targets: reduce reasons/attribution to shared coverage capacity") from exc
+                def install() -> dict[str, Any]:
+                    # No await, I/O, or model decision between final checks and installation.
+                    binding.ensure_open()
+                    if self._sealed or self._binding is not binding or clock.monotonic() >= self.deadline:
+                        raise HostToolFatal("Review authority has closed", code="authority_closed")
+                    if self._claims is not claims_snapshot or kind == "discovery" and self._discovered:
+                        raise HostToolFatal("Assignment revisions changed before installation", code="authority_closed")
+                    self._targets, self._claims = targets, claims
+                    self._discovered |= kind == "discovery"
+                    return canonical
+
+                return install
+
+            try:
+                return self.inputs.admit_submission(prepare)
+            except SanctionedInputUnavailable as exc:
+                raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
         binding = HostToolBinding(
             deadline=min(deadline, self.deadline), accept=accept, allowed_tools=self._allowed_tools,

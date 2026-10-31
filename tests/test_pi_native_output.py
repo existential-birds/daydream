@@ -1264,11 +1264,11 @@ async def test_native_submission_waits_for_captured_source_validation_without_re
     validating = delayed = False
     validation_started = validation_finished = 0.0
     read_native = owner._native_entry
-    def slow_read(root: Path, path: str, gitlink: str | None = None) -> Any:
+    def slow_read(root: Path, path: str, gitlink: str | None = None, **kwargs: Any) -> Any:
         nonlocal delayed
-        value = read_native(root, path, gitlink)
+        value = read_native(root, path, gitlink, **kwargs)
         if validating and not delayed and root == captured.root and path == "api.py":
-            assert value is not None and value[1] == b"VALUE = 1\n"
+            assert value is not None and value.size == len(b"VALUE = 1\n")
             delayed = True
             if expires:
                 binding.restrict(deadline=time.monotonic() + 0.1, tool_call_budget=None)

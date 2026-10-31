@@ -22,6 +22,7 @@ from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
 from daydream.review_source_refs import (
+    _SubmissionSources,
     canonicalize_source_selectors,
     lf_lines,
     part_source_mapping,
@@ -175,6 +176,21 @@ class StageInputFactory:
         return canonicalize_source_selectors(selectors, expected_refs, revision=self.revision,
             source_root=self.work.repo, require_assigned=require_assigned, source_aliases=self._source_aliases,
             captured_source=self.captured_source)
+
+    def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]]) -> T:
+        """Resolve a prospective payload, validate once, then synchronously install it.
+
+        The resolver retains bounded host facts, never bodies or success across
+        callbacks. The Review owner's closure rechecks current authority after
+        all I/O and owns the only domain state transition.
+        """
+        sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source)
+        try:
+            install = prepare(sources)
+        finally:
+            sources.close()
+        self._revalidate_canonical()
+        return install()
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}

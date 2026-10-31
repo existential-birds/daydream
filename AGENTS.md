@@ -44,6 +44,18 @@ The pre-push hook checks signatures and runs this gate. Follow
 Run `make rl-check` separately when changing `rl/daydream_review`; it is outside
 `make check`. Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
+## Local PR reviews
+
+Run Daydream reviews during development with the Pi backend:
+
+```bash
+daydream --comment --backend pi --non-interactive --capture-data <target>
+```
+
+Leave `--model` unset so the configured backend default applies. Omit `--yes`,
+which review modes reject. `--comment` publishes to the PR, so run it only when
+a review is requested.
+
 ## Testing standard (mandatory)
 
 Choose the test boundary that owns the observable behavior or independent contract.

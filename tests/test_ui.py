@@ -383,7 +383,8 @@ async def test_normal_agent_transcript_preserves_overlapping_tools_tasks_and_tho
 ) -> None:
     """Native sibling tool events keep their results and labels through a single panel lifetime."""
     output = StringIO()
-    console = Console(file=output, force_terminal=True, no_color=False, width=120, theme=NEON_THEME)
+    console = Console(file=output, force_terminal=True, no_color=False, width=120, color_system="truecolor",
+                      theme=NEON_THEME)
     monkeypatch.setattr(agent_mod, "console", console)
     events = [
         *[ThinkingEvent(text=f"thought {i} of the stream") for i in range(5)],

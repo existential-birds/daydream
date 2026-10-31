@@ -109,6 +109,9 @@ async def test_review_budget_stop_emits_partial_findings(
 
     silence(monkeypatch)
     stub = BudgetBackend(multi_stack_target)
+    if budget == "wall":
+        # One fake clock is shared by every scope, so siblings must not overlap and charge each other's budgets.
+        stub.fanout_concurrency = 1
     if phase == "arbiter":
         stub.parse_severity = "high"
     elif phase == "suppression":

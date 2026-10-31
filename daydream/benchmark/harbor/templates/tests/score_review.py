@@ -52,41 +52,11 @@ def _terminate_proc(proc: Any) -> None:
 async def _claude_cli_stdout(proc: Any) -> str:
     """Collect a CLI subprocess's stdout as text, byte- and time-bounded.
 
-    Real ``asyncio`` processes expose ``proc.stdout`` as an incremental
-    ``StreamReader``; the injected test seam may instead expose the captured
-    stdout directly (as text or bytes). Either way the collected output is
-    size-capped at ``_RESPONSE_CAP_BYTES`` and rejected -- never truncated-and-
-    accepted, matching the HTTP clients' ``_parse_json_response`` posture -- and
-    total collection time is bounded by ``_REQUEST_TIMEOUT`` with the child
-    killed on timeout so a hung ``claude`` cannot accumulate across the retry
-    loop and the concurrency-10 fan-out.
+    Read the subprocess's incremental stdout, rejecting output above
+    ``_RESPONSE_CAP_BYTES`` rather than truncating it. Collection and process
+    settlement share one ``_REQUEST_TIMEOUT`` deadline; kill the child on timeout
+    so a hung ``claude`` cannot accumulate across retries and concurrent pairs.
     """
-    stream = getattr(proc, "stdout", None)
-    if stream is None:
-        communicate = getattr(proc, "communicate", None)
-        if communicate is None:
-            return ""
-        try:
-            stream, _stderr_b = await asyncio.wait_for(
-                communicate(), timeout=_REQUEST_TIMEOUT
-            )
-        except (asyncio.TimeoutError, TimeoutError):
-            _terminate_proc(proc)
-            raise
-    if isinstance(stream, (str, bytes)):
-        raw = stream.encode("utf-8") if isinstance(stream, str) else stream
-        if len(raw) > _RESPONSE_CAP_BYTES:
-            _terminate_proc(proc)
-            raise VerifierError(
-                f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
-            )
-        return stream if isinstance(stream, str) else raw.decode("utf-8", errors="replace")
-    read = getattr(stream, "read", None)
-    if read is None:
-        return ""
-    # Real asyncio subprocess: read incrementally so memory stays bounded by
-    # _RESPONSE_CAP_BYTES even while the child is still streaming, and keep the
-    # whole collection inside the shared _REQUEST_TIMEOUT budget.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _REQUEST_TIMEOUT
     parts: list[bytes] = []
@@ -97,7 +67,7 @@ async def _claude_cli_stdout(proc: Any) -> str:
             _terminate_proc(proc)
             raise asyncio.TimeoutError
         try:
-            chunk = await asyncio.wait_for(read(_STDOUT_CHUNK_BYTES), timeout=remaining)
+            chunk = await asyncio.wait_for(proc.stdout.read(_STDOUT_CHUNK_BYTES), timeout=remaining)
         except (asyncio.TimeoutError, TimeoutError):
             _terminate_proc(proc)
             raise
@@ -112,17 +82,15 @@ async def _claude_cli_stdout(proc: Any) -> str:
         parts.append(chunk)
     # stdout EOF does not imply the child has exited; wait so the caller's
     # exit-code check sees a settled process, still inside the same budget.
-    wait = getattr(proc, "wait", None)
-    if wait is not None:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            _terminate_proc(proc)
-            raise asyncio.TimeoutError
-        try:
-            await asyncio.wait_for(wait(), timeout=remaining)
-        except (asyncio.TimeoutError, TimeoutError):
-            _terminate_proc(proc)
-            raise
+    remaining = deadline - loop.time()
+    if remaining <= 0:
+        _terminate_proc(proc)
+        raise asyncio.TimeoutError
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=remaining)
+    except (asyncio.TimeoutError, TimeoutError):
+        _terminate_proc(proc)
+        raise
     return b"".join(parts).decode("utf-8", errors="replace")
 
 
@@ -657,7 +625,7 @@ class ClaudeCliJudgeClient:
                     timeout=_REQUEST_TIMEOUT,
                 )
                 stdout = await _claude_cli_stdout(proc)
-                rc = getattr(proc, "returncode", getattr(proc, "rc", 0))
+                rc = proc.returncode
                 # Terminal failure classes raise on the first attempt, mirroring
                 # the HTTP clients (a non-429 4xx and a malformed-JSON parse are
                 # never retried): a non-zero exit (expired/revoked OAuth token,
