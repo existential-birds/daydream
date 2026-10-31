@@ -574,6 +574,7 @@ def recorded_fixture(source, head, base):
                 metadata, rawpath = row.split(b"\t", 1)
                 mode, kind, oid = metadata.split()
                 if mode == b"160000":
+                    (repo / os.fsdecode(rawpath)).mkdir(parents=True, exist_ok=True)
                     continue
                 child.stdin.write(oid + b"\n")
                 child.stdin.flush()
