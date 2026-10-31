@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import islice
@@ -180,7 +180,7 @@ class ReviewInvestigation:
         }
 
     async def run(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
-        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
+        stage_inputs: Callable[[dict[str, Any]], Awaitable[PreparedSanctionedInputs]],
         input_factory: StageInputFactory | None = None, **agent_kwargs: Any,
     ) -> tuple[dict[str, Any], str | None]:
         """Fresh calls share hard bounds; advisory targets cannot abort useful work."""
@@ -340,7 +340,7 @@ class ReviewInvestigation:
 
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
-        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
+        stage_inputs: Callable[[dict[str, Any]], Awaitable[PreparedSanctionedInputs]],
         candidate_ids: list[str] | None = None, assignment_parts: list[dict[str, Any]] | None = None,
         future_batches: int = 0, future_triage_stages: int | None = None) -> bool:
         self.reason = None
@@ -386,7 +386,7 @@ class ReviewInvestigation:
             async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
                 prior_admitted = self.admitted_stages
                 try:
-                    prepared = stage_inputs(state)
+                    prepared = await stage_inputs(state)
                     kwargs = {**agent_kwargs, 'sanctioned_inputs': prepared}
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                     if native_admission:

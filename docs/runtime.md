@@ -147,7 +147,9 @@ body reads; the resolver closes before one complete capture/canonical-input chec
 Only then does Review synchronously recheck original authority/deadline and install.
 Empty selectors and sibling callbacks get the same final guard. Standalone/stored
 reference checks, preparation, and terminal validation remain independent; no
-validation success survives a callback. The writable capture is not a sandbox.
+validation success survives a callback. Stack and stage preparation validate on a
+worker thread because a full check on the shared loop starves sibling invocations'
+host-tool setup timers. The writable capture is not a sandbox.
 
 Full history still consumes private disk, up to the physical object-store limits
 in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are

@@ -466,6 +466,9 @@ async def test_unsuccessful_stage_discards_checkpoints(
         responder=lambda p: response(p) if (reviewer(p) and (not structure_only or
             'you are the structural reviewer' in p.lower())) or 'understand the intent' in p.lower() else None)
     review.backend.merge_echo_records = True
+    if budget == 'wall':
+        # One fake clock is shared by every scope, so siblings must not overlap and charge each other's budgets.
+        review.backend.fanout_concurrency = 1
     assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == 0
     data = review.load()
     result = data['terminal_result']
