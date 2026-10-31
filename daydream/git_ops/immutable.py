@@ -148,30 +148,49 @@ _CHUNK_BYTES = 1024 * 1024
 def _parent(root: Path, relative: str, *, create: bool = False,
             private: bool = True) -> Iterator[tuple[int, str]]:
     """Pin every parent and reject symlink/replacement races before returning."""
-    descriptors = [os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    descriptors: list[int] = []
     bindings: list[tuple[int, str, int]] = []
-    try:
-        parts = relative.split("/")
-        for part in parts[:-1]:
-            parent = descriptors[-1]
-            if create:
-                try:
-                    os.mkdir(part, dir_fd=parent)
-                except FileExistsError:
-                    pass
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-            descriptors.append(child)
-            bindings.append((parent, part, child))
-        yield descriptors[-1], parts[-1]
-        failure = _StorageConflict if private else _SourceChanged
-        for parent, part, child in bindings:
-            info = os.stat(part, dir_fd=parent, follow_symlinks=False)
-            opened = os.fstat(child)
+    failure = _StorageConflict if private else _SourceChanged
+
+    def validate_bindings() -> None:
+        try:
+            for parent, part, child in bindings:
+                info = os.stat(part, dir_fd=parent, follow_symlinks=False)
+                opened = os.fstat(child)
+                if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise failure("immutable source parent changed during reading")
+            info, opened = root.lstat(), os.fstat(descriptors[0])
             if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
-                raise failure("immutable source parent changed during reading")
-        info, opened = root.lstat(), os.fstat(descriptors[0])
-        if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
-            raise failure("immutable source root changed during reading")
+                raise failure("immutable source root changed during reading")
+        except OSError as exc:
+            raise failure("immutable source parent binding is unavailable") from exc
+
+    try:
+        try:
+            descriptors.append(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+            parts = relative.split("/")
+            for part in parts[:-1]:
+                parent = descriptors[-1]
+                if create:
+                    try:
+                        os.mkdir(part, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                descriptors.append(child)
+                bindings.append((parent, part, child))
+        except OSError as exc:
+            if private:
+                raise _StorageConflict("immutable source private parent is unavailable") from exc
+            raise
+        try:
+            yield descriptors[-1], parts[-1]
+        except OSError:
+            if private:
+                validate_bindings()
+            raise
+        else:
+            validate_bindings()
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)

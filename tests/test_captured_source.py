@@ -454,7 +454,7 @@ def test_capture_cleanup_preserves_replaced_storage(source: tuple[Path, str, str
     assert not another.root.exists()
 
 
-@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted"])
+@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted", "deleted-directory"])
 def test_local_capture_requires_materialized_skip_worktree_contents(
     source: tuple[Path, str, str], tmp_path: Path, state: str,
 ) -> None:
@@ -473,14 +473,16 @@ def test_local_capture_requires_materialized_skip_worktree_contents(
     elif state == "noncone":
         git(repo, "sparse-checkout", "set", "--no-cone", "/visible/", "/.gitignore")
     else:
-        if state != "deleted":
+        if not state.startswith("deleted"):
             git(repo, "update-index", "--skip-worktree", "support/helper.py")
         if state == "present":
             (repo / "support/helper.py").write_text("helper = 4\n")
+        elif state == "deleted-directory":
+            shutil.rmtree(repo / "support")
         else:
             (repo / "support/helper.py").unlink()
     flags = git(repo, "ls-files", "-t", "--", "support/helper.py")
-    assert flags == ("H" if state == "deleted" else "S") + " support/helper.py"
+    assert flags == ("H" if state.startswith("deleted") else "S") + " support/helper.py"
     original_index = (repo / ".git/index").read_bytes()
     original_refs = git(repo, "show-ref")
     destination = tmp_path / "captured"
@@ -671,7 +673,7 @@ def test_capture_verifies_both_separately_admitted_sides(
     assert captured.read("new", "both.bin")[1] == new
 
 
-@pytest.mark.parametrize("kind", ["blob", "tree", "existing-tree", "native"])
+@pytest.mark.parametrize("kind", ["blob", "tree", "existing-tree", "native", "parent", "parent-open", "parent-create"])
 def test_capture_preserves_competing_object_bytes(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
 ) -> None:
@@ -679,15 +681,31 @@ def test_capture_preserves_competing_object_bytes(
     repo, base, head = source
     expected_source = "value = 1\n" if kind == "existing-tree" else "value = 345\n"
     (repo / "subject.py").write_text(expected_source)
+    if kind == "parent-create":
+        (repo / "fresh").mkdir()
+        (repo / "fresh/new.py").write_text(expected_source)
     tree_oid = git(repo, "rev-parse", "HEAD^{tree}")
     destination = tmp_path / "captured"
     expected = ((repo / ".git/objects" / tree_oid[:2] / tree_oid[2:]).read_bytes()
                 if kind == "existing-tree" else b"competing object bytes")
     link = os.link
     competing: list[Path] = []
+    create_failures: list[FileNotFoundError] = []
+
+    def preserve_parent(parent: Path) -> None:
+        preserved = parent.with_name("preserved-parent")
+        parent.rename(preserved)
+        witness = preserved / "witness"
+        witness.write_bytes(expected)
+        competing.append(witness)
 
     def competing_link(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
         parent = next((destination / ".git/objects").glob("*/" + str(src)))
+        if kind == "parent":
+            link(src, dst, *args, **kwargs)
+            if not competing:
+                preserve_parent(parent.parent)
+            return
         target = parent.with_name(str(dst))
         target.write_bytes(b"competing object bytes")
         competing.append(target)
@@ -696,6 +714,21 @@ def test_capture_preserves_competing_object_bytes(
     opened = os.open
 
     def competing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if kind == "parent-create" and path == "new.py" and flags & os.O_CREAT and not competing:
+            parent = destination / "fresh"
+            parent.rmdir()
+            parent.mkdir()
+            witness = parent / "witness"
+            witness.write_bytes(expected)
+            competing.append(witness)
+            try:
+                return opened(path, flags, *args, **kwargs)
+            except FileNotFoundError as exc:
+                create_failures.append(exc)
+                raise
+        if (kind == "parent-open" and flags & os.O_DIRECTORY and isinstance(path, str) and len(path) == 2
+                and (destination / "subject.py").exists() and not competing):
+            preserve_parent(destination / ".git/objects" / path)
         if (kind == "existing-tree" and path == tree_oid[2:] and not flags & os.O_CREAT
                 and (destination / "subject.py").exists() and not competing):
             target = destination / ".git/objects" / tree_oid[:2] / tree_oid[2:]
@@ -714,14 +747,17 @@ def test_capture_preserves_competing_object_bytes(
                 competing.extend((destination / ".git/objects").glob("*/" + path))
         return opened(path, flags, *args, **kwargs)
 
-    if kind == "blob":
+    if kind in {"blob", "parent"}:
         monkeypatch.setattr(os, "link", competing_link)
     else:
         monkeypatch.setattr(os, "open", competing_open)
-    with pytest.raises(GitError, match="conflicts|replaced"):
+    with pytest.raises(GitError, match=None if kind.startswith("parent") else "conflicts|replaced"):
         capture_source(repo, destination, base_sha=base, head_sha=head, local=True)
     assert len(competing) == 1 and competing[0].read_bytes() == expected
     assert (repo / "subject.py").read_text() == expected_source
+    if kind == "parent-create":
+        assert len(create_failures) == 1
+        assert (repo / "fresh/new.py").read_text() == expected_source
 
 
 @pytest.mark.parametrize("phase", ["compression", "comparison", "comparison-stat"])

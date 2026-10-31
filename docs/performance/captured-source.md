@@ -16,8 +16,8 @@ tracemalloc repetitions. Medians and observed ranges are not population percenti
 
 | Untraced control | Paired baseline median capture / validate | Streaming median capture / validate | Streaming range |
 |---|---:|---:|---|
-| Recorded checkout, 1,054 native files | 4.779 / 1.971 s | 1.320 / 0.247 s | capture 1.310–1.565; validate 0.240–0.256 s |
-| 1,024 files, approximately 1 MiB | 4.592 / 1.878 s | 0.967 / 0.233 s | capture 0.925–1.102; validate 0.224–0.245 s |
+| Recorded checkout, 1,054 native files | 4.779 / 1.971 s | 1.419 / 0.253 s | capture 1.413–1.994; validate 0.253–0.263 s |
+| 1,024 files, approximately 1 MiB | 4.592 / 1.878 s | 1.078 / 0.257 s | capture 1.028–1.172; validate 0.246–0.262 s |
 
 An earlier streaming iteration measured 1.757 / 0.314 s on the recorded checkout,
 missing the capture target. Bounded LF scanning replaced byte-at-a-time raw header
@@ -25,16 +25,16 @@ consumption before the final measurements above. Those earlier samples remain in
 the external evidence; they are not included in the final implementation's medians.
 
 Across every required 64 MiB/16-file, 240 MiB/16-file, and unchanged 64 MiB-leaf
-repetition, traced capture peaks were at most **2.319 MiB** and complete-validation
-peaks at most **2.171 MiB**. Original capture peaks were 324.45, 746.56, and
+repetition, traced capture peaks were at most **2.320 MiB** and complete-validation
+peaks at most **2.172 MiB**. Original capture peaks were 324.45, 746.56, and
 320.16 MiB respectively. Tracemalloc measures Python allocations, including retained
 metadata, and excludes Git/native memory; its perturbed timings are kept separate.
 
 | Control | Final process-tree footprint median | Reduction from original investigation |
 |---|---:|---:|
-| Recorded checkout | 98.438 MiB | 48.86% (original 192.49 MiB) |
-| 64 MiB / 16 files | 68.688 MiB | 85.46% (original 472.39 MiB) |
-| 240 MiB / 16 files | 68.735 MiB | 95.68% (original 1,589.38 MiB) |
+| Recorded checkout | 102.141 MiB | 46.94% (original 192.49 MiB) |
+| 64 MiB / 16 files | 68.110 MiB | 85.58% (original 472.39 MiB) |
+| 240 MiB / 16 files | 68.142 MiB | 95.71% (original 1,589.38 MiB) |
 
 Footprint is the maximum sampled simultaneous sum of macOS
 `proc_pid_rusage(RUSAGE_INFO_V0).ri_phys_footprint` for worker and discovered
@@ -44,11 +44,11 @@ is diagnostic only; cross-process USS was unavailable. Native Git can reconstruc
 an entire admitted blob; concurrent readers multiply that component.
 
 One submission with 1/8/32 target decisions performs **one** complete traversal,
-instead of 3/10/34. Eight-/32-target admission medians were 0.0642/0.0667 s,
-96.94%/99.08% below paired baseline. Four eight-target submissions at concurrency
+instead of 3/10/34. Eight-/32-target admission medians were 0.0675/0.0703 s,
+96.79%/99.03% below paired baseline. Four eight-target submissions at concurrency
 1/2/4 perform **four** traversals in every repetition. Complete native/blob payload
 verification falls from 80.046082 to 8.004608 MiB; these are logical verification
-bytes, not physical device I/O. Four-submission medians were 0.2562/0.1494/0.1116 s.
+bytes, not physical device I/O. Four-submission medians were 0.2629/0.1592/0.1140 s.
 Preparation and terminal checks are independent and remain required.
 
 Each local capture acceptance/full-validation operation launches one raw reader,
