@@ -549,33 +549,36 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
         sys.executable, "-m", "daydream", "--non-interactive", "--no-archive", "--no-eval", "--flow", "signal-fixture",
         "--pr-number", "1", str(git_repo),
     ]
-    proc = subprocess.Popen(  # noqa: S603 - controlled production entrypoint
-        argv, cwd=Path(__file__).resolve().parents[1], env=child_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True,
-    )
-    stdout = ""
-    stderr = ""
+    # Files, not pipes: nothing drains a pipe before READY, and a full one blocks the child's banner.
+    stdout_path = tmp_path / "signal.stdout"
+    stderr_path = tmp_path / "signal.stderr"
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        proc = subprocess.Popen(  # noqa: S603 - controlled production entrypoint
+            argv, cwd=Path(__file__).resolve().parents[1], env=child_env, stdout=stdout_file, stderr=stderr_file,
+        )
     try:
         deadline = time.monotonic() + 10
         while not ready.exists() and time.monotonic() < deadline:
             if proc.poll() is not None:
-                stdout, stderr = proc.communicate()
                 pytest.fail(
                     f"signal fixture exited before READY: {proc.returncode}\n"
-                    f"stdout={stdout}\nstderr={stderr}"
+                    f"stdout={stdout_path.read_text()}\nstderr={stderr_path.read_text()}"
                 )
             time.sleep(0.05)
         assert ready.exists(), "signal fixture did not expose two live sibling invocations"
 
         os.kill(proc.pid, signum)
-        stdout, stderr = proc.communicate(timeout=10)
+        proc.wait(timeout=10)
         assert proc.returncode == 130, (
-            f"signal={signum.name} exit={proc.returncode}\nstdout={stdout}\nstderr={stderr}"
+            f"signal={signum.name} exit={proc.returncode}\n"
+            f"stdout={stdout_path.read_text()}\nstderr={stderr_path.read_text()}"
         )
     finally:
         if proc.poll() is None:
             proc.kill()
-            proc.communicate(timeout=10)
+            proc.wait(timeout=10)
+    stdout = stdout_path.read_text()
+    stderr = stderr_path.read_text()
 
     run_root = git_repo / ".daydream" / "runs"
     run_dirs = [path for path in run_root.iterdir() if path.is_dir()]
