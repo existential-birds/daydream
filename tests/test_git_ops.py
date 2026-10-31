@@ -138,19 +138,31 @@ def test_resolve_diff_merge_base_redacts_external_git_timeout(
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     original_run_git = git_process._run_git
+    original_popen = subprocess.Popen
+    preference_args = ["rev-parse", "--verify", "refs/remotes/origin/main"]
+    launched: list[subprocess.Popen[Any]] = []
+
+    def observe_probe_launch(argv: Any, *args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        child = original_popen(argv, *args, **kwargs)
+        if argv[1:] == preference_args:
+            launched.append(child)
+        return child
 
     def run_with_short_probe_deadline(target: Path, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         # Keep the real subprocess and retry loop; only the deliberately hung
         # external preference probe needs a shorter deadline than production.
-        if args == ["rev-parse", "--verify", "refs/remotes/origin/main"]:
+        if args == preference_args:
             kwargs["timeout"] = 0.5
         return original_run_git(target, args, **kwargs)
 
     monkeypatch.setattr(git_process, "_run_git", run_with_short_probe_deadline)
+    monkeypatch.setattr(subprocess, "Popen", observe_probe_launch)
     with install_diff_base_git_shim(tmp_path, monkeypatch, mode="timeout-preference", head=head) as shim_dir:
         with pytest.raises(GitError) as raised:
             git_ops.resolve_diff_merge_base(repo, "main", head)
-    assert (shim_dir / "timeout-probes").read_text().splitlines() == ["started"] * 3
+    # A timeout can kill Python before a child-side startup marker is written.
+    assert len(launched) == 3
+    assert all(child.returncode is not None for child in launched)
     assert str(raised.value) == "branch-focus preferred base probe failed"
     assert str(repo) not in str(raised.value)
     assert head not in str(raised.value)
