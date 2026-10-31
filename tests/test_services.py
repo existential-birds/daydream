@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import inspect
-import re
 from functools import partial
 from pathlib import Path
 from typing import Sequence
@@ -110,55 +108,3 @@ def test_policy_arguments_carry_no_defaults() -> None:
         for p in parameters.values()
         if p.name not in {"path", "services"}
     )
-
-
-
-# The first two patterns are the shapes the issue #1216 M7 acceptance search
-# uses; keep them in sync with the M7 command rather than treating them as
-# unrelated. The third is a superset that also catches a `startswith` arguing on
-# `root` without the exact f-string spelling (`path.startswith(service.root...)`),
-# which the M7 pair alone would let through.
-_CONTAINMENT_SHAPES = (
-    re.compile(r'\.startswith\(f"\{[^}]*root[^}]*\}/"\)'),
-    re.compile(r"\b(path|file|relative|target|name|p)\s*[!=]=\s*([a-z_]+\.)?root\b"),
-    re.compile(r"\.startswith\([^)]*\broot\b"),
-)
-
-
-# ``_owning_partition`` in Improve's audit scope answers the same *shape* of
-# question about partitions. It is enumerated Out of Scope and is the one allowed
-# exception, so the exemption is scoped to that function's module and name rather
-# than to any line that happens to mention ``partition.root``.
-_PARTITION_EXCEPTION = Path("daydream") / "improve" / "audit_scope.py"
-
-
-def _function_line_span(path: Path, name: str) -> set[int]:
-    """The inclusive source lines occupied by the named function, so an
-    exemption names the function rather than any line that mentions its state."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-    return set()
-
-def test_no_service_containment_shape_lives_outside_services_py() -> None:
-    """The acceptance search (issue #1216 M7/S1), executable.
-
-    ``_owning_partition`` in Improve's audit scope answers the same *shape* of question about partitions; it is
-    enumerated Out of Scope and is the one allowed exception."""
-    repo_root = Path(__file__).resolve().parents[1]
-    owner = repo_root / "daydream" / "services.py"
-    partition_exception = repo_root / _PARTITION_EXCEPTION
-    partition_exempt_lines = _function_line_span(partition_exception, "_owning_partition")
-    offenders: list[str] = []
-    for source in sorted((repo_root / "daydream").rglob("*.py")):
-        if source == owner:
-            continue
-        for number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
-            if not any(shape.search(line) for shape in _CONTAINMENT_SHAPES):
-                continue
-            if source == partition_exception and number in partition_exempt_lines:
-                continue
-            offenders.append(f"{source.relative_to(repo_root)}:{number}: {line.strip()}")
-
-    assert offenders == []

@@ -29,10 +29,17 @@ from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, R
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.review_result import record_pool, review_coverage
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_orchestrator import _merge_item, _run_deep
+
+
+@pytest.fixture(autouse=True)
+def _no_open_pr(fake_gh: FakeGh) -> None:
+    fake_gh.set_response("pr-list", value=[])
+
 
 # Reconstruct Pi's prose-without-JSON response shape from run
 # c48ca322-eb7d-4634-9fc3-fddbf349bacd. Original prose was not archived;
@@ -189,24 +196,29 @@ async def test_phase_failure_preserves_original_error_when_coverage_write_also_f
 
 
 @pytest.mark.parametrize("fault", ["synthesis", "projection"])
-async def test_public_resume_retains_failure_until_same_revision_remerge(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+async def test_legacy_resume_retains_failure_until_same_revision_remerge(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
     make_config: Callable[..., RunConfig], fault: str,
 ) -> None:
-    """Fix-only export preserves a failed synthesis/projection; actual remerge repairs it."""
-    from daydream.findings import load_findings_artifact
+    """Fix-only settlement retains failed legacy synthesis/projection until an actual remerge."""
+    from daydream.review_result import FinalizedReview
     from daydream.runner import run
     from tests.test_deep_orchestrator import _pin_findings_pr
+
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_emit_str = "malformed synthesis response" if fault == "synthesis" else None
-    outputs = [tmp_path / f"review-{stage}.json" for stage in ("cold", "fix", "merge")]
+    finalized: list[FinalizedReview] = []
+    deep = multi_stack_target / ".daydream" / "deep"
     for index, stage in enumerate(("review", "fix", "merge")):
         expected = 1 if index == 0 and fault == "synthesis" else 0
-        assert await run(make_config(multi_stack_target, start_at=stage, findings_out=str(outputs[index]),
-                                    pr_number=pr.number)) == expected
+        assert await run(make_config(multi_stack_target, start_at=stage, output_mode="loop", assume="no"),
+                         review_result_handler=finalized.append) == expected
+        assert len(finalized) == index + 1
+        persisted = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
+        assert persisted.to_dict()["stack_outcomes"] == finalized[-1].terminal_result["stack_outcomes"]
         if index == 0 and fault == "projection":
-            DeepArtifact.MERGED_ITEMS.at(multi_stack_target / ".daydream" / "deep").write_text("{corrupt projection")
+            DeepArtifact.MERGED_ITEMS.at(deep).write_text("{corrupt projection")
         if index == 1:
             assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
         if index == 2:
@@ -214,22 +226,20 @@ async def test_public_resume_retains_failure_until_same_revision_remerge(
             assert prompts and "__merge__" not in "\n".join(prompts)
         stub.merge_emit_str = None
         stub.calls.clear()
-    loaded = [load_findings_artifact(path, expected_repo="o/r", expected_pr_number=pr.number,
-                                    expected_head_sha=pr.head_sha) for path in outputs]
-    assert all(artifact.terminal_result is not None for artifact in loaded)
-    first, resumed, rerun = [cast(dict[str, Any], artifact.terminal_result) for artifact in loaded]
+    first, resumed, rerun = [result.terminal_result for result in finalized]
     assert len({result["run_id"] for result in (first, resumed, rerun)}) == 3
     assert first["analyzed_revision"] == resumed["analyzed_revision"] == rerun["analyzed_revision"]
+    assert first["analyzed_revision"]["head_sha"] == pr.head_sha
     reason = "synthesis_failure" if fault == "synthesis" else "malformed_artifact"
     assert resumed["analysis_state"] == ("incomplete" if fault == "synthesis" else "failed")
     assert reason in resumed["reason_codes"]
-    assert rerun["analysis_state"] == "complete" and reason not in rerun["reason_codes"] and loaded[2].findings
-    assert loaded[0].findings
+    assert rerun["analysis_state"] == "complete" and reason not in rerun["reason_codes"] and finalized[2].items
+    assert finalized[0].items
     if fault == "synthesis":
         assert first["analysis_state"] == "incomplete" and first["pipeline_state"] == "failed"
-        assert resumed["pipeline_state"] == "completed" and reason in first["reason_codes"] and loaded[1].findings
+        assert resumed["pipeline_state"] == "completed" and reason in first["reason_codes"] and finalized[1].items
     else:
-        assert first["analysis_state"] == "complete" and loaded[1].findings == []
+        assert first["analysis_state"] == "complete" and finalized[1].items == []
 
 
 def _salvage_record() -> dict[str, object]:

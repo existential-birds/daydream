@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Stream captured review sources with bounded Python payload buffers and one raw
+  Git reader per operation. Native submissions perform one complete integrity
+  check before atomic admission, reducing capture memory and repeated validation
+  work while retaining preparation and terminal checks
+  ([#1710](https://github.com/existential-birds/daydream/issues/1710)).
+
+- Review local changes as one captured net base-to-working comparison, including
+  nonignored untracked files and dirty supporting context. Native browsing and
+  canonical references share accepted source; unstable capture fails before model
+  work. Comment and findings-export modes independently pin committed PR source
+  and visibly exclude local edits ([#1676](https://github.com/existential-birds/daydream/issues/1676)).
+  Local results use schema 3/terminal 2 with a separate source identity; committed
+  results/exports remain distinct. Incompatible stage caches require a fresh review;
+  extension API 8 remains supported. Stopped reviews restart.
+
 ### Fixed
 
+- Allow Pi's captured-source validation to finish within the original review
+  deadline without mistaking valid slow admission for a lost submission receipt.
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).

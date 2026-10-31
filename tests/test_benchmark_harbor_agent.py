@@ -17,56 +17,6 @@ from tests.harness.fake_gh import FakeGh
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 
 
-def test_build_candidate_findings_maps_and_skips() -> None:
-    items = [{"file": "src/cache.py", "line": 42,
-         "description": "Cache key not tenant-scoped",
-         "rationale": "Key can collide across tenants.", "severity": "high", "confidence": "HIGH"},
-        {"file": "", "line": 1, "description": "empty-file item is skipped", "rationale": "", "severity": "low"},
-        {"file": "src/a.py", "line": 3, "description": "Dup A", "rationale": "r",
-         "severity": "medium", "confidence": "LOW"},
-        {"file": "src/a.py", "line": 9, "description": "Dup A", "rationale": "r",
-         "severity": "medium", "confidence": "LOW"},
-    ]
-    case_id = "case-abc123def456"
-    findings = candidate.build_candidate_findings(items, case_id=case_id)
-
-    assert len(findings) == 3                       # empty-file item skipped
-    assert [f["title"] for f in findings] == ["Cache key not tenant-scoped", "Dup A", "Dup A"]
-    f0 = findings[0]
-    assert f0["path"] == "src/cache.py" and f0["start_line"] == 42 and f0["end_line"] == 42
-    assert f0["severity"] == "high" and "Key can collide" in f0["body"]
-    # byte-for-byte candidate-id contract incl. duplicate ordinals: the verifier
-    # re-derives every id and would raise on any drift; the parsed findings must
-    # carry the exact ids the builder derived.
-    parsed = vc.validate_candidate_artifact(
-        {"schema_version": 1, "case_id": case_id, "base_ref": "base", "head_ref": "head", "findings": findings}
-    )
-    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in findings]
-    assert findings[1]["candidate_id"] != findings[2]["candidate_id"]
-
-def test_build_candidate_findings_enforces_verifier_bounds_fail_closed() -> None:
-    case_id = "case-abc123def456"
-    # A verbose canonical description is preserved in the body while the
-    # display title is deterministically bounded for the verifier schema.
-    overlong_title = [{"file": "src/a.py", "line": 1, "description": "t" * 501, "rationale": "", "severity": "low"}]
-    [bounded] = candidate.build_candidate_findings(overlong_title, case_id=case_id)
-    assert len(bounded["title"]) <= 500
-    assert "t" * 501 in bounded["body"]
-
-    # over-long body (>8 KiB) is a typed failure
-    overlong_body = [{"file": "src/a.py", "line": 1,
-                      "description": "header", "rationale": "r" * 9000, "severity": "low"}]
-    with pytest.raises(candidate.CandidateError) as bad_body:
-        candidate.build_candidate_findings(overlong_body, case_id=case_id)
-    assert bad_body.value.kind == "invalid_finding"
-
-    # off-vocabulary severity is mapped, never propagated: the shared
-    # extraction boundary (pr_review.extract_item_fields -> severity.normalize_severity)
-    # maps 'CRITICAL' to None, and null severity is verifier-valid (R6 boundary mapping).
-    off_vocab = [{"file": "src/a.py", "line": 1, "description": "x", "rationale": "", "severity": "CRITICAL"}]
-    [mapped] = candidate.build_candidate_findings(off_vocab, case_id=case_id)
-    assert mapped["severity"] is None
-
 def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
     case_id = "case-abc123def456"
     over = [{"title": f"t{i}", "body": "b", "severity": "low", "path": "src/f.py", "start_line": i, "end_line": i}
@@ -109,41 +59,6 @@ def test_entrypoint_backend_allowlist_rejects_others_and_defaults_pi() -> None:
             entrypoint.require_supported_backend({"DAYDREAM_REVIEW_BACKEND": value})
         assert "'pi'" in str(exc.value)
     assert entrypoint.require_supported_backend({}) == "pi"
-
-def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
-    # missing merged output -> fail-closed, never a silent clean review
-    with pytest.raises(candidate.CandidateError) as missing:
-        entrypoint.publish_review(
-            repo_dir=tmp_path, artifact_path=tmp_path / "review.json", case_id="case-abc123def456",
-        )
-    assert missing.value.kind == "missing_merged"
-
-    # corrupt merged output (items not a list) -> fail-closed
-    deep = tmp_path / ".daydream" / "deep"
-    deep.mkdir(parents=True)
-    (deep / "merged-items.json").write_text('{"items": "nope"}')
-    with pytest.raises(candidate.CandidateError) as corrupt:
-        entrypoint.publish_review(
-            repo_dir=tmp_path, artifact_path=tmp_path / "review.json", case_id="case-abc123def456",
-        )
-    assert corrupt.value.kind == "corrupt_merged"
-
-    # 101 parseable items -> artifact build raises over_limit
-    items = [{"file": "src/f.py", "line": i, "description": f"d{i}",
-         "rationale": "r", "severity": "low", "confidence": "LOW"}
-        for i in range(1, 102)
-    ]
-    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
-    with pytest.raises(candidate.CandidateError) as over:
-        entrypoint.publish_review(
-            repo_dir=tmp_path, artifact_path=tmp_path / "review.json", case_id="case-abc123def456",
-        )
-    assert over.value.kind == "over_limit"
-
-    (deep / "merged-items.json").write_text(json.dumps({"items": []}))
-    entrypoint.publish_review(repo_dir=tmp_path, artifact_path=tmp_path / "review.json", case_id="case-abc123def456")
-    loaded = json.loads((tmp_path / "review.json").read_text())
-    assert loaded["findings"] == []
 
 def test_agent_package_import_does_not_pull_harbor() -> None:
     """Importing the daydream.benchmark package must not import Harbor (a lazy,

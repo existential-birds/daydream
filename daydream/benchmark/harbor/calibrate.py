@@ -263,7 +263,7 @@ def _fixture_sha256(pairs: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _render_judge_prompt_digest(sr: Any) -> str:
+def _render_judge_prompt_digest() -> str:
     """sha256 of the packaged judge prompt template bytes."""
     prompt_path = _TEMPLATES / "tests" / "judge_prompt.md"
     return hashlib.sha256(prompt_path.read_bytes()).hexdigest()
@@ -279,7 +279,7 @@ def _invalidation_inputs(
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "",
         "model": env.get("DAYDREAM_JUDGE_MODEL") or "",
         "host": _judge_host_from_env(env),
-        "judge_prompt_sha256": _render_judge_prompt_digest(sr),
+        "judge_prompt_sha256": _render_judge_prompt_digest(),
         "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
         "fixture_sha256": _fixture_sha256(pairs),
         "fixture_provenance": _load_provenance(pairs),

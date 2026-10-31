@@ -7,6 +7,7 @@ from typing import Any
 from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_value
+from daydream.review_result import ANALYZED_REVISION_SCHEMA
 
 REPORT_INPUT_MAX_BYTES = 64 * 1024
 
@@ -15,10 +16,8 @@ _FILES = {'type': 'array', 'maxItems': 32, 'items': _TEXT}
 NOTE_ORIGIN_SCHEMA = strict_object({
     'scope_id': _TEXT, 'stage': _TEXT,
     'sequence': {'type': 'integer', 'minimum': 1}, 'judgment_origin': {'const': 'reviewer'},
-    'analyzed_revision': strict_object({name: _TEXT
-        for name in ('head_sha', 'merge_base_sha', 'diff_key', 'pr_base_sha')}),
+    'analyzed_revision': ANALYZED_REVISION_SCHEMA,
 })
-NOTE_ORIGIN_SCHEMA['properties']['analyzed_revision']['required'].remove('pr_base_sha')
 SOURCE_RATIONALE_SCHEMA = strict_object({
     'admitted_stages': {'type': 'integer', 'minimum': 0},
     'target_decisions': strict_object({name: {'type': 'integer', 'minimum': 0}

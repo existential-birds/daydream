@@ -1,6 +1,8 @@
 """Review for review and fix phases."""
 
 import json
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -459,6 +461,13 @@ async def phase_per_stack_reviews(
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
         )}
     results: dict[str, Path] = {}
+    preparation_order = anyio.Lock()
+
+    async def prepared_off_loop[T](prepare: Callable[[], T]) -> T:
+        """Keep source validation off the timer loop; the fair lock preserves deterministic dispatch order."""
+        async with preparation_order:
+            return await anyio.to_thread.run_sync(prepare)
+
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
@@ -504,9 +513,9 @@ async def phase_per_stack_reviews(
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
                                      "exploration-affected-files": exploration_dir / "affected_files.md"})
-            input_factory = StageInputFactory.for_review(backend, work, stack, diff_path=diff_path,
-                shared_paths=shared_paths, revision=coverage.revision.to_dict(), registry=active_registry,
-                artifact_session=artifact_session, allow_standalone=allow_standalone)
+            input_factory = await prepared_off_loop(partial(StageInputFactory.for_review, backend, work, stack,
+                diff_path=diff_path, shared_paths=shared_paths, revision=coverage.revision.to_dict(),
+                registry=active_registry, artifact_session=artifact_session, allow_standalone=allow_standalone))
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
                 stack_payload = shard_key_payload(
@@ -632,8 +641,8 @@ async def phase_per_stack_reviews(
                             limits=review_limits)
                         with stack_scope(base_stack):
                             structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
-                                stage_inputs=input_factory.prepare,
-                                canonicalize_sources=input_factory.canonicalize_source_selectors,
+                                stage_inputs=lambda state: prepared_off_loop(partial(input_factory.prepare, state)),
+                                input_factory=input_factory,
                                 read_only=read_only,
                                 run_context=run_context,
                             )

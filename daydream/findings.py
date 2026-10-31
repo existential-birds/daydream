@@ -101,6 +101,8 @@ def _validate_artifact(data: Any) -> None:
         jsonschema.validate(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
                             else FINDINGS_SCHEMA)
         if data["kind"] == "review":
+            if 'source_id' in data['terminal_result']['analyzed_revision']:
+                raise ValueError('local captured findings cannot be relabeled as a committed PR artifact')
             immutable = version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
             if immutable:
                 _validate_immutable_binding(data)

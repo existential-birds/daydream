@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -545,15 +545,11 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
 def _fake_cli_runner(stdout_arg: str, rc: int = 0) -> Any:
     """Fake subprocess seam for ``ClaudeCliJudgeClient``: fixed returncode + stdout."""
 
-    class FakeProc:
-        returncode = rc
-        stdout = stdout_arg  # class bodies cannot see the enclosing function scope
-
     calls: list[list[Any]] = []
 
     async def runner(argv: Any, env: Any) -> Any:
         calls.append([argv, env])
-        return FakeProc()
+        return _ScriptedChild([stdout_arg.encode("utf-8")], returncode=rc)
 
     runner.calls = calls  # type: ignore[attr-defined]
     return runner
@@ -571,26 +567,31 @@ async def _hang() -> None:
 class _ScriptedChild:
     """StreamReader-shaped spawned child covering the CLI streaming seam.
 
-    ``chunks`` yields read() results: an iterator returns each entry then EOF,
-    while a coroutine function is awaited per read (to hang or repeat forever).
+    Finite ``chunks`` feed a real StreamReader; a coroutine function supplies
+    read() results instead to hang or repeat forever.
     ``wait`` runs after EOF; ``on_kill`` records each kill, and the default
     treats a kill as a bug.
     """
 
-    def __init__(self, chunks: Any, *, wait: Any = None, on_kill: Any = None) -> None:
-        self.stdout = self
-        self._chunks = chunks if callable(chunks) else iter(chunks)
+    def __init__(self, chunks: Any, *, returncode: int = 0, wait: Any = None, on_kill: Any = None) -> None:
+        self.stdout: Any
+        if callable(chunks):
+            self.stdout = SimpleNamespace(read=chunks)
+        else:
+            self.stdout = asyncio.StreamReader()
+            for chunk in chunks:
+                self.stdout.feed_data(chunk)
+            self.stdout.feed_eof()
+        self.returncode: int | None = None
+        self._returncode = returncode
         self._wait = wait
         self._on_kill = on_kill
 
-    async def read(self, n: int) -> bytes:
-        if callable(self._chunks):
-            return cast(bytes, await self._chunks(n))
-        return next(self._chunks, b"")
-
-    async def wait(self) -> None:
+    async def wait(self) -> int:
         if self._wait is not None and inspect.isawaitable(result := self._wait()):
             await result
+        self.returncode = self._returncode
+        return self.returncode
 
     def kill(self) -> None:
         if self._on_kill is None:
@@ -1056,21 +1057,11 @@ def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tm
 @pytest.mark.asyncio
 async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module: Any) -> None:
     sr = sr_module
-    calls = []
-
-    class FakeProc:
-        rc = 0
-        stdout = json.dumps(_OK_ENVELOPE)
-        stderr = ""
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        calls.append((args, kwargs))
-        return FakeProc()
-
-    client = sr.ClaudeCliJudgeClient(model="claude-x", runner=fake_run)
+    runner = _fake_cli_runner(json.dumps(_OK_ENVELOPE))
+    client = sr.ClaudeCliJudgeClient(model="claude-x", runner=runner)
     raw = await client.complete_json(user="<prompt>", system="sys", max_tokens=512)
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
-    argv = calls[0][0][0]
+    argv = runner.calls[0][0]
     assert argv[0] == "claude" and "--output-format" in argv and "json" in argv
     assert "--model" in argv and "claude-x" in argv
     # Tool-scope lockdown: the spawned CLI carries the OAuth credential in its
@@ -1080,7 +1071,7 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     assert "--allowedTools" in argv and "[]" in argv
     # The 512-token output budget maps onto the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS
     # (the CLI exposes no --max-tokens flag), matching the HTTP clients' request cap.
-    assert calls[0][0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
+    assert runner.calls[0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("post_eof", [False, True], ids=["blocked-read", "post-eof-wait"])
@@ -1177,27 +1168,6 @@ async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
     assert len(settled) == 1
 
-
-@pytest.mark.asyncio
-async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
-    """Without an exposed stdout stream, communicate() drains both pipes together."""
-    sr = sr_module
-    seen: list[tuple[bytes, bytes]] = []
-
-    class CommunicatingProc:
-        async def communicate(self) -> tuple[bytes, bytes]:
-            out = json.dumps(_OK_ENVELOPE).encode("utf-8")
-            seen.append((out, b""))
-            return out, b""
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return CommunicatingProc()
-
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
-    raw = await client.complete_json(user="u")
-    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
-    assert len(seen) == 1
-    assert seen[0][1] == b""  # stderr is drained by communicate, never blocks
 
 def test_build_client_empty_string_api_key_fails_closed(sr_module: Any) -> None:
     """The template's `${VAR:-}` fallback resolves to "" — still fail-closed (#979)."""

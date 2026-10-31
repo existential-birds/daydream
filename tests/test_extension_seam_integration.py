@@ -209,11 +209,12 @@ async def test_post_review_uses_published_items_path(tmp_path: Path, monkeypatch
         target_dir: Path, merged_items_path: Path, *, console: Any, run_info: str, renderers: pr_review.ReviewRenderers,
         post: bool, approve_on_clean: bool = False, pr_number: int | None = None, diagram_blocks: str | None = None,
         run_context: RunContext | None = None, auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-        review_summary: str | None = None,
+        review_summary: str | None = None, review_complete: bool = True,
     ) -> None:
         assert run_context is ctx.run_context
         assert isinstance(run_info, str)
         assert isinstance(renderers, pr_review.ReviewRenderers)
+        assert review_complete is False  # Fixture has no sealed terminal result authorizing approval.
         posted_paths.append(merged_items_path)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)

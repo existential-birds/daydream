@@ -349,7 +349,7 @@ def _preflight(
     *,
     oracle: bool,
     env: dict[str, Any],
-    docker_ok: Callable[[], Any] | None = None,
+    docker_ok: Callable[[], package.DockerNetworkPolicyCapability] | None = None,
 ) -> list[str]:
     """Fail-closed preflight: collect every blocking failure (empty = pass).
 
@@ -415,12 +415,8 @@ def _preflight(
 
     try:
         capability = (docker_ok or _default_docker_ok)()
-        if isinstance(capability, bool):
-            docker_supported = capability
-            docker_reason = ""
-        else:
-            docker_supported = bool(getattr(capability, "supported", False))
-            docker_reason = str(getattr(capability, "reason", ""))
+        docker_supported = capability.supported
+        docker_reason = capability.reason
     except Exception as exc:  # noqa: BLE001 - preflight probes always fail closed
         docker_supported = False
         docker_reason = f"Docker capability probe failed: {str(exc)[:1000]}"
@@ -526,7 +522,6 @@ def _current_state_mapping(
     """
     version = importlib.metadata.version("harbor")
     major_minor = ".".join(str(version).split(".")[:2])
-    sr = calibrate._load_judge_template()
     config = _compiled_job_config(workspace)
     mapping = {
         "compiled_lock_sha256": compiled_lock_sha256,
@@ -537,7 +532,7 @@ def _current_state_mapping(
         "reviewer_backend": env.get("DAYDREAM_REVIEW_BACKEND") or "",
         "reviewer_model": env.get("DAYDREAM_REVIEW_MODEL") or "",
         "reviewer_base_url": env.get("DAYDREAM_REVIEW_BASE_URL") or "",
-        "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
+        "verifier_template_sha256": calibrate._render_judge_prompt_digest(),
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
         "attempts": config.get("n_attempts", 1),
     }

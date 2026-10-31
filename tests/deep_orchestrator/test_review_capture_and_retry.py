@@ -1241,7 +1241,10 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
             if part['new_count'] != 0:
                 assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (100, 1, 99, 501)
 
-    assert await review.run(findings_out=None) == 0
+    # This parser contract deliberately retains a configured zero-context patch.
+    # Captured review has host-owned diff formatting; the legacy loop still admits
+    # this valid input and must preserve both old-only and later fragment ranges.
+    assert await review.run(output_mode='loop', findings_out=None) == 0
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
     assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0

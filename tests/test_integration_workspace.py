@@ -7,21 +7,25 @@ review execution while workspace and Git operations remain real.
 
 from __future__ import annotations
 
+import json
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import pytest
 from rich.console import Console
 
 from daydream import git_ops, runner
 from daydream.backends import ResultEvent, TextEvent
+from daydream.findings import load_findings_artifact
 from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import git as _git
+from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import git as _git, tracked_source_state
+from tests.test_github_app_integration import _minimal_backend
 from tests.test_workspace import _push_origin_commit_via_sidecar
 
 # --- Helpers ---------------------------------------------------------------
@@ -197,14 +201,15 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 # --- Test 4: --comment + no open PR ----------------------------------------
 
 @pytest.mark.asyncio
-async def test_comment_mode_without_open_pr_runs_deep_flow(
-    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_comment_mode_without_open_pr_rejects_before_dispatch(
+    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """Comment mode resolves an origin-only branch and dispatches deep review without a PR."""
+    """An origin-only branch without a PR cannot dispatch committed comment review."""
     _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Z")
-    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
-    monkeypatch.setattr("daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
+    fake_gh.set_response("pr-list", value=[])
     captured: dict[str, Any] = {}
+    errors: list[str] = []
+    monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
 
     def _capture(work: Any, config: Any) -> None:
         captured["is_ephemeral"] = work.is_ephemeral
@@ -216,33 +221,35 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     config = RunConfig(target=str(repo_with_origin), branch="feat/Z", output_mode="comment", cleanup=False,)
     exit_code = await runner.run(config)
 
-    assert exit_code == 0
-    assert captured["is_ephemeral"] is True
-    assert captured["output_mode"] == "comment"
+    assert exit_code == 1
+    assert captured == {}
+    assert any("No target PR found" in message for message in errors)
 
 
 # --- Test 5: --comment + open PR resolves base from PR ---------------------
 
 @pytest.mark.asyncio
 async def test_comment_mode_with_open_pr_uses_pr_base(
-    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
-    """An open PR's ``baseRefName`` is what ``open_workspace`` resolves as base."""
+    """An origin-only PR pins its head, comparison and distinct base tip before dispatch."""
     # PR base = "develop". Push a develop branch to origin AND create a local
     # tracking branch so ``git merge-base develop HEAD`` (run from inside the
     # ephemeral worktree) can resolve the ref symbolically.
-    _make_feature_branch_on_origin(tmp_path, bare_origin, branch="develop")
-    _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/W")
+    base_tip = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="develop")
+    head = _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/W")
     _git(repo_with_origin, "fetch", "origin")
     _git(repo_with_origin, "branch", "develop", "origin/develop")
 
-    monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch, **_kwargs: [{
-                "number": 42, "baseRefName": "develop", "headRefOid": "deadbeef", "baseRefOid": "cafebabe",
-                "url": "https://github.com/x/y/pull/42",
-            }
-        ],
-    )
+    comparison = _git(repo_with_origin, "merge-base", "develop", head)
+    fake_gh.serve_pr_view({
+        "number": 42, "headRefName": "feat/W", "baseRefName": "develop", "headRefOid": head,
+        "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/42",
+    })
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/42", {
+        "head": {"sha": head}, "base": {"sha": base_tip},
+    })
     # Stop _run_loop_deep after open_workspace resolves; assertions below check
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
@@ -250,6 +257,10 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     def _capture(work: Any, config: Any) -> None:
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
+        captured["head_sha"] = work.head_sha
+        captured["pr"] = work.review_pr
+        captured["pr_number"] = config.pr_number
+        captured["pr_repo"] = config.pr_repo
 
     _stub_run_loop_deep(monkeypatch, _capture)
 
@@ -257,8 +268,16 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     exit_code = await runner.run(config)
 
     assert exit_code == 0
-    assert captured["base_branch"] == "develop"
+    assert captured["base_branch"] == comparison
     assert captured["is_ephemeral"] is True
+    assert captured["head_sha"] == head
+    assert captured["pr"].base_ref == "develop"
+    assert captured["pr"].base_sha == comparison
+    assert captured["pr"].pr_base_sha == base_tip
+    assert captured["pr_number"] == 42
+    assert captured["pr_repo"] == "acme/widgets"
+    assert config.pr_number is None
+    assert config.pr_repo is None
 
 
 # --- Test 6: --review on base branch is allowed ----------------------------
@@ -293,5 +312,121 @@ async def test_review_mode_on_base_branch_does_not_error(
     # WrongBranchError must NOT have been raised.
     assert captured.get("title") != "Wrong Branch"
     # _run_loop_deep was reached.
-    assert routed["base_branch"] == "main"
+    assert routed["base_branch"] == _git(repo_with_origin, "rev-parse", "main")
     assert routed["head_branch"] == "main"
+
+
+@pytest.mark.parametrize("route,base_kind", [
+    ("in-place", "default"), ("in-place", "named"), ("in-place", "sha"),
+    ("worktree", "default"), ("branch", "default"),
+])
+async def test_local_review_pins_remote_preferred_base_without_upstream(
+    repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, route: str, base_kind: str,
+) -> None:
+    """Capture must retain the diff resolver's base policy, including explicit SHAs.
+
+    Resolver unit tests do not cover the runner taking the workspace's different
+    merge-base as its accepted source and expanding the actual review inventory.
+    """
+    repo = repo_with_origin
+    original_base = _git(repo, "rev-parse", "main")
+    _git(repo, "branch", "--unset-upstream", "main")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
+    _git(repo, "add", "upstream.py")
+    _git(repo, "commit", "-m", "already merged upstream")
+    remote_tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "HEAD:main")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-m", "feature change")
+    _git(repo, "push", "origin", "feature")
+    assert _git(repo, "rev-parse", "main") == original_base
+    assert _git(repo, "rev-parse", "origin/main") == remote_tip
+    fake_gh.set_response("pr-list", value=[])
+    backend = _minimal_backend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    before = tracked_source_state(repo)
+    base = original_base if base_kind == "sha" else "main" if base_kind == "named" else None
+    config = RunConfig(target=str(repo), output_mode="review", non_interactive=True, shallow=True,
+                       stack="python", archive=False, base=base, force_worktree=route == "worktree",
+                       branch="feature" if route == "branch" else None)
+
+    assert await runner.run(config) == 0
+
+    assert backend.calls
+    diff = (repo / ".daydream/diff.patch").read_text()
+    coverage = json.loads((repo / ".daydream/deep/review-coverage.json").read_text())
+    expected_base = original_base if base_kind == "sha" else remote_tip
+    assert coverage["analyzed_revision"]["merge_base_sha"] == expected_base
+    assert "diff --git a/feature.py b/feature.py" in diff
+    assert ("diff --git a/upstream.py b/upstream.py" in diff) == (base_kind == "sha")
+    assigned = {path for scope in coverage["planned_scopes"] for path in scope["files"]}
+    assert assigned == ({"feature.py", "upstream.py"} if base_kind == "sha" else {"feature.py"})
+    assert tracked_source_state(repo) == before
+
+
+@pytest.mark.parametrize("tip_available,explicit_base,mode", [
+    (False, False, "review"), (True, False, "review"),
+    (False, True, "review"), (False, False, "comment"),
+])
+async def test_findings_export_keeps_pr_base_when_optional_tip_is_unavailable(
+    repo_with_origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+    tip_available: bool, explicit_base: bool, mode: Literal["review", "comment"],
+) -> None:
+    """Export binds the PR comparison even when its optional REST tip cannot be read.
+
+    Lookup/export unit tests bypass workspace capture; comment-mode tests require
+    base-tip evidence and therefore never exercise this optional export fallback.
+    """
+    repo = repo_with_origin
+    main = _git(repo, "rev-parse", "main")
+    _git(repo, "checkout", "-b", "release")
+    (repo / "release.py").write_text("RELEASE = 1\n")
+    _git(repo, "add", "release.py")
+    _git(repo, "commit", "-m", "release branch change")
+    release = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "feature.py").write_text("FEATURE = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-m", "feature change")
+    head = _git(repo, "rev-parse", "HEAD")
+    fake_gh.serve_pr_view({
+        "number": 42, "headRefName": "feature", "baseRefName": "release", "headRefOid": head,
+        "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/42",
+    })
+    fake_gh.set_response("GET", "repos/acme/widgets/pulls/42",
+                         {"head": {"sha": head}, "base": {"sha": release}} if tip_available
+                         else {"__error__": "base-tip request unavailable"})
+    backend = _minimal_backend()
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
+    before = tracked_source_state(repo)
+    output = tmp_path / "findings.json"
+    config = RunConfig(target=str(repo), output_mode=mode, findings_out=str(output), pr_number=42,
+                       non_interactive=True, shallow=True, stack="python", archive=False,
+                       base=main if explicit_base else None)
+    errors: list[str] = []
+    monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
+
+    result = await runner.run(config)
+
+    assert tracked_source_state(repo) == before
+    if mode == "comment":
+        assert result == 1 and not backend.calls and not output.exists()
+        assert any("PR base could not be pinned" in message for message in errors)
+        assert not fake_gh.calls("POST", "repos/acme/widgets/pulls/42/reviews")
+        return
+    assert result == 0 and backend.calls
+    artifact = load_findings_artifact(output, expected_repo="acme/widgets", expected_pr_number=42,
+                                     expected_head_sha=head)
+    assert artifact.analysis_complete and artifact.terminal_result is not None
+    revision = artifact.terminal_result["analyzed_revision"]
+    assert revision["head_sha"] == head
+    assert revision["merge_base_sha"] == (main if explicit_base else release)
+    assert revision.get("pr_base_sha") == (release if tip_available else None)
+    diff = (repo / ".daydream/diff.patch").read_text()
+    assert "diff --git a/feature.py b/feature.py" in diff
+    assert ("diff --git a/release.py b/release.py" in diff) == explicit_base
+    assigned = {path for scope in artifact.terminal_result["planned_scopes"] for path in scope["files"]}
+    assert assigned == ({"feature.py", "release.py"} if explicit_base else {"feature.py"})

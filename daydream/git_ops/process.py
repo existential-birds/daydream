@@ -12,8 +12,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal, overload
+from typing import Any, Iterator, Literal, overload
 from urllib.parse import urlparse
 
 from daydream.backends._subprocess import terminate_process
@@ -228,6 +229,146 @@ def _bounded_subprocess(
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
+
+
+class _GitStream:
+    """Duplex bounded pipe transport; the caller owns framing, never child lifetime."""
+
+    def __init__(self, proc: subprocess.Popen[bytes], timeout: float,
+                 selector: selectors.BaseSelector) -> None:
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        self.proc = proc
+        self.input = proc.stdin
+        self.output = proc.stdout
+        self.errors = proc.stderr
+        self.deadline = time.monotonic() + timeout
+        self.pending = bytearray()
+        self.stderr = bytearray()
+        self.eof = False
+        self.selector = selector
+        for stream in (self.input, self.output, self.errors):
+            os.set_blocking(stream.fileno(), False)
+        self.selector.register(self.output, selectors.EVENT_READ)
+        self.selector.register(self.errors, selectors.EVENT_READ)
+
+    def _pump(self) -> bool:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitTimeoutError("streaming git operation timed out")
+        writable = False
+        for key, _ in self.selector.select(remaining):
+            if key.fileobj is self.input:
+                writable = True
+                continue
+            chunk = os.read(key.fd, 65536)
+            if not chunk:
+                self.selector.unregister(key.fileobj)
+                if key.fileobj is self.output:
+                    self.eof = True
+                continue
+            buffer = self.pending if key.fileobj is self.output else self.stderr
+            buffer.extend(chunk)
+            if len(buffer) > 65536:
+                raise GitError("streaming git output exceeds the supported bounds")
+        return writable
+
+    def send(self, request: bytes) -> None:
+        if len(request) > 4096:
+            raise GitError("streaming git request exceeds the supported bounds")
+        self.selector.register(self.input, selectors.EVENT_WRITE)
+        try:
+            while request:
+                if self._pump():
+                    count = os.write(self.input.fileno(), request)
+                    request = request[count:]
+        finally:
+            self.selector.unregister(self.input)
+
+    def read(self, size: int) -> bytes:
+        """Return at most one pipe chunk, including a short final chunk on EOF."""
+        if time.monotonic() >= self.deadline:
+            raise GitTimeoutError("streaming git operation timed out")
+        while not self.pending and not self.eof:
+            self._pump()
+        count = min(size, len(self.pending))
+        chunk = bytes(self.pending[:count])
+        del self.pending[:count]
+        return chunk
+
+    def line(self) -> bytes:
+        line = bytearray()
+        while len(line) < 256:
+            if time.monotonic() >= self.deadline:
+                raise GitTimeoutError("streaming git operation timed out")
+            if not self.pending:
+                if self.eof:
+                    break
+                self._pump()
+                continue
+            end = self.pending.find(b"\n", 0, 256 - len(line))
+            count = end + 1 if end >= 0 else min(len(self.pending), 256 - len(line))
+            line.extend(self.pending[:count])
+            del self.pending[:count]
+            if end >= 0:
+                return bytes(line)
+        raise GitError("streaming git object header is truncated or exceeds the supported bounds")
+
+    def finish(self) -> None:
+        self.input.close()
+        while self.selector.get_map():
+            if self.pending:
+                raise GitError("streaming git returned extra object bytes")
+            self._pump()
+        if self.pending:
+            raise GitError("streaming git returned extra object bytes")
+        try:
+            self.proc.wait(timeout=max(0, self.deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise GitTimeoutError("streaming git operation timed out") from exc
+        if self.proc.returncode:
+            raise GitError("streaming git failed: " + os.fsdecode(bytes(self.stderr)).strip())
+
+
+@contextmanager
+def _stream_git(repo: Path, args: list[str], *, timeout: float = 30) -> Iterator[_GitStream]:
+    """One inert, non-replayed operation, joined even when a consumer fails/cancels.
+
+    Both pipes are drained during request writes and body reads. Failure cleanup
+    discards fixed chunks under a one-second tail allowance, then reaps the child.
+    Existing buffered subprocess callers retain their own contracts.
+    """
+    from daydream.git_ops.immutable import git_environment
+
+    try:
+        with selectors.DefaultSelector() as selector, subprocess.Popen(
+            ["git", *args], cwd=repo, env=git_environment(repo),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ) as proc:
+            transport = None
+            try:
+                transport = _GitStream(proc, timeout, selector)
+                yield transport
+                transport.finish()
+            finally:
+                assert proc.stdin is not None
+                try:
+                    if not proc.stdin.closed:
+                        proc.stdin.close()
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    if transport is not None:
+                        transport.pending.clear()
+                        transport.deadline = time.monotonic() + 1
+                        try:
+                            while selector.get_map():
+                                transport._pump()
+                                transport.pending.clear()
+                        except (GitError, OSError):
+                            pass
+                    proc.wait()
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitError("streaming git operation unavailable") from exc
 
 
 @overload

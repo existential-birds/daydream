@@ -9,6 +9,7 @@ from typing import Any
 
 import jsonschema
 
+from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
@@ -70,6 +71,13 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
 
     state = DeepState(ctx.data)
     coverage = state.review_coverage
+    if ctx.work.captured_source is not None:
+        try:
+            ctx.work.captured_source.validate()
+        except (git_ops.GitError, OSError):
+            coverage.require_phase('snapshot')
+            coverage.record_phase('snapshot', 'failed', reasons=[ReasonCode.EVIDENCE_INCOMPLETE])
+            print_warning(console, 'Captured source integrity failed; rerun the review.')
     items: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
     projection_valid = no_diff

@@ -79,14 +79,15 @@ _BREAKDOWN = _object(optional=("false_positive_penalty", "posterior_cost", "outc
     outcome_prior=_nullable(_NUMBER), outcome_prior_n=_nullable(_COUNT))
 _RUN_PAYLOADS = {
     "original_task": _object(optional=("source_diff_sha256", "redaction"),
-        analyzed_revision=_object(optional=("pr_base_sha",), head_sha=_ID, merge_base_sha=_ID, diff_key=_ID,
-                                  pr_base_sha=_nullable(_STRING)),
+        analyzed_revision=_object(optional=("pr_base_sha", "source_id"), head_sha=_ID, merge_base_sha=_ID, diff_key=_ID,
+                                  pr_base_sha=_nullable(_STRING), source_id=_SHA),
         diff=_STRING, diff_sha256=_SHA, source_diff_sha256=_nullable(_SHA), redaction=_nullable(_MAP),
         repository=_object(repo_slug=_nullable(_STRING), remote_url=_nullable(_STRING), host=_nullable(_STRING)),
         pr=_object(number=_nullable({"type": "integer", "minimum": 1}), repo=_nullable(_STRING)),
-        changed_files=_array(_STRING), input_scope={"enum": ["committed", "committed_and_tracked_worktree"]},
-        dirty_tracked=_nullable(_BOOL), untracked_files_included={"const": False}),
-    "final_state": _object(head_sha=_nullable(_STRING)),
+        changed_files=_array(_STRING),
+        input_scope={"enum": ["committed", "committed_and_tracked_worktree", "captured_working"]},
+        dirty_tracked=_nullable(_BOOL), untracked_files_included=_BOOL),
+    "final_state": _object(optional=("source_id",), head_sha=_nullable(_STRING), source_id=_SHA),
     "recommended_patch": _object(optional=("source_sha256",),
         patch=_STRING, sha256=_SHA, source_sha256=_nullable(_SHA), capture=_nullable(_MAP)),
     "trajectories": _object(documents={**_array(_MAP), "minItems": 1}, root_trajectory_id=_ID,
@@ -290,6 +291,18 @@ def _validate_observation(record: Record) -> None:
 
 def _validate_run_evidence(run: Record) -> None:
     """Validate complete raw sections without rewriting producer payloads."""
+    task = run['original_task']
+    if task['status'] == 'available':
+        value = task['value']
+        local = 'source_id' in value['analyzed_revision']
+        if local != (value['input_scope'] == 'captured_working') or local != value['untracked_files_included']:
+            raise ValueError('captured source identity differs from input population policy')
+        final = run['final_state']
+        if final['status'] == 'available':
+            if local != ('source_id' in final['value']) or local and (
+                    final['value']['source_id'] != value['analyzed_revision']['source_id']
+                    or final['value']['head_sha'] != value['analyzed_revision']['head_sha']):
+                raise ValueError('captured final state differs from reviewed source identity')
     for name, text_key, digest_key in (("original_task", "diff", "diff_sha256"),
                                       ("recommended_patch", "patch", "sha256")):
         section = run[name]

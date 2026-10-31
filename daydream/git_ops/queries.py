@@ -373,7 +373,7 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     exclusions; failed queries raise ``GitError``.
     """
     preferred_base = _prefer_remote_base(repo, base)
-    paths = ["--", ".", *(f":(exclude){p.rstrip('/')}" for p in exclude)] if exclude else []
+    paths = ["--", ".", *(f":(exclude){p.rstrip('/')}" for p in exclude or [])]
     # Retain committed and tracked working-tree changes so resume fingerprints see both.
     result = []
     for revision, label in ((f"{preferred_base}...{head}", f"{base}...{head}"), (head, head)):

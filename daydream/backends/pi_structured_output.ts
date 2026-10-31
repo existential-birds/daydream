@@ -148,10 +148,24 @@ export default async function (pi: ExtensionAPI) {
           try {
             const body = JSON.stringify({ id: toolCallId, arguments: params });
             if (Buffer.byteLength(body) > host.max_frame_bytes) throw new Error("Host frame limit");
+            // Query the unchanged host deadline at submission time. Subtracting
+            // the full round trip is conservative and needs no shared clock origin.
+            const statusStarted = performance.now();
+            const statusResponse = await fetch(host.url + "/status", {
+              headers: { Authorization: host.authorization },
+              signal: AbortSignal.timeout(host.request_timeout_ms),
+            });
+            const status = await statusResponse.json() as any;
+            if (!statusResponse.ok || status.ready !== true || !Number.isSafeInteger(status.remaining_ms)
+                || status.remaining_ms <= 0 || status.remaining_ms > 2_147_483_647) {
+              throw new Error("Host submission deadline unavailable");
+            }
+            const remaining = Math.floor(status.remaining_ms - (performance.now() - statusStarted));
+            if (remaining <= 0) throw new Error("Host submission deadline expired");
             const response = await fetch(host.url + "/submit", {
               method: "POST",
               headers: { Authorization: host.authorization, "Content-Type": "application/json" },
-              body, signal: AbortSignal.timeout(host.request_timeout_ms),
+              body, signal: AbortSignal.timeout(remaining),
             });
             const text = await response.text();
             if (Buffer.byteLength(text) > host.max_frame_bytes) throw new Error("Host response frame limit");

@@ -144,7 +144,7 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
             payload = review_stage_result(prompt, [record()] if stage['scope_id'] == 'python' else [])
             if stage['scope_id'] == 'python' and stage['progress'] and failure_kind == 'host-input':
                 fail_next_canonical_open = True
-        elif not any(arg.endswith('pi_structured_output.ts') for arg in argv):
+        elif 'Submit the final result using structured_output alone as your final action.' not in prompt:
             return make_mock_process_from_fixture('simple_text.jsonl')
         elif 'cross-stack merge agent' in prompt.lower():
             payload = merge_result([dict(record(), lens='per-stack', source_uids=['python:1'])])

@@ -52,10 +52,10 @@ from tests.test_deep_orchestrator import (
 )
 
 
-@pytest.mark.parametrize(('resume', 'presentation_fault'), [
-    pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-resume'),
+@pytest.mark.parametrize(('restart', 'presentation_fault'), [
+    pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-restart'),
     pytest.param(False, 'context', id='unavailable-report-fresh'),
-    pytest.param(True, 'context', id='unavailable-report-resume'),
+    pytest.param(True, 'context', id='unavailable-report-restart'),
     pytest.param(False, 'missing-items', id='missing-items'),
     pytest.param(False, 'corrupt-items', id='corrupt-items'),
     pytest.param(False, 'permission-items', id='permission-items'),
@@ -63,7 +63,7 @@ from tests.test_deep_orchestrator import (
     pytest.param(False, 'post', id='post-failure'),
 ])
 async def test_synthesis_receives_retained_structural_records_and_owns_publication(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, resume: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, restart: bool,
     presentation_fault: str, fake_gh: FakeGh,
 ) -> None:
     """Complete input delivery and exact published output prevent structural resurrection.
@@ -112,12 +112,13 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", publish)
     config = empty_review_config(multi_stack_target, tmp_path / "synthesis-trajectory.json",
                                 output_mode="comment", pr_number=7)
-    if resume:
+    prior_review_calls = 0
+    if restart:
         assert await _runner.run(config) == 0
+        prior_review_calls = _count_review_prompts(backend.calls)
         supplied.clear()
         published.clear()
         summaries.clear()
-        config.start_at = "merge"
     failed: list[Path] = []
     stage, read = json_utils._stage_bytes, Path.read_text
     ready_to_post = False
@@ -160,6 +161,8 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     elif presentation_fault == 'post':
         fake_gh.set_response('POST', '/repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 503 unavailable'})
     assert await _runner.run(config) == (1 if presentation_fault == 'post' else 0)
+    if restart:
+        assert _count_review_prompts(backend.calls) == 2 * prior_review_calls
     if presentation_fault != 'none':
         assert frozen_review_calls and frozen_review_calls[0] > 0
         assert _count_review_prompts(backend.calls) == frozen_review_calls[0]

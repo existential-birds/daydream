@@ -255,8 +255,12 @@ Use this sequence for a GitHub issue or implementation spec:
 After opening the PR, run the available Daydream reviewer from its checkout:
 
 ```bash
-daydream . --backend codex --comment --non-interactive
+daydream . --backend pi --comment --non-interactive --capture-data
 ```
+
+Leave `--model` unset so the configured backend default applies, and omit `--yes`,
+which review modes reject. `--comment` publishes to the PR, so outside this loop
+run it only when a review is requested.
 
 Verify the selected PR's base/head first. If the default comparison base differs
 from its verified base, append `--base <verified ref/SHA>`; the

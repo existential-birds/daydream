@@ -70,7 +70,7 @@ def _spy_bound_deep_diff(
         return result
     monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
 
-@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'malformed-author-resume'])
+@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'retained-judgments-refused'])
 async def test_deep_findings_out_emits_artifact_and_stops(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path, resume: bool,
 ) -> None:
@@ -100,6 +100,9 @@ async def test_deep_findings_out_emits_artifact_and_stops(
         config.start_at = 'merge'
         rc = await run(config)
         assert sum(review_stage_state(call['prompt']) is not None for call in backend.calls) == review_calls
+        assert rc == 1 and json.loads(out.read_text()) == initial
+        assert (deep / 'review-author-context.json').read_text() == '[]'
+        return
 
     # (b) exit 0
     assert rc == 0
@@ -108,14 +111,6 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     assert data["pr_number"] == 7
     assert data["head_sha"] == pr.head_sha
     assert data["repo"] == "o/r"
-    if resume:
-        assert data['review_context']['author_reported'] is None
-        assert data['terminal_result']['analyzed_revision'] == initial['terminal_result']['analyzed_revision']
-        assert data['terminal_result']['run_id'] != initial['terminal_result']['run_id']
-        assert data['terminal_result']['analysis_state'] == initial['terminal_result']['analysis_state'] == 'complete'
-        assert data['findings'] == initial['findings'] and data['findings']
-        assert (deep / 'review-author-context.json').read_text() == '[]'
-        assert 'Author-reported check context unavailable.' in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
     # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
     # exists. This is the real "no fix ran" signal: it ignores daydream's own gitignored

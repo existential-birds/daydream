@@ -22,6 +22,7 @@ from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
 from daydream.review_source_refs import (
+    _SubmissionSources,
     canonicalize_source_selectors,
     lf_lines,
     part_source_mapping,
@@ -67,6 +68,7 @@ class StageInputFactory:
         revision: dict[str, Any], artifact_session: ArtifactSession | None, allow_standalone: bool, read_only: bool,
         bundle_capable: bool = False) -> None:
         self.backend, self.work, self.stack = backend, work, stack
+        self.captured_source = work.captured_source
         self.revision = revision
         self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
         self.shared_paths = shared_paths
@@ -142,7 +144,8 @@ class StageInputFactory:
             refs = (ref for part in self.parts for ref in part.assignment['source_refs']) if structural else (
                 self.by_id[decision['target_id']].assignment['source_refs'])
             if not validate_source_refs(decision['evidence_refs'], refs, revision=self.revision,
-                    source_root=self.work.repo, require_assigned=decision['status'] == 'reviewed'):
+                    source_root=self.work.repo, require_assigned=decision['status'] == 'reviewed',
+                    captured_source=self.captured_source):
                 raise ValueError('retained source attribution differs from frozen assignment')
 
     def _mapped(self, part: _Part, *, body: str | bytes | None = None) -> _Part:
@@ -157,6 +160,11 @@ class StageInputFactory:
         return inputs._capture_input(label, path, inputs.SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
 
     def _revalidate_canonical(self) -> None:
+        if self.captured_source is not None:
+            try:
+                self.captured_source.validate()
+            except (GitError, OSError) as exc:
+                raise inputs.SanctionedInputUnavailable('captured source changed or is unavailable') from exc
         for expected in self.canonical:
             if self._canonical(expected.label, expected.path) != expected:
                 raise inputs.SanctionedInputUnavailable(f"sanctioned input {expected.label!r} changed after capture")
@@ -166,7 +174,23 @@ class StageInputFactory:
         """Recheck the original canonical inputs immediately before resolving selectors."""
         self._revalidate_canonical()
         return canonicalize_source_selectors(selectors, expected_refs, revision=self.revision,
-            source_root=self.work.repo, require_assigned=require_assigned, source_aliases=self._source_aliases)
+            source_root=self.work.repo, require_assigned=require_assigned, source_aliases=self._source_aliases,
+            captured_source=self.captured_source)
+
+    def admit_submission[T](self, prepare: Callable[[_SubmissionSources], Callable[[], T]]) -> T:
+        """Resolve a prospective payload, validate once, then synchronously install it.
+
+        The resolver retains bounded host facts, never bodies or success across
+        callbacks. The Review owner's closure rechecks current authority after
+        all I/O and owns the only domain state transition.
+        """
+        sources = _SubmissionSources(self.revision, self.work.repo, self._source_aliases, self.captured_source)
+        try:
+            install = prepare(sources)
+        finally:
+            sources.close()
+        self._revalidate_canonical()
+        return install()
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}
@@ -352,7 +376,8 @@ class StageInputFactory:
                 continue
             label = f"before-context-{index:04d}"
             try:
-                _, raw = frozen_source(self.work.repo, self.revision["merge_base_sha"], old_path)
+                _, raw = (self.captured_source.read('old', old_path) if self.captured_source is not None else
+                          frozen_source(self.work.repo, self.revision["merge_base_sha"], old_path))
                 text = raw.decode("utf-8")
                 if len(raw) > 64 * 1024:
                     raise UnicodeError("optional context exceeds its bound")

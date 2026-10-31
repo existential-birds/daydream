@@ -5,8 +5,9 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.git_ops.models import GitError, PathAbsentError
 from daydream.git_ops.source import FrozenSourceRejected, frozen_source
@@ -16,6 +17,9 @@ from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_text
 from daydream.repository_paths import git_observed_path_is_confined
+
+if TYPE_CHECKING:
+    from daydream.git_ops.captured_source import CapturedSource
 
 SOURCE_REFS_MAX_BYTES = 8192
 _SUPPORTING_SOURCE_MAX_BYTES = 64 * 1024
@@ -58,6 +62,73 @@ def _sha(body: str | bytes) -> str:
     return hashlib.sha256(body.encode('utf-8') if isinstance(body, str) else body).hexdigest()
 
 
+def source_revision(revision: Mapping[str, Any], side: str) -> str:
+    """Keep actual HEAD provenance separate from captured working-content identity."""
+    identity: str = revision['merge_base_sha'] if side == 'old' else revision.get('source_id', revision['head_sha'])
+    return identity
+
+
+def _source_contents(root: Path, revision: Mapping[str, Any], side: str, path: str,
+                     captured_source: CapturedSource | None) -> tuple[str, bytes]:
+    if captured_source is not None:
+        if captured_source.revision_for(side) != source_revision(revision, side):
+            raise GitError('captured source differs from analyzed revision')
+        return captured_source.read(side, path)
+    if 'source_id' in revision:
+        raise GitError('captured working source is unavailable; restart review')
+    return frozen_source(root, source_revision(revision, side), path)
+
+
+@dataclass(frozen=True)
+class _SupportingFacts:
+    digest: str
+    size: int
+    lines: int
+    utf8: bool
+
+
+def _supporting_facts(root: Path, revision: Mapping[str, Any], side: str, path: str,
+                      captured: CapturedSource | None) -> _SupportingFacts:
+    _, contents = _source_contents(root, revision, side, path, captured)
+    try:
+        contents.decode('utf-8')
+        utf8 = True
+    except UnicodeDecodeError:
+        utf8 = False
+    return _SupportingFacts(_sha(contents), len(contents),
+        contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n')), utf8)
+
+
+class _SubmissionSources:
+    """Callback-local host facts, revoked before the factory validates and installs."""
+
+    def __init__(self, revision: dict[str, Any], root: Path, aliases: Mapping[str, str],
+                 captured: CapturedSource | None) -> None:
+        self.revision, self.root, self.aliases, self.captured = revision, root, aliases, captured
+        self._facts: dict[tuple[str, str], _SupportingFacts] = {}
+        self._active = True
+
+    def _supporting(self, side: str, path: str) -> _SupportingFacts:
+        if not self._active:
+            raise RuntimeError('submission source resolver has closed')
+        key = side, path
+        if key not in self._facts:
+            self._facts[key] = _supporting_facts(self.root, self.revision, side, path, self.captured)
+        return self._facts[key]
+
+    def canonicalize(self, selectors: Any, expected: Iterable[dict[str, Any]], *,
+                     require_assigned: bool = True) -> list[dict[str, Any]]:
+        if not self._active:
+            raise RuntimeError('submission source resolver has closed')
+        return canonicalize_source_selectors(selectors, expected, revision=self.revision,
+            source_root=self.root, require_assigned=require_assigned, source_aliases=self.aliases,
+            captured_source=self.captured, _submission=self)
+
+    def close(self) -> None:
+        self._active = False
+        self._facts.clear()
+
+
 def source_id(reference: dict[str, Any]) -> str:
     """Name one exact host-assigned identity independently of the model's basis claim."""
     identity = {key: value for key, value in reference.items() if key not in {'basis', 'role'}}
@@ -81,6 +152,8 @@ def canonicalize_source_selectors(
     selectors: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
     source_root: Path, require_assigned: bool = True,
     source_aliases: Mapping[str, str] | None = None,
+    captured_source: CapturedSource | None = None,
+    _submission: _SubmissionSources | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve a complete selection atomically against frozen assignment/Git identities.
 
@@ -139,32 +212,31 @@ def canonicalize_source_selectors(
                     raise HostToolRejected(
                         f'{field}: path must remain inside the repository; choose a confined repository path '
                         'or remove this optional supporting selector.')
-                pinned_revision = revision['merge_base_sha' if side == 'old' else 'head_sha']
+                pinned_revision = source_revision(revision, side)
                 try:
-                    _, contents = frozen_source(source_root, pinned_revision, path)
+                    facts = (_submission._supporting(side, path) if _submission is not None else
+                             _supporting_facts(source_root, revision, side, path, captured_source))
                 except (FrozenSourceRejected, PathAbsentError) as exc:
                     raise HostToolRejected(
                         f'{field}: no available regular blob at the pinned revision; choose a regular file '
                         f'on this side within {_SUPPORTING_SOURCE_MAX_BYTES} whole-blob bytes, '
                         'use an assigned source_id, or remove this optional supporting selector.') from exc
-                if len(contents) > _SUPPORTING_SOURCE_MAX_BYTES:
+                if facts.size > _SUPPORTING_SOURCE_MAX_BYTES:
                     raise HostToolRejected(
-                        f'{field}: the whole pinned blob is {len(contents)} bytes, above '
+                        f'{field}: the whole pinned blob is {facts.size} bytes, above '
                         f'{_SUPPORTING_SOURCE_MAX_BYTES}; narrowing source_range cannot reduce this whole-blob '
                         'limit. Use an assigned source_id or remove this optional supporting selector.')
-                try:
-                    contents.decode('utf-8')
-                except UnicodeDecodeError as exc:
+                if not facts.utf8:
                     raise HostToolRejected(
                         f'{field}: the whole pinned blob is not UTF-8 text; choose a UTF-8 regular file '
-                        'or remove this optional supporting selector.') from exc
-                line_count = contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n'))
+                        'or remove this optional supporting selector.')
+                line_count = facts.lines
                 if not 1 <= bounds['start'] <= bounds['end'] <= line_count:
                     raise HostToolRejected(
                         f'{field}.source_range: allowed 1..{line_count} with start <= end; '
                         'choose a contained range or remove this optional supporting selector.')
                 reference = {
-                    'artifact_sha256': _sha(contents), 'part_sha256': None, 'revision': pinned_revision,
+                    'artifact_sha256': facts.digest, 'part_sha256': None, 'revision': pinned_revision,
                     'path': path, 'side': side, 'source_range': deepcopy(bounds), 'fragment': None,
                     'basis': selector['basis'], 'role': 'supporting',
                 }
@@ -176,7 +248,8 @@ def canonicalize_source_selectors(
         # Canonical evidence has its own retained bounds and contract, independent
         # of the smaller model-facing selector schema.
         if not validate_source_refs(resolved, assigned.values(), revision=revision, source_root=source_root,
-                                    require_assigned=require_assigned, raise_unavailable=True):
+                                    require_assigned=require_assigned, raise_unavailable=True,
+                                    captured_source=captured_source, _submission=_submission):
             raise HostToolRejected(
                 f'evidence_refs: canonical references must fit four items and {SOURCE_REFS_MAX_BYTES} UTF-8 '
                 'bytes in total; remove optional supporting selectors or use fewer assigned selectors.')
@@ -235,7 +308,7 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
     identity = {'artifact_sha256': artifact_sha256, 'part_sha256': _sha(diff),
                 'basis': 'supplied_diff', 'role': 'assigned'}
     paths = {'old': old_path, 'new': new_path}
-    revisions = {'old': revision['merge_base_sha'], 'new': revision['head_sha']}
+    revisions = {side: source_revision(revision, side) for side in ('old', 'new')}
     refs: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     if assignment['kind'] == 'continuation' and body is not None:
@@ -280,7 +353,8 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
             offset = assignment['fragment_offset']
             source = body.encode('utf-8') if isinstance(body, str) else body
             metadata = source[offset:offset + assignment['fragment_bytes']]
-        refs.append({**identity, 'revision': revision['head_sha'], 'path': assignment['file'], 'side': 'diff',
+        refs.append({**identity, 'revision': source_revision(revision, 'diff'),
+                     'path': assignment['file'], 'side': 'diff',
                      'source_range': None, 'fragment': {'offset': offset,
                      'bytes': len(metadata), 'sha256': _sha(metadata)}})
     return {'source_refs': refs, 'source_options': source_options(refs), 'source_summary': summaries,
@@ -289,7 +363,8 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
 
 def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
                          source_root: Path | None = None, require_assigned: bool = True,
-                         raise_unavailable: bool = False) -> bool:
+                         raise_unavailable: bool = False, captured_source: CapturedSource | None = None,
+                         _submission: _SubmissionSources | None = None) -> bool:
     """Validate all references before admission; labels assert basis, not execution."""
     if not validates_schema(refs, SOURCE_REFS_SCHEMA):
         return False
@@ -327,11 +402,12 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
                 or ref['side'] not in {'old', 'new'} or not isinstance(ref['source_range'], dict)
                 or not git_observed_path_is_confined(source_root, ref['path'])):
             return False
-        expected_revision = revision['merge_base_sha' if ref['side'] == 'old' else 'head_sha']
+        expected_revision = source_revision(revision, ref['side'])
         if ref['revision'] != expected_revision:
             return False
         try:
-            _, contents = frozen_source(source_root, expected_revision, ref['path'])
+            facts = (_submission._supporting(ref['side'], ref['path']) if _submission is not None else
+                     _supporting_facts(source_root, revision, ref['side'], ref['path'], captured_source))
         except (GitError, OSError, UnicodeError, ValueError) as exc:
             if raise_unavailable:
                 raise HostToolFatal(
@@ -340,8 +416,8 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
                     'source validation; this review invocation must stop.', code='input_unavailable') from exc
             return False
         bounds = ref['source_range']
-        line_count = contents.count(b'\n') + int(bool(contents) and not contents.endswith(b'\n'))
-        if (len(contents) > _SUPPORTING_SOURCE_MAX_BYTES or ref['artifact_sha256'] != _sha(contents)
+        line_count = facts.lines
+        if (facts.size > _SUPPORTING_SOURCE_MAX_BYTES or ref['artifact_sha256'] != facts.digest
                 or not 1 <= bounds['start'] <= bounds['end'] <= line_count):
             return False
     return assigned or not require_assigned

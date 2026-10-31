@@ -16,7 +16,7 @@ import tempfile
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Mapping
 
 from daydream import git_ops
 from daydream.artifact_visibility import ArtifactVisibilityError
@@ -152,42 +152,6 @@ def parse_reviewer_environment(environment: Mapping[str, str]) -> ParsedReviewer
         agent_dir=Path(source[env_policy.AGENT_DIR_ENV]) if source.get(env_policy.AGENT_DIR_ENV) else None,
         execution=backend_execution,
     )
-
-
-def publish_review(
-    *,
-    repo_dir: str | Path,
-    artifact_path: str | Path,
-    case_id: str,
-    base_ref: str = "base",
-    head_ref: str = "head",
-) -> None:
-    """Publish the candidate artifact from the runner's merged-items output."""
-    repo_dir = Path(repo_dir)
-    merged = repo_dir / ".daydream" / "deep" / "merged-items.json"
-    try:
-        raw: Any = json.loads(merged.read_text())
-    except OSError as exc:
-        raise candidate.CandidateError(
-            f"merged items output is missing or unreadable at {merged}: {exc}",
-            kind="missing_merged",
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise candidate.CandidateError(
-            f"merged items output {merged} is corrupt JSON: {exc}",
-            kind="corrupt_merged",
-        ) from exc
-    items = raw.get("items") if isinstance(raw, dict) else None
-    if not isinstance(items, list):
-        raise candidate.CandidateError(
-            f"merged items output {merged} is corrupt (items is not a list)",
-            kind="corrupt_merged",
-        )
-    findings = candidate.build_candidate_findings(items, case_id=case_id)
-    artifact = candidate.build_candidate_artifact(
-        case_id, findings, base_ref=base_ref, head_ref=head_ref
-    )
-    candidate.write_candidate_artifact_atomic(artifact_path, artifact)
 
 
 async def main(environment: Mapping[str, str]) -> int:

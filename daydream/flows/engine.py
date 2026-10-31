@@ -76,20 +76,26 @@ class FlowContext:
     def _backend(self, phase: str, *, effort: str | None = None) -> Backend:
         """Resolve ``phase``'s backend, honoring a runner-bound factory seam."""
         if self._backend_factory is not None:
-            return self._backend_factory(
+            backend = self._backend_factory(
                 self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace, effort,
             )
+        else:
+            from daydream.runner import _resolve_backend
 
-        from daydream.runner import _resolve_backend
+            backend = _resolve_backend(
+                self.config,
+                phase,
+                cache=self._backend_cache,
+                cwd=self.work.repo,
+                audit_workspace=self.audit_workspace,
+                effort_override=effort,
+            )
+        if self.work.captured_source is not None:
+            from daydream.backends.pi import PiBackend
 
-        return _resolve_backend(
-            self.config,
-            phase,
-            cache=self._backend_cache,
-            cwd=self.work.repo,
-            audit_workspace=self.audit_workspace,
-            effort_override=effort,
-        )
+            if isinstance(backend, PiBackend):
+                backend.bind_review_context(self.work.source)
+        return backend
 
     def backend_for(self, phase: str) -> Backend:
         """Cache instances by resolved backend, model, effort, and audit root for this context."""

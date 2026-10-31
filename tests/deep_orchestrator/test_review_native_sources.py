@@ -4,8 +4,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
+import threading
 import tracemalloc
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +15,14 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
+from daydream.deep import orchestrator
 from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
 from daydream.review_source_refs import canonicalize_source_selectors, source_id
-from tests.deep_orchestrator.test_review_completion import record, scopes
+from daydream.review_stage_inputs import StageInputFactory
+from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
     InvestigationRun,
     candidate,
@@ -28,6 +32,134 @@ from tests.deep_orchestrator.test_review_investigation import (
 )
 from tests.deep_orchestrator.test_review_stage_reservations import NativeStageBackend
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
+
+
+@pytest.mark.usefixtures('fake_gh')
+@pytest.mark.parametrize('failure', ['capture', 'accepted-source'])
+async def test_local_capture_failures_refuse_dispatch_without_changing_the_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    """Preparation and later setup failures need an actionable cause before model dispatch."""
+    repo = tmp_path / 'unstable_local'
+    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': 'VALUE = 1\n'})
+    review = ReviewRun(repo, tmp_path, monkeypatch)
+    before = tracked_source_state(repo)
+    index = (repo / '.git/index').read_bytes()
+    observed: list[Path] = []
+    if failure == 'capture':
+        enumerate_untracked = queries._list_untracked_z
+
+        def concurrent_write(source: Path) -> list[str]:
+            paths = enumerate_untracked(source)
+            if source == repo:
+                observed.append(source)
+                path = source / 'api.py'
+                # Real writes with unchanged bytes still invalidate observations
+                # accepted before this enumeration/materialization boundary.
+                path.write_bytes(path.read_bytes())
+            return paths
+
+        monkeypatch.setattr(queries, '_list_untracked_z', concurrent_write)
+    else:
+        setup = orchestrator.run_deep
+
+        async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
+            assert work.captured_source is not None and work.repo != repo
+            observed.append(work.repo)
+            (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
+            return await setup(config, work, *args, **kwargs)
+
+        monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
+    assert await review.run(findings_out=None) == 1
+    from tests.harness.console import collapse_panel_text
+
+    message = ('stop concurrent writers and rerun the review' if failure == 'capture'
+               else 'captured native source integrity failed')
+    assert message in collapse_panel_text(capsys)
+    assert review.backend.calls == []
+    if failure == 'capture':
+        assert len(observed) > 1
+    else:
+        assert len(observed) == 1 and not observed[0].exists()
+    assert (repo / '.git/index').read_bytes() == index
+    assert tracked_source_state(repo) == before
+    assert not review.output.exists()
+    assert not (repo / '.review-output.md').exists()
+    assert not (repo / '.daydream/deep/review-coverage.json').exists()
+
+
+@pytest.mark.parametrize('cancelled', [False, True], ids=['final-working', 'net-cancellation'])
+async def test_local_runner_uses_one_capture_for_diff_targets_and_supporting_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+) -> None:
+    """Source-owner tests miss runner cwd routing and the no-model net-empty outcome."""
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+
+    repo = tmp_path / 'local_subject'
+    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n', 'support.py': 'HELPER = 0\n'},
+                        feature={'api.py': 'VALUE = 1\n', 'support.py': 'HELPER = 0\n'})
+    (repo / 'api.py').write_text('VALUE = 2\n')
+    git(repo, 'add', 'api.py')
+    accepted = 'VALUE = 0\n' if cancelled else 'VALUE = 3\n'
+    (repo / 'api.py').write_text(accepted)
+    (repo / 'support.py').write_text('HELPER = 2\n')
+    if not cancelled:
+        (repo / 'new.py').write_text('NEW = 3\n')
+    index = (repo / '.git/index').read_bytes()
+    original_head = git(repo, 'rev-parse', 'HEAD')
+    seen: list[Path] = []
+    review = ReviewRun(repo, tmp_path, monkeypatch)
+
+    class CapturedReader(EmptyReviewBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            assert cwd != repo
+            assert (cwd / 'api.py').read_text() == accepted
+            assert (cwd / 'support.py').read_text() == 'HELPER = 2\n'
+            assert (cwd / 'new.py').read_text() == 'NEW = 3\n'
+            if not seen:
+                (repo / 'api.py').write_text('VALUE = 9\n')
+                (repo / 'support.py').write_text('HELPER = 9\n')
+                (repo / 'new.py').write_text('NEW = 9\n')
+            seen.append(cwd)
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    review.backend = CapturedReader(repo)
+    assert await review.run(findings_out=None, ignore_paths=['support.py']) == 0
+    diff = (repo / '.daydream/diff.patch').read_text()
+    result = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
+    assert result['analyzed_revision']['head_sha'] == original_head
+    assert len(result['analyzed_revision']['source_id']) == 64
+    if cancelled:
+        assert diff == '' and not seen and result['planned_scopes'] == []
+    else:
+        assert seen and all(not root.exists() for root in seen)
+        assert 'VALUE = 3' in diff and 'NEW = 3' in diff and 'VALUE = 2' not in diff
+        assert 'support.py' not in diff
+        assert {path for scope in result['planned_scopes'] for path in scope['files']} == {'api.py', 'new.py'}
+    assert (repo / '.git/index').read_bytes() == index
+    assert git(repo, 'rev-parse', 'HEAD') == original_head
+
+
+async def test_preparation_validates_off_the_loop_while_submission_stays_synchronous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fake backends have no setup timers, so a full validation on the loop stalls nothing they can observe."""
+    review = many_file_review(tmp_path, monkeypatch, count=1, docs_count=0)
+    review.backend = NativeStageBackend(review.repo)
+    validations: list[tuple[str, bool]] = []
+    revalidate = StageInputFactory._revalidate_canonical
+
+    def observed(factory: StageInputFactory) -> None:
+        caller = sys._getframe(1).f_code.co_name
+        validations.append((caller, threading.current_thread() is threading.main_thread()))
+        revalidate(factory)
+
+    monkeypatch.setattr(StageInputFactory, '_revalidate_canonical', observed)
+    assert await review.run() == 0
+    assert {('__init__', False), ('prepare', False), ('admit_submission', True)} <= set(validations)
+    assert not {caller for caller, on_loop in validations if on_loop and caller in {'__init__', 'prepare'}}
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])

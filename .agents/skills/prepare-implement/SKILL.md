@@ -81,7 +81,9 @@ stands alone in the new session:
   open a ready-for-review PR after the applicable checks pass.
 - **PR review loop:** after opening the PR, verify its selected base/head
   repositories, refs, and SHAs, and use the implementation checkout bound to that
-  head. Run `daydream . --backend codex --comment --non-interactive` by default.
+  head. Run the
+  [Daydream review command](../../../CONTRIBUTING.md#shared-agent-skill-workflow)
+  by default.
   Confirm its comparison base resolves to the verified PR base SHA; if the
   default is wrong or stale, including for a non-default PR target,
   append only `--base <verified ref/SHA>`. Fetch the required base if needed

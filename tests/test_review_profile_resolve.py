@@ -68,16 +68,17 @@ def test_relative_repo_path_cannot_escape(tmp_path: Path, monkeypatch: pytest.Mo
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path) -> None:
 
     # A real Git target reaches profile resolution after workspace opening.
-    init_repo(tmp_path)
-    write_and_stage(tmp_path, "seed.txt", "x\n")
-    commit(tmp_path, "init")
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    write_and_stage(repo, "seed.txt", "x\n")
+    commit(repo, "init")
 
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "cli-p"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     env = {**os.environ, "DAYDREAM_REVIEW_PROFILE": str(p)}
     repo_root = Path(__file__).resolve().parents[1]
     # Exercise the profile flag through the real CLI.
-    out = subprocess.run([sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
+    out = subprocess.run([sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(repo)],
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
     # An empty diff with a valid explicit profile exits successfully.
@@ -88,7 +89,7 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path) -> None:
     bad = tmp_path / "bad.toml"
     bad.write_text('schema_version = 1\nname = "bad"\nunknown = 1')
     out_bad = subprocess.run(
-        [sys.executable, "-m", "daydream", "--review", "--review-profile", str(bad), str(tmp_path)],
+        [sys.executable, "-m", "daydream", "--review", "--review-profile", str(bad), str(repo)],
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
     assert out_bad.returncode != 0

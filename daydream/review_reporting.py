@@ -9,14 +9,13 @@ from typing import Any
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text
 from daydream.review_rationale import SOURCE_RATIONALE_SCHEMA
+from daydream.review_result import ANALYZED_REVISION_SCHEMA
 
 _TEXT = {'type': 'string', 'maxLength': 512}
-_REVISION = strict_object({name: _TEXT for name in ('head_sha', 'merge_base_sha', 'diff_key', 'pr_base_sha')})
-_REVISION['required'].remove('pr_base_sha')
 REVIEW_CONTEXT_SCHEMA = strict_object({
     'scopes': {'type': 'array', 'maxItems': 32, 'items': strict_object({
         'scope_id': _TEXT, 'originating_run_id': {'anyOf': [_TEXT, {'type': 'null'}]},
-        'analyzed_revision': {'anyOf': [_REVISION, {'type': 'null'}]},
+        'analyzed_revision': {'anyOf': [ANALYZED_REVISION_SCHEMA, {'type': 'null'}]},
         'review_context': {'anyOf': [SOURCE_RATIONALE_SCHEMA, {'type': 'null'}]},
     })},
     'scopes_omitted': {'type': 'integer', 'minimum': 0},

@@ -459,6 +459,9 @@ async def test_acceptance_and_authority_closure_have_one_synchronous_order(
     binding = HostToolBinding(deadline=110, accept=accept)
     async with _endpoint(binding) as client:
         assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        assert (await client.get("/status")).json()["remaining_ms"] == 10_000
+        fake.advance(1)
+        assert (await client.get("/status")).json()["remaining_ms"] == 9_000
         binding.admit("terminal", NATIVE_SUBMIT, _RESULT, terminal=True)
         if order == "acceptance-first":
             assert binding.submit("terminal", _RESULT) == _RESULT

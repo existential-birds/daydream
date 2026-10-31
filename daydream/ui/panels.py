@@ -139,14 +139,12 @@ class LiveToolPanel:
 
     def __init__(
         self,
-        console: Console,
         name: str,
         args: dict[str, object],
         quiet_mode: bool = False,
         label: str | None = None,
     ) -> None:
         """Keep the resolved background-task label for the header."""
-        self._console = console
         self._name = name
         self._args = redact_native_auth_value(args)
         self._label = redact_native_auth_value(label)
@@ -422,7 +420,6 @@ class LiveToolPanelRegistry:
         label = self.resolve_call_label(name, args)
 
         panel = LiveToolPanel(
-            console=self._console,
             name=name,
             args=args,
             quiet_mode=self._quiet_mode,

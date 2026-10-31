@@ -80,8 +80,8 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
     """Runner-owned prompt delivery + installed CLI/file set, only provider doubled.
 
     Existing pre_scan coverage cannot detect a helper that reroots via shared Git
-    metadata, loses tracked ignored evidence, or lacks the production CLI dispatch.
-    Execute the delivered expansion example: hardcoded argv missed its absent roots.
+    metadata or loses tracked ignored evidence. Execute the delivered expansion
+    example too: ignored files outside the accepted capture stay unavailable.
     """
     from dataclasses import replace
 
@@ -125,6 +125,11 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
         if stage is not None and stage["stage"] == "first_pass" and not observed:
             assert REPOSITORY_SEARCH_GUIDANCE in prompt
             assert ("CUSTOM_SEARCH_STRATEGY" in prompt) == custom_strategy
+            assert cwd != linked and (cwd / ".git").is_dir()
+            assert (linked / "deps/pkg/generated.go").is_file()
+            assert not (cwd / "deps/pkg").exists()
+            # Later edits in the original linked worktree cannot change reads.
+            (linked / ".rules/policy").write_text("search-token LATER ORIGINAL EDIT\n")
             # Remove rg entirely while retaining the real Git executable.
             bin_dir = tmp_path / "git-only-bin"
             bin_dir.mkdir()
@@ -138,7 +143,7 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
                 completed = subprocess.run(
                     command + suffix, cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
                 )
-                assert completed.returncode == 2  # outward symlink is disclosed as skipped
+                assert completed.returncode == 2  # Skipped symlink or unavailable ignored expansion.
                 observed.append(json.loads(completed.stdout))
             # Substitute example placeholders only; never supply omitted roots or options.
             example = next(part for part in prompt.split("`")[1::2] if "--expand" in part)
@@ -150,7 +155,7 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
                 [sys.executable, "-m", "daydream", *[values.get(arg, arg) for arg in argv[1:]]],
                 cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
             )
-            assert completed.returncode == 0, completed.stderr or completed.stdout
+            assert completed.returncode == 2, completed.stderr or completed.stdout
             observed.append(json.loads(completed.stdout))
         return [TextEvent(text="Review complete."),
             ResultEvent(structured_output=review_stage_result(prompt, []) if schema else None, continuation=None)]
@@ -161,20 +166,14 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
         review_profile=ResolvedProfile(profile=profile, source_kind="test"))
     assert await runner.run(config, private_roots=private_root_locations(base=tmp_path / "private")) == 0
     assert len(observed) == 3
-    normal, expanded, documented = observed
+    normal, unavailable, documented = observed
     expected = {"services/taste/untracked.go", ".rules/policy", "deps/tracked.go"}
     assert {hit["path"] for hit in normal["matches"]} == expected
-    assert {hit["path"] for hit in expanded["matches"]} == expected | {"deps/pkg/generated.go"}
     assert normal["skipped_files"] == 1
-    assert expanded["skipped_files"] == 1
-    assert normal["incomplete"] == expanded["incomplete"] == []
-    assert all("WRONG SIBLING" not in hit["text"] for result in observed for hit in result["matches"])
-    assert expanded["expansion"]["reason"] == "trace generated caller"
-    assert documented["roots"] == ["deps/pkg"]
-    assert documented["expansion"] == {"paths": ["deps/pkg"], "reason": "trace generated caller"}
-    assert documented["matches"] == [{"path": "deps/pkg/generated.go", "line": 1, "text": "// search-token generated"}]
-    assert documented["visited_count"] == 1
-    assert documented["incomplete"] == [] and documented["skipped_files"] == 0
+    assert normal["incomplete"] == []
+    assert all("WRONG SIBLING" not in hit["text"] and "LATER ORIGINAL EDIT" not in hit["text"]
+               for hit in normal["matches"])
+    assert unavailable == documented == {"error": "search path does not exist: 'deps/pkg'"}
     assert trajectory.is_file()
     assert json.loads(trajectory.read_text())["extra"]["profile_digest"] == profile.digest
     assert not (main / ".review-output.md").exists()

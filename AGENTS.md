@@ -44,6 +44,11 @@ The pre-push hook checks signatures and runs this gate. Follow
 Run `make rl-check` separately when changing `rl/daydream_review`; it is outside
 `make check`. Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
+## Local PR reviews
+
+Run Daydream reviews during development with
+[the command in CONTRIBUTING.md](CONTRIBUTING.md#shared-agent-skill-workflow).
+
 ## Testing standard (mandatory)
 
 Choose the test boundary that owns the observable behavior or independent contract.

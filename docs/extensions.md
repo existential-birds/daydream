@@ -91,7 +91,7 @@ contract versions are independent. Preserve these supplied groups:
 
 | Fields | Meaning |
 |---|---|
-| `stage`, `scope_id`, `analyzed_revision` | Frozen first-pass/integration/triage identity |
+| `stage`, `scope_id`, `analyzed_revision` | Frozen first-pass/integration/triage identity; local source includes `source_id` |
 | `assigned_files`, `source_refs`, `source_options`, `assignment_parts`, `source_summary` | Exact targets, canonical source identities and host source IDs; offsets are UTF-8 diff-body bytes |
 | `supporting_bundle`, `supporting_catalog` | Bounded admitted context/pointers and availability; no directory-wide access |
 | `remaining_work`, `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Dispatch-time residual work, pace and enforced budgets; future reserves already excluded |
@@ -121,7 +121,7 @@ contradictions, unfinished targets, and isolated failures preserve their origina
 authority and incomplete coverage; later success cannot erase earlier failures.
 Final-turn output selection and native structured submission remain host-owned;
 malformed envelopes cannot recover nested fragments. Native Pi's private stage
-contract 14 uses selector submissions and one host-accepted canonical result after
+contract 15 uses selector submissions and one host-accepted canonical result after
 clean native settlement. Its model schema is distinct from retained canonical
 output; other backends retain their canonical reference schema. The private cache
 identity changes with this contract, while extension API 8 and persisted canonical
@@ -143,8 +143,9 @@ The default remains defined in [configuration](../daydream/config.py).
 ### Committed-review program
 
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
-independently of extension flow steps/builders. Existing extension and CLI contracts
-remain unchanged. Route integration is #1679; default cutover is #1641 after #1686
+independently of extension flow steps/builders. Optional `CommittedReviewRequest.local` and `AnalyzedRevision.source_id` retain
+extension API 8; captured local and committed subjects follow the
+[captured-source contract](runtime.md#captured-local-source). Broader route integration is #1679; default cutover is #1641 after #1686
 comparison/owner acceptance; final retirement is #1687.
 
 ### Plan-writer
