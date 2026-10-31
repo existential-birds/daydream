@@ -149,11 +149,11 @@ Empty selectors and sibling callbacks get the same final guard. Standalone/store
 reference checks, preparation, and terminal validation remain independent; no
 validation success survives a callback. The writable capture is not a sandbox.
 
-Full history still consumes private disk and the existing 2 GiB/100,000-physical-file
-admission budget. Each source side retains its 256 MiB/100,000-entry policy. Python
-payload buffers are fixed-size; Git may reconstruct a whole admitted blob, and
-concurrent readers multiply native memory. Manifest/diff memory remains bounded by
-its existing policies. See the [measurements and reproduction commands](performance/captured-source.md).
+Full history still consumes private disk, up to the physical object-store limits
+in [Immutable PR inputs](#immutable-pr-inputs). Python payload buffers are
+fixed-size; Git may reconstruct a whole admitted blob, and concurrent readers
+multiply native memory. Manifest/diff memory remains bounded by its existing
+policies. See the [measurements and reproduction commands](performance/captured-source.md).
 
 Local `AnalyzedRevision.head_sha` remains real HEAD provenance. `source_id` binds
 the accepted before/after contents, modes, eligible population and exclusions;
