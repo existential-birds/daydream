@@ -1190,9 +1190,8 @@ async def test_sharded_admission_rejects_each_bad_sibling_atomically_and_retains
         assert not set(rejected[scope_id]).intersection(item["target_id"] for item in outcome["target_decisions"])
         assert [event["metadata"]["admitted"] for event in events] == [True, False]
         last = events[-1]["metadata"]
-        # The full captured patch crosses the run-wide scale threshold, so
-        # both stages keep the scaled 144-call allowance without tool starts.
-        assert events[0]["metadata"]["remaining_tool_calls"] == last["remaining_tool_calls"] == 144
+        # Without tool starts, both stages keep the whole allowance.
+        assert events[0]["metadata"]["remaining_tool_calls"] == last["remaining_tool_calls"]
         assert last["observed_tool_starts"] == 0
         assert bool(last.get("schema_rejection")) is malformed
         if not fault.startswith("mixed-"):
