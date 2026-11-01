@@ -765,7 +765,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
         post_diagram_comment_to_pr,
         render_diagram_comment_body,
     )
-    from daydream.runner import _emit_diagram_findings
+    from daydream.runner import _write_findings_for_parsed
 
     diagrams: dict[str, Any] = deep_state.diagrams or {}
     payload: dict[str, Any] = diagrams.get("payload") or {}
@@ -790,11 +790,12 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
                 "PR is captured at run start",
             )
             return Stop(1)
+        # No findings or mermaid here: Phase B re-renders mermaid from the grounded specs.
         return Stop(
-            _emit_diagram_findings(
-                ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth,
-                run_info=run_info.markdown, renderers=resolve_review_renderers(ctx.registry),
-                captured_pr=pr,
+            _write_findings_for_parsed(
+                ctx.work.repo, ctx.config, [], kind="diagram", diagrams=payload,
+                auth=ctx.github_execution.auth, run_info=run_info.markdown,
+                renderers=resolve_review_renderers(ctx.registry), captured_pr=pr,
             )
         )
 

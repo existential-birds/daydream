@@ -391,10 +391,6 @@ def run_record_schema() -> Record:
     return deepcopy(_RUN_SCHEMA)
 
 
-def observation_record_schema() -> Record:
-    return deepcopy(_OBSERVATION_SCHEMA)
-
-
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _DIRECTORIES = ("runs", "observations", "snapshots")

@@ -18,7 +18,7 @@ from daydream.artifact_visibility import (
     resolve_private_workspace_owner,
 )
 from daydream.backends import AgentEvent, Backend, ClaudeBackend, TextEvent
-from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
+from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, PHASE_DEFAULT_MODELS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.detection import StackAssignment
 from daydream.exploration_runner import _sample_paths, repo_scan
@@ -2943,21 +2943,24 @@ def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) 
     )
     assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [("python", ["services/api/inner/main.py"])]
 
+_CLAUDE_MODELS = PHASE_DEFAULT_MODELS["claude"]
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(("file_config", "expected_tiers"),
     [
         # Plan authoring runs on the top model tier at max reasoning; recon does not.
         pytest.param(None,
-            {"plan-writer": ("claude-opus-5", "max"), "vet": ("claude-opus-5", "xhigh"),
-                "audit": ("claude-sonnet-5", "high"), "recon": ("claude-sonnet-5", "low"),
+            {"plan-writer": (_CLAUDE_MODELS["plan_write"], "max"), "vet": (_CLAUDE_MODELS["vet"], "xhigh"),
+                "audit": (_CLAUDE_MODELS["audit"], "high"), "recon": (_CLAUDE_MODELS["recon"], "low"),
             }, id="built-in-defaults",
         ),
         # A ``[tool.daydream.phases.plan_write]`` table still wins over those
         # defaults, and unrelated phases keep their own.
         pytest.param(
-            DaydreamFileConfig(phases={"plan_write": {"model": "claude-sonnet-5", "reasoning_effort": "medium"}}),
-            {"plan-writer": ("claude-sonnet-5", "medium"), "recon": ("claude-sonnet-5", "low"),
-                "vet": ("claude-opus-5", "xhigh"),
+            DaydreamFileConfig(phases={"plan_write": {"model": "file-plan-model", "reasoning_effort": "medium"}}),
+            {"plan-writer": ("file-plan-model", "medium"), "recon": (_CLAUDE_MODELS["recon"], "low"),
+                "vet": (_CLAUDE_MODELS["vet"], "xhigh"),
             }, id="phase-table-override",
         ),
     ],

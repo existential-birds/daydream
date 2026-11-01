@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from daydream import json_utils
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import PHASE_DEFAULT_MODELS, REVIEW_OUTPUT_FILE
 from daydream.deep import fix_steps, orchestrator as deep_orchestrator
 from daydream.deep.records import item_uid
 from daydream.extensions.api import Stop
@@ -526,13 +526,13 @@ async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
     # (a) Per-stack fan-out created with a Sonnet model id (N>1 multi-stack).
     per_stack_models = models_where(lambda pl: "you are reviewing the" in pl and "stack" in pl)
     assert len(per_stack_models) >= 2, f"expected an N>1 fan-out, got {per_stack_models!r}"
-    assert set(per_stack_models) == {"claude-sonnet-5"}
+    assert set(per_stack_models) == {PHASE_DEFAULT_MODELS["claude"]["per_stack_review"]}
 
     # (b) Merge backend created with an Opus model id.
-    assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-5"]
+    assert models_where(lambda pl: "cross-stack merge agent" in pl) == [PHASE_DEFAULT_MODELS["claude"]["merge"]]
 
     # (c) Opus arbiter created exactly once when a high-severity record exists.
-    assert models_where(lambda pl: "you are the arbiter" in pl) == ["claude-opus-5"]
+    assert models_where(lambda pl: "you are the arbiter" in pl) == [PHASE_DEFAULT_MODELS["claude"]["arbiter"]]
 
     # The rendered merge artifact on disk reflects the arbitrated finding.
     report = (multi_stack_target / ".review-output.md").read_text()
@@ -586,7 +586,7 @@ async def test_no_arbiter_when_all_findings_low_and_uncontested(
     per_stack_models = {
         c["model"] for c in calls if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
     }
-    assert per_stack_models == {"claude-sonnet-5"}
+    assert per_stack_models == {PHASE_DEFAULT_MODELS["claude"]["per_stack_review"]}
 
 async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

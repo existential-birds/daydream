@@ -109,6 +109,8 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
     silence(monkeypatch)
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '0')
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
+    # Sibling stages read the same diff.patch, so concurrency could spend the fault outside python.
+    monkeypatch.setenv('DAYDREAM_PI_FANOUT_CONCURRENCY', '1')
     terminal_message = 'Provider finish_reason: error'
     stages: list[dict[str, Any]] = []
     fail_next_canonical_open = False

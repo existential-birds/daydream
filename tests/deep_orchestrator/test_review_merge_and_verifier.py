@@ -14,7 +14,7 @@ from daydream import json_utils, pr_review, review_reporting, runner as _runner
 from daydream.backends import ResultEvent
 from daydream.backends.codex import CodexLifecycleError
 from daydream.backends.lifecycle import BackendLifecycleFailure
-from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config import PHASE_DEFAULT_MODELS, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
@@ -999,8 +999,8 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(multi_stack_target
     # (phases.py) -- the established intent-phase prompt discriminator.
     intent_models = [c["model"] for c in calls if "understand the intent of these changes" in c["prompt"].lower()]
     assert intent_models, "intent phase did not execute through runner.run"
-    assert set(intent_models) == {"claude-sonnet-5"}, (
-        f"intent phase should run on claude-sonnet-5 (mid tier), got {sorted(intent_models)!r}"
+    assert set(intent_models) == {PHASE_DEFAULT_MODELS["claude"]["intent"]}, (
+        f"intent phase should run on its default model, got {sorted(intent_models)!r}"
     )
 
 async def test_verifier_runs_after_merge_before_fix(

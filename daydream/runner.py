@@ -827,23 +827,6 @@ async def _dispatch(
     )
 
 
-def _emit_diagram_findings(
-    target_dir: Path, config: RunConfig, payload: dict[str, Any], *,
-    run_info: str,
-    renderers: "pr_review.ReviewRenderers",
-    captured_pr: "pr_review.PRInfo",
-    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-) -> int:
-    """Write a diagram artifact with no findings or mermaid render.
-
-    Phase B re-renders mermaid from the grounded specs in ``payload``.
-    """
-    return _write_findings_for_parsed(
-        target_dir, config, [], kind="diagram", diagrams=payload, auth=auth,
-        run_info=run_info, renderers=renderers, captured_pr=captured_pr,
-    )
-
-
 def _write_findings_for_parsed(
     target_dir: Path,
     config: RunConfig,
