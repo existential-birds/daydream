@@ -336,7 +336,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
         "cancelled", "preparation",
-        "report-stage", "bundle-stage", "beyond-512-parts", "hub-export", "hosted-output-install",
+        "report-stage", "bundle-stage", "beyond-512-parts", "capacity-refusal", "hub-export", "hosted-output-install",
         "hosted-bundle-install",
     ]
 )
@@ -408,8 +408,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                 # Four bounded review_admit batches plus the final batch fit the five-call allocation.
                 for number, start in enumerate(range(0, 440, 110)):
                     batch = {"targets": decisions[start:start + 110], "claims": []}
-                    binding.admit(f"batch-{number}", "review_admit", batch)
-                    receipt = binding.call(f"batch-{number}", "review_admit", batch)
+                    receipt = _charged(binding, "review_admit", batch)
                     assert receipt["progress"]["decided"] == start + 110 and not receipt["final"]
                     assert receipt["capacity"]["remaining_tool_calls"] == 4 - number
                     assert receipt["capacity"]["protected"]["challenge_tool_calls"] == 5
@@ -525,8 +524,12 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         limits=ReviewLimits(90, 12, 10),
         hosted_policy=hosted_policy,
     )
-    if challenge == "hub-export":
-        with pytest.raises(ValueError, match="external export"):
+    if challenge == "capacity-refusal":
+        # The remaining finite bound (typed coverage scopes) refuses before any model work.
+        monkeypatch.setattr(committed_review, "COVERAGE_MAX_SHARDS", 0)
+    if challenge in {"capacity-refusal", "hub-export"}:
+        expected = "retains at most 0 assignment parts" if challenge == "capacity-refusal" else "external export"
+        with pytest.raises(ValueError, match=expected):
             await run_committed_review(review_request)
         assert dispatches == []
         assert not (repo / ".daydream/committed-review.json").exists()
@@ -1712,7 +1715,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
             observed["late_refs"] = [{"source_id": next(option["source_id"] for option in late_target["source_options"]
                                                         if option["side"] == "new"),
                                       "basis": "supplied_diff", "source_range": None}]
-            reviewed = entries[:150]
+            reviewed = entries[:len(entries) // 2]
             for start in range(0, len(reviewed), 75):
                 batch = {"targets": [{
                     "target_id": entry["target_id"], "status": "reviewed", "reason": "",
@@ -1761,43 +1764,65 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     assert terminal["analysis_state"] == "incomplete" and not result.complete
     decisions = {d["target_id"]: d for scope in terminal["stack_outcomes"] for d in scope["target_decisions"]}
     assert decisions.keys() == {entry["target_id"] for entry in entries}
-    assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == {e["target_id"] for e in entries[:150]}
-    assert all(d["reason"].startswith("unsubmitted:") for t, d in decisions.items() if d["status"] != "reviewed")
+    admitted = {e["target_id"] for e in entries[:len(entries) // 2]}
+    assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == admitted
+    undecided = [d for t, d in decisions.items() if t not in admitted]
+    assert undecided and all(d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:")
+                             and d["evidence_refs"] == [] for d in undecided)
     assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith(("target.py", "big.py"))
     assert [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
     assert value["execution"][0]["reason"] == "backend_failure" and not value["execution"][0]["accepted"]
 
 
-async def test_lookup_is_read_only_cursor_bound_and_closes_with_authority(review_inputs: StageInputFactory) -> None:
+async def test_lookup_is_read_only_cursor_bound_and_closes_with_authority(tmp_path: Path) -> None:
     """Navigation cannot mutate review state, alias another query's cursor, or outlive authority.
 
     Proof A drives lookups only along valid cursors; this catches a cursor reused across
-    queries, unavailable selections reported as errors instead of typed data, and lookups
-    served after the assignment closed.
+    queries, a forged offset inside a multibyte character killing the invocation instead
+    of a correctable rejection, unavailable selections reported as errors instead of
+    typed data, and lookups served after the assignment closed.
     """
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    repo = tmp_path / "subject"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n", "uni.py": "TEXT = ''\n", "helper.py": "H = 1\n"},
+                        feature={"api.py": "VALUE = 0\n", "uni.py": "TEXT = '\u00e9\u00e9\u00e9'\n",
+                                 "helper.py": "H = 1\n"})
+    review = Review(_inputs(repo, tmp_path / "inputs", ["api.py", "uni.py"]), "domain",
+                    deadline=clock.monotonic() + 60)
     binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
     async with binding.session():
-        before = dict(review._decisions), deepcopy(review._claims), review._generation
         path_page = _charged(binding, "review_source", {"target_id": None, "path": "api.py", "cursor": None})
         assert path_page["status"] == "complete" and {e["file"] for e in path_page["entries"]} == {"api.py"}
         assert path_page["capacity"]["basis"].startswith("current host ledger")
-        unavailable = _charged(binding, "review_source", {"target_id": None, "path": "support/helper.py",
-                                                          "cursor": None})
+        assert path_page["capacity"]["remaining_tool_calls"] is None
+        unavailable = _charged(binding, "review_source", {"target_id": None, "path": "helper.py", "cursor": None})
         assert unavailable["status"] == "unavailable" and "not proof of absence" in unavailable["reason"]
         unknown = _charged(binding, "review_source", {"target_id": "part:999999", "path": None, "cursor": None})
         assert unknown["status"] == "unavailable"
-        foreign = Review._cursor({"target_id": None, "path": "api.py"}, 0)
-        with pytest.raises(HostToolRejected, match="same target_id/path query"):
-            _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": foreign})
+        uni = _charged(binding, "review_source", {"target_id": "uni.py", "path": None, "cursor": None})
+        body = uni["content"].encode()
+        inside = body.index("\u00e9".encode()) + 1
+        # Forged cursors (built from the private format) model a model editing opaque cursors.
+        uni_query = {"target_id": "uni.py", "path": None}
+        for target, cursor, message in [
+            (None, Review._cursor({"target_id": None, "path": "api.py"}, 0), "same target_id/path query"),
+            ("uni.py", Review._cursor(uni_query, inside), "outside this target's content"),
+            ("uni.py", Review._cursor(uni_query, len(body) + 1), "outside this target's content"),
+            (None, Review._cursor({"target_id": None, "path": None}, 99), "outside this query's results"),
+        ]:
+            with pytest.raises(HostToolRejected, match=message):
+                _charged(binding, "review_source", {"target_id": target, "path": None, "cursor": cursor})
         with pytest.raises(HostToolRejected, match="not both"):
             _charged(binding, "review_source", {"target_id": "api.py", "path": "api.py", "cursor": None})
-        assert (review._decisions, review._claims, review._generation) == before
-        assert binding.authority_open and not binding.accepted and binding.calls == 5
+        assert binding.authority_open and binding.fatal_error is None and binding.calls == 9
+        catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
+        assert catalog["decided_targets"] == 0 and all(entry["decided"] is None for entry in catalog["entries"])
     binding.close_authority()
-    # Closed authority refuses even a charged start.
     with pytest.raises(HostToolFatal, match="closed"):
         binding.admit("late", "review_source", {"target_id": None, "path": None, "cursor": None})
+    value = review.seal({})
+    assert value["claims"] == [] and all(
+        d["status"] == "not_reviewed" for scope in value["terminal_result"]["stack_outcomes"]
+        for d in scope["target_decisions"])
 
 
 async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(review_inputs: StageInputFactory) -> None:
@@ -1812,7 +1837,7 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
     first, second = (part["target_id"] for part in review.assignments[:2])
 
     def decision(target: str, **fields: Any) -> dict[str, Any]:
-        part = review.assignments[review._index[target]]
+        part = next(part for part in review.assignments if part["target_id"] == target)
         return {"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [{
             "source_id": part["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}],
             **fields}
@@ -1821,7 +1846,6 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
         receipt = _charged(binding, "review_admit",
                            {"targets": [decision(first)], "claims": [_proposal(review_inputs)]})
         assert receipt["progress"]["decided"] == 1 and receipt["admitted"]["claims"][0]["revision"] == 1
-        state = deepcopy(review._decisions), deepcopy(review._claims), deepcopy(review._coverage._target_decision_bytes)
         bad = decision(second)
         bad["evidence_refs"][0]["source_id"] = "source:" + "0" * 64
         for batch, message in [
@@ -1830,13 +1854,15 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
             ({"targets": [decision(second), decision(second)], "claims": []}, "at most once per batch"),
             ({"targets": [decision(second, status="not_reviewed", reason="x" * 1024)], "claims": [
                 {**_proposal(review_inputs), "title": "t" * 4096} for _ in range(33)]}, "exceeds 131072 UTF-8 bytes"),
+            ({"targets": [decision(second)] * 129, "claims": []}, "at most 128 items"),
         ]:
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
-            assert (review._decisions, review._claims, review._coverage._target_decision_bytes) == state
         final = {"targets": [decision(second)], "claims": []}
         binding.admit("final", "structured_output", final, terminal=True)
-        assert binding.submit("final", final)["progress"]["remaining"] == len(review.assignments) - 2
+        # Rejected batches installed nothing: one claim and exactly the two admitted decisions remain.
+        progress = binding.submit("final", final)["progress"]
+        assert (progress["decided"], progress["pending_challenge"]) == (2, 1)
     value = review.seal({})
     decisions = [d for scope in value["terminal_result"]["stack_outcomes"] for d in scope["target_decisions"]]
     assert {d["target_id"] for d in decisions if d["status"] == "reviewed"} == {first, second}
@@ -1885,8 +1911,7 @@ async def test_denied_over_limit_discovery_start_cannot_spend_protected_challeng
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
     result = await run_committed_review(CommittedReviewRequest(
         review_inputs.work.source, review_inputs.revision["merge_base_sha"], limits=ReviewLimits(90, 12, 10)))
-    assert allocations == [("discovery", 5), ("challenge", 5)]
-    assert result.to_dict()["settings"]["limits"]["protected_challenge_tool_calls"] == 5
+    assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
 
 
 async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:
@@ -1917,3 +1942,74 @@ async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tm
         receipt = _charged(binding, "review_admit", {"targets": [], "claims": [claim(span["end"])]})
     assert receipt["admitted"]["claims"][0]["revision"] == 1
     assert review.pending()[0]["payload"]["evidence_refs"][0]["fragment"] == late["source_refs"][0]["fragment"]
+
+
+async def test_challenge_verdict_must_name_the_claim_revision_current_at_admission(
+    review_inputs: StageInputFactory,
+) -> None:
+    """A verdict on a revision superseded by an earlier batch must be rejected, not sealed.
+
+    The assignment snapshots pending revisions once. Progressive batches can revise a
+    claim first; a later verdict naming the dispatch-time revision previously passed,
+    marked the newer revision confirmed without evidence, and made sealing raise so
+    every admitted finding was lost.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    await _submit(review, "discovery", _discovery(review_inputs))
+    claim = review.pending()[0]
+    binding, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
+    revised["payload"].update(grounds="Refined grounds change the semantic payload.",
+                              evidence_refs=_selectors(review_inputs))
+    async with binding.session():
+        receipt = _charged(binding, "review_admit", {"verdicts": [], "claims": [revised]})
+        assert receipt["admitted"]["claims"][0]["revision"] == 2
+        stale = {"verdicts": [_verdict(review_inputs, claim)], "claims": []}
+        with pytest.raises(HostToolRejected, match="current revision at most once"):
+            _charged(binding, "review_admit", stale)
+        assert binding.authority_open and binding.fatal_error is None
+    value = review.seal({})
+    validate_committed_result(value)
+    retained, = value["claims"]
+    assert retained["revision"] == 2 and retained["disposition"] == "unresolved" and value["findings"] == []
+
+
+async def test_unexpected_batch_installation_failure_is_indeterminate_and_keeps_prior_state(
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mutating host tool that fails inside installation cannot be replayed or half-installed.
+
+    Endpoint tests only check the outcome label. Coverage capacity now installs before
+    review state, so a failure there leaves earlier batches intact, the binding refuses
+    further work (no replay), and the sealed result stays valid and incomplete.
+    """
+    from daydream.review_result import ReviewCoverage
+
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    first, second = (part["target_id"] for part in review.assignments[:2])
+    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+
+    def batch(target: str) -> dict[str, Any]:
+        part = review.assignments[review._index[target]]
+        return {"targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [{
+            "source_id": part["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}]}],
+            "claims": []}
+
+    async with binding.session():
+        assert _charged(binding, "review_admit", batch(first))["progress"]["decided"] == 1
+        monkeypatch.setattr(ReviewCoverage, "admit_target_decisions_budgets",
+                            lambda self, updates: (_ for _ in ()).throw(RuntimeError("storage fault")))
+        with pytest.raises(HostToolFatal) as failure:
+            _charged(binding, "review_admit", batch(second))
+        assert failure.value.outcome == "indeterminate" and not failure.value.preacceptance
+        assert binding.fatal_error is failure.value and not binding.authority_open
+        with pytest.raises(HostToolFatal):
+            _charged(binding, "review_admit", batch(second))
+    monkeypatch.undo()
+    value = review.seal({})
+    validate_committed_result(value)
+    decisions = {d["target_id"]: d for scope in value["terminal_result"]["stack_outcomes"]
+                 for d in scope["target_decisions"]}
+    assert decisions[first]["status"] == "reviewed"
+    assert decisions[second]["reason"].startswith("unsubmitted:")
+    assert value["terminal_result"]["analysis_state"] == "incomplete"

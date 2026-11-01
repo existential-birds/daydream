@@ -54,7 +54,7 @@ from tests.harness.trajectory import make_recorder
 from tests.test_committed_review import immutable_input_for
 
 # Declared loopback model limits must fit committed review's native-capacity preflight.
-FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 65536
+FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 16384
 HOSTED_TOOLS = {"read", "grep", "find", "ls", "review_source", "review_admit", "structured_output"}
 _SCHEMA = {"type": "object", "additionalProperties": False,
     "properties": {"verdict": {"type": "string"}, "findings": {"type": "array"}}, "required": ["verdict", "findings"]}
@@ -381,7 +381,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert assignment["profile"]["hosted_policy"]["model"] == expected_model
             assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
             marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
-            assert marker in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
+            # Stable strategy policy survives compaction in system instructions, not the user turn.
+            assert marker in json.dumps([m["content"] for m in request["messages"]
+                                         if m["role"] in {"system", "developer"}])
+            assert marker not in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
             assert assignment["profile"]["strategies"][kind] == marker
         revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
         call_kind = f"{kind}-{revision}" if hosted else kind
@@ -1072,7 +1075,7 @@ _LOOKUP = {"type": "object", "additionalProperties": False, "properties": {"targ
            "required": ["target_id"]}
 
 
-@pytest.mark.parametrize("case", ["served", "correctable", "fatal", "capacity"])
+@pytest.mark.parametrize("case", ["served", "correctable", "oversized", "fatal", "capacity"])
 async def test_native_host_lookup_is_registered_charged_and_served_with_exact_bytes(
     tmp_path: Path, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -1093,8 +1096,11 @@ async def test_native_host_lookup_is_registered_charged_and_served_with_exact_by
             raise HostToolFatal("Frozen review input is unavailable", code="input_unavailable")
         return {"target_id": arguments["target_id"], "content": frozen}
     accepted = {"verdict": "complete", "findings": []}
-    native_provider.turns = [[("lookup-1", "review_source", {"target_id": "t1"})],
-                             [("lookup-2", "review_source", {"target_id": "t1"})] if case == "correctable" else
+    # An oversized host-tool argument is a correctable payload fault, not an aborted invocation.
+    first = {"target_id": "t" * 140_000} if case == "oversized" else {"target_id": "t1"}
+    native_provider.turns = [[("lookup-1", "review_source", first)],
+                             [("lookup-2", "review_source", {"target_id": "t1"})]
+                             if case in {"correctable", "oversized"} else
                              [("submit", "structured_output", accepted)],
                              [("submit", "structured_output", accepted)]]
     binding = HostToolBinding(deadline=time.monotonic() + 30, accept=lambda value: value,
@@ -1138,14 +1144,17 @@ async def test_native_host_lookup_is_registered_charged_and_served_with_exact_by
     assert failure is None and binding.accepted_result == accepted
     history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[-1]["messages"]
                if message["role"] == "tool"}
-    served_id = "lookup-2" if case == "correctable" else "lookup-1"
+    served_id = "lookup-2" if case in {"correctable", "oversized"} else "lookup-1"
     # The exact frozen bytes arrive unescaped, after the bounded metadata JSON block.
     assert frozen in history[served_id] and '"capacity"' in history[served_id]
     assert '"content"' not in history[served_id]
     if case == "correctable":
         assert "Unknown target_id" in history["lookup-1"] and binding.rejections == 1
+    if case == "oversized":
+        assert "exceeds" in history["lookup-1"] and "split it into smaller batches" in history["lookup-1"]
+        assert binding.fatal_error is None
     assert served == [{"target_id": "t1"}] * (2 if case == "correctable" else 1)
-    assert binding.calls == (3 if case == "correctable" else 2)
+    assert binding.calls == (3 if case in {"correctable", "oversized"} else 2)
 
 
 @pytest.mark.parametrize("cancel_at", ["active-read", "late-start"])
@@ -1818,5 +1827,10 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
     assert [item["metadata"]["phase"] for item in compaction] == ["start", "end"]
     assert compaction[1]["metadata"]["usage"]["input"] == 10 and compaction[1]["metadata"]["summary_bytes"] > 0
     assert "earlier lookups and one admitted batch" not in json.dumps(compaction)
+    # Every provider request is billed once, including the summarization call that is not a generation.
+    billed = [native_provider.usage.get(index, {"prompt_tokens": 10, "completion_tokens": 5})
+              for index in range(len(native_provider.requests))]
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == sum(usage["prompt_tokens"] for usage in billed)
+    assert trajectory["final_metrics"]["total_completion_tokens"] == sum(u["completion_tokens"] for u in billed)
     rejection = next(m for r in native_provider.requests for m in r["messages"] if m.get("tool_call_id") == "call-55")
     assert "no available regular blob" in rejection["content"]

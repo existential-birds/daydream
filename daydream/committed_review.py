@@ -32,6 +32,7 @@ from daydream.backends.pi import PiBackend
 from daydream.committed_review_model import (
     ADMIT_TOOL,
     CATALOG_PAGE_MAX_BYTES,
+    COMMITTED_BATCH_OUTPUT_BYTES,
     COMMITTED_SUBMISSION_MAX_BYTES,
     COVERAGE_MAX_SHARDS,
     COVERAGE_SHARD_TARGETS,
@@ -286,8 +287,9 @@ class Review:
             raise HostToolFatal("Frozen captured review input changed after preparation", code="input_unavailable")
         # Exact captured change bytes: a continuation's host notice is not captured content.
         body = diff.removeprefix(_CONTINUATION_NOTICE).encode() if part["kind"] == "continuation" else diff.encode()
-        if offset > len(body):
-            raise HostToolRejected("review_source.cursor: offset is outside this target's content")
+        if offset > len(body) or offset < len(body) and body[offset] & 0xC0 == 0x80:
+            raise HostToolRejected("review_source.cursor: offset is outside this target's content; "
+                                   "pass a next_cursor returned for this target")
         end = min(len(body), offset + LOOKUP_PAGE_MAX_BYTES)
         while end < len(body) and body[end] & 0xC0 == 0x80:
             end -= 1
@@ -372,7 +374,9 @@ class Review:
                 else:
                     for verdict in canonical["verdicts"]:
                         uid = verdict["uid"]
-                        if uid in judged or uid in verdicts or revisions.get(uid) != verdict["revision"]:
+                        # A claim revised by an earlier batch needs a verdict on its current revision.
+                        if (uid in judged or uid in verdicts or revisions.get(uid) != verdict["revision"]
+                                or claims[uid]["revision"] != verdict["revision"]):
                             raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
                         verdicts.add(uid)
                         if not verdict["grounds"].strip():
@@ -412,9 +416,9 @@ class Review:
                         raise HostToolFatal("Review authority has closed", code="authority_closed")
                     if self._generation != generation or kind == "discovery" and self._discovered:
                         raise HostToolFatal("Assignment revisions changed before installation", code="authority_closed")
+                    # Coverage capacity installs in one step before any domain state changes.
+                    self._coverage.admit_target_decisions_budgets(updates)
                     self._decisions, self._claims = decisions, claims
-                    for scope_id, scope_decisions in updates.items():
-                        self._coverage.admit_target_decisions(scope_id, scope_decisions)
                     self._generation += 1
                     judged.update(verdicts)
                     self._discovered |= final and kind == "discovery"
@@ -433,7 +437,7 @@ class Review:
             allowed_tools=self._allowed_tools, reserves=reserves,
             host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
                         ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
-            native_requirement=NativeCapacityRequirement(LARGEST_TOOL_RESULT_BYTES, COMMITTED_SUBMISSION_MAX_BYTES),
+            native_requirement=NativeCapacityRequirement(LARGEST_TOOL_RESULT_BYTES, COMMITTED_BATCH_OUTPUT_BYTES),
         )
         binding.configure_schema(schema)
         self._binding = binding
@@ -520,8 +524,9 @@ next_cursor; path lists one changed path's targets; target_id returns that targe
 and exact captured change bytes, paged by next_cursor. Re-request any target after context compaction instead
 of relying on summaries. Its page sha256 values identify exact frozen bytes. A claim line must fall inside a
 cited source_range or, for exact continuation fragments, inside that fragment's summarized line span.
-Submission: review_admit admits one bounded batch now and returns a receipt; admitted decisions and claims are
-retained even if later work fails, and each target is decided at most once. structured_output submits the
+Submission: keep each batch under 32 KiB of arguments. review_admit admits one bounded batch now
+and returns a receipt; admitted decisions and claims are retained even if later work fails, and each
+target is decided at most once. structured_output submits the
 final batch and ends this assignment; call it alone in a completed generation. Every batch is atomic: a
 rejected batch changes nothing and may be corrected within the original cumulative allowance. Undecided
 targets remain typed unfinished work. Empty findings are legitimate.
@@ -909,14 +914,15 @@ async def _dispatch(
     # which native compaction never summarizes away; the user turn only starts work.
     instructions = (
         _INSTRUCTIONS
+        + "\nReview strategy:\n"
+        + profile["strategies"][kind]
         + "\nCatalog status and decided markers below are a dispatch-time snapshot."
         + "\nCommitted review assignment:\n"
         + canonical_json(assignment)
         + "\nEnd committed review assignment.\n"
     )
     prompt = (f"Begin the committed review {kind} assignment described in the system instructions. "
-              "Navigate with review_source, admit batches with review_admit and finish with structured_output.\n"
-              "Review strategy:\n" + profile["strategies"][kind] + "\n")
+              "Navigate with review_source, admit batches with review_admit and finish with structured_output.\n")
     reason: str | None = None
     settled = False
     budget.deadline = deadline

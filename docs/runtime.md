@@ -84,9 +84,10 @@ conversation, followed by host-scheduled fresh challenge, navigates it:
 - `review_admit` admits one bounded batch (at most 128 targets or verdicts plus
   claims, within the shared 128 KiB argument bound) through the same synchronous
   closure-first path as `structured_output`, which submits the final batch and ends
-  the assignment. Each batch is validated and installed atomically, decides each
-  target at most once and answers with a compact receipt. Admitted decisions and
-  claims survive later omission, unavailability, retries or failure.
+  the assignment. Each batch is validated and installed atomically (coverage
+  capacity before review state), decides each target at most once and answers
+  with a compact receipt. Admitted decisions and claims survive later omission,
+  unavailability, retries or failure.
 - Both tools report current host capacity after charging the call (remaining tool
   starts, remaining time to the original deadline and protected reserves),
   labelled as distinct from dispatch-time snapshots.
@@ -107,10 +108,11 @@ charged to discovery's own ledger but cannot reduce the protected challenge rese
 unspent discovery calls carry into challenge. Before provider work the native
 extension reports the selected model's `contextWindow`/`maxTokens` and compaction
 settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
-instructions and prompt, the largest single tool result (64 KiB), the 128 KiB
-submission bound, the compaction reserve and kept context to fit, estimated at
-three bytes per token, and otherwise fails with an actionable `native_capacity`
-error. Daydream never writes native model registries or settings.
+instructions and prompt, the largest single tool result (64 KiB), one recommended
+32 KiB batch, the compaction reserve and kept context to fit, estimated at three
+bytes per token, and requires output for that batch; otherwise it fails with an
+actionable `native_capacity` error. Larger batches up to the 128 KiB argument bound
+remain admissible; an oversized `review_admit` is a correctable rejection. Daydream never writes native model registries or settings.
 
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
 and derived coverage. Every publication claim receives counterevidence-seeking

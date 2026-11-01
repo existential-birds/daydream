@@ -20,7 +20,7 @@ def main() -> None:
         (config / "models.json").write_text(json.dumps({"providers": {"openrouter": {
             "baseUrl": f"{url}/v1", "api": "openai-completions", "apiKey": "synthetic-loopback-only",
             "models": [{"id": "output-model", "reasoning": False, "input": ["text"],
-                        "contextWindow": 131072, "maxTokens": 65536}]}}}))
+                        "contextWindow": 131072, "maxTokens": 16384}]}}}))
         (config / "settings.json").write_text(json.dumps({"retry": {"enabled": False, "maxRetries": 0}}))
         rc = asyncio.run(entrypoint.main({
             "PATH": os.environ["PATH"], "LANG": "C.UTF-8", "DAYDREAM_REVIEW_BACKEND": "pi",
