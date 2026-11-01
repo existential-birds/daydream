@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own files and is required only above 5 changed files or 500 added lines;
   full-repository sweeps run on request.
 
+- Give large reviews 50% more time and tool calls at each diff-size tier (×3, ×6
+  and ×9 above 1,000, 5,000 and 10,000 lines); automatic sharding thresholds are
+  unchanged.
+
 - Default the Claude backend to `claude-haiku-5-5`, `claude-sonnet-5-5` and
   `claude-opus-5-5` across the existing phase tiers. Claude effort stays ambient,
   and explicit model pins are unchanged.

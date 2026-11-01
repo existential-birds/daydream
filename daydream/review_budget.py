@@ -150,11 +150,11 @@ def review_scale_for_diff(diff: str) -> int:
     lines = diff.count("\n") + bool(diff and not diff.endswith("\n"))
     size = len(diff.encode("utf-8"))
     if lines > 10_000 or size > 512 * 1024:
-        return 6
+        return 9
     if lines > 5_000 or size > 256 * 1024:
-        return 4
+        return 6
     if lines > 1_000 or size > 64 * 1024:
-        return 2
+        return 3
     return 1
 
 

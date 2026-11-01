@@ -158,7 +158,7 @@ async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
     git(repo, 'add', old_test)
     git(repo, 'commit', '--amend', '-m', 'feature with removed test')
     diff = git(repo, 'diff', 'main..HEAD')
-    assert review_scale_for_diff(diff) == 2
+    assert review_scale_for_diff(diff) < 4
     assert 'deleted file mode 100644\n' in diff and 'new file mode 100644\n' in diff
     changed = git(repo, 'diff', '--name-only', 'main..HEAD').splitlines()
     review = ReviewRun(repo, tmp_path, monkeypatch)
