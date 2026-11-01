@@ -860,9 +860,6 @@ async def test_runner_default_non_loop_generation_omits_optional_scope_attribute
 class _ExactAllocationBackend(_NoCancelBackend):
     """Two complete generations, late per-generation usage, terminal total."""
 
-    def __init__(self) -> None:
-        self.ended = False
-
     async def execute(self, _cwd: Path, prompt: str, *_args: Any, **_kwargs: Any) -> AsyncGenerator[AgentEvent]:
         yield RequestEvent(prompt)
         yield _gen_start("gen-a")
@@ -877,7 +874,6 @@ class _ExactAllocationBackend(_NoCancelBackend):
         yield CostEvent(0.003, 150, 30, measurement_source="terminal")
         yield TextEvent("final answer")
         yield ResultEvent(None, None)
-        self.ended = True
 
 async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],

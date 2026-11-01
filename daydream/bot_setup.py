@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from daydream import config, git_ops
 from daydream.agent import console
 from daydream.bot_manifest import register_app_via_manifest
@@ -347,10 +349,6 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
     Every command dispatch must bind the live API-resolved HEAD_SHA; post runs
     must follow workflow_run completion. Comments cannot satisfy these checks.
     """
-    try:
-        import yaml  # lazy: pyyaml is a dev-only dependency (see pyproject.toml)
-    except ImportError:
-        return False
     try:
         wf = yaml.safe_load(content)
     except yaml.YAMLError:

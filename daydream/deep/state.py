@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
-    from daydream.test_execution import TestRecipe
 
 
 _T = TypeVar("_T")
