@@ -1314,7 +1314,7 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         if stage['stage'] == 'integration':
             starts = 0 if fault == 'syntax' else integration_starts
             assert stage['observed_tool_starts'] == 0
-            assert stage['remaining_tool_calls'] == 96
+            assert stage['remaining_tool_calls'] == 144
             assert stage['assigned_target_ids'] == ['integration:structure']
             assert stage['progress'] == [] and stage['folded_alternatives'] is True
             assert stage['assigned_files'][0].startswith('00_guide_')
@@ -1324,7 +1324,7 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         else:
             starts = stage['remaining_tool_calls'] + 1 if cutoff else 0
             assert stage['observed_tool_starts'] == integration_starts
-            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance'] == 96 - integration_starts
+            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance'] == 144 - integration_starts
             assert stage['completed_target_ids'] == ['integration:structure']
             assert stage['progress'] == stage['assigned_target_ids'] == []
             assert [(item['candidate_id'], item['disposition']) for item in stage['closed_decisions']] == (
@@ -1365,9 +1365,9 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         assert coverage['diagnostics']['scopes']['structure'] in coverage['diagnostics']['phases']['alternatives']
     else:
         assert phases['alternatives']['status'] == ('incomplete' if cutoff else 'complete')
-        assert len(observations) == (97 if cutoff else integration_starts)
-        assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else integration_starts)
-        assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 96 - integration_starts)
+        assert len(observations) == (145 if cutoff else integration_starts)
+        assert metadata[-1]['observed_tool_starts'] == (145 if cutoff else integration_starts)
+        assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 144 - integration_starts)
         assert [item['admitted'] for item in metadata] == [True, not cutoff]
         stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
         assert [stage['stage'] for stage in stages] == ['integration', 'triage']
@@ -1412,11 +1412,11 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
         elif stage['scope_id'] == 'python':
             assert stage['observed_tool_starts'] >= 6
             if len(stage['progress']) == 4:
-                assert stage['observed_tool_starts'] == 6 and stage['remaining_tool_calls'] == 90
+                assert stage['observed_tool_starts'] == 6 and stage['remaining_tool_calls'] == 138
             assert stage['candidates'] == []
             assert all('poisoned' not in note for note in stage['notes'])
         elif stage['scope_id'] == 'structure':
-            assert stage['observed_tool_starts'] == 0 and stage['remaining_tool_calls'] == 96
+            assert stage['observed_tool_starts'] == 0 and stage['remaining_tool_calls'] == 144
             assert stage['candidates'] == []
 
     backend.stage_response = response
@@ -1427,11 +1427,11 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     assert deadlines == pytest.approx([deadlines[0]] * len(deadlines), abs=0.01, rel=0)
     metadata = stage_ends(review, 'python')[0]['metadata']
     assert metadata['investigation_base_budget_s'] == 20
-    assert metadata['investigation_scaled_budget_s'] == 40
-    assert metadata['investigation_effective_allowance_s'] == pytest.approx(40, rel=0, abs=0.01)
+    assert metadata['investigation_scaled_budget_s'] == 60
+    assert metadata['investigation_effective_allowance_s'] == pytest.approx(60, rel=0, abs=0.01)
     assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 6
-    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 90
+    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 138
     python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)
     assert len(python_stages) > 2
