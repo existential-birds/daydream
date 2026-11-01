@@ -297,7 +297,8 @@ class Review:
         described = {key: deepcopy(part[key]) for key in (
             "target_id", "file", "kind", "part_index", "part_count", "hunk_index", "source_options",
             "old_start", "old_count", "new_start", "new_count", "fragment_offset", "fragment_bytes",
-            "old_line", "new_line", "segment_index", "segment_count") if key in part}
+            "old_line", "new_line", "segment_index", "segment_count", "fragment_line_offset",
+            "source_summary") if key in part}
         return {
             "status": "complete" if offset == 0 and end == len(body) else "partial", "query": query,
             "target": {**described, "decided": self._entry(part)["decided"]},

@@ -74,9 +74,10 @@ conversation, followed by host-scheduled fresh challenge, navigates it:
   omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
 - `review_source` is a charged, read-only host lookup over frozen canonical inputs:
   with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
-  path's targets; `target_id` returns the target's `source_options`, ranges and its
-  exact captured change bytes in 32 KiB pages with per-page and whole-content
-  SHA-256. Cursors are opaque and bound to their query. Unknown targets and
+  path's targets; `target_id` returns the target's `source_options`, ranges (for a
+  continuation fragment, its `source_summary` claim-line span and split-line
+  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages with
+  per-page and whole-content SHA-256. Cursors are opaque and bound to their query. Unknown targets and
   unchanged paths return `status: unavailable` data, not errors. It never reads
   live checkout bytes, follows links or mutates review state, and is refused once
   assignment authority closes. A single line over 50 KB, unreachable through stock

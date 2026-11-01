@@ -1918,18 +1918,22 @@ async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tm
     """A new 20k-line file is one hunk of null-range fragments; its claims previously had no valid line.
 
     The fragment identity stays canonical; only its summarized complete-line span admits
-    the claim line, and a line outside that span is still rejected.
+    the claim line, and a line outside that span is still rejected. The model learns that
+    span from review_source, so the lookup itself must return it for a late fragment.
     """
     repo = tmp_path / "subject"
     seed_feature_branch(repo, base={"keep.py": "KEEP = 1\n"},
                         feature={"keep.py": "KEEP = 1\n", "big.py": "".join(f"ITEM_{n} = {n}\n" for n in range(20000))})
     inputs = _inputs(repo, tmp_path / "inputs", ["big.py"])
     review = Review(inputs, "domain", deadline=clock.monotonic() + 60)
-    late = review.assignments[-1]
-    assert late["kind"] == "continuation" and late["source_refs"][0]["source_range"] is None
+    planned = review.assignments[-1]
+    assert planned["kind"] == "continuation" and planned["source_refs"][0]["source_range"] is None
+    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    lookup = binding.host_tools["review_source"].callback
+    late = lookup({"target_id": planned["target_id"], "path": None, "cursor": None})["target"]
+    assert late["fragment_line_offset"] == planned["fragment_line_offset"]
     span = late["source_summary"][0]["new"]
     selector = [{"source_id": late["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}]
-    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
 
     def claim(line: int) -> dict[str, Any]:
         return {"uid": "", "revision": 0, "source_uids": [], "title": "Late item", "payload": {
@@ -1941,7 +1945,7 @@ async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tm
             _charged(binding, "review_admit", {"targets": [], "claims": [claim(span["start"] - 1)]})
         receipt = _charged(binding, "review_admit", {"targets": [], "claims": [claim(span["end"])]})
     assert receipt["admitted"]["claims"][0]["revision"] == 1
-    assert review.pending()[0]["payload"]["evidence_refs"][0]["fragment"] == late["source_refs"][0]["fragment"]
+    assert review.pending()[0]["payload"]["evidence_refs"][0]["fragment"] == planned["source_refs"][0]["fragment"]
 
 
 async def test_challenge_verdict_must_name_the_claim_revision_current_at_admission(
