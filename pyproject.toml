@@ -8,9 +8,9 @@ dependencies = [
     "anyio>=4.15.1",
     "rich>=15.0.0",
     "pyfiglet>=1.0",
-    "pydantic>=2.14.1",
+    "pydantic>=2.14.2",
     "httpx>=0.28",
-    "PyJWT>=2.0",
+    "PyJWT>=2.15.0",
     "jsonschema>=4.0",
     # Held at 0.25.2: 0.26.0 has a native Point-getter use-after-free that
     # SIGSEGVs the process (py-tree-sitter#472). daydream/_tree_sitter_safety.py
@@ -23,9 +23,9 @@ dependencies = [
     "tree-sitter-rust==0.24.2",
     "pyyaml>=6.0",
     "traceloop-sdk==0.62.4",
-    "opentelemetry-api>=1.45.1,<2",
+    "opentelemetry-api>=1.45.2,<2",
     "opentelemetry-sdk>=1.42,<2",
-    "opentelemetry-exporter-otlp-proto-http>=1.42,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2,<2",
     "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
     "opentelemetry-semantic-conventions-ai==0.5.1",
     "requests>=2.32,<3",
@@ -33,19 +33,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-benchmark = ["harbor>=0.24.0,<0.25"]
-hub = ["huggingface_hub>=2.2.0"]
+benchmark = ["harbor>=0.25.0,<0.26"]
+hub = ["huggingface_hub>=2.4.0"]
 
 [dependency-groups]
 dev = [
-    "grpcio>=1.84.1",
+    "grpcio>=1.85.0",
     "grpc-stubs>=1.53",
     "opentelemetry-proto>=1.42,<2",
-    "mypy>=2.4.0",
-    "pytest>=9.1.1",
-    "pytest-asyncio>=1.4.0",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
     "pytest-xdist>=3.6",
-    "ruff>=0.17.2",
+    "ruff>=0.17.3",
     "types-jsonschema>=4.26.0.20261006",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260906",
     "types-requests>=2.33.0.20261006",
