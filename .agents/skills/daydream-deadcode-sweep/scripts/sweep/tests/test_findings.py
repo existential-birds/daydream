@@ -64,6 +64,16 @@ class FindingsTests(unittest.TestCase):
         (self.root / "ready.py").write_text("changed again\n")
         self.assertTrue(self.plan()[0]["needs_revalidation"])
 
+    def test_consumed_outcome_cannot_settle_a_later_change(self):
+        self.write_rows("findings-1.jsonl", [self.finding("ready.py", -50)])
+        selected = self.plan()[0]
+        (self.apply / "outcomes-1.jsonl").write_text(json.dumps({"id": selected["id"], "status": "rejected", "reason": "kept"}) + "\n")
+        self.module.finish(self.root, self.scan, self.apply, self.memory)
+        self.assertEqual(self.plan(), [])
+        (self.root / "ready.py").write_text("changed\n")
+        self.module.finish(self.root, self.scan, self.apply, self.memory)
+        self.assertTrue(self.plan()[0]["needs_revalidation"])
+
     def test_overlapping_candidates_defer_and_path_escape_rejected(self):
         first = self.finding("shared.py", -80)
         second = dict(first, symbol="other", est_net_lines=-60)

@@ -109,7 +109,9 @@ def plan(root, scan, apply, memory, max_chunks, findings_max):
 
 def finish(root, scan, apply, memory):
     candidates = load(root, scan, memory)
-    for outcome in rows(sorted(apply.glob("outcomes-*.jsonl"))):
+    # An outcome settles one decision; replaying it could hide a later change.
+    outcomes = sorted(apply.glob("outcomes-*.jsonl"))
+    for outcome in rows(outcomes):
         key = outcome.get("id")
         if key not in candidates or outcome.get("status") not in ("applied", "rejected", "deferred"):
             continue
@@ -117,6 +119,9 @@ def finish(root, scan, apply, memory):
         row.update(status=outcome["status"], outcome_reason=outcome.get("reason", ""),
                    fingerprints=fingerprints(root, row), needs_revalidation=False)
     save(memory, candidates)
+    consumed = len(list(apply.glob("consumed-*.jsonl")))
+    for index, path in enumerate(outcomes, consumed):
+        path.rename(path.with_name(f"consumed-{index}-{path.name}"))
 
 
 def main():

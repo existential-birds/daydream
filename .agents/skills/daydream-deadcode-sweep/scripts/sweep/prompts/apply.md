@@ -30,8 +30,9 @@ estimated savings and confidence are leads, not proof.
 
 ## Apply a complete simplification
 
-Net-negative means total insertions < total deletions across the committed PR.
-Count all replacement code, callers, tests, and support files. No minimum savings;
+In full-repository mode, net-negative means total insertions < total deletions across
+the committed PR. In PR mode the PR may grow, but each simplification must remove more
+than it adds. Count all replacement code, callers, tests, and support files. No minimum savings;
 prefer the largest well-supported changes that can be finished and verified.
 File moves, whitespace removal, compressed statements, fixture minification, and
 documentation cuts that conceal code growth do not qualify as simplification.
@@ -81,11 +82,11 @@ finding. CI remains required for merge.
 
 If a simplification breaks behavior or checks, correct it or undo only that change,
 including restoring code/tests when needed. Net reduction is measured across the
-remaining PR; never delete more live behavior to repair a deletion. Update the
+remaining sweep changes; never delete more live behavior to repair a deletion. Update the
 summary/outcome records if a previously applied change is reversed.
 
-When the user has requested commits or shipping, commit completed work with a conventional message describing the actual simplification
-and additions/deletions/net. Otherwise leave local changes uncommitted for review.
+When the user has requested commits or shipping, commit completed work with a
+conventional message describing the actual simplification and additions/deletions/net. Otherwise leave local changes uncommitted for review.
 Include relevant verification evidence. Do not claim completion because a timeout
 checkpoint was auto-committed.
 
@@ -105,7 +106,7 @@ As each change is verified, append a plain semantic bullet to
 __APPLY_DIR__/summary-bullets.md. Name the area and what disappeared or became
 simpler; no heading, filler, commit-subject echo, or claims about untouched files.
 One honest bullet is better than padding. Keep bullets concise; remove any made
-inaccurate by repair. prbody.py supplies the deterministic diff breakdown.
+inaccurate by repair. Take the file breakdown from `git diff --numstat <base>...HEAD`.
 
 Write __APPLY_DIR__/report-__CHUNK_LABEL__.md with applied/deferred/rejected IDs,
 preserved contracts, verification actually run, and actual additions/deletions/net
