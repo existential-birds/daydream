@@ -338,6 +338,10 @@ class ReviewInvestigation:
                  [self.assignments.get(target, {})])
         return (ref for part in parts for ref in part.get('source_refs', []))
 
+    def _assigns_only_fragments(self, stage: str, targets: list[str]) -> bool:
+        references = [reference for target in targets for reference in self._expected_source_refs(stage, target)]
+        return bool(references) and all(reference['fragment'] is not None for reference in references)
+
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
         stage_inputs: Callable[[dict[str, Any]], Awaitable[PreparedSanctionedInputs]],
@@ -360,8 +364,10 @@ class ReviewInvestigation:
             state.update(attempt=attempt, max_attempts=2, schema_rejection=rejection.to_dict() if rejection else None)
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             native_admission = isinstance(backend, PiBackend)
+            fragments_only = self._assigns_only_fragments(stage, targets)
             submission_schema = (review_stage_submission_schema(review_stage_admission_schema(schema))
-                                 if native_admission else review_stage_generation_schema(schema, self.revision))
+                                 if native_admission else review_stage_generation_schema(
+                                     schema, self.revision, fragments_only=fragments_only))
             if native_admission:
                 state['source_attribution'] = 'host_selectors'
                 state['source_options'] = self._reference_options(stage, targets, selectors=True)

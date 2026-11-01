@@ -76,15 +76,20 @@ def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str,
     return schema
 
 
-def review_stage_generation_schema(canonical_schema: dict[str, Any], revision: dict[str, Any]) -> dict[str, Any]:
+def review_stage_generation_schema(canonical_schema: dict[str, Any], revision: dict[str, Any], *,
+                                   fragments_only: bool = False) -> dict[str, Any]:
     """Constrain model-authored references to identities the model can reproduce.
 
     Supporting references need a whole-blob digest only the host can compute, so
-    only host-selector stages may retain them. Admission stays independent.
+    only host-selector stages may retain them. A stage assigned only fragments
+    cannot cite line ranges. Admission stays independent.
     """
     schema = copy.deepcopy(canonical_schema)
     reference = schema['properties']['targets']['items']['properties']['evidence_refs']['items']['properties']
     reference['role']['enum'] = ['assigned']
+    if fragments_only:
+        reference['source_range'] = {'type': 'null'}
+        reference['fragment'] = reference['fragment']['anyOf'][0]
     revisions = [revision.get('source_id', revision.get('head_sha')), revision.get('merge_base_sha')]
     if all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) for value in revisions):
         reference['revision']['enum'] = list(dict.fromkeys(revisions))

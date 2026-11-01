@@ -370,7 +370,8 @@ regular Git blobs. Exact continuation fragments retain their null source ranges.
 Supporting attribution cannot satisfy assigned coverage. Correspondence is never
 proof of a read, understanding or an executed check. Backends that author canonical
 references generate assigned references only, because supporting references need a
-host-computed blob digest; an assigned range may join the hunks of one part.
+host-computed blob digest; an assigned range may join the hunks of one part, and a
+stage assigned only fragments must cite those fragments.
 
 The existing `structured_output` terminal tool calls one invocation-local host
 callback. Only a sole terminal call in a completed native generation may enter
