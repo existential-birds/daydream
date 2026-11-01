@@ -93,6 +93,9 @@ conversation, followed by host-scheduled fresh challenge, navigates it:
   starts, remaining time to the original deadline and protected reserves),
   labelled as distinct from dispatch-time snapshots.
 
+A reviewed target decision or challenge verdict with empty `evidence_refs` records
+the target's assigned sources or the judged claim's evidence; models cite source IDs
+only to locate claims or add evidence.
 At sealing every planned target has exactly one typed decision: an admitted model
 decision or a host-authored `not_reviewed` decision whose reason starts with
 `unsubmitted:`. Coverage shards targets in inventory order into scopes of 12

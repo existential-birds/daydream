@@ -359,9 +359,14 @@ class Review:
                                 f"targets.target_id {identifier}: already admitted; earlier decisions are final")
                         if target["status"] == "not_reviewed" and not target["reason"].strip():
                             raise HostToolRejected("targets.reason: explain unfinished work")
-                        target["evidence_refs"] = self._refs(
-                            sources, target["evidence_refs"], target=identifier,
-                            required=target["status"] == "reviewed")
+                        reviewed = target["status"] == "reviewed"
+                        # A reviewed target without refs records its own assigned sources.
+                        selectors = target["evidence_refs"] or ([
+                            {"source_id": option["source_id"], "basis": "supplied_diff", "source_range": None}
+                            for option in self.assignments[self._index[identifier]]["source_options"]]
+                            if reviewed else [])
+                        target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
+                                                             required=reviewed)
                         decisions[identifier] = target
                         affected.add(self._shard_of[identifier])
                     if any(c["uid"] for c in value["claims"]):
@@ -377,7 +382,10 @@ class Review:
                         if not verdict["grounds"].strip():
                             raise HostToolRejected(
                                 "verdicts.grounds: retain substantive counterevidence or uncertainty")
-                        verdict["evidence_refs"] = self._refs(sources, verdict["evidence_refs"])
+                        # A verdict without refs records the judged claim's own evidence.
+                        verdict["evidence_refs"] = (self._refs(sources, verdict["evidence_refs"])
+                                                    if verdict["evidence_refs"]
+                                                    else deepcopy(claims[uid]["payload"]["evidence_refs"]))
                         claims[uid]["challenge_evidence"].append(verdict)
                         claims[uid]["disposition"] = verdict["verdict"]
                     if any(c["uid"] and c["uid"] not in revisions for c in value["claims"]):
@@ -506,7 +514,8 @@ class Review:
 
 
 _INSTRUCTIONS = """Review the original captured source using ordinary read/search tools plus review_source.
-The complete planned targets are obligations, not read receipts. Evidence refs select a target's source_options
+The complete planned targets are obligations, not read receipts. A reviewed target or a verdict may pass
+evidence_refs=[] to record the target's sources or the judged claim's evidence. Evidence refs select source_options
 with {source_id,basis,source_range}; source_range=null retains the exact identity. Supporting selectors use
 {path,side,source_range,basis} against captured Git blobs and cannot replace assigned evidence.
 Report only concrete claims with trigger, consequence, location and supporting grounds. A new claim uses

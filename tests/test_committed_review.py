@@ -1639,7 +1639,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
                 claim, = assignment["claims"]
                 verdict = {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
                            "grounds": "The late captured bytes contain the marker after counterevidence search.",
-                           "evidence_refs": observed["late_refs"]}
+                           "evidence_refs": []}
                 value = {"verdicts": [verdict], "claims": []}
                 binding.admit("challenge-final", "structured_output", value, terminal=True)
                 accepted = binding.submit("challenge-final", value)
@@ -1671,9 +1671,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
             reviewed = entries[:len(entries) // 2]
             for start in range(0, len(reviewed), 75):
                 batch = {"targets": [{
-                    "target_id": entry["target_id"], "status": "reviewed", "reason": "",
-                    "evidence_refs": [{"source_id": targets[entry["target_id"]]["source_options"][0]["source_id"],
-                                       "basis": "supplied_diff", "source_range": None}],
+                    "target_id": entry["target_id"], "status": "reviewed", "reason": "", "evidence_refs": [],
                 } for entry in reviewed[start:start + 75]], "claims": [] if start else [{
                     "uid": "", "revision": 0, "source_uids": [], "title": "Late marker value",
                     "payload": {"claim": "The late marker changes captured behavior.", "trigger": "Import the file.",
