@@ -155,14 +155,6 @@ def decode_retry_recovery_allowance(raw: Any) -> float | None:
     return value
 
 
-def undeclared_retry_allowance_message(source: str, raw: Any) -> str:
-    """Name a refused value and source without presenting it as an effective bound."""
-    return (
-        f"{source}={raw!r} is not a finite non-negative number; "
-        "the retry-recovery allowance stays undeclared"
-    )
-
-
 def coerce_declared_retry_allowance(raw: Any, source: str) -> float | None:
     """Decode one *declared* allowance from any source, or ``None`` if not usable.
 
@@ -177,7 +169,11 @@ def coerce_declared_retry_allowance(raw: Any, source: str) -> float | None:
         return None
     value = decode_retry_recovery_allowance(raw)
     if value is None:
-        _logger.warning("%s", undeclared_retry_allowance_message(source, raw))
+        _logger.warning(
+            "%s=%r is not a finite non-negative number; the retry-recovery allowance stays undeclared",
+            source,
+            raw,
+        )
     return value
 
 

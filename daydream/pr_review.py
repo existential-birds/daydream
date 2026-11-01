@@ -29,8 +29,6 @@ from daydream.reviews.diagrams import (
 )
 from daydream.reviews.identity import (
     DAYDREAM_FOOTER as DAYDREAM_FOOTER,
-    DAYDREAM_REPO_URL as DAYDREAM_REPO_URL,
-    DIAGRAM_MARKER_RE as DIAGRAM_MARKER_RE,
     FINDING_MARKER_RE as FINDING_MARKER_RE,
     diagram_marker as diagram_marker,
     finding_marker as finding_marker,
