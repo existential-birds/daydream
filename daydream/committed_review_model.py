@@ -27,7 +27,6 @@ _ID = {"type": "string", "maxLength": 512}
 _NULLABLE_SELECTOR = {"type": ["string", "null"], "maxLength": 4096}
 # Each native submission admits a bounded batch; the population itself is unbounded
 # here and limited only by capture, retained-coverage and transport bounds below.
-COMMITTED_BATCH_MAX_ITEMS = 128
 # One maximal claim must stay submittable; reuse the existing host argument bound.
 COMMITTED_SUBMISSION_MAX_BYTES = _MAX_ARGUMENT_BYTES
 # Instructions ask for batches this size; preflight requires one to fit native output.
@@ -79,7 +78,7 @@ def assignment_schema(kind: str, *, selectors: bool, retained: bool = False) -> 
     )
     fields["evidence_refs"] = SOURCE_SELECTORS_SCHEMA if selectors else SOURCE_REFS_SCHEMA
     return strict_object({
-        "targets" if kind == "discovery" else "verdicts": _array(strict_object(fields), COMMITTED_BATCH_MAX_ITEMS),
+        "targets" if kind == "discovery" else "verdicts": _array(strict_object(fields)),
         "claims": _array(_RECORD_SCHEMA if retained else _claim_schema(selectors=selectors)),
     })
 
@@ -188,8 +187,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("duplicate assignment identity")
     shards = coverage_shards(assignments)
     if (
-        len(shards) > COVERAGE_MAX_SHARDS
-        or [(scope["scope_id"], scope["stack"], scope["shard"], scope["files"])
+        [(scope["scope_id"], scope["stack"], scope["shard"], scope["files"])
             for scope in terminal["planned_scopes"]]
         != [(shard_scope_id(index), "committed", index, sorted({part["file"] for part in shard}))
             for index, shard in enumerate(shards)]

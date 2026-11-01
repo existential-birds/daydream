@@ -441,6 +441,7 @@ class HostToolBinding:
             value = positive(settings.get(key)) if isinstance(settings, dict) else None
             evidence[key] = value if value is not None else default
             evidence[f"{key}_source"] = "native_settings" if value is not None else "pi_1.4.0_default"
+        self.native_limits = evidence
         requirement = self.native_requirement
         if requirement is not None:
             def tokens(size: int) -> int:
@@ -449,7 +450,6 @@ class HostToolBinding:
                        + evidence["reserve_tokens"] + evidence["keep_recent_tokens"])
             output = tokens(requirement.submission_bytes)
             evidence.update(required_context_tokens=context, required_output_tokens=output)
-            self.native_limits = evidence
             if evidence["context_window"] is None or evidence["max_tokens"] is None:
                 raise self._fatal("Native model context/output limits are unavailable before provider work; "
                                   "declare contextWindow and maxTokens in the native model registry",
@@ -461,7 +461,6 @@ class HostToolBinding:
                     f"context) and maxTokens >= {output}; observed contextWindow "
                     f"{evidence['context_window']} and maxTokens {evidence['max_tokens']}. Select a model "
                     "with larger native limits or adjust native compaction settings.", code="native_capacity")
-        self.native_limits = evidence
         return evidence
 
     @asynccontextmanager

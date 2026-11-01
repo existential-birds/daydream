@@ -208,9 +208,9 @@ class PiHostToolServer:
                         raise self._fatal("Native terminal or host tool schemas differ from the bound schemas",
                                           code="native_readiness")
                     # Refuse a model that cannot hold this invocation before any provider work.
-                    evidence = self.binding.check_native_limits(value.get("native_limits"))
+                    self.binding.check_native_limits(value.get("native_limits"))
                     self.ready = True
-                    await self._reply(writer, 200, {"ready": True, "native_limits": evidence})
+                    await self._reply(writer, 200, {"ready": True})
                     return
                 if path == "/admit":
                     oversized = (f"The entire structured_output argument object exceeds {policy._MAX_ARGUMENT_BYTES} "

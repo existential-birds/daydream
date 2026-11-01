@@ -34,28 +34,30 @@ export default function (pi: ExtensionAPI) {
     }
     return result as any;
   };
-  const snippets: Record<string, string> = {
-    review_source: "Look up the frozen captured review's targets and exact change bytes",
-    review_admit: "Admit a bounded batch of review results without ending the assignment",
-  };
-  const descriptions: Record<string, string> = {
-    review_source: "Read-only host lookup of the frozen captured review: omit target_id/path for the paged target "
-      + "catalog; target_id returns exact captured change bytes with its source_options; path lists that changed "
-      + "path's targets. Pass the returned cursor for the next page. Every call is charged and reports current host "
-      + "capacity.",
-    review_admit: "Admit a bounded batch of decisions/claims (or verdicts) into the host review without ending the "
-      + "assignment. Use structured_output for the final batch. Every call is charged and returns a compact receipt "
-      + "and current capacity.",
+  const texts: Record<string, { snippet: string, description: string }> = {
+    review_source: {
+      snippet: "Look up the frozen captured review's targets and exact change bytes",
+      description: "Read-only host lookup of the frozen captured review: omit target_id/path for the paged target "
+        + "catalog; target_id returns exact captured change bytes with its source_options; path lists that changed "
+        + "path's targets. Pass the returned cursor for the next page. Every call is charged and reports current "
+        + "host capacity.",
+    },
+    review_admit: {
+      snippet: "Admit a bounded batch of review results without ending the assignment",
+      description: "Admit a bounded batch of decisions/claims (or verdicts) into the host review without ending the "
+        + "assignment. Use structured_output for the final batch. Every call is charged and returns a compact "
+        + "receipt and current capacity.",
+    },
   };
   // A charged nonterminal host tool. Its start was admitted by tool_execution_start;
   // the host serves it once for that identity and remains the domain authority.
   const registerHostTool = (name: string, schema: any) => {
-    const description = descriptions[name];
-    if (!description || !snippets[name] || !schema || typeof schema !== "object" || Array.isArray(schema)) {
+    const text = texts[name];
+    if (!text || !schema || typeof schema !== "object" || Array.isArray(schema)) {
       throw new Error("Unsupported host tool");
     }
     pi.registerTool({
-      name, label: name, description, promptSnippet: snippets[name],
+      name, label: name, description: text.description, promptSnippet: text.snippet,
       parameters: schema,
       async execute(toolCallId, params, _signal, _onUpdate, ctx) {
         try {
@@ -116,7 +118,6 @@ export default function (pi: ExtensionAPI) {
   // input barrier before parsing so missing/invalid authority stays fail closed.
   pi.on("input", async (_event, ctx) => {
     let failureCode: string | undefined;
-    let failureError: string | undefined;
     try {
       if (failed || !packet) throw new Error("Host binding unavailable");
       const tool = pi.getAllTools().find(candidate => candidate.name === packet.tool_name);
@@ -157,17 +158,15 @@ export default function (pi: ExtensionAPI) {
       if (status.ready !== true) {
         if ((status.outcome === "fatal" || status.outcome === "indeterminate") && typeof status.code === "string") {
           failureCode = status.code;
-          failureError = typeof status.error === "string" ? status.error.slice(0, 1024) : undefined;
         }
         throw new Error("Host binding unavailable");
       }
       ready = true;
-      process.stdout.write(JSON.stringify({ type: "daydream_host_tools_ready", native_limits: status.native_limits }) + "\n");
+      process.stdout.write(JSON.stringify({ type: "daydream_host_tools_ready" }) + "\n");
       return { action: "continue" as const };
     } catch { /* A thrown input handler is caught by Pi; explicitly handle below. */ }
     failed = true;
-    process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed", code: failureCode,
-      ...(failureError ? { error: failureError } : {}) }) + "\n");
+    process.stdout.write(JSON.stringify({ type: "daydream_host_tools_failed", code: failureCode }) + "\n");
     return { action: "handled" as const };
   });
   // This public event is awaited before tool execution. It carries the complete
@@ -244,7 +243,7 @@ export default function (pi: ExtensionAPI) {
     if (typeof pi.getAllTools !== "function" || typeof pi.getActiveTools !== "function"
         || packet?.tool_name !== "structured_output") throw new Error("Unsupported native terminal capability");
     const hostTools = packet.host_tools ?? {};
-    if (!hostTools || typeof hostTools !== "object" || Array.isArray(hostTools)) throw new Error("Invalid host tools");
+    if (typeof hostTools !== "object" || Array.isArray(hostTools)) throw new Error("Invalid host tools");
     for (const [name, schema] of Object.entries(hostTools)) registerHostTool(name, schema);
   } catch { failed = true; }
 }

@@ -99,8 +99,7 @@ decision or a host-authored `not_reviewed` decision whose reason starts with
 (`committed:NNNNN`, `shard` = index); a full shard of worst-case decisions (four
 references, 1024-character reasons) fits the 256 KiB scope bound. Review reserves
 that typed unfinished attribution before model work and refuses, before any model
-work, a plan whose minimal attribution exceeds the 8 MiB run allocation or 10,000
-scopes. Claim lines must fall inside a cited `source_range` or, for exact
+work, a plan whose minimal attribution exceeds the 8 MiB run allocation. Claim lines must fall inside a cited `source_range` or, for exact
 continuation fragments, inside that fragment's summarized complete-line span; the
 canonical fragment identity is unchanged.
 
@@ -482,10 +481,9 @@ install at the same synchronous boundary as acceptance, and their unexpected
 failures are indeterminate. Their results carry exact frozen bytes as a separate
 text block and report current capacity. `/ready` exact-matches the declared
 schemas and runs the binding's native-capacity preflight before provider work.
-Native compaction events are retained as bounded `pi_compaction` diagnostics (summary
-size and digest, never its text) and their summary usage is added to the
-invocation totals; compaction is neither completion nor settlement evidence. The
-read-only Pi search guidance names only the tools it can run.
+Compaction evidence is described in [observability](observability.md); compaction
+is neither completion nor settlement evidence. The read-only Pi search guidance
+names only the tools it can run.
 
 Close authority before shutdown and join/isolate callback transports and evidence
 writers before freezing. Native reads use the existing process cleanup. Acceptance,

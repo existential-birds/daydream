@@ -121,16 +121,10 @@ class Review:
         self._allowed_tools = allowed_tools
         self.assignments = deepcopy([part.assignment for part in inputs.parts])
         self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
-        self._files = {part["file"] for part in self.assignments}
         self._by_file: dict[str, list[int]] = {}
         for index, part in enumerate(self.assignments):
             self._by_file.setdefault(part["file"], []).append(index)
         self._shards = coverage_shards(self.assignments)
-        if len(self._shards) > COVERAGE_MAX_SHARDS:
-            raise ValueError(
-                f"committed review retains at most {COVERAGE_MAX_SHARDS * COVERAGE_SHARD_TARGETS} assignment parts "
-                f"in typed coverage; the captured plan has {len(self.assignments)}. Narrow the review base or "
-                "exclusions and rerun")
         self._shard_of = {part["target_id"]: index for index, shard in enumerate(self._shards) for part in shard}
         # Fragment-only evidence has no source range; its summarized complete-line span
         # admits claim lines without changing the canonical fragment identity.
@@ -180,7 +174,7 @@ class Review:
     def _claim(self, sources: _SubmissionSources, claim: dict[str, Any], claims: dict[str, dict[str, Any]]) -> None:
         claim["payload"]["evidence_refs"] = self._refs(sources, claim["payload"]["evidence_refs"])
         payload = claim["payload"]
-        if payload["file"] not in self._files:
+        if payload["file"] not in self._by_file:
             raise HostToolRejected("claim.payload.file: choose a file from the complete changed-target inventory")
 
         def covers(ref: dict[str, Any]) -> bool:
@@ -251,7 +245,7 @@ class Review:
         """The first bounded, explicitly partial page of the complete population."""
         query: dict[str, Any] = {"target_id": None, "path": None}
         return {**self._entries_page(query, list(range(len(self.assignments))), 0),
-                "total_files": len(self._files)}
+                "total_files": len(self._by_file)}
 
     def lookup(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Serve exact frozen bytes or a catalog page; never mutates review state."""

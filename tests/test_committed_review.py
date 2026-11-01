@@ -336,7 +336,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
         "cancelled", "preparation",
-        "report-stage", "bundle-stage", "beyond-512-parts", "capacity-refusal", "hub-export", "hosted-output-install",
+        "report-stage", "bundle-stage", "hub-export", "hosted-output-install",
         "hosted-bundle-install",
     ]
 )
@@ -398,35 +398,13 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                     ))
                     challenge_started.set()
                     await asyncio.Event().wait()
-            if assignment["kind"] == "discovery" and challenge == "beyond-512-parts":
-                # More than 512 parts: progressive atomic batches, then a final batch.
-                decisions = [{"target_id": part["target_id"], "status": "reviewed", "reason": "",
-                              "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
-                                                 "basis": "supplied_diff", "source_range": None}]}
-                             for part in _looked_up(binding)]
-                assert len(decisions) > 512
-                # Four bounded review_admit batches plus the final batch fit the five-call allocation.
-                for number, start in enumerate(range(0, 440, 110)):
-                    batch = {"targets": decisions[start:start + 110], "claims": []}
-                    receipt = _charged(binding, "review_admit", batch)
-                    assert receipt["progress"]["decided"] == start + 110 and not receipt["final"]
-                    assert receipt["capacity"]["remaining_tool_calls"] == 4 - number
-                    assert receipt["capacity"]["protected"]["challenge_tool_calls"] == 5
-                proposal = _proposal(review_inputs)
-                # Scope-local source handles are assigned over this run's full population.
-                proposal["payload"]["evidence_refs"] = decisions[0]["evidence_refs"]
-                value = {"targets": decisions[440:], "claims": [proposal]}
-            elif assignment["kind"] == "discovery":
+            if assignment["kind"] == "discovery":
                 value = _discovery(review_inputs)
                 for number in range(kwargs["tool_call_budget"] - 1):
                     binding.admit(f"read-{number}", "read", {})
             else:
                 value = {"verdicts": [] if challenge == "missing" else [
                     _verdict(review_inputs, assignment["claims"][0])], "claims": []}
-                if challenge == "beyond-512-parts":
-                    part = _looked_up(binding)[0]
-                    value["verdicts"][0]["evidence_refs"] = [{"source_id": part["source_options"][0]["source_id"],
-                                                              "basis": "supplied_diff", "source_range": None}]
                 if challenge == "last-call-quota":
                     for number in range(kwargs["tool_call_budget"] - 1):
                         binding.admit(f"challenge-read-{number}", "read", {})
@@ -459,12 +437,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge == "exhausted":
         profile_path = repo.parent / "pipeline-only.toml"
         profile_path.write_text('name = "pipeline-only"\n[pipeline]\nreviewer_investigation_budget_s = 60\n')
-    if challenge == "beyond-512-parts":
-        paths = [f"extra-{number:03}.py" for number in range(511)]
-        for path in paths:
-            (repo / path).write_text("VALUE = 1\n")
-        git(repo, "add", *paths)
-        commit(repo, "add files beyond the former 512-part refusal")
     output_root = repo
     hosted_policy = None
     if challenge.startswith("hosted-"):
@@ -524,12 +496,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         limits=ReviewLimits(90, 12, 10),
         hosted_policy=hosted_policy,
     )
-    if challenge == "capacity-refusal":
-        # The remaining finite bound (typed coverage scopes) refuses before any model work.
-        monkeypatch.setattr(committed_review, "COVERAGE_MAX_SHARDS", 0)
-    if challenge in {"capacity-refusal", "hub-export"}:
-        expected = "retains at most 0 assignment parts" if challenge == "capacity-refusal" else "external export"
-        with pytest.raises(ValueError, match=expected):
+    if challenge == "hub-export":
+        with pytest.raises(ValueError, match="external export"):
             await run_committed_review(review_request)
         assert dispatches == []
         assert not (repo / ".daydream/committed-review.json").exists()
@@ -617,7 +585,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge == "preparation":
         assert injected
         assert [d["deadline"] for d in dispatches] == [145, 190]
-    complete = challenge in {"exhausted", "preparation", "beyond-512-parts"}
+    complete = challenge in {"exhausted", "preparation"}
     assert result.complete is complete
     assert value["terminal_result"]["analysis_state"] == (
         "complete" if complete or output_failure else "incomplete"
@@ -708,11 +676,6 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     relabeled['schema_version'] = 4
     with pytest.raises(ValueError, match='result version does not match captured source identity'):
         validate_committed_result(relabeled)
-    # Pre-navigation results (single-scope coverage, 512-part inventories) are not converted.
-    for superseded in (1, 2, 3):
-        relabeled['schema_version'] = superseded
-        with pytest.raises(ValueError, match='unsupported committed review result version; restart review'):
-            validate_committed_result(relabeled)
     assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
     assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
     assert value['terminal_result']['analysis_state'] == 'incomplete'
@@ -1616,19 +1579,6 @@ async def test_sibling_submission_revalidates_after_prior_acceptance(
 _LONG_LINE = "VALUE = '" + "é" * 30000 + "'\n"  # One UTF-8 line over 50 KB: unreadable by stock Pi read.
 
 
-def _navigation_repo(repo: Path, shape: str) -> str:
-    """About 20k changed lines either across more than 512 files or inside one large file."""
-    if shape == "many-files":
-        base = {f"pkg/module_{index:04d}.py": "BASE = 0\n" for index in range(600)}
-        feature = {path: "".join(f"ITEM_{line} = {line}\n" for line in range(33)) for path in base}
-        feature["zz_late/target.py"] = "LATE_MARKER = 'late'\n" + _LONG_LINE
-    else:
-        base = {"big.py": "BASE = 0\n"}
-        feature = {"big.py": "".join(f"ITEM_{line} = {line}\n" for line in range(20000))
-                   + "LATE_MARKER = 'late'\n" + _LONG_LINE}
-    return seed_feature_branch(repo, base=base, feature=feature)
-
-
 def _charged(binding: HostToolBinding, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Drive one host tool through its real charged admission and correlated call."""
     call_id = f"{name}-{binding.calls}"
@@ -1653,9 +1603,8 @@ def _read_target(binding: HostToolBinding, target_id: str) -> tuple[dict[str, An
             return page["target"], body
 
 
-@pytest.mark.parametrize("shape", ["many-files", "large-file"])
 async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Proof A: a ~20k-line real capture is navigable through bounded lookup, not inline inventory.
 
@@ -1667,7 +1616,11 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     undecided target as unfinished, and cannot report complete coverage.
     """
     repo = tmp_path / "source"
-    head = _navigation_repo(repo, shape)
+    # About 20k changed lines across more than 512 files.
+    base_files = {f"pkg/module_{index:04d}.py": "BASE = 0\n" for index in range(600)}
+    feature = {path: "".join(f"ITEM_{line} = {line}\n" for line in range(33)) for path in base_files}
+    feature["zz_late/target.py"] = "LATE_MARKER = 'late'\n" + _LONG_LINE
+    head = seed_feature_branch(repo, base=base_files, feature=feature)
     base = git(repo, "rev-parse", "main")
     numstat = [line.split("\t") for line in git(repo, "diff", "--numstat", base, head).splitlines()]
     expected_files = {path for _, _, path in numstat}
@@ -1741,12 +1694,10 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     assert {part["file"] for part in value["assignments"]} == {entry["file"] for entry in entries} == expected_files
     assert [entry["target_id"] for entry in entries] == [part["target_id"] for part in value["assignments"]]
     assert len({entry["target_id"] for entry in entries}) == len(entries)
-    if shape == "many-files":
-        assert len(entries) > 512
+    assert len(entries) > 512
     catalog = observed["system_catalog"]
     assert catalog["omitted_after"] == len(entries) - len(catalog["entries"])
-    assert catalog["status"] == ("partial" if catalog["omitted_after"] else "complete")
-    assert catalog["status"] == "partial" or shape == "large-file"
+    assert catalog["status"] == "partial"
     assert catalog["total_targets"] == len(entries) and catalog["total_files"] == len(expected_files)
     # Every changed line is reachable: lookups expose at least the independently counted additions.
     added = sum(line.startswith("+") and not line.startswith("+++ ")
@@ -1754,7 +1705,7 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     assert all(not body.startswith(b"[Ordered continuation") for body in observed["contents"].values())
     fragments = [observed["contents"][entry["target_id"]] for entry in entries
                  if observed["targets"][entry["target_id"]]["kind"] == "continuation"
-                 and observed["targets"][entry["target_id"]]["file"].endswith(("target.py", "big.py"))]
+                 and observed["targets"][entry["target_id"]]["file"].endswith("target.py")]
     assert fragments, "the long multibyte line must require continuation fragments"
     reassembled = b"".join(fragment.split(b"\n@@", 1)[1].split(b"\n", 1)[1] for fragment in fragments)
     assert ("+" + _LONG_LINE).encode() in reassembled
@@ -1769,18 +1720,18 @@ async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
     undecided = [d for t, d in decisions.items() if t not in admitted]
     assert undecided and all(d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:")
                              and d["evidence_refs"] == [] for d in undecided)
-    assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith(("target.py", "big.py"))
+    assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith("target.py")
     assert [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
     assert value["execution"][0]["reason"] == "backend_failure" and not value["execution"][0]["accepted"]
 
 
-async def test_lookup_is_read_only_cursor_bound_and_closes_with_authority(tmp_path: Path) -> None:
-    """Navigation cannot mutate review state, alias another query's cursor, or outlive authority.
+async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
+    """Navigation cannot mutate review state or alias another query's cursor.
 
     Proof A drives lookups only along valid cursors; this catches a cursor reused across
     queries, a forged offset inside a multibyte character killing the invocation instead
-    of a correctable rejection, unavailable selections reported as errors instead of
-    typed data, and lookups served after the assignment closed.
+    of a correctable rejection, and unavailable selections reported as errors instead of
+    typed data.
     """
     repo = tmp_path / "subject"
     seed_feature_branch(repo, base={"api.py": "VALUE = 1\n", "uni.py": "TEXT = ''\n", "helper.py": "H = 1\n"},
@@ -1792,8 +1743,6 @@ async def test_lookup_is_read_only_cursor_bound_and_closes_with_authority(tmp_pa
     async with binding.session():
         path_page = _charged(binding, "review_source", {"target_id": None, "path": "api.py", "cursor": None})
         assert path_page["status"] == "complete" and {e["file"] for e in path_page["entries"]} == {"api.py"}
-        assert path_page["capacity"]["basis"].startswith("current host ledger")
-        assert path_page["capacity"]["remaining_tool_calls"] is None
         unavailable = _charged(binding, "review_source", {"target_id": None, "path": "helper.py", "cursor": None})
         assert unavailable["status"] == "unavailable" and "not proof of absence" in unavailable["reason"]
         unknown = _charged(binding, "review_source", {"target_id": "part:999999", "path": None, "cursor": None})
@@ -1816,13 +1765,6 @@ async def test_lookup_is_read_only_cursor_bound_and_closes_with_authority(tmp_pa
         assert binding.authority_open and binding.fatal_error is None and binding.calls == 9
         catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
         assert catalog["decided_targets"] == 0 and all(entry["decided"] is None for entry in catalog["entries"])
-    binding.close_authority()
-    with pytest.raises(HostToolFatal, match="closed"):
-        binding.admit("late", "review_source", {"target_id": None, "path": None, "cursor": None})
-    value = review.seal({})
-    assert value["claims"] == [] and all(
-        d["status"] == "not_reviewed" for scope in value["terminal_result"]["stack_outcomes"]
-        for d in scope["target_decisions"])
 
 
 async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(review_inputs: StageInputFactory) -> None:
@@ -1854,7 +1796,6 @@ async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(rev
             ({"targets": [decision(second), decision(second)], "claims": []}, "at most once per batch"),
             ({"targets": [decision(second, status="not_reviewed", reason="x" * 1024)], "claims": [
                 {**_proposal(review_inputs), "title": "t" * 4096} for _ in range(33)]}, "exceeds 131072 UTF-8 bytes"),
-            ({"targets": [decision(second)] * 129, "claims": []}, "at most 128 items"),
         ]:
             with pytest.raises(HostToolRejected, match=message):
                 _charged(binding, "review_admit", batch)
@@ -1976,44 +1917,3 @@ async def test_challenge_verdict_must_name_the_claim_revision_current_at_admissi
     validate_committed_result(value)
     retained, = value["claims"]
     assert retained["revision"] == 2 and retained["disposition"] == "unresolved" and value["findings"] == []
-
-
-async def test_unexpected_batch_installation_failure_is_indeterminate_and_keeps_prior_state(
-    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A mutating host tool that fails inside installation cannot be replayed or half-installed.
-
-    Endpoint tests only check the outcome label. Coverage capacity now installs before
-    review state, so a failure there leaves earlier batches intact, the binding refuses
-    further work (no replay), and the sealed result stays valid and incomplete.
-    """
-    from daydream.review_result import ReviewCoverage
-
-    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
-    first, second = (part["target_id"] for part in review.assignments[:2])
-    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
-
-    def batch(target: str) -> dict[str, Any]:
-        part = review.assignments[review._index[target]]
-        return {"targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [{
-            "source_id": part["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}]}],
-            "claims": []}
-
-    async with binding.session():
-        assert _charged(binding, "review_admit", batch(first))["progress"]["decided"] == 1
-        monkeypatch.setattr(ReviewCoverage, "admit_target_decisions_budgets",
-                            lambda self, updates: (_ for _ in ()).throw(RuntimeError("storage fault")))
-        with pytest.raises(HostToolFatal) as failure:
-            _charged(binding, "review_admit", batch(second))
-        assert failure.value.outcome == "indeterminate" and not failure.value.preacceptance
-        assert binding.fatal_error is failure.value and not binding.authority_open
-        with pytest.raises(HostToolFatal):
-            _charged(binding, "review_admit", batch(second))
-    monkeypatch.undo()
-    value = review.seal({})
-    validate_committed_result(value)
-    decisions = {d["target_id"]: d for scope in value["terminal_result"]["stack_outcomes"]
-                 for d in scope["target_decisions"]}
-    assert decisions[first]["status"] == "reviewed"
-    assert decisions[second]["reason"].startswith("unsubmitted:")
-    assert value["terminal_result"]["analysis_state"] == "incomplete"

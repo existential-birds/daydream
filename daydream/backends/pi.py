@@ -142,21 +142,6 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
 )
 
 
-def _pi_native_limits_metadata(evidence: Any) -> dict[str, Any]:
-    """Closed bounded projection of the host's native model-limit evidence."""
-    if not isinstance(evidence, dict):
-        return {"native_limits": "unavailable"}
-    selected: dict[str, Any] = {}
-    for key, value in evidence.items():
-        if not isinstance(key, str) or len(selected) >= 32:
-            continue
-        if value is None or type(value) in {bool, int}:
-            selected[key[:64]] = value
-        elif isinstance(value, str):
-            selected[key[:64]] = _pi_diagnostic_text(value, 128)[0]
-    return selected
-
-
 def _pi_compaction_metadata(event: dict[str, Any], generation_id: str | None) -> dict[str, Any]:
     """Bounded native compaction evidence; the summary text itself is never retained."""
     metadata: dict[str, Any] = {"phase": "start" if event.get("type") == "compaction_start" else "end",
@@ -1462,14 +1447,13 @@ class PiBackend:
                     if host_server is None or not host_server.ready:
                         raise PiError("Native host readiness was not established", category="HOST_TOOLS")
                     host_ready = True
+                    limits = host_tools.native_limits if host_tools is not None else None
                     yield DiagnosticEvent(code="pi_native_capacity", message="Native model limits",
-                                          metadata=_pi_native_limits_metadata(
-                                              host_tools.native_limits if host_tools is not None else None))
+                                          metadata=dict(limits or {}))
                     continue
                 if event_type == "daydream_host_tools_failed":
                     capacity = host_tools.fatal_error if host_tools is not None else None
-                    if event.get("code") == "native_capacity" and capacity is not None \
-                            and capacity.code == "native_capacity":
+                    if capacity is not None and capacity.code == "native_capacity":
                         # A model that cannot fit the invocation is refused before provider work.
                         raise PiError(str(capacity), category="HOST_TOOLS", retryable=False)
                     if self._hosted_read_only:

@@ -321,8 +321,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
             async with httpx.AsyncClient(trust_env=False, headers={'Authorization': packet['authorization']}) as client:
                 response = await client.post(packet['url'] + '/ready',
                     json={'tool_name': packet['tool_name'], 'schema': packet['schema']})
-                assert set(response.json()) == {'ready', 'native_limits'} and response.json()['ready'] is True
-                assert response.json()['native_limits']['reserve_tokens_source'] == 'pi_1.4.0_default'
+                assert response.json() == {'ready': True}
                 response = await client.post(packet['url'] + '/admit', json={
                     'id': 'submit', 'name': packet['tool_name'], 'arguments': payload, 'terminal': True})
                 assert response.json()['allowed'] is True

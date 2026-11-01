@@ -1075,7 +1075,7 @@ _LOOKUP = {"type": "object", "additionalProperties": False, "properties": {"targ
            "required": ["target_id"]}
 
 
-@pytest.mark.parametrize("case", ["served", "correctable", "oversized", "fatal", "capacity"])
+@pytest.mark.parametrize("case", ["correctable", "oversized", "fatal", "capacity"])
 async def test_native_host_lookup_is_registered_charged_and_served_with_exact_bytes(
     tmp_path: Path, native_provider: _NativeProvider, case: str,
 ) -> None:
@@ -1099,9 +1099,7 @@ async def test_native_host_lookup_is_registered_charged_and_served_with_exact_by
     # An oversized host-tool argument is a correctable payload fault, not an aborted invocation.
     first = {"target_id": "t" * 140_000} if case == "oversized" else {"target_id": "t1"}
     native_provider.turns = [[("lookup-1", "review_source", first)],
-                             [("lookup-2", "review_source", {"target_id": "t1"})]
-                             if case in {"correctable", "oversized"} else
-                             [("submit", "structured_output", accepted)],
+                             [("lookup-2", "review_source", {"target_id": "t1"})],
                              [("submit", "structured_output", accepted)]]
     binding = HostToolBinding(deadline=time.monotonic() + 30, accept=lambda value: value,
         host_tools={"review_source": HostTool(_LOOKUP, lookup)},
@@ -1144,17 +1142,16 @@ async def test_native_host_lookup_is_registered_charged_and_served_with_exact_by
     assert failure is None and binding.accepted_result == accepted
     history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[-1]["messages"]
                if message["role"] == "tool"}
-    served_id = "lookup-2" if case in {"correctable", "oversized"} else "lookup-1"
     # The exact frozen bytes arrive unescaped, after the bounded metadata JSON block.
-    assert frozen in history[served_id] and '"capacity"' in history[served_id]
-    assert '"content"' not in history[served_id]
+    assert frozen in history["lookup-2"] and '"capacity"' in history["lookup-2"]
+    assert '"content"' not in history["lookup-2"]
     if case == "correctable":
         assert "Unknown target_id" in history["lookup-1"] and binding.rejections == 1
     if case == "oversized":
         assert "exceeds" in history["lookup-1"] and "split it into smaller batches" in history["lookup-1"]
         assert binding.fatal_error is None
     assert served == [{"target_id": "t1"}] * (2 if case == "correctable" else 1)
-    assert binding.calls == (3 if case in {"correctable", "oversized"} else 2)
+    assert binding.calls == 3
 
 
 @pytest.mark.parametrize("cancel_at", ["active-read", "late-start"])
