@@ -169,7 +169,7 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
         assert ("x-custom", "grpc-credential") in headers
 
 
-@pytest.mark.parametrize("drift", ["1.45.2", "missing-surface"])
+@pytest.mark.parametrize("drift", ["1.45.3", "missing-surface"])
 def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.MonkeyPatch, drift: str) -> None:
     """Unreviewed SDK versions or missing private fields must release the real channel before failing."""
     delegates: list[GrpcExporter] = []

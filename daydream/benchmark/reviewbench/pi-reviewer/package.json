@@ -4,5 +4,8 @@
   "version": "1.0.0",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0"
+  },
+  "overrides": {
+    "undici": "8.12.3"
   }
 }

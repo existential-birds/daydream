@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Move the `benchmark` extra's supported Harbor range to `[0.25, 0.26)`. Reinstall
+  with `uv sync --all-extras`.
+
 - Publish the simplification sweep skill for contributors. PR mode covers a PR's
   own files and is required only above 5 changed files or 500 added lines;
   full-repository sweeps run on request.
@@ -44,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
+
+### Security
+
+- Require PyJWT 2.15.0 or later and ship patched LiteLLM, msgpack, mcp and undici
+  in the locked runtimes, resolving the open Dependabot advisories.
 
 
 ## [0.32.0] - 2026-10-29

@@ -61,9 +61,10 @@ _CREDENTIAL_PROVIDER_VARS = (
 
 #: Audited releases and private delegate surface. 1.45.1 preserves the 1.44.0
 #: channel/stub, unary export, shutdown, and encoding contracts; its metrics
-#: endpoint parsing change still accepts the explicit NoOpMeterProvider.
+#: endpoint parsing change still accepts the explicit NoOpMeterProvider. 1.45.2
+#: changes only package version strings across the bridge's OTLP packages.
 #: Drift fails initialization, never falling back to stock retry loops.
-_GRPC_BRIDGE_VERSIONS = frozenset({"1.44.0", "1.45.1"})
+_GRPC_BRIDGE_VERSIONS = frozenset({"1.44.0", "1.45.1", "1.45.2"})
 _GRPC_BRIDGE_SURFACE = ("_client", "_channel", "_headers", "_timeout", "_shutdown", "_initialize_channel_and_stub")
 
 _ACK_OK = "ok"
