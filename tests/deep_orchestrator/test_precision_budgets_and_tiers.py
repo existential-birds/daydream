@@ -13,6 +13,7 @@ import pytest
 
 from daydream import remote_ci
 from daydream.backends import AgentEvent, ResultEvent
+from daydream.config import PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.phases import TestAndHealResult, phase_test_and_heal as _phase_test_and_heal
@@ -77,10 +78,10 @@ async def test_precision_routes_borderline_low_finding(
     suppression = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
     assert len(suppression) == suppression_count
     if suppression:
-        assert suppression[0]["model"] == "claude-sonnet-5"
+        assert suppression[0]["model"] == PHASE_DEFAULT_MODELS["claude"]["suppression"]
     arbiters = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
     assert len(arbiters) == 1
-    assert arbiters[0]["model"] == "claude-opus-5"
+    assert arbiters[0]["model"] == PHASE_DEFAULT_MODELS["claude"]["arbiter"]
 
 @pytest.mark.parametrize("widened", [False, True], ids=["default-low-only", "include-medium"])
 async def test_precision_confidence_classes_control_medium_suppression(

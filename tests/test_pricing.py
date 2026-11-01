@@ -93,21 +93,7 @@ def test_load_user_prices_unresolvable_home_returns_empty(
 def test_resolve_prices_none_returns_builtin_copy() -> None:
     """The returned table must be independently mutable."""
     resolved = resolve_prices()
-    assert resolved == {
-        "gpt-5.5": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
-        "gpt-5.5-pro": ModelPrice(input=30.00, cached_input=30.00, output=180.00),
-        "gpt-5-codex": ModelPrice(input=1.25, cached_input=1.25, output=10.00),
-        "gpt-5.3-codex": ModelPrice(input=1.75, cached_input=1.75, output=14.00),
-        "gpt-5.6-sol": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
-        "gpt-5.6-terra": ModelPrice(input=2.50, cached_input=0.25, output=15.00),
-        "gpt-5.6-luna": ModelPrice(input=1.00, cached_input=0.10, output=6.00),
-        "gpt-5.6": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
-        "openai/gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
-        "gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
-        "claude-sonnet-5": ModelPrice(input=3.00, cached_input=0.30, output=15.00),
-        "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
-        "deepseek/deepseek-v4-flash-0731": ModelPrice(input=0.28, cached_input=0.028, output=0.42),
-    }
+    assert resolved == MODEL_PRICES
     assert resolved is not MODEL_PRICES
 
     resolved["gpt-5.5"] = ModelPrice(input=0.0, cached_input=0.0, output=0.0)

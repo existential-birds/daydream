@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Default the Claude backend to `claude-haiku-5-5`, `claude-sonnet-5-5` and
+  `claude-opus-5-5` across the existing phase tiers. Claude effort stays ambient,
+  and explicit model pins are unchanged.
+
 - Stream captured review sources with bounded Python payload buffers and one raw
   Git reader per operation. Native submissions perform one complete integrity
   check before atomic admission, reducing capture memory and repeated validation

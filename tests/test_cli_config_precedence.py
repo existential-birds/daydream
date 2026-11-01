@@ -15,6 +15,7 @@ from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
+from daydream.config import PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.adjudication_steps import _run_arbiter
 from daydream.deep.latency import (
@@ -62,7 +63,7 @@ def test_model_precedence_cli_over_file_over_table(tmp_path: Path, monkeypatch: 
     cfg.fix_model = None
     assert _resolved_model(cfg, "review") == "file-model"   # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
-    assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"   # falls through to table default
+    assert _resolved_model(cfg2, "parse") == PHASE_DEFAULT_MODELS["claude"]["parse"]   # falls through to table default
 
 
 def test_backend_precedence_mirrors_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

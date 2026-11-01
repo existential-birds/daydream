@@ -10,7 +10,7 @@ from dataclasses import dataclass
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
 DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 
@@ -96,7 +96,7 @@ _MODEL_PHASE_TIERS = (
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     backend: {phase: model for phases, model in zip(_MODEL_PHASE_TIERS, models, strict=True) for phase in phases}
     for backend, models in {
-        "claude": ("claude-haiku-4-5", "claude-sonnet-5", DEFAULT_CLAUDE_MODEL),
+        "claude": ("claude-haiku-5-5", "claude-sonnet-5-5", DEFAULT_CLAUDE_MODEL),
         "codex": ("gpt-5.6-luna", DEFAULT_CODEX_MODEL, DEFAULT_CODEX_MODEL),
     }.items()
 }
