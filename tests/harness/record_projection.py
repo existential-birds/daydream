@@ -13,7 +13,6 @@ from tests.harness.dataset import observation, run_record
 
 CAPTURED_AT = "2026-10-04T10:00:00Z"
 VALID_AT = "2026-10-04T11:00:00Z"
-OBSERVED_AT = "2026-10-04T12:00:00Z"
 AS_OF = "2026-10-05T00:00:00+00:00"
 
 

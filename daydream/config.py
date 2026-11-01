@@ -225,7 +225,6 @@ DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 # extra_risk_categories is validated against the mandatory vocabulary and can
 # change nothing. Neither has a CLI flag.
 DEFAULT_VERIFY_ALL: bool = False
-DEFAULT_EXTRA_RISK_CATEGORIES: tuple[str, ...] = ()
 
 # Synthetic scope metadata for structural review alongside language stacks;
 # never a CLI-selectable skill name.

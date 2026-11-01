@@ -376,17 +376,21 @@ def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, 
     assigned = False
     selectors = [{key: value for key, value in ref.items() if key not in {'basis', 'role'}} for ref in refs]
     matching = [False] * len(refs)
+    spans: list[tuple[int, int] | None] = [None] * len(refs)
     # Whole-change assignments may have many parts. Stream their existing host
     # identities while retaining only the at-most-four submitted selectors.
     for expected in expected_refs:
         for index, selector in enumerate(selectors):
-            bounds = selector['source_range']
-            same_identity = all(value == expected[key] for key, value in selector.items() if key != 'source_range')
-            matching[index] |= same_identity and (
-                isinstance(bounds, dict) and isinstance(expected['source_range'], dict)
-                and expected['source_range']['start'] <= bounds['start'] <= bounds['end']
-                <= expected['source_range']['end']
-                or bounds is None and expected['source_range'] is None)
+            if any(value != expected[key] for key, value in selector.items() if key != 'source_range'):
+                continue
+            bounds, allowed = selector['source_range'], expected['source_range']
+            if isinstance(bounds, dict) and isinstance(allowed, dict):
+                # Hunks of one part share its identity, so a range may join them.
+                start, end = spans[index] or (allowed['start'], allowed['end'])
+                start, end = spans[index] = min(start, allowed['start']), max(end, allowed['end'])
+                matching[index] |= start <= bounds['start'] <= bounds['end'] <= end
+            else:
+                matching[index] |= bounds is None and allowed is None
         if all(matching):
             break
     for index, ref in enumerate(refs):

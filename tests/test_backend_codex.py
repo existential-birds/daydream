@@ -340,9 +340,9 @@ async def test_continuation_token_resumes(tmp_path: Path, read_only: bool, local
             'evidence_refs']['items']['properties']['revision']
         assert 'enum' not in REVIEW_STAGE_SCHEMA['properties']['targets']['items']['properties'][
             'evidence_refs']['items']['properties']['revision']
-        assert review_stage_generation_schema(canonical, {}) == canonical
-        assert review_stage_generation_schema(canonical, {'head_sha': head}) == canonical
-        assert review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': 'main'}) == canonical
+        for unusable in ({}, {'head_sha': head}, {'head_sha': head, 'merge_base_sha': 'main'}):
+            assert 'enum' not in review_stage_generation_schema(canonical, unusable)['properties']['targets'][
+                'items']['properties']['evidence_refs']['items']['properties']['revision']
         identical = review_stage_generation_schema(canonical, {'head_sha': head, 'merge_base_sha': head})
         assert identical['properties']['targets']['items']['properties']['evidence_refs']['items'][
             'properties']['revision']['enum'] == [head]

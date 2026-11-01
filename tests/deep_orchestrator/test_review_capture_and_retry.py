@@ -1223,12 +1223,22 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
     decisions: list[dict[str, Any]] = []
+    fragment_stages: list[bool] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
+        schema = review.backend.calls[-1]['output_schema']
         if sandbox:
-            assert Draft202012Validator(review.backend.calls[-1]['output_schema']).is_valid(output)
+            assert Draft202012Validator(schema).is_valid(output)
+        fragments_only = all(reference['fragment'] is not None for part in stage['assignment_parts']
+                             for reference in part['source_refs'])
+        fragment_stages.append(fragments_only)
+        if fragments_only:
+            cited = copy.deepcopy(output)
+            cited['targets'][0]['evidence_refs'][0].update(source_range={'start': 1, 'end': 1}, fragment=None)
+            assert Draft202012Validator(schema).is_valid(output)
+            assert not Draft202012Validator(schema).is_valid(cited)
         scoped = index['api.py']
         fragments.append(diff)
         decisions.extend(copy.deepcopy(output['targets']))
@@ -1247,6 +1257,7 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     assert await review.run(output_mode='loop', findings_out=None) == 0
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
+    assert True in fragment_stages
     assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0
     first_reference, = decisions[0]['evidence_refs']
     assert first_reference['side'] == 'old'

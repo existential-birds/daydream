@@ -20,7 +20,12 @@ from daydream.git_ops import queries
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.host_tools import HostToolFatal, HostToolRejected
-from daydream.review_source_refs import canonicalize_source_selectors, source_id
+from daydream.review_source_refs import (
+    canonicalize_source_selectors,
+    part_source_mapping,
+    source_id,
+    validate_source_refs,
+)
 from daydream.review_stage_inputs import StageInputFactory
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.deep_orchestrator.test_review_investigation import (
@@ -87,6 +92,43 @@ async def test_local_capture_failures_refuse_dispatch_without_changing_the_sourc
     assert not review.output.exists()
     assert not (repo / '.review-output.md').exists()
     assert not (repo / '.daydream/deep/review-coverage.json').exists()
+
+
+@pytest.mark.parametrize('ignored', [True, False], ids=['ignored', 'eligible'])
+async def test_reviewer_check_output_stops_later_stages_only_when_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], ignored: bool,
+) -> None:
+    """Capture-owner tests miss later stages, siblings and terminal validation sharing one writable capture."""
+    review = many_file_review(tmp_path, monkeypatch, supporting_sources={'.gitignore': 'generated/\n'})
+    capture: list[Path] = []
+    setup = orchestrator.run_deep
+
+    async def record_capture(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
+        capture.append(work.repo)
+        return await setup(config, work, *args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, 'run_deep', record_capture)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        path = capture[0] / ('generated/check.txt' if ignored else 'stray.txt')
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('check output')
+
+    assert await review.run() == 0
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    outcomes = {outcome['scope_id']: outcome for outcome in coverage['stack_outcomes']}
+    from tests.harness.console import collapse_panel_text
+
+    terminal = collapse_panel_text(capsys)
+    if ignored:
+        assert {outcome['status'] for outcome in outcomes.values()} == {'complete'}
+        assert 'Captured source integrity failed' not in terminal
+    else:
+        assert outcomes['python']['status'] == 'incomplete'
+        assert outcomes['python']['partial_evidence'] is True
+        assert 'stray.txt' in coverage['diagnostics']['scopes']['python']
+        assert 'Captured source integrity failed' in terminal and 'stray.txt' in terminal
 
 
 @pytest.mark.parametrize('cancelled', [False, True], ids=['final-working', 'net-cancellation'])
@@ -330,6 +372,28 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     assert not (repo / old_path).exists()
     assert (repo / 'modern.py').is_file() is renamed
     assert tracked_source_state(repo) == before
+
+
+def test_assigned_range_may_join_hunks_of_one_part_without_leaving_it() -> None:
+    """Whole-stage tests use single-hunk parts, so they miss a citation that joins a part's hunks."""
+    revision = {'head_sha': 'a' * 40, 'merge_base_sha': 'b' * 40, 'diff_key': 'c' * 64}
+    assignment = {'kind': 'file', 'file': 'api.py'}
+
+    def references(diff: str, path: str = 'api.py') -> list[dict[str, Any]]:
+        mapped = part_source_mapping(diff, assignment, artifact_sha256='d' * 64, revision=revision,
+                                     old_path=path, new_path=path)['source_refs']
+        return [{**reference, 'basis': 'supplied_diff', 'role': 'assigned'} for reference in mapped
+                if reference['side'] == 'new']
+
+    first, second = assigned = references('@@ -10,1 +10,1 @@\n-a\n+b\n@@ -20,2 +20,2 @@\n-c\n+d\n e\n')
+    assert (first['source_range'], second['source_range']) == ({'start': 10, 'end': 10}, {'start': 20, 'end': 21})
+    other = references('@@ -30,1 +30,1 @@\n-f\n+g\n')
+    joined = {**first, 'source_range': {'start': 10, 'end': 21}}
+    beyond = {**first, 'source_range': {'start': 10, 'end': 22}}
+    across = {**other[0], 'source_range': {'start': 10, 'end': 30}}
+    assert validate_source_refs([joined], assigned, revision=revision)
+    assert not validate_source_refs([beyond], assigned, revision=revision)
+    assert not validate_source_refs([across], [*assigned, *other], revision=revision)
 
 
 @pytest.mark.parametrize('fault', [None, 'contained-range', 'foreign-id', 'assigned-range', 'supporting-range',

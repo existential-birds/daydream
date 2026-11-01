@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import zlib
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -490,6 +491,32 @@ class CapturedSource:
                 raise immutable._StorageConflict("captured native source integrity failed")
         return oid, body
 
+    def _ignored_by_accepted_rules(self, paths: set[str]) -> set[str]:
+        """Reviewer checks may leave ignored output, but they cannot author the rules that excuse it.
+
+        Evaluation happens in a scratch repository holding only accepted .gitignore
+        files, so new ignore files and this writable Git directory have no effect.
+        Accepted metadata paths and anything beneath them are never excusable.
+        """
+        accepted = {name for _, _, name in self._after}
+        candidates = sorted((path for path in paths - accepted
+                             if accepted.isdisjoint(map(str, PurePosixPath(path).parents))), key=os.fsencode)
+        rules = [name for mode, _, name in self._after
+                 if mode in {"100644", "100755"} and PurePosixPath(name).name == ".gitignore"]
+        if not candidates or not rules:
+            return set()
+        with tempfile.TemporaryDirectory() as scratch, immutable.inert_git_context(Path(scratch)):
+            root = Path(scratch)
+            immutable._git(root, "init", "--template=", ".")
+            for name in rules:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.root / name, root / name)
+            result = process._run_git(root, ["check-ignore", "--no-index", "--stdin", "-z"], timeout=30,
+                capture_bytes=True, input_bytes=b"\0".join(map(os.fsencode, candidates)) + b"\0")
+            if result.returncode not in {0, 1}:  # Git exits 1 when no path matches.
+                raise GitError("captured source ignore rules unavailable")
+            return set(queries._decode_nul_paths(result.stdout))
+
     def validate(self) -> None:
         """Reject changed native bytes, population, directories or Git evidence."""
         self._check_storage()
@@ -530,12 +557,13 @@ class CapturedSource:
                     if name in dirs:
                         dirs.remove(name)
                     continue
-                if leaf.is_symlink():
-                    raise GitError("captured native source contains an unexpected symlink")
-                if name in names:
+                if name in names or leaf.is_symlink():
                     actual.add(relative)
-        if actual != expected:
-            raise GitError("captured native source population changed")
+        unexpected = actual - expected
+        if unexpected:
+            unexpected -= self._ignored_by_accepted_rules(unexpected)
+        if changed := unexpected | (expected - actual):
+            raise GitError(f"captured native source population changed at {min(changed)!r}")
 
 
 def capture_source(

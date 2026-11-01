@@ -20,8 +20,10 @@ one assigned reference from source_refs or assignment_parts.source_refs; not_rev
 artifact/part digests, side-specific revision and true path. source_summary describes the actual supplied side;
 continuation old_start/count and new_start/count are full-hunk totals, not exact continuation ranges.
 fragment_offset and fragment.offset count UTF-8 bytes in the diff hunk body, never source line numbers. For partial
-lines cite the exact fragment. Supporting references may describe broader frozen source, but cannot replace an
-assigned reference. basis is supplied_diff, source_inspection or executed_check; role is assigned or supporting.
+lines cite the exact fragment. Copy a reference that has a fragment unchanged, with that fragment and null source_range,
+even after inspecting source: never swap it for a line range. A non-null source_range may narrow or join supplied ranges
+of one part. basis is supplied_diff, source_inspection or executed_check; role is always assigned. List other consulted
+files in supporting_files.
 """
 _SELECTOR_SOURCE_GUIDANCE = """
 Each target decision includes evidence_refs with at most four source selectors. For reviewed work, select at

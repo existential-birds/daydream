@@ -19,6 +19,7 @@ from daydream.json_utils import atomic_write_bytes, atomic_write_json
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
+from daydream.redaction import redact_text
 from daydream.review_budget import render_review_warnings, review_warnings
 from daydream.review_result import ReasonCode, deliver_finalized_review
 from daydream.trajectory import get_current_recorder
@@ -74,10 +75,11 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     if ctx.work.captured_source is not None:
         try:
             ctx.work.captured_source.validate()
-        except (git_ops.GitError, OSError):
+        except (git_ops.GitError, OSError) as exc:
             coverage.require_phase('snapshot')
             coverage.record_phase('snapshot', 'failed', reasons=[ReasonCode.EVIDENCE_INCOMPLETE])
-            print_warning(console, 'Captured source integrity failed; rerun the review.')
+            print_warning(console,
+                          f'Captured source integrity failed: {redact_text(str(exc))[:240]}; rerun the review.')
     items: list[dict[str, Any]] = []
     held: list[dict[str, Any]] = []
     projection_valid = no_diff
