@@ -1,9 +1,11 @@
 """Bounded authenticated loopback callbacks for one native Pi invocation.
 
-The model sees only Pi's existing terminal tool. Its extension confirms the
-active schema before provider work, charges actual native starts, then invokes
-one synchronous host operation. This endpoint has no filesystem reader or MCP
-server, and never schedules domain installation in a background thread.
+The model sees Pi's stock read-only tools, the terminal ``structured_output``
+tool and any charged nonterminal host tools the binding declares. The extension
+confirms the active schemas and native model limits before provider work,
+charges actual native starts, then invokes synchronous host operations. This
+endpoint has no filesystem reader or MCP server, and never schedules domain
+installation in a background thread.
 """
 
 from __future__ import annotations
@@ -58,7 +60,11 @@ class PiHostToolServer:
             "max_frame_bytes": policy._MAX_FRAME_BYTES,
             "max_argument_bytes": policy._MAX_ARGUMENT_BYTES,
             **({"allowed_tools": sorted(self.binding.allowed_tools)} if self.binding.allowed_tools is not None else {}),
+            **({"host_tools": self._host_schemas()} if self.binding.host_tools else {}),
         }
+
+    def _host_schemas(self) -> dict[str, Any]:
+        return {name: tool.schema for name, tool in sorted(self.binding.host_tools.items())}
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._connected, "127.0.0.1", 0,
@@ -148,7 +154,7 @@ class PiHostToolServer:
                     await self._reply(writer, 403, {"error": "Unauthorized transport"})
                     return
                 authenticated = True
-                admitting = path in {"/admit", "/submit"}
+                admitting = path in {"/admit", "/submit", "/call"}
                 submitting = path == "/submit"
                 if "transfer-encoding" in headers:
                     raise ValueError("chunked requests are unsupported")
@@ -166,8 +172,8 @@ class PiHostToolServer:
                 if not isinstance(value, dict):
                     raise ValueError("expected object")
                 submission_id = value.get("id")
-                if path in {"/admit", "/submit"}:
-                    if path == "/admit":
+                if path in {"/admit", "/submit", "/call"}:
+                    if path != "/submit":
                         self.binding.ensure_open()
                     if not self.ready:
                         raise self._fatal("Native tool readiness was not established before admission/submission",
@@ -194,12 +200,17 @@ class PiHostToolServer:
                     return
                 if path == "/ready":
                     self.binding.ensure_open()
-                    if (set(value) != {"tool_name", "schema"} or self.binding.schema is None
-                            or value["tool_name"] != policy.NATIVE_SUBMIT or value["schema"] != self.binding.schema):
-                        raise self._fatal("Native terminal schema differs from the bound schema",
+                    if (not {"tool_name", "schema"} <= set(value) <= {"tool_name", "schema", "native_limits",
+                                                                         "host_tools"}
+                            or self.binding.schema is None
+                            or value["tool_name"] != policy.NATIVE_SUBMIT or value["schema"] != self.binding.schema
+                            or value.get("host_tools", {}) != self._host_schemas()):
+                        raise self._fatal("Native terminal or host tool schemas differ from the bound schemas",
                                           code="native_readiness")
+                    # Refuse a model that cannot hold this invocation before any provider work.
+                    evidence = self.binding.check_native_limits(value.get("native_limits"))
                     self.ready = True
-                    await self._reply(writer, 200, {"ready": True})
+                    await self._reply(writer, 200, {"ready": True, "native_limits": evidence})
                     return
                 if path == "/admit":
                     oversized = (f"The entire structured_output argument object exceeds {policy._MAX_ARGUMENT_BYTES} "
@@ -219,6 +230,15 @@ class PiHostToolServer:
                     result = self.binding.submit(value.get("id"), value.get("arguments"))
                     complete = True
                     await self._reply(writer, 200, {"id": submission_id, "accepted": True, "result": result})
+                    return
+                if path == "/call":
+                    # The callback is synchronous on this loop; bound its reply by
+                    # the assignment's deadline rather than the short control timeout.
+                    request_timeout.reschedule(asyncio.get_running_loop().time()
+                        + max(0.0, self.binding.deadline - clock.monotonic()))
+                    result = self.binding.call(value.get("id"), value.get("name"), value.get("arguments"))
+                    complete = True
+                    await self._reply(writer, 200, {"id": submission_id, "result": result})
                     return
                 await self._reply(writer, 404, self._error(self._fatal(
                     "Unknown native host endpoint", code="invalid_frame"), submission_id))

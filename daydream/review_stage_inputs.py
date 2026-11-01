@@ -311,7 +311,9 @@ class StageInputFactory:
             probe_bytes = len(inputs.truncate_utf8_to_budget(rest[:256], 256).encode('utf-8'))
             probe = self._mapped(_Part({**meta, 'fragment_bytes': probe_bytes}, notice + header), body=source_body)
             allowance = self._remaining_bytes(self._render([probe])) - 1536
-            low = len(inputs.truncate_utf8_to_budget(rest, max(0, allowance)))
+            # A budget of N bytes never needs more than N characters: bound the
+            # encoded prefix so multi-MB hunks are not re-encoded per fragment.
+            low = len(inputs.truncate_utf8_to_budget(rest[:max(0, allowance)], max(0, allowance)))
             if low == 0:
                 raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Review very large captured changes through bounded source navigation instead of
+  refusing plans over 512 assignment parts or inlining the whole inventory
+  ([#1677](https://github.com/existential-birds/daydream/issues/1677)). Committed
+  review keeps its policy, assignment and a bounded, explicitly partial catalog in
+  system instructions that survive native compaction; the model navigates with the
+  charged read-only `review_source` lookup (exact frozen bytes, current host
+  capacity) and admits progressive atomic batches with `review_admit`. Every target
+  retains a typed decision, admitted work survives later failure, and models whose
+  declared limits cannot fit the invocation are refused before provider work.
+  **Breaking (0.y.z):** committed/immutable/local results move to schemas 4/5/6
+  with sharded per-target coverage; earlier results are rejected with a restart
+  instruction. The hosted grant becomes `pi-read-only-v2` (two added host tools),
+  and native model registries must declare `contextWindow`/`maxTokens`. Pi
+  compaction events and summary usage are retained, and read-only Pi search
+  guidance names only the tools it can run. Extension API 8 is unchanged.
+
 - Stream captured review sources with bounded Python payload buffers and one raw
   Git reader per operation. Native submissions perform one complete integrity
   check before atomic admission, reducing capture memory and repeated validation

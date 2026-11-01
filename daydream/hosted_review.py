@@ -1,6 +1,9 @@
 """Trusted operator policy for the bounded native Pi committed-review entry point.
 
-This is model/tool authority, not infrastructure isolation. The immutable request
+This is model/tool authority, not infrastructure isolation. Policy
+``pi-read-only-v2`` grants Pi's stock read/find/ls/grep, the charged host
+``review_source`` lookup and ``review_admit`` batch admission, and the terminal
+``structured_output`` tool; nothing else. The immutable request
 adds independently validated inert Git preparation; the legacy request retains
 the operator's preparation responsibility.
 """
@@ -16,7 +19,7 @@ from daydream.backends import BackendExecutionInput
 from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile
 
-HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "structured_output"})
+HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "review_source", "review_admit", "structured_output"})
 
 
 class UnsupportedHostedPolicy(ValueError):
