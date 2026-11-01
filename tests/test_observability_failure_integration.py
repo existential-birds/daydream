@@ -457,7 +457,7 @@ async def invoke(label, allowance):
         phase=DaydreamPhase.REVIEW, wall_budget_s=allowance)
     results[label] = {"output": output, "aborted": aborted}
 async with anyio.create_task_group() as group:
-    group.start_soon(invoke, "timed-out", 0.05)
+    group.start_soon(invoke, "timed-out", 1)
     group.start_soon(invoke, "healthy", 5)
 (ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(json.dumps(results))
 ''')
@@ -475,6 +475,7 @@ async with anyio.create_task_group() as group:
         with anyio.fail_after(15):
             async with anyio.create_task_group() as group:
                 group.start_soon(launch)
+                # The 1s allowance only has to outlast spawn and the first read on a loaded runner.
                 await spawner.wait_for_read(0)
                 await spawner.wait_for_read(1)
                 assert await spawner.procs[0].wait() == -15

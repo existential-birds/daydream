@@ -68,7 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract test runs as root, and the Harbor image proof skips without Docker unless
   `DAYDREAM_REQUIRE_DOCKER` (set in CI) requires it. The staged Pi host-input
   diagnostic test now faults only its own stack's canonical read instead of racing
-  the concurrent structural stage.
+  the concurrent structural stage, and the Pi invocation-timeout observability test
+  allows its timed-out invocation enough time to reach its first read on loaded runners.
 
 ### Security
 
