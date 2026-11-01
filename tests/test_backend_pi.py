@@ -1312,7 +1312,9 @@ async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path:
 
     backend: Any = (CapturingPi(model="fixture-model") if backend_kind.startswith("pi") else
                     ScriptedBackend(responder=respond))
-    await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW, read_only=read_only,
+    # Composed review prompts embed the shell guidance; read-only Pi must substitute it in place.
+    await run_agent(backend, tmp_path, "Review\n\n" + REPOSITORY_SEARCH_GUIDANCE, phase=DaydreamPhase.REVIEW,
+                    read_only=read_only,
                     persist_session=False, review_limits=ReviewLimits(), progress_callback=lambda _: None)
     prompt, instructions = seen[0]
     expected = READ_ONLY_PI_SEARCH_GUIDANCE if backend_kind == "pi-read-only" else REPOSITORY_SEARCH_GUIDANCE
@@ -1321,8 +1323,7 @@ async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path:
     if backend_kind != "other-read-only":
         assert instructions is not None and instructions.count(expected) == 1 and other not in instructions
     if backend_kind == "pi-read-only":
-        assert "daydream search" in READ_ONLY_PI_SEARCH_GUIDANCE and "no shell" in READ_ONLY_PI_SEARCH_GUIDANCE.lower()
-        assert "review_source" in READ_ONLY_PI_SEARCH_GUIDANCE and "not proof of absence" in prompt
+        assert prompt.startswith("Review\n\n" + READ_ONLY_PI_SEARCH_GUIDANCE)
 
 
 # Retry env knobs

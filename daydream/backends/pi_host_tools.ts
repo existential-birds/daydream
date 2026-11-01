@@ -60,6 +60,12 @@ export default function (pi: ExtensionAPI) {
       async execute(toolCallId, params, _signal, _onUpdate, ctx) {
         try {
           if (!ready || failed) throw new Error("Host authority unavailable");
+          // Oversized arguments are a correctable payload fault: the start is charged, nothing installs.
+          if (Buffer.byteLength(JSON.stringify(params) ?? "null") > packet.max_argument_bytes) {
+            return { content: [{ type: "text" as const, text: `The entire ${name} argument object exceeds `
+              + `${packet.max_argument_bytes} UTF-8 bytes; split it into smaller batches before retrying` }],
+              details: { host_tool: name, code: "invalid_submission" }, isError: true };
+          }
           // Bound the synchronous host callback by the unchanged assignment deadline.
           const statusStarted = performance.now();
           const statusResponse = await fetch(packet.url + "/status", {

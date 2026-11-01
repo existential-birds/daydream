@@ -440,6 +440,10 @@ class ReviewCoverage:
             raise ValueError('run source attribution exceeds retained byte limit')
         return sizes
 
+    def admit_target_decisions_budgets(self, updates: Mapping[str, list[dict[str, Any]]]) -> None:
+        """Claim several scopes' capacity in one step after their combined preview."""
+        self._target_decision_bytes.update(self.check_target_decisions_budgets(updates))
+
     def admit_target_decisions(self, scope_id: str, decisions: list[dict[str, Any]]) -> None:
         """Claim capacity synchronously with stage admission or restored coverage."""
         self._target_decision_bytes[scope_id] = self.check_target_decisions_budget(scope_id, decisions)

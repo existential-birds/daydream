@@ -30,6 +30,8 @@ _NULLABLE_SELECTOR = {"type": ["string", "null"], "maxLength": 4096}
 COMMITTED_BATCH_MAX_ITEMS = 128
 # One maximal claim must stay submittable; reuse the existing host argument bound.
 COMMITTED_SUBMISSION_MAX_BYTES = _MAX_ARGUMENT_BYTES
+# Instructions ask for batches this size; preflight requires one to fit native output.
+COMMITTED_BATCH_OUTPUT_BYTES = 32 * 1024
 # Reasons stay small enough that a full shard of worst-case decisions (four refs
 # each) always fits the shared 256 KiB per-scope retained attribution bound.
 COMMITTED_REASON_MAX_CHARS = 1024

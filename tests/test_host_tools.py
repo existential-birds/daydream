@@ -665,18 +665,26 @@ async def test_http_host_tool_unexpected_failure_is_indeterminate_only_when_muta
     Terminal callback tests cover /submit only; they cannot catch /call presenting
     a possibly installed batch admission as a fatal preacceptance outcome.
     """
-    def broken(_arguments: dict[str, Any]) -> dict[str, Any]:
+    invoked: list[dict[str, Any]] = []
+
+    def broken(arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(arguments)
         raise ValueError("private-token")
     binding = _lookup_binding(broken, mutating=mutating)
     async with _endpoint(binding) as client:
         assert (await _ready(client))["ready"]
         assert (await client.post("/admit", json={"id": "x", "name": "review_source",
                                                  "arguments": None})).json()["allowed"]
-        response = (await client.post("/call", json={"id": "x", "name": "review_source",
-                                                     "arguments": {"target_id": "t1"}})).json()
+        call = {"id": "x", "name": "review_source", "arguments": {"target_id": "t1"}}
+        response = (await client.post("/call", json=call)).json()
+        replay = (await client.post("/call", json=call)).json()
     assert response["outcome"] == ("indeterminate" if mutating else "fatal")
     assert response["code"] == "callback_failed" and "private-token" not in response["error"]
-    assert ("accepted" in response) is not mutating and not binding.authority_open
+    # Only a read-only failure is a confirmed preacceptance refusal; a mutation may have happened.
+    assert response.get("accepted") is (None if mutating else False)
+    assert binding.fatal_error is not None and binding.fatal_error.preacceptance is not mutating
+    assert not binding.authority_open and replay["outcome"] in {"fatal", "indeterminate"}
+    assert invoked == [{"target_id": "t1"}]
 
 
 @pytest.mark.parametrize("case", ["insufficient", "unavailable", "host-schema"])
