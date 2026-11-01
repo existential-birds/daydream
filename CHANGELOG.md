@@ -68,12 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
 - Make the local gate pass in root-run containers with host-injected Git config and
-  no Docker daemon: tests replace inherited `GIT_CONFIG_*` entries, the native Claude
-  contract test runs as root, and the Harbor image proof skips without Docker unless
-  `DAYDREAM_REQUIRE_DOCKER` (set in CI) requires it. The staged Pi host-input
-  diagnostic test now faults only its own stack's canonical read instead of racing
-  the concurrent structural stage, and the Pi invocation-timeout observability test
-  allows its timed-out invocation enough time to reach its first read on loaded runners.
+  no Docker daemon, and remove two timing races in Pi diagnostic tests.
 
 ### Security
 
