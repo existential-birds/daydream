@@ -186,16 +186,14 @@ checklist item is N/A.
 
 ## Pull request requirements
 
-Before creating **any PR, including a draft**, run the local
-`daydream-deadcode-sweep` skill (`.agents/skills/daydream-deadcode-sweep/SKILL.md`) on the
-contribution branch after implementation and before final validation and publication.
-Complete the skill's full repository-wide discovery, candidate selection,
-simplification/refactoring, and verification workflow. A completed sweep may find
-no worthwhile change; record that outcome with its discovery evidence.
-An incomplete or blocked sweep blocks PR creation. Record the sweep's coverage,
-candidate outcomes, applied simplifications, and verification results in the PR's
-**Test Plan**. The skill is local tooling excluded from Git; if unavailable, report
-the missing prerequisite before creating the PR.
+Before creating a PR, including a draft, that changes more than 5 files or adds more
+than 500 lines, run the [simplification sweep](.agents/skills/daydream-deadcode-sweep/SKILL.md)
+in PR mode. Run it after implementation and before final validation and publication.
+PR mode covers the files in the PR, plus other files only as needed to finish an
+investigation or refactor. A completed sweep may find no worthwhile change; record that
+outcome with its evidence. An incomplete or blocked sweep blocks PR creation. Record
+coverage, candidate outcomes, applied simplifications and verification in the PR's
+**Test Plan**. Full-repository sweeps run only on request.
 
 Every PR must start from [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md),
 including PRs created through `gh` or another API. Use the
@@ -247,7 +245,7 @@ Use this sequence for a GitHub issue or implementation spec:
 3. **Execute the prompt:** run it in a new session. Recheck repository guidance
    and worktree state, create a new branch from the verified requested base or
    captured HEAD, preserve unrelated work, and implement the goal. Complete the
-   [required pre-PR simplification sweep](#pull-request-requirements), validate,
+   [simplification sweep](#pull-request-requirements) when required, validate,
    make signed Conventional Commits with explicit staging, and push with hooks
    enabled. Open a PR following the [PR requirements](#pull-request-requirements),
    then complete the review loop below before reporting merge readiness.
