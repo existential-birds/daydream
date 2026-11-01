@@ -139,7 +139,9 @@ drains stderr, enforces a shared deadline, and joins before dispatch/finalizatio
 Full validation covers both separately admitted sides (up to 512 MiB of unique
 blob payload), native contents/population/modes, semantic index and storage.
 Output from reviewer checks that accepted `.gitignore` rules ignore stays outside
-the population; eligible additions fail validation and name the changed path.
+the population. Ignore files created after capture excuse nothing, so a tool's
+self-ignoring cache needs an accepted rule; other additions fail validation and
+name the changed path.
 Selected textual reads retain their independent limit. Private creation conflicts
 and replacements are refused without deleting competing bytes.
 

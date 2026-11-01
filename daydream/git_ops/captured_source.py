@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 import zlib
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -490,6 +491,31 @@ class CapturedSource:
                 raise immutable._StorageConflict("captured native source integrity failed")
         return oid, body
 
+    def _ignored_by_accepted_rules(self, paths: set[str]) -> set[str]:
+        """Reviewer checks may leave ignored output, but they cannot author the rules that excuse it.
+
+        Evaluation happens in a scratch repository holding only accepted .gitignore
+        files, so new ignore files and this writable Git directory have no effect.
+        Accepted metadata paths are never excusable.
+        """
+        accepted = {name for _, _, name in self._after}
+        candidates = sorted(paths - accepted, key=os.fsencode)
+        rules = [name for mode, _, name in self._after
+                 if mode in {"100644", "100755"} and PurePosixPath(name).name == ".gitignore"]
+        if not candidates or not rules:
+            return set()
+        with tempfile.TemporaryDirectory() as scratch, immutable.inert_git_context(Path(scratch)):
+            root = Path(scratch)
+            immutable._git(root, "init", "--template=", ".")
+            for name in rules:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.root / name, root / name)
+            result = process._run_git(root, ["check-ignore", "--no-index", "--stdin", "-z"], timeout=30,
+                capture_bytes=True, input_bytes=b"\0".join(map(os.fsencode, candidates)) + b"\0")
+            if result.returncode not in {0, 1}:  # Git exits 1 when no path matches.
+                raise GitError("captured source ignore rules unavailable")
+            return set(queries._decode_nul_paths(result.stdout))
+
     def validate(self) -> None:
         """Reject changed native bytes, population, directories or Git evidence."""
         self._check_storage()
@@ -534,13 +560,7 @@ class CapturedSource:
                     actual.add(relative)
         unexpected = actual - expected
         if unexpected:
-            # Reviewer checks may leave output capture would exclude. Only accepted
-            # .gitignore rules apply, never info/exclude in this writable Git directory.
-            with immutable.inert_git_context(self.root):
-                unexpected -= set(queries._decode_nul_paths(process._run_git(self.root,
-                    ["ls-files", "--others", "--ignored", "--exclude-per-directory=.gitignore", "-z"],
-                    timeout=30, capture_bytes=True, max_output_bytes=immutable._MAX_SOURCE_BYTES,
-                    error_context="captured source ignored inventory unavailable").stdout))
+            unexpected -= self._ignored_by_accepted_rules(unexpected)
         if changed := unexpected | (expected - actual):
             raise GitError(f"captured native source population changed at {min(changed)!r}")
 

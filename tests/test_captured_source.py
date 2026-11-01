@@ -277,8 +277,9 @@ def test_capture_retries_working_population_change_during_enumeration(
 
 
 @pytest.mark.parametrize("corruption", [
-    "bytes", "missing", "population", "population-exclude", "population-link", "metadata", "storage", "index",
-    "skip", "assume", "stages", "intent", "support-bytes", "support-mode", "support-missing", "support-parent",
+    "bytes", "missing", "population", "population-exclude", "population-gitignore", "population-link", "metadata",
+    "storage", "index", "skip", "assume", "stages", "intent", "support-bytes", "support-mode", "support-missing",
+    "support-parent",
 ])
 def test_capture_integrity_never_falls_back_to_original(
     source: tuple[Path, str, str], tmp_path: Path, corruption: str,
@@ -314,6 +315,10 @@ def test_capture_integrity_never_falls_back_to_original(
         (captured.root / ".git/info").mkdir()
         (captured.root / ".git/info/exclude").write_text("injected.py\n")
         (captured.root / "injected.py").write_text("tampered")
+    elif corruption == "population-gitignore":
+        (captured.root / "generated").mkdir()
+        (captured.root / "generated/.gitignore").write_text("*\n")
+        (captured.root / "generated/injected.py").write_text("tampered")
     elif corruption == "population-link":
         (captured.root / "injected.py").symlink_to(captured.root / "subject.py")
     elif corruption == "metadata":
@@ -341,7 +346,7 @@ def test_capture_integrity_never_falls_back_to_original(
     with pytest.raises(GitError) as failure:
         captured.validate()
     if corruption.startswith("population"):
-        assert "injected.py" in str(failure.value)
+        assert ("generated/.gitignore" if corruption == "population-gitignore" else "injected.py") in str(failure.value)
     elif not corruption.startswith("support-"):
         with pytest.raises(GitError):
             captured.read("new", "subject.py")
@@ -352,7 +357,7 @@ def test_ignored_check_output_leaves_accepted_source_valid(tmp_path: Path) -> No
     """A reviewer's real test run writes the ignored caches capture itself would exclude."""
     repo = tmp_path / "source"
     init_repo(repo)
-    write_and_stage(repo, ".gitignore", "__pycache__/\nbuild/\n")
+    write_and_stage(repo, ".gitignore", "__pycache__/\n.pytest_cache/\nbuild/\n")
     write_and_stage(repo, "tests/test_subject.py", "def test_subject() -> None:\n    assert True\n")
     base = commit(repo, "base")
     write_and_stage(repo, "subject.py", "value = 1\n")
