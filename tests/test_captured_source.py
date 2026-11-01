@@ -423,7 +423,12 @@ def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
     with pytest.raises(FrozenSourceRejected):
         captured.read("old", "module")
     captured.validate()
-    (captured.root / "linked.py").write_text("shadow")  # Ignore rules cannot hide accepted metadata paths.
+    (captured.root / "linked.py").mkdir()  # Ignore rules cannot hide files beneath accepted metadata paths.
+    (captured.root / "linked.py/injected.py").write_text("shadow")
+    with pytest.raises(GitError):
+        captured.validate()
+    shutil.rmtree(captured.root / "linked.py")
+    (captured.root / "linked.py").write_text("shadow")  # Nor the accepted metadata path itself.
     with pytest.raises(GitError):
         captured.validate()
     assert git(repo, "rev-parse", "HEAD") == head

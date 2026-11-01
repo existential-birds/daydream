@@ -496,10 +496,11 @@ class CapturedSource:
 
         Evaluation happens in a scratch repository holding only accepted .gitignore
         files, so new ignore files and this writable Git directory have no effect.
-        Accepted metadata paths are never excusable.
+        Accepted metadata paths and anything beneath them are never excusable.
         """
         accepted = {name for _, _, name in self._after}
-        candidates = sorted(paths - accepted, key=os.fsencode)
+        candidates = sorted((path for path in paths - accepted
+                             if accepted.isdisjoint(map(str, PurePosixPath(path).parents))), key=os.fsencode)
         rules = [name for mode, _, name in self._after
                  if mode in {"100644", "100755"} and PurePosixPath(name).name == ".gitignore"]
         if not candidates or not rules:
