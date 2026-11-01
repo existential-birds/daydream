@@ -63,6 +63,7 @@ htmlcov/
 !.agents/skills/test-audit/
 !.agents/skills/implementation-audit/
 !.agents/skills/daydream-trace-analysis/
+!.agents/skills/daydream-deadcode-sweep/
 .hermes/
 /skills-lock.json
 

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Publish the simplification sweep skill for contributors. PR mode covers a PR's
+  own files and is required only above 5 changed files or 500 added lines;
+  full-repository sweeps run on request.
+
 - Default the Claude backend to `claude-haiku-5-5`, `claude-sonnet-5-5` and
   `claude-opus-5-5` across the existing phase tiers. Claude effort stays ambient,
   and explicit model pins are unchanged.
