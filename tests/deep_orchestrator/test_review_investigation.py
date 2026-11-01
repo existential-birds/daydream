@@ -937,18 +937,17 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         prose = call['prompt'].split('Host review stage:\n')[0]
         assert set(call['output_schema']['properties']) == {
             'targets', 'notes', 'supporting_files', 'candidates', 'contradictions'}
-        revision = call['output_schema']['properties']['targets']['items']['properties'][
-            'evidence_refs']['items']['properties']['revision']
-        if sandbox:
-            assert revision['enum'] == [review.pr.head_sha, review.pr.base_sha]
-            if output['targets']:
-                assert Draft202012Validator(call['output_schema']).is_valid(output)
-                shortened = deepcopy(output)
-                shortened['targets'][0]['evidence_refs'][0]['revision'] = review.pr.head_sha[:12]
-                assert not Draft202012Validator(call['output_schema']).is_valid(shortened)
-                assert Draft202012Validator(REVIEW_STAGE_SCHEMA).is_valid(shortened)
-        else:
-            assert 'enum' not in revision
+        reference = call['output_schema']['properties']['targets']['items']['properties'][
+            'evidence_refs']['items']['properties']
+        assert reference['revision']['enum'] == [review.pr.head_sha, review.pr.base_sha]
+        assert reference['role']['enum'] == ['assigned']
+        if output['targets']:
+            assert Draft202012Validator(call['output_schema']).is_valid(output)
+            for field, value in (('revision', review.pr.head_sha[:12]), ('role', 'supporting')):
+                faulty = deepcopy(output)
+                faulty['targets'][0]['evidence_refs'][0][field] = value
+                assert not Draft202012Validator(call['output_schema']).is_valid(faulty)
+                assert Draft202012Validator(REVIEW_STAGE_SCHEMA).is_valid(faulty)
         assert 'with issues' not in prose
         assert 'AI-generated code' not in prose
         assert 'Be strict' not in prose

@@ -138,6 +138,8 @@ reader per materialization/verification operation checks object framing and OIDs
 drains stderr, enforces a shared deadline, and joins before dispatch/finalization.
 Full validation covers both separately admitted sides (up to 512 MiB of unique
 blob payload), native contents/population/modes, semantic index and storage.
+Output from reviewer checks that accepted `.gitignore` rules ignore stays outside
+the population; eligible additions fail validation and name the changed path.
 Selected textual reads retain their independent limit. Private creation conflicts
 and replacements are refused without deleting competing bytes.
 
@@ -364,7 +366,9 @@ Models select assigned source IDs or supporting path/side/LF ranges; the host
 constructs canonical `evidence_refs` from the full assignment inventory and pinned
 regular Git blobs. Exact continuation fragments retain their null source ranges.
 Supporting attribution cannot satisfy assigned coverage. Correspondence is never
-proof of a read, understanding or an executed check.
+proof of a read, understanding or an executed check. Backends that author canonical
+references generate assigned references only, because supporting references need a
+host-computed blob digest; an assigned range may join the hunks of one part.
 
 The existing `structured_output` terminal tool calls one invocation-local host
 callback. Only a sole terminal call in a completed native generation may enter

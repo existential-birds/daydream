@@ -77,12 +77,17 @@ def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str,
 
 
 def review_stage_generation_schema(canonical_schema: dict[str, Any], revision: dict[str, Any]) -> dict[str, Any]:
-    """Constrain native generation to captured source identities without changing admission."""
+    """Constrain model-authored references to identities the model can reproduce.
+
+    Supporting references need a whole-blob digest only the host can compute, so
+    only host-selector stages may retain them. Admission stays independent.
+    """
     schema = copy.deepcopy(canonical_schema)
+    reference = schema['properties']['targets']['items']['properties']['evidence_refs']['items']['properties']
+    reference['role']['enum'] = ['assigned']
     revisions = [revision.get('source_id', revision.get('head_sha')), revision.get('merge_base_sha')]
     if all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value) for value in revisions):
-        schema['properties']['targets']['items']['properties']['evidence_refs']['items']['properties'][
-            'revision']['enum'] = list(dict.fromkeys(revisions))
+        reference['revision']['enum'] = list(dict.fromkeys(revisions))
     return schema
 
 

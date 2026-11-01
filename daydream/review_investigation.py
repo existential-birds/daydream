@@ -15,7 +15,7 @@ from daydream import agent, clock
 if TYPE_CHECKING:
     from daydream.review_stage_inputs import StageInputFactory
 from daydream.backends import Backend
-from daydream.backends.codex import CodexBackend, codex_lifecycle_diagnostic
+from daydream.backends.codex import codex_lifecycle_diagnostic
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
@@ -361,8 +361,7 @@ class ReviewInvestigation:
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             native_admission = isinstance(backend, PiBackend)
             submission_schema = (review_stage_submission_schema(review_stage_admission_schema(schema))
-                                 if native_admission else review_stage_generation_schema(schema, self.revision)
-                                 if isinstance(backend, CodexBackend) else schema)
+                                 if native_admission else review_stage_generation_schema(schema, self.revision))
             if native_admission:
                 state['source_attribution'] = 'host_selectors'
                 state['source_options'] = self._reference_options(stage, targets, selectors=True)
@@ -379,6 +378,7 @@ class ReviewInvestigation:
             syntax_error: dict[str, int] | None = None
             retry_rejection: SchemaRejection | None = None
             actual_rejection: SchemaRejection | None = None
+            input_failure = ''
             accepted = False
             binding: HostToolBinding | None = None
             starts_before = self.budget.observed_tool_starts
@@ -497,8 +497,9 @@ class ReviewInvestigation:
                     else:
                         output = None
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-                except SanctionedInputUnavailable:
+                except SanctionedInputUnavailable as exc:
                     self.reason = 'evidence_incomplete'
+                    input_failure = f' ({redact_text(str(exc))[:240]})'
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     self.reason = 'interruption'
                     self.failure_class = 'cancellation'
@@ -566,7 +567,7 @@ class ReviewInvestigation:
                                   'admission_failure': 'Stage evidence admission failed',
                                   'quantitative_exhaustion': 'Review limit exhausted'}
                         label = labels.get(self.failure_class or '', 'Review stopped')
-                        self.failure_diagnostic = f"{label}: {self.reason}"
+                        self.failure_diagnostic = f"{label}: {self.reason}{input_failure}"
                     transition.extra.update(
                         review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
                         investigation_base_budget_s=self._base_limits.investigation_s,

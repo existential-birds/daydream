@@ -530,12 +530,19 @@ class CapturedSource:
                     if name in dirs:
                         dirs.remove(name)
                     continue
-                if leaf.is_symlink():
-                    raise GitError("captured native source contains an unexpected symlink")
-                if name in names:
+                if name in names or leaf.is_symlink():
                     actual.add(relative)
-        if actual != expected:
-            raise GitError("captured native source population changed")
+        unexpected = actual - expected
+        if unexpected:
+            # Reviewer checks may leave output capture would exclude. Only accepted
+            # .gitignore rules apply, never info/exclude in this writable Git directory.
+            with immutable.inert_git_context(self.root):
+                unexpected -= set(queries._decode_nul_paths(process._run_git(self.root,
+                    ["ls-files", "--others", "--ignored", "--exclude-per-directory=.gitignore", "-z"],
+                    timeout=30, capture_bytes=True, max_output_bytes=immutable._MAX_SOURCE_BYTES,
+                    error_context="captured source ignored inventory unavailable").stdout))
+        if changed := unexpected | (expected - actual):
+            raise GitError(f"captured native source population changed at {min(changed)!r}")
 
 
 def capture_source(

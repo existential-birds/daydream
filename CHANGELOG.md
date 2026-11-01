@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Claude deep reviews from losing scopes to `evidence_incomplete`. Ignored
+  output from reviewer checks no longer fails captured-source validation, integrity
+  failures name the changed path, non-Pi stages generate assigned references only,
+  and an assigned range may join hunks of one part
+  ([#1735](https://github.com/existential-birds/daydream/issues/1735)).
 - Allow Pi's captured-source validation to finish within the original review
   deadline without mistaking valid slow admission for a lost submission receipt.
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies

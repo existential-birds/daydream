@@ -10,6 +10,8 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -275,8 +277,8 @@ def test_capture_retries_working_population_change_during_enumeration(
 
 
 @pytest.mark.parametrize("corruption", [
-    "bytes", "missing", "population", "metadata", "storage", "index", "skip", "assume", "stages", "intent",
-    "support-bytes", "support-mode", "support-missing", "support-parent",
+    "bytes", "missing", "population", "population-exclude", "population-link", "metadata", "storage", "index",
+    "skip", "assume", "stages", "intent", "support-bytes", "support-mode", "support-missing", "support-parent",
 ])
 def test_capture_integrity_never_falls_back_to_original(
     source: tuple[Path, str, str], tmp_path: Path, corruption: str,
@@ -308,6 +310,12 @@ def test_capture_integrity_never_falls_back_to_original(
         (captured.root / "subject.py").unlink()
     elif corruption == "population":
         (captured.root / "injected.py").write_text("tampered")
+    elif corruption == "population-exclude":
+        (captured.root / ".git/info").mkdir()
+        (captured.root / ".git/info/exclude").write_text("injected.py\n")
+        (captured.root / "injected.py").write_text("tampered")
+    elif corruption == "population-link":
+        (captured.root / "injected.py").symlink_to(captured.root / "subject.py")
     elif corruption == "metadata":
         (captured.root / ".git/HEAD").write_text(base + "\n")
     elif corruption == "index":
@@ -330,12 +338,34 @@ def test_capture_integrity_never_falls_back_to_original(
         old_objects = captured.root / ".git/old-objects"
         (captured.root / ".git/objects").rename(old_objects)
         shutil.copytree(old_objects, captured.root / ".git/objects")
-    with pytest.raises(GitError):
+    with pytest.raises(GitError) as failure:
         captured.validate()
-    if corruption != "population" and not corruption.startswith("support-"):
+    if corruption.startswith("population"):
+        assert "injected.py" in str(failure.value)
+    elif not corruption.startswith("support-"):
         with pytest.raises(GitError):
             captured.read("new", "subject.py")
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
+
+
+def test_ignored_check_output_leaves_accepted_source_valid(tmp_path: Path) -> None:
+    """A reviewer's real test run writes the ignored caches capture itself would exclude."""
+    repo = tmp_path / "source"
+    init_repo(repo)
+    write_and_stage(repo, ".gitignore", "__pycache__/\nbuild/\n")
+    write_and_stage(repo, "tests/test_subject.py", "def test_subject() -> None:\n    assert True\n")
+    base = commit(repo, "base")
+    write_and_stage(repo, "subject.py", "value = 1\n")
+    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=commit(repo, "feature"), local=True)
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
+    subprocess.run([sys.executable, "-m", "pytest", "-q", "tests"], cwd=captured.root, env=environment, check=True,
+                   capture_output=True)
+    assert list(captured.root.glob("tests/__pycache__/*.pyc"))
+    assert (captured.root / ".pytest_cache/.gitignore").is_file()
+    (captured.root / "build").mkdir()
+    (captured.root / "build/subject.py").symlink_to(captured.root / "subject.py")
+    captured.validate()
+    assert captured.read("new", "subject.py")[1] == b"value = 1\n"
 
 
 def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
@@ -352,13 +382,14 @@ def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
     git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "--", str(module_origin), "module")
     git(repo / "module", "checkout", "--detach", module_base)
     git(repo, "add", "module")
+    write_and_stage(repo, ".gitignore", "ignored/\nlinked.py\n")
     base = commit(repo, "gitlink base")
     write_and_stage(repo, "subject.py", "value = 2\n")
     head = commit(repo, "feature after gitlink base")
     (repo / "linked.py").symlink_to(tmp_path / "private.py")
     (tmp_path / "private.py").write_text("outside")
     (repo / ".daydream").symlink_to(tmp_path / "private.py")
-    git(repo, "add", "linked.py")
+    git(repo, "add", "--force", "linked.py")
     git(repo, "update-index", "--add", "--cacheinfo", f"160000,{module_base},uninitialized")
     (repo / "uninitialized").mkdir()
     (repo / "uninitialized/secret.py").write_text("uninitialized nested bytes")
@@ -387,6 +418,9 @@ def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
     with pytest.raises(FrozenSourceRejected):
         captured.read("old", "module")
     captured.validate()
+    (captured.root / "linked.py").write_text("shadow")  # Ignore rules cannot hide accepted metadata paths.
+    with pytest.raises(GitError):
+        captured.validate()
     assert git(repo, "rev-parse", "HEAD") == head
     assert git(repo, "show-ref") == original_refs
     assert (repo / ".git/index").read_bytes() == original_index
