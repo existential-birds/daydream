@@ -176,7 +176,10 @@ The packaged native extensions and bounded authenticated loopback endpoint requi
 Pi 1.4.0 for the verified completion/tool APIs. They confirm the active terminal
 tool/schema and intended endpoint before provider work. Missing/overridden tools,
 tools-disabled or incompatible modes fail explicitly. There is no filesystem
-reader, filesystem grant protocol, MCP runtime extra or additional model tool.
+reader, filesystem grant protocol or MCP runtime extra. Bindings may declare charged
+nonterminal host tools; committed review uses `review_source` and `review_admit`
+(see [committed review](runtime.md#committed-review-requestresult)), while staged
+deep review declares none.
 Stock Pi reads/searches retain their native behavior and read-only restrictions.
 Ordinary unbound calls retain their supported version/configuration behavior.
 Improve still requires Claude's independent snapshot-root guard.

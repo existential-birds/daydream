@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import math
 import os
+import re
 import uuid
 from collections.abc import Callable
 from contextlib import AsyncExitStack
@@ -29,10 +30,22 @@ from daydream.artifacts.ownership import operational_worktree_root
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiBackend
 from daydream.committed_review_model import (
-    COMMITTED_ASSIGNMENT_LIMIT,
+    ADMIT_TOOL,
+    CATALOG_PAGE_MAX_BYTES,
+    COMMITTED_SUBMISSION_MAX_BYTES,
+    COVERAGE_MAX_SHARDS,
+    COVERAGE_SHARD_TARGETS,
+    LARGEST_TOOL_RESULT_BYTES,
+    LOOKUP_PAGE_MAX_BYTES,
+    LOOKUP_SCHEMA,
+    LOOKUP_TOOL,
+    RESULT_VERSIONS,
     CommittedReviewResult,
     assignment_schema,
+    coverage_shards,
     planned_work_id,
+    receipt_schema,
+    shard_scope_id,
     validate_committed_result,
 )
 from daydream.committed_review_output import write_committed_review_output
@@ -40,16 +53,18 @@ from daydream.deep.detection import StackAssignment
 from daydream.git_ops.captured_source import CapturedSource, capture_source
 from daydream.host_tools import (
     _MAX_RESULT_BYTES,
+    HostTool,
     HostToolBinding,
     HostToolCallBudgetExceeded,
     HostToolFatal,
     HostToolRejected,
+    NativeCapacityRequirement,
 )
 from daydream.hosted_review import HOSTED_PI_TOOLS, HostedReviewPolicy, UnsupportedHostedPolicy
 from daydream.hunk_index import write_hunk_index
 from daydream.immutable_review import ImmutableReviewInput
 from daydream.json_utils import canonical_json
-from daydream.prompt_budget import SanctionedInputUnavailable, prepare_sanctioned_inputs
+from daydream.prompt_budget import SanctionedInputUnavailable
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_profile import ResolvedProfile, build_default_profile, resolve_from_runconfig
 from daydream.review_result import (
@@ -57,10 +72,11 @@ from daydream.review_result import (
     PlannedScope,
     ReasonCode,
     ReviewCoverage,
+    preserved_target_decisions,
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_source_refs import _SubmissionSources
+from daydream.review_source_refs import _SubmissionSources, source_id
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -83,24 +99,51 @@ class CommittedReviewRequest:
     local: bool = False
 
 
+_UNDECIDED_REASON = "unsubmitted: no admitted decision before this review ended; unfinished"
+_CURSOR = re.compile(r"c1\.([0-9a-f]{12})\.([0-9]{1,12})")
+_CONTINUATION_NOTICE = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
+
+
 class Review:
-    """Only writer of live assignments, semantic revisions and challenge evidence."""
+    """Only writer of live assignments, semantic revisions and challenge evidence.
+
+    The complete planned population is retained before any prompt bounding. Each
+    target has exactly one typed decision at sealing: an admitted model decision
+    or a host-authored unfinished one. Batches admit progressively and atomically.
+    """
 
     def __init__(
         self, inputs: StageInputFactory, run_id: str, *, deadline: float,
         allowed_tools: frozenset[str] | None = None,
     ) -> None:
-        population = sum(len(batch) for batch in inputs.assignment_batches)
-        if population > COMMITTED_ASSIGNMENT_LIMIT:
-            raise ValueError(
-                f"committed review supports at most {COMMITTED_ASSIGNMENT_LIMIT} assignment parts; "
-                f"the captured plan has {population}"
-            )
         self.inputs, self.run_id, self.deadline = inputs, run_id, deadline
         self._allowed_tools = allowed_tools
-        self.assignments = deepcopy([part for batch in inputs.assignment_batches for part in batch])
-        self._targets: list[dict[str, Any]] = []
+        self.assignments = deepcopy([part.assignment for part in inputs.parts])
+        self._index = {part["target_id"]: index for index, part in enumerate(self.assignments)}
+        self._files = {part["file"] for part in self.assignments}
+        self._by_file: dict[str, list[int]] = {}
+        for index, part in enumerate(self.assignments):
+            self._by_file.setdefault(part["file"], []).append(index)
+        self._shards = coverage_shards(self.assignments)
+        if len(self._shards) > COVERAGE_MAX_SHARDS:
+            raise ValueError(
+                f"committed review retains at most {COVERAGE_MAX_SHARDS * COVERAGE_SHARD_TARGETS} assignment parts "
+                f"in typed coverage; the captured plan has {len(self.assignments)}. Narrow the review base or "
+                "exclusions and rerun")
+        self._shard_of = {part["target_id"]: index for index, shard in enumerate(self._shards) for part in shard}
+        # Fragment-only evidence has no source range; its summarized complete-line span
+        # admits claim lines without changing the canonical fragment identity.
+        self._fragment_spans: dict[str, tuple[int, int]] = {}
+        for part in self.assignments:
+            if part["kind"] == "continuation":
+                summary = part["source_summary"][0]
+                for ref in part["source_refs"]:
+                    span = summary.get(ref["side"]) if ref["side"] in {"old", "new"} else None
+                    if span is not None:
+                        self._fragment_spans[source_id(ref)] = (span["start"], span["end"])
+        self._decisions: dict[str, dict[str, Any]] = {}
         self._claims: dict[str, dict[str, Any]] = {}
+        self._generation = 0
         self._sealed = False
         self._discovered = False
         self._binding: HostToolBinding | None = None
@@ -108,29 +151,47 @@ class Review:
         self._coverage = ReviewCoverage(
             run_id,
             AnalyzedRevision.from_dict(inputs.revision),
-            [PlannedScope("committed", "committed", tuple(sorted({p["file"] for p in self.assignments})))]
-            if self.assignments
-            else [],
+            [PlannedScope(shard_scope_id(index), "committed", tuple(sorted({p["file"] for p in shard})), index)
+             for index, shard in enumerate(self._shards)],
             ["challenge"] if self.assignments else ["no_diff"],
         )
+        # Reserve truthful unfinished attribution for every target before model work.
+        try:
+            for index in range(len(self._shards)):
+                self._coverage.admit_target_decisions(shard_scope_id(index), self._shard_decisions(index, {}))
+        except ValueError as exc:
+            raise ValueError("captured plan exceeds retained per-target coverage capacity before review; "
+                             "narrow the review base or exclusions and rerun") from exc
+
+    def _shard_decisions(self, index: int, decisions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        return preserved_target_decisions([
+            decisions.get(part["target_id"]) or {
+                "target_id": part["target_id"], "status": "not_reviewed", "reason": _UNDECIDED_REASON,
+                "evidence_refs": []}
+            for part in self._shards[index]])
 
     def _refs(self, sources: _SubmissionSources, selectors: Any, *,
               target: str | None = None, required: bool = True) -> list[dict[str, Any]]:
-        refs = [ref for part in self.assignments if target is None or part["target_id"] == target
-                for ref in part["source_refs"]]
-        return sources.canonicalize(selectors, refs, require_assigned=required)
+        parts = self.assignments if target is None else [self.assignments[self._index[target]]]
+        return sources.canonicalize(selectors, (ref for part in parts for ref in part["source_refs"]),
+                                    require_assigned=required)
 
     def _claim(self, sources: _SubmissionSources, claim: dict[str, Any], claims: dict[str, dict[str, Any]]) -> None:
         claim["payload"]["evidence_refs"] = self._refs(sources, claim["payload"]["evidence_refs"])
         payload = claim["payload"]
-        if payload["file"] not in {p["file"] for p in self.assignments}:
+        if payload["file"] not in self._files:
             raise HostToolRejected("claim.payload.file: choose a file from the complete changed-target inventory")
-        if payload["line"] is not None and not any(
-            ref["path"] == payload["file"]
-            and ref["source_range"] is not None
-            and ref["source_range"]["start"] <= payload["line"] <= ref["source_range"]["end"]
-            for ref in payload["evidence_refs"]
-        ):
+
+        def covers(ref: dict[str, Any]) -> bool:
+            if ref["path"] != payload["file"]:
+                return False
+            bounds = ref["source_range"]
+            if bounds is not None:
+                return bool(bounds["start"] <= payload["line"] <= bounds["end"])
+            span = self._fragment_spans.get(source_id(ref)) if ref["role"] == "assigned" else None
+            return span is not None and span[0] <= payload["line"] <= span[1]
+
+        if payload["line"] is not None and not any(covers(ref) for ref in payload["evidence_refs"]):
             raise HostToolRejected("claim.payload.line: choose a line covered by its canonical source references")
         if not set(claim["source_uids"]) <= self._claims.keys():
             raise HostToolRejected("claim.source_uids: use retained predecessor UIDs, or [] for no predecessors")
@@ -153,86 +214,212 @@ class Review:
             existing.update(revision=existing["revision"] + 1, payload=payload, disposition="unresolved")
         existing["title"] = claim["title"]
 
-    def assignment(self, kind: str, *, deadline: float) -> tuple[HostToolBinding, dict[str, Any]]:
-        """Open one native terminal capability for the current immutable work snapshot."""
+    # Read-only navigation over frozen canonical inputs ---------------------------------
+
+    def _entry(self, part: dict[str, Any]) -> dict[str, Any]:
+        decision = self._decisions.get(part["target_id"])
+        return {"target_id": part["target_id"], "file": part["file"], "kind": part["kind"],
+                "part": f"{part['part_index']}/{part['part_count']}",
+                "decided": None if decision is None else decision["status"]}
+
+    @staticmethod
+    def _cursor(query: dict[str, Any], offset: int) -> str:
+        return f"c1.{hashlib.sha256(canonical_json(query).encode()).hexdigest()[:12]}.{offset}"
+
+    def _entries_page(self, query: dict[str, Any], indices: list[int], offset: int) -> dict[str, Any]:
+        entries: list[dict[str, Any]] = []
+        size = 2
+        end = offset
+        for index in indices[offset:]:
+            entry = self._entry(self.assignments[index])
+            entry_size = len(canonical_json(entry).encode()) + 1
+            if entries and size + entry_size > CATALOG_PAGE_MAX_BYTES:
+                break
+            entries.append(entry)
+            size += entry_size
+            end += 1
+        return {
+            "status": "complete" if offset == 0 and end == len(indices) else "partial",
+            "query": query, "total_targets": len(indices),
+            "decided_targets": sum(self.assignments[i]["target_id"] in self._decisions for i in indices),
+            "offset": offset, "entries": entries, "omitted_before": offset, "omitted_after": len(indices) - end,
+            "next_cursor": self._cursor(query, end) if end < len(indices) else None,
+        }
+
+    def catalog(self) -> dict[str, Any]:
+        """The first bounded, explicitly partial page of the complete population."""
+        query: dict[str, Any] = {"target_id": None, "path": None}
+        return {**self._entries_page(query, list(range(len(self.assignments))), 0),
+                "total_files": len(self._files)}
+
+    def lookup(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Serve exact frozen bytes or a catalog page; never mutates review state."""
+        target, path, cursor = arguments["target_id"], arguments["path"], arguments["cursor"]
+        if target is not None and path is not None:
+            raise HostToolRejected("review_source: select target_id or path, not both; use null for the other")
+        query = {"target_id": target, "path": path}
+        offset = 0
+        if cursor is not None:
+            match = _CURSOR.fullmatch(cursor)
+            if match is None or self._cursor(query, 0).split(".")[1] != match[1]:
+                raise HostToolRejected("review_source.cursor: pass a next_cursor returned for this same "
+                                       "target_id/path query, or null for its first page")
+            offset = int(match[2])
+        if target is None:
+            indices = list(range(len(self.assignments))) if path is None else self._by_file.get(path)
+            if indices is None:
+                return {"status": "unavailable", "query": query,
+                        "reason": "not a changed path in this captured review; changed targets are listed by "
+                                  "review_source with target_id=null and path=null. Use read/grep for supporting "
+                                  "files; a bounded search is not proof of absence."}
+            if offset > len(indices):
+                raise HostToolRejected("review_source.cursor: offset is outside this query's results")
+            return self._entries_page(query, indices, offset)
+        index = self._index.get(target)
+        if index is None:
+            return {"status": "unavailable", "query": query,
+                    "reason": "unknown target_id; select one from the catalog (target_id=null, path=null)"}
+        part = self.assignments[index]
+        diff = self.inputs.by_id[target].diff
+        identity = part["source_refs"][0]["part_sha256"]
+        if hashlib.sha256(diff.encode()).hexdigest() != identity:
+            raise HostToolFatal("Frozen captured review input changed after preparation", code="input_unavailable")
+        # Exact captured change bytes: a continuation's host notice is not captured content.
+        body = diff.removeprefix(_CONTINUATION_NOTICE).encode() if part["kind"] == "continuation" else diff.encode()
+        if offset > len(body):
+            raise HostToolRejected("review_source.cursor: offset is outside this target's content")
+        end = min(len(body), offset + LOOKUP_PAGE_MAX_BYTES)
+        while end < len(body) and body[end] & 0xC0 == 0x80:
+            end -= 1
+        chunk = body[offset:end]
+        described = {key: deepcopy(part[key]) for key in (
+            "target_id", "file", "kind", "part_index", "part_count", "hunk_index", "source_options",
+            "old_start", "old_count", "new_start", "new_count", "fragment_offset", "fragment_bytes",
+            "old_line", "new_line", "segment_index", "segment_count") if key in part}
+        return {
+            "status": "complete" if offset == 0 and end == len(body) else "partial", "query": query,
+            "target": {**described, "decided": self._entry(part)["decided"]},
+            "page": {"offset": offset, "bytes": len(chunk), "total_bytes": len(body),
+                     "sha256": hashlib.sha256(chunk).hexdigest(),
+                     "content_sha256": hashlib.sha256(body).hexdigest()},
+            "next_cursor": self._cursor(query, end) if end < len(body) else None,
+            "content": chunk.decode("utf-8"),
+        }
+
+    # Progressive admission ------------------------------------------------------------
+
+    def _receipt(self, kind: str, final: bool, decisions: int, touched: list[dict[str, Any]]) -> dict[str, Any]:
+        undecided = [part["target_id"] for part in self.assignments if part["target_id"] not in self._decisions]
+        return {
+            "assignment": kind, "final": final,
+            "admitted": {"decisions": decisions, "claims": [
+                {"uid": claim["uid"], "revision": claim["revision"], "title": claim["title"]} for claim in touched]},
+            "progress": {"decided": len(self._decisions), "total": len(self.assignments),
+                         "remaining": len(undecided), "next_undecided": undecided[:8],
+                         "pending_challenge": len(self.pending())},
+        }
+
+    def assignment(
+        self, kind: str, *, deadline: float, reserves: dict[str, Any] | None = None,
+    ) -> tuple[HostToolBinding, dict[str, Any]]:
+        """Open one native capability for the current work snapshot, with charged host navigation."""
         if self._sealed or (self._binding is not None and not self._binding.closed and not self._binding.accepted):
             raise ValueError("Review is sealed or already has an active assignment")
         if kind not in {"discovery", "challenge"} or kind == "discovery" and self._discovered:
             raise ValueError("invalid or already admitted assignment")
         revisions = {c["uid"]: c["revision"] for c in self.pending()}
-        claims_snapshot = self._claims
         if kind == "challenge" and not revisions:
             raise ValueError("no challenge obligations")
         schema = assignment_schema(kind, selectors=True)
+        retained_claims = assignment_schema(kind, selectors=False, retained=True)["properties"]["claims"]
+        judged: set[str] = set()
 
-        def accept(value: dict[str, Any]) -> dict[str, Any]:
+        def admit(value: dict[str, Any], *, final: bool) -> dict[str, Any]:
             binding.ensure_open()
+            if len(canonical_json(value).encode()) > COMMITTED_SUBMISSION_MAX_BYTES:
+                raise HostToolRejected(
+                    f"submission exceeds {COMMITTED_SUBMISSION_MAX_BYTES} UTF-8 bytes; split it into smaller "
+                    "review_admit batches and finish with a smaller structured_output batch")
+            generation = self._generation
 
             def prepare(sources: _SubmissionSources) -> Callable[[], dict[str, Any]]:
                 claims = deepcopy(self._claims)
+                decisions = dict(self._decisions)
                 canonical = deepcopy(value)
-                targets = canonical["targets"] if kind == "discovery" else deepcopy(self._targets)
+                verdicts: set[str] = set()
+                affected: set[int] = set()
                 if kind == "discovery":
-                    identifiers = [t["target_id"] for t in value["targets"]]
-                    if len(set(identifiers)) != len(identifiers) or set(identifiers) != {
-                        p["target_id"] for p in self.assignments
-                    }:
-                        raise HostToolRejected("targets: submit each assigned target_id exactly once")
-                    for target in targets:
+                    identifiers = [t["target_id"] for t in canonical["targets"]]
+                    if len(set(identifiers)) != len(identifiers):
+                        raise HostToolRejected("targets: submit each target_id at most once per batch")
+                    for target in canonical["targets"]:
+                        identifier = target["target_id"]
+                        if identifier not in self._index:
+                            raise HostToolRejected(
+                                "targets.target_id: choose a planned target from review_source's catalog")
+                        if identifier in decisions:
+                            raise HostToolRejected(
+                                f"targets.target_id {identifier}: already admitted; earlier decisions are final")
                         if target["status"] == "not_reviewed" and not target["reason"].strip():
                             raise HostToolRejected("targets.reason: explain unfinished work")
                         target["evidence_refs"] = self._refs(
-                            sources, target["evidence_refs"], target=target["target_id"],
-                            required=target["status"] == "reviewed"
-                        )
+                            sources, target["evidence_refs"], target=identifier,
+                            required=target["status"] == "reviewed")
+                        decisions[identifier] = target
+                        affected.add(self._shard_of[identifier])
                     if any(c["uid"] for c in value["claims"]):
                         raise HostToolRejected("discovery.claims: new concerns require empty uid and revision=0")
                 else:
-                    seen: set[str] = set()
                     for verdict in canonical["verdicts"]:
                         uid = verdict["uid"]
-                        if uid in seen or revisions.get(uid) != verdict["revision"]:
+                        if uid in judged or uid in verdicts or revisions.get(uid) != verdict["revision"]:
                             raise HostToolRejected("verdicts: use each assigned uid/current revision at most once")
-                        seen.add(uid)
+                        verdicts.add(uid)
                         if not verdict["grounds"].strip():
                             raise HostToolRejected(
                                 "verdicts.grounds: retain substantive counterevidence or uncertainty")
                         verdict["evidence_refs"] = self._refs(sources, verdict["evidence_refs"])
-                        claim = claims[uid]
-                        claim["challenge_evidence"].append(verdict)
-                        claim["disposition"] = verdict["verdict"]
+                        claims[uid]["challenge_evidence"].append(verdict)
+                        claims[uid]["disposition"] = verdict["verdict"]
                     if any(c["uid"] and c["uid"] not in revisions for c in value["claims"]):
                         raise HostToolRejected("claims: revisions may change only currently assigned claims")
                 changed: set[str] = set()
+                touched: list[dict[str, Any]] = []
                 for submitted in canonical["claims"]:
                     if submitted["uid"] and submitted["uid"] in changed:
                         raise HostToolRejected("claims: update a retained uid at most once per submission")
                     changed.add(submitted["uid"])
                     self._claim(sources, submitted, claims)
-                # HostToolBinding copies this canonical result before returning it to native code.
-                canonical["claims"] = list(claims.values())
+                    touched.append(claims[submitted["uid"]])
+                retained = list(claims.values())
                 try:
-                    jsonschema.validate(canonical, assignment_schema(kind, selectors=False, retained=True))
+                    jsonschema.validate(retained, retained_claims)
                 except jsonschema.ValidationError as exc:
                     raise HostToolRejected(
                         "claims: canonical retention limit exceeded; reduce optional proposals") from exc
-                if any(len(canonical_json(value).encode()) > _MAX_RESULT_BYTES
-                       for value in (canonical, {"targets": targets, "claims": canonical["claims"]})):
-                    raise HostToolRejected("retained review exceeds shared byte capacity; reduce optional material")
+                if len(canonical_json(retained).encode()) > _MAX_RESULT_BYTES:
+                    raise HostToolRejected("retained claims exceed shared byte capacity; reduce optional material")
+                updates = {shard_scope_id(index): self._shard_decisions(index, decisions) for index in affected}
                 try:
-                    self._coverage.check_target_decisions_budget("committed", targets)
+                    self._coverage.check_target_decisions_budgets(updates)
                 except ValueError as exc:
                     raise HostToolRejected("targets: reduce reasons/attribution to shared coverage capacity") from exc
+
                 def install() -> dict[str, Any]:
                     # No await, I/O, or model decision between final checks and installation.
                     binding.ensure_open()
                     if self._sealed or self._binding is not binding or clock.monotonic() >= self.deadline:
                         raise HostToolFatal("Review authority has closed", code="authority_closed")
-                    if self._claims is not claims_snapshot or kind == "discovery" and self._discovered:
+                    if self._generation != generation or kind == "discovery" and self._discovered:
                         raise HostToolFatal("Assignment revisions changed before installation", code="authority_closed")
-                    self._targets, self._claims = targets, claims
-                    self._discovered |= kind == "discovery"
-                    return canonical
+                    self._decisions, self._claims = decisions, claims
+                    for scope_id, scope_decisions in updates.items():
+                        self._coverage.admit_target_decisions(scope_id, scope_decisions)
+                    self._generation += 1
+                    judged.update(verdicts)
+                    self._discovered |= final and kind == "discovery"
+                    return self._receipt(kind, final, len(canonical["targets" if kind == "discovery"
+                                                                    else "verdicts"]), touched)
 
                 return install
 
@@ -242,7 +429,11 @@ class Review:
                 raise HostToolFatal('Captured review input is unavailable', code='input_unavailable') from exc
 
         binding = HostToolBinding(
-            deadline=min(deadline, self.deadline), accept=accept, allowed_tools=self._allowed_tools,
+            deadline=min(deadline, self.deadline), accept=lambda value: admit(value, final=True),
+            allowed_tools=self._allowed_tools, reserves=reserves,
+            host_tools={LOOKUP_TOOL: HostTool(LOOKUP_SCHEMA, self.lookup),
+                        ADMIT_TOOL: HostTool(schema, lambda value: admit(value, final=False), mutating=True)},
+            native_requirement=NativeCapacityRequirement(LARGEST_TOOL_RESULT_BYTES, COMMITTED_SUBMISSION_MAX_BYTES),
         )
         binding.configure_schema(schema)
         self._binding = binding
@@ -271,18 +462,19 @@ class Review:
             reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
         completed = (
             self._discovered
-            and len(self._targets) == len(self.assignments)
-            and all(t["status"] == "reviewed" for t in self._targets)
+            and len(self._decisions) == len(self.assignments)
+            and all(t["status"] == "reviewed" for t in self._decisions.values())
         )
         if self.assignments:
             scope_complete = completed and not reasons
-            coverage.record_scope(
-                "committed",
-                "complete" if scope_complete else "incomplete",
-                reasons=[] if scope_complete else sorted(reasons | {ReasonCode.EVIDENCE_INCOMPLETE.value}),
-                partial_evidence=bool(self._targets) and not scope_complete,
-                target_decisions=self._targets,
-            )
+            for index, shard in enumerate(self._shards):
+                coverage.record_scope(
+                    shard_scope_id(index),
+                    "complete" if scope_complete else "incomplete",
+                    reasons=[] if scope_complete else sorted(reasons | {ReasonCode.EVIDENCE_INCOMPLETE.value}),
+                    partial_evidence=not scope_complete and any(p["target_id"] in self._decisions for p in shard),
+                    target_decisions=self._shard_decisions(index, self._decisions),
+                )
             challenged = not self.pending() and completed and not reasons
             coverage.record_phase(
                 "challenge",
@@ -295,7 +487,7 @@ class Review:
         pipeline = "cancelled" if ReasonCode.INTERRUPTION.value in reasons else "failed" if reasons else "completed"
         terminal = coverage.finalize(pipeline)
         result = {
-            "schema_version": 1,
+            "schema_version": RESULT_VERSIONS["committed"],
             "run_id": self.run_id,
             "analyzed_revision": self.inputs.revision,
             "assignments": self.assignments,
@@ -307,23 +499,34 @@ class Review:
             "execution": self.execution,
         }
         if immutable_input is not None:
-            result.update(schema_version=2, immutable_input=immutable_input.to_dict())
+            result.update(schema_version=RESULT_VERSIONS["immutable"], immutable_input=immutable_input.to_dict())
         elif 'source_id' in self.inputs.revision:
-            result['schema_version'] = 3
+            result['schema_version'] = RESULT_VERSIONS["local"]
         validate_committed_result(result)
         return deepcopy(result)
 
 
-_INSTRUCTIONS = """Review the original captured source using ordinary read/search tools.
-The complete assignments are obligations, not read receipts. Evidence refs select source_options with
-{source_id,basis,source_range}; source_range=null retains the exact identity. Supporting selectors use
+_INSTRUCTIONS = """Review the original captured source using ordinary read/search tools plus review_source.
+The complete planned targets are obligations, not read receipts. Evidence refs select a target's source_options
+with {source_id,basis,source_range}; source_range=null retains the exact identity. Supporting selectors use
 {path,side,source_range,basis} against captured Git blobs and cannot replace assigned evidence.
 Report only concrete claims with trigger, consequence, location and supporting grounds. A new claim uses
 uid="", revision=0 and source_uids=[] unless it explicitly synthesizes retained predecessor UIDs.
 A retained claim update echoes uid and current revision; changing any semantic payload creates a fresh
 challenge obligation. title is presentation only. Never claim an executed check unless it happened.
-Use structured_output alone in a completed generation. Rejected submissions may be corrected within the
-original cumulative allowance; accepted submissions terminate this assignment. Empty findings are legitimate.
+Navigation: the catalog below is a bounded first page of the complete population; its status and omitted
+counts say what is not shown. review_source with target_id=null and path=null pages the whole catalog with
+next_cursor; path lists one changed path's targets; target_id returns that target's source_options, ranges
+and exact captured change bytes, paged by next_cursor. Re-request any target after context compaction instead
+of relying on summaries. Its page sha256 values identify exact frozen bytes. A claim line must fall inside a
+cited source_range or, for exact continuation fragments, inside that fragment's summarized line span.
+Submission: review_admit admits one bounded batch now and returns a receipt; admitted decisions and claims are
+retained even if later work fails, and each target is decided at most once. structured_output submits the
+final batch and ends this assignment; call it alone in a completed generation. Every batch is atomic: a
+rejected batch changes nothing and may be corrected within the original cumulative allowance. Undecided
+targets remain typed unfinished work. Empty findings are legitimate.
+Capacity: instruction allowances are dispatch-time snapshots. review_source and review_admit results report
+current host capacity after charging that call, including protected reserves you cannot spend.
 Discovery must decide every target explicitly. Challenge must seek counterevidence for each assigned claim
 against the original captured source, independently of investigator confidence, summaries or completion.
 Confirm only if the claim survives that investigation; rejection requires substantive counterevidence.
@@ -426,6 +629,12 @@ async def _run_committed_review(
             "tool_calls": limits.tool_calls,
         },
         "native_contexts": {},
+        "navigation": {
+            "lookup_tool": LOOKUP_TOOL, "admission_tool": ADMIT_TOOL,
+            "catalog_page_max_bytes": CATALOG_PAGE_MAX_BYTES, "lookup_page_max_bytes": LOOKUP_PAGE_MAX_BYTES,
+            "submission_max_bytes": COMMITTED_SUBMISSION_MAX_BYTES,
+            "coverage_shard_targets": COVERAGE_SHARD_TARGETS, "coverage_max_shards": COVERAGE_MAX_SHARDS,
+        },
         "strategies": {
             "discovery": strategies["discovery.generic_fallback"].content,
             "challenge": strategies["arbitration"].content.replace(
@@ -435,7 +644,7 @@ async def _run_committed_review(
     }
     if hosted is not None:
         settings["hosted_policy"] = {
-            "name": "pi-read-only-v1", "backend": hosted.backend, "provider": hosted.provider,
+            "name": "pi-read-only-v2", "backend": hosted.backend, "provider": hosted.provider,
             "model": hosted.model, "tools": sorted(HOSTED_PI_TOOLS),
             "trusted_prepared_source": True,
         }
@@ -531,11 +740,12 @@ async def _run_committed_review(
         index_path = write_hunk_index(diff_path.parent, diff)
         files = (list(work.captured_source.files) if work.captured_source is not None else
                  git_ops.diff_name_only_strict(captured_root, original.base_sha, original.head_sha))
-        inputs = StageInputFactory(
+        # Full captured-source checks run off-loop so host-tool timers are never starved.
+        inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
             backends["discovery"], work, StackAssignment("committed", files),
             diff_path=diff_path, hunk_index_path=index_path, shared_paths={}, revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
-        )
+        ))
         investigation_s = min(limits.investigation_s, profile.profile.pipeline.reviewer_investigation_budget_s)
         finish = started + min(
             investigation_s + limits.finalization_s, profile.profile.pipeline.review_wall_budget_s
@@ -549,10 +759,12 @@ async def _run_committed_review(
             protected_challenge_s=review_deadline - discovery_deadline,
             protected_finalization_s=limits.finalization_s,
         )
-        budget = ReviewInvestigationBudget(limits, review_deadline)
-        review = Review(
+        discovery_calls = limits.tool_calls // 2
+        settings["limits"].update(protected_challenge_tool_calls=limits.tool_calls - discovery_calls)
+        budget = ReviewInvestigationBudget(replace(limits, tool_calls=discovery_calls), discovery_deadline)
+        review = await anyio.to_thread.run_sync(lambda: Review(
             inputs, run_id, deadline=review_deadline, allowed_tools=None if hosted is None else HOSTED_PI_TOOLS,
-        )
+        ))
         recorder = _open_recorder(
             config=config, target_dir=captured_root, work=work,
             flow_kind=DaydreamRunFlow.CUSTOM, run_artifacts=artifacts,
@@ -580,9 +792,18 @@ async def _run_committed_review(
                         await _dispatch(
                             review, kind, backends[kind], budget, profile=settings,
                             deadline=discovery_deadline if kind == "discovery" else review_deadline,
-                            allocation=limits.tool_calls // 2 if kind == "discovery"
-                            else budget.remaining_tool_calls,
+                            allocation=budget.remaining_tool_calls,
+                            reserves={"challenge_tool_calls": limits.tool_calls - discovery_calls,
+                                      "challenge_s": round(review_deadline - discovery_deadline, 3),
+                                      "finalization_s": limits.finalization_s} if kind == "discovery"
+                            else {"finalization_s": limits.finalization_s},
                         )
+                        if kind == "discovery":
+                            # Discovery spends only its own allocation, including a denied
+                            # over-limit start; unspent calls carry into the challenge reserve.
+                            spent = min(budget.observed_tool_starts, discovery_calls)
+                            budget = ReviewInvestigationBudget(
+                                replace(limits, tool_calls=limits.tool_calls - spent), review_deadline)
                         kind = "challenge"
         except asyncio.CancelledError as exc:
             # Recorder exit retains interrupted native evidence before
@@ -671,47 +892,50 @@ async def _dispatch(
     deadline: float,
     allocation: int,
     profile: dict[str, Any],
+    reserves: dict[str, Any],
 ) -> None:
     repo = review.inputs.work.repo
-    binding, schema = review.assignment(kind, deadline=deadline)
+    binding, schema = review.assignment(kind, deadline=deadline, reserves=reserves)
     assignment = {
         "kind": kind,
         "run_id": review.run_id,
         "analyzed_revision": review.inputs.revision,
         "captured_root": str(repo),
-        "assignments": deepcopy(review.assignments),
+        "catalog": review.catalog(),
         "claims": review.pending() if kind == "challenge" else [],
         "profile": profile,
     }
-    prompt = (
+    # Stable policy, navigation, catalog root and claims live in system instructions,
+    # which native compaction never summarizes away; the user turn only starts work.
+    instructions = (
         _INSTRUCTIONS
-        + "\nReview strategy:\n"
-        + profile["strategies"][kind]
+        + "\nCatalog status and decided markers below are a dispatch-time snapshot."
         + "\nCommitted review assignment:\n"
         + canonical_json(assignment)
         + "\nEnd committed review assignment.\n"
     )
+    prompt = (f"Begin the committed review {kind} assignment described in the system instructions. "
+              "Navigate with review_source, admit batches with review_admit and finish with structured_output.\n"
+              "Review strategy:\n" + profile["strategies"][kind] + "\n")
     reason: str | None = None
     settled = False
     budget.deadline = deadline
     try:
-        review.inputs._revalidate_canonical()
-        prepared = prepare_sanctioned_inputs(backend, repo, {"diff": review.inputs.canonical[0].path}, read_only=True)
+        await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
         _, _, stopped = await agent.run_agent(
             backend,
             repo,
             prompt,
             phase=DaydreamPhase.REVIEW if kind == "discovery" else DaydreamPhase.VERIFY,
             output_schema=schema,
-            result_schema=assignment_schema(kind, selectors=False, retained=True),
+            result_schema=receipt_schema(kind),
             read_only=True,
             persist_session=False,
             deadline=deadline,
             investigation_budget=budget,
             tool_call_budget=allocation,
             tool_call_start_floor=1,
-            sanctioned_inputs=prepared,
-            review_system_instructions=_INSTRUCTIONS,
+            review_system_instructions=instructions,
             review_stage_scope_id=kind,
             host_tools=binding,
         )

@@ -275,10 +275,10 @@ def build_committed_findings_artifact(
     session. Unresolved concerns and native diagnostics remain in the paired
     committed result; this handoff retains confirmed findings and typed coverage.
     """
-    from daydream.committed_review_model import validate_committed_result
+    from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
 
     validate_committed_result(payload)
-    if payload['schema_version'] != 2:
+    if payload['schema_version'] != RESULT_VERSIONS['immutable']:
         raise FindingsValidationError('committed findings require an immutable result')
     if hashlib.sha256(snapshot_diff.encode()).hexdigest() != payload['analyzed_revision']['diff_key']:
         raise FindingsValidationError('committed findings differ from the captured review diff')

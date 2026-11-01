@@ -23,6 +23,8 @@ class _NativeProvider:
     errors: dict[int, str] = field(default_factory=dict)
     finish_reasons: dict[int, str] = field(default_factory=dict)
     response_headers: dict[str, str] = field(default_factory=dict)
+    # Per-request provider usage; unlisted requests report the default 10/5/15.
+    usage: dict[int, dict[str, int]] = field(default_factory=dict)
 
 
 @contextmanager
@@ -55,7 +57,7 @@ def native_provider_server(fixture: _NativeProvider) -> Iterator[str]:
             chunks: list[dict[str, Any]] = [
                 {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
                 {"choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
+                 "usage": fixture.usage.get(index, {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})},
             ]
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
