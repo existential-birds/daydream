@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 import tomllib
@@ -36,15 +37,16 @@ for _git_env_var in (
 ):
     os.environ.pop(_git_env_var, None)
 
-# Temporary test repositories must not inherit signing or global ignores.
-# Append scoped overrides for all descendant Git processes, including helpers.
-_git_config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
-os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "commit.gpgsign"
-os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "false"
-_git_config_count += 1
-os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "core.excludesFile"
-os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "/dev/null"
-os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
+# Temporary test repositories must not inherit signing, global ignores, or
+# host-injected config such as URL rewrites, which snapshot capture refuses.
+# Replace environment config with scoped overrides for descendant Git processes.
+for _git_env_var in [name for name in os.environ if re.fullmatch(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)", name)]:
+    os.environ.pop(_git_env_var)
+os.environ.update({
+    "GIT_CONFIG_COUNT": "2",
+    "GIT_CONFIG_KEY_0": "commit.gpgsign", "GIT_CONFIG_VALUE_0": "false",
+    "GIT_CONFIG_KEY_1": "core.excludesFile", "GIT_CONFIG_VALUE_1": "/dev/null",
+})
 
 # Real-Git fixtures share tests.harness.git_helpers.
 

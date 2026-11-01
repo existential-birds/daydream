@@ -56,9 +56,11 @@ async def test_native_claude_keeps_only_schema_serialization_tool(tmp_path: Path
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     # No inherited provider credentials, runtime settings, or real provider endpoint.
+    # IS_SANDBOX lets the CLI accept read-only bypassPermissions in root-run containers.
     execution = BackendExecutionInput.from_environment({
         "PATH": os.environ["PATH"], "HOME": str(tmp_path), "ANTHROPIC_API_KEY": "local-fixture-not-a-secret",
         "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "IS_SANDBOX": "1",
     }, backend="claude")
     schema = {
         "type": "object", "properties": {"findings": {"type": "array", "items": {"type": "string"}}},

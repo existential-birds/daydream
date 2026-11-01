@@ -149,6 +149,7 @@ jobs:
         run: make install
       - name: Run pytest shard
         env:
+          DAYDREAM_REQUIRE_DOCKER: "1"
           SHARD_INDEX: ${{ matrix.index }}
           SHARD_COUNT: ${{ needs.plan.outputs.count }}
           PYTEST_WORKERS: ${{ needs.plan.outputs.workers }}
@@ -211,6 +212,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Keep the measured worker count independent of runner CPU availability.
     env:
+      DAYDREAM_REQUIRE_DOCKER: "1"
       PYTEST_WORKERS: "8"
       PYTEST_REPORT_ARGS: "--junitxml=baseline-tests.xml"
     steps:

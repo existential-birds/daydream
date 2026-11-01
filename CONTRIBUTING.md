@@ -25,8 +25,10 @@ Python dependencies. Other backend CLIs (`gh`, Codex, Osprey) are feature-specif
 Docker is optional: `make actionlint` runs the workflow-YAML checks in a
 pinned container, but when no Docker daemon is available that target is
 skipped with a note (`actionlint skipped: Docker daemon is not available`)
-and exits 0 — so `make check` still passes locally. CI always runs
-actionlint, so a workflow error a local run skipped will still fail your PR.
+and exits 0 — so `make check` still passes locally. The packaged Harbor
+image proof (`test_audit_execution_proofs_harbor_gated`) likewise skips
+without a daemon. CI requires Docker for both (`ACTIONLINT_REQUIRE_DOCKER`,
+`DAYDREAM_REQUIRE_DOCKER`), so a failure a local run skipped still fails your PR.
 
 ## Setup
 
