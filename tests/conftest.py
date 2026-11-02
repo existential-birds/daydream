@@ -48,6 +48,16 @@ os.environ.update({
     "GIT_CONFIG_KEY_1": "core.excludesFile", "GIT_CONFIG_VALUE_1": "/dev/null",
 })
 
+
+
+def _fsync_without_durability(fd: Any) -> None:
+    """Keep fsync's bad-descriptor failure; no test can observe power-loss durability."""
+    os.fstat(fd if isinstance(fd, int) else fd.fileno())
+
+
+# Fsync is a large share of a real-path run. Fault tests patch over this seam.
+os.fsync = _fsync_without_durability
+
 # Real-Git fixtures share tests.harness.git_helpers.
 
 
