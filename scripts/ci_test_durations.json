@@ -987,7 +987,6 @@
     "tests/test_atomic_write_consolidation.py::test_no_hand_rolled_temp_rename_writer_remains": 1.457694,
     "tests/test_atomic_write_migration.py::TestRecordExportPersistence::test_materialize_bytes_private_modes_and_fault_preserve_prior": 0.129376,
     "tests/test_backend_claude.py::test_injected_claude_uses_run_local_transport_for_version_and_main_spawn[version-times-out]": 2.050228,
-    "tests/test_backend_claude_native_finalization.py::test_native_claude_keeps_only_schema_serialization_tool": 1.077478,
     "tests/test_backend_codex.py::TestResolveRealGitDir::test_concurrent_first_wave_callers_never_see_unresolved_flag": 0.110088,
     "tests/test_backend_codex.py::test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd": 0.104806,
     "tests/test_backend_codex.py::test_codex_read_only_mirrors_symlinks_and_unstaged_deletions": 0.213845,
