@@ -139,8 +139,8 @@ use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
 Profile discovery/arbitration strategies cannot disable host obligations.
 
-The run's artifact session stages the report then atomically writes schema-7
-`committed-review.json`: claims/challenge evidence, work records, typed coverage,
+The run's artifact session stages the report then atomically writes the
+[versioned](#captured-local-source) `committed-review.json`: claims/challenge evidence, work records, typed coverage,
 run/source and complete planned-work identity. Prior/competing bytes survive publication failure.
 `CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
 and `capture_state` report installation and trajectory independently. Admission,
@@ -352,8 +352,8 @@ Trusted host writers publish `review-output.md`, `committed-review.json` and
 private session and conflict-safe installation. Existing source public artifacts
 are restored unchanged. Diagnostics stay under `private_base`; output destinations
 do not become model write grants. Recorded policy/configuration identities omit
-credentials and callback capabilities. This additive API retains committed result
-schema 7 and extension API 8.
+credentials and callback capabilities. This additive API retains the committed result
+schema and extension API 8.
 
 For ordinary hosted committed input, the preparation attestation is required **before Git worktree materialization**:
 the operator must control/audit source Git configuration, checkout hooks and filters.
@@ -371,8 +371,8 @@ The same embedding API accepts
 `daydream.immutable_review.ImmutableReviewInput.from_dict(envelope)`. The trusted
 host supplies schema version 1; repository configuration cannot provide identity,
 source attestation or execution authority. The canonical envelope is frozen before
-model work and retained in schema-8 `committed-review.json`. Ordinary committed
-results use schema 7. Both result versions retain the local analyzed revision,
+model work and retained in the immutable [result version](#captured-local-source) of
+`committed-review.json`. Both result versions retain the local analyzed revision,
 source references, complete planned-work binding and independent execution outcomes.
 
 ```python
@@ -531,13 +531,11 @@ eight-call ceiling or hidden nested tool execution.
 Committed-review bindings set `protected_submission=True`: the last start belongs to
 `structured_output`. Any other start that would take it, ordinary or host tool and
 including parallel-batch members, is counted in `denied_starts` and refused with
-correctable `capacity_protected` without charging (`charged_starts` excludes it) or
-closing authority; more than `PROTECTED_DENIAL_LIMIT` (32) denials fail closed.
-`capacity()` reports both counts and `run_agent`'s stream ceiling excludes denied starts.
-Each execution entry records `allocation`, `observed_starts` and `overshoot` (observed
-minus charged); overshoot never reduces later reserves. Pi denies prospectively at
-`/admit`, so a denied start is still observed and reported as overshoot; Claude and
-Codex only observe starts (committed review is Pi-only today).
+correctable `capacity_protected` without charging or closing authority; a bounded
+number of denials then fails closed. `capacity()` reports both counts and `run_agent`'s
+stream ceiling excludes denied starts. Pi denies prospectively at `/admit`, so a denied
+start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
+that never reduces later reserves; Claude and Codex only observe starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension; `/admit` charges each start, and `/call` serves
