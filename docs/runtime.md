@@ -153,8 +153,8 @@ and external delivery remain separate integration work.
 
 `CommittedReviewRequest.assignment_policy="broad"` (the default) dispatches one
 discovery work over every target. `"adaptive"` partitions the inventory with
-`StageInputFactory.assignment_batches` (whole parts, at most four files/64 KiB, inventory
-order) into concurrent local discovery work under
+`StageInputFactory.assignment_batches` (whole parts, at most four files within the
+transport's assignment byte allowance, inventory order) into concurrent local discovery work under
 `anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
 trajectory. It decomposes only when every batch keeps a usable two-start allocation
 after the cross-assignment floor; otherwise it runs one broad assignment. There is no
@@ -537,7 +537,8 @@ correctable `capacity_protected` without charging or closing authority; a bounde
 number of denials then fails closed. `capacity()` reports both counts and `run_agent`'s
 stream ceiling excludes denied starts. Pi denies prospectively at `/admit`, so a denied
 start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
-that never reduces later reserves; Claude and Codex only observe starts.
+that never reduces later reserves. Committed review is Pi-only; for other adapters, which
+do not serve host tools, Claude and Codex only observe starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension; `/admit` charges each start, and `/call` serves

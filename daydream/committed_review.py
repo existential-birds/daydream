@@ -371,7 +371,18 @@ class Review:
         claims = {uid: revision for (uid, revision), owner in self._claim_owner.items()
                   if owner == work_id and self._claims[uid]["revision"] == revision
                   and self._claims[uid]["disposition"] == "unresolved"}
+        work = self.work[work_id]
+        if work.kind == "challenge" and not work.live and not work.superseded_by:
+            # A closed challenge also answers for the pending revisions it authored, so the
+            # challenge that judges them supersedes it and its failure cannot outlive them.
+            claims.update(self._authored(work_id))
         return tuple(sorted(targets, key=self._index.__getitem__)), claims
+
+    def _authored(self, work_id: str) -> dict[str, int]:
+        """Pending, unheld revisions a work item authored."""
+        return {uid: c["revision"] for uid, c in self._claims.items()
+                if c["revised_by"] == work_id and c["disposition"] == "unresolved"
+                and (uid, c["revision"]) not in self._claim_owner}
 
     @property
     def decomposed(self) -> bool:
@@ -419,6 +430,8 @@ class Review:
         covered_claims = {(uid, rev) for _, claims in planned for uid, rev in claims.items()}
         holders = ({self._target_owner[t] for t in covered_targets if t in self._target_owner}
                    | {self._claim_owner[c] for c in covered_claims if c in self._claim_owner})
+        authors = {self._claims[uid]["revised_by"] for uid, _ in covered_claims}
+        holders |= {author for author in authors if set(self.leftovers(author)[1].items()) & covered_claims}
         for holder in holders:
             targets, claims = self.leftovers(holder)
             if not set(targets) <= covered_targets or not set(claims.items()) <= covered_claims:

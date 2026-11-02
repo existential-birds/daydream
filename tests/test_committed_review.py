@@ -876,7 +876,11 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         value["planned_work_id"] = planned_work_id(value["analyzed_revision"], value["assignments"])
     elif corruption == "self-judged":
         # A verdict from the context that authored the revision is not a fresh challenge.
-        value["claims"][0]["revised_by"] = value["claims"][0]["challenge_evidence"][0]["work_id"]
+        # Keep provenance valid so only the fresh-challenge guard can reject it.
+        judge = value["claims"][0]["challenge_evidence"][0]["work_id"]
+        value["claims"][0]["revised_by"] = judge
+        next(w for w in value["work"] if w["work_id"] == judge)["admitted_claims"].append(
+            {"uid": value["claims"][0]["uid"], "revision": value["claims"][0]["revision"]})
     elif corruption == "forged-author":
         # Attribution must match the work that admitted the claim, not any retained work.
         value["claims"][0]["work_id"] = value["claims"][0]["challenge_evidence"][0]["work_id"]
@@ -886,8 +890,11 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         value["work"].append({**deepcopy(value["work"][0]), "work_id": "work:3", "admitted_targets": [],
                               "admitted_claims": []})
     elif corruption == "double-credit":
+        # A superseded parent holds no current responsibility, so only double credit can reject it.
         credited = value["work"][0]["admitted_targets"][:1]
+        value["work"][0].update(state="superseded", superseded_by=["work:3"])
         value["work"].append({**deepcopy(value["work"][0]), "work_id": "work:3", "kind": "follow_up",
+                              "parents": ["work:1"], "state": "accepted", "superseded_by": [],
                               "targets": credited, "admitted_targets": credited, "admitted_claims": []})
     else:
         terminal = value["terminal_result"]
@@ -898,9 +905,9 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         _forge_completion(value)
     value["findings"] = deepcopy(value["claims"])
     with pytest.raises(ValueError, match={
-        "self-judged": "identity/provenance", "unrecorded-verdict": "challenge evidence",
+        "self-judged": "invalid retained challenge evidence", "unrecorded-verdict": "invalid retained challenge",
         "forged-author": "identity/provenance", "overlap": "overlap",
-        "double-credit": "overlap|duplicate completion credit"}.get(corruption, "")):
+        "double-credit": "duplicate completion credit"}.get(corruption, "")):
         validate_committed_result(value)
 
 
@@ -2272,3 +2279,34 @@ async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
     assert work["work:4"]["claims"] == [{"uid": claim["uid"], "revision": 2}]
     assert sealed["findings"][0]["revision"] == 2 and sealed["findings"][0]["revised_by"] == "work:3"
     assert sealed["terminal_result"]["analysis_state"] == "complete"
+
+
+async def test_failed_revising_challenge_is_superseded_by_the_challenge_that_judges_it(
+    review_inputs: StageInputFactory,
+) -> None:
+    """A challenge that revises a claim and then fails answers for its new revision.
+
+    The new revision had no holder, so the next challenge had no parent and the stale
+    failure kept the review incomplete after the revision was resolved elsewhere.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    await _submit(review, "discovery", _discovery(review_inputs))
+    _clean(review, "work:1")
+    claim = review.pending()[0]
+    reviser, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
+    revised["payload"].update(grounds="Revised grounds.", evidence_refs=_selectors(review_inputs))
+    async with reviser.session():
+        _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
+    reviser.close_authority()
+    _clean(review, "work:2", "host_wall_budget_exhaustion")
+    judge, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    async with judge.session():
+        value = {"verdicts": [_verdict(review_inputs, review.pending()[0])], "claims": []}
+        judge.admit("terminal", "structured_output", value, terminal=True)
+        judge.submit("terminal", value)
+    _clean(review, "work:3")
+    sealed = review.seal({})
+    work = {record["work_id"]: record for record in sealed["work"]}
+    assert work["work:2"]["state"] == "superseded" and work["work:3"]["parents"] == ["work:2"]
+    assert sealed["findings"][0]["revised_by"] == "work:2" and sealed["terminal_result"]["analysis_state"] == "complete"
