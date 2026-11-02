@@ -845,7 +845,8 @@ async def test_shared_retry_recovery_spans_work_items_without_renewal_or_early_c
 
     Challenge previously built a fresh budget and renewed recovery. Merely sharing the
     ledger instead let the first failing local work clamp the allowance to its own short
-    deadline, starving later required work of any retry.
+    deadline, starving later required work of any retry; and stop evidence computed as the
+    shared ledger's delta attributed earlier or concurrent work's retries to this invocation.
     """
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -854,14 +855,26 @@ async def test_shared_retry_recovery_spans_work_items_without_renewal_or_early_c
     for deadline, expected in [(30.0, "wall_budget_exceeded"), (1_000.0, None)]:
         budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=10), deadline=deadline,
                                            retry_recovery_budget=recovery)
-        backend = _retryable_failing_backend(advance=fake.advance, advance_s=20.0)
+        sibling = [5.0] if expected is None else []
+
+        def advance(seconds: float, sibling: list[float] = sibling) -> None:
+            fake.advance(seconds)
+            if sibling:
+                recovery.charge(sibling.pop())  # A concurrent sibling charges the shared ledger mid-invocation.
+
+        backend = _retryable_failing_backend(advance=advance, advance_s=20.0)
         if expected is not None:
             _, _, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW,
                                            investigation_budget=budget, retry_recovery_allowance_s=100.0)
             assert reason == expected and recovery.spent_s == pytest.approx(20.0)
             continue
+        recorder = make_recorder(tmp_path)
         with pytest.raises(_RetryableBackendError):
-            await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW,
-                            investigation_budget=budget, retry_recovery_allowance_s=100.0)
+            async with recorder:
+                await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW,
+                                investigation_budget=budget, retry_recovery_allowance_s=100.0)
     # The later work retries only within what remains of the one cumulative allowance.
-    assert backend.call_count == 4 and recovery.spent_s == pytest.approx(80.0) and recovery.spent_s <= 100.0
+    assert backend.call_count == 4 and recovery.spent_s == pytest.approx(85.0) and recovery.spent_s <= 100.0
+    # Its stop evidence reports only its own retries, not the earlier work's shared-ledger charge.
+    _traj, meta = _budget_stop(recorder)
+    assert meta["retry_recovery_spent_s"] == pytest.approx(60.0)

@@ -528,7 +528,14 @@ async def _run_agent(
                     investigation_budget.retry_recovery_budget = recovery
             else:
                 recovery.allowance_s = min(recovery.allowance_s, resolved_allowance)
-            recovery_spent_before = recovery.spent_s
+            # A recovery ledger may be shared by concurrent work; telemetry reports only
+            # this invocation's own charges, never a sibling's.
+            invocation_recovery_s = 0.0
+
+            def charge_recovery(seconds: float) -> None:
+                nonlocal invocation_recovery_s
+                recovery.charge(seconds)
+                invocation_recovery_s += max(0.0, seconds)
             if host_tools is not None:
                 host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
             native_calls_before = host_tools.calls if host_tools is not None else 0
@@ -581,7 +588,7 @@ async def _run_agent(
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before + pending,
+                        retry_recovery_spent_s=invocation_recovery_s + pending,
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
@@ -988,11 +995,11 @@ async def _run_agent(
                         # backend_s, or backend_s + backoff_s would overcount.
                         charged = telemetry.charge_attempt(clock.monotonic())
                         if telemetry.attempt_is_retry:
-                            recovery.charge(charged)
+                            charge_recovery(charged)
                         # The backoff sleep is retry overhead: charge it to the
                         # cumulative allowance before sleeping so a later
                         # failure sees the un-rebased remainder.
-                        recovery.charge(delay)
+                        charge_recovery(delay)
                         await anyio.sleep(delay)
                         telemetry.backoff_s += delay
                         # Recheck after backoff because a sibling may have opened the circuit.
@@ -1036,7 +1043,7 @@ async def _run_agent(
                                 clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
                             )
                             if telemetry.attempt_is_retry:
-                                recovery.charge(charged)
+                                charge_recovery(charged)
 
             # Emit at most one stop record. In-flight deadline stops retain partials;
             # pre-dispatch stops discard them. Recorder failure cannot change the return value.
@@ -1056,7 +1063,7 @@ async def _run_agent(
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before,
+                        retry_recovery_spent_s=invocation_recovery_s,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
                         ),
