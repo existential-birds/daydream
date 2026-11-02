@@ -171,28 +171,14 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
 _MAKE_INVOCATION_RE = re.compile(r"^make\s+([A-Za-z0-9_.-]+)\s*$")
 
 
-def _dry_run_recipe(target: str) -> str:
-    """Read the real recipe without inherited flags or recursive directory messages."""
-    env = {key: value for key, value in os.environ.items() if key not in ("MAKEFLAGS", "MFLAGS")}
-    proc = subprocess.run(
-        ["make", "--no-print-directory", "-n", target], cwd=_ROOT, env=env,
-        capture_output=True, text=True, check=False,
-    )
-    assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
-    return proc.stdout
-
-
 def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """The real check job invokes declared gate steps, plus stated CI-only ones."""
     monkeypatch.setenv("MAKEFLAGS", "-w")
     monkeypatch.setenv("MFLAGS", "-w")
     workflow = load_workflow(_CI_WORKFLOW)
     steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
-    # Script tests are a component of make test, shared with the static CI job.
-    script_recipe = _dry_run_recipe("test-scripts").strip()
-    assert script_recipe in _dry_run_recipe("test")
     assert all(reason.strip() for reason in _CI_ONLY_STEPS.values())
-    targets = {*_gate_steps(), *_static_steps(), "test-scripts"}
+    targets = {*_gate_steps(), *_static_steps()}
     for step in steps:
         command = step.get("run")
         if not isinstance(command, str) or step.get("name") in _CI_ONLY_STEPS:

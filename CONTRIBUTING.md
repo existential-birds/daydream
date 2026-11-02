@@ -84,7 +84,7 @@ The focused targets, all run from the repo root:
 |---|---|
 | `make lint` | Ruff over `daydream tests scripts/ci_*.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
 | `make typecheck` | mypy over `daydream tests scripts/ci_*.py` |
-| `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
+| `make test` | `pytest -n logical` (one worker per logical CPU) with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | actionlint over `.github/workflows/*.yml` plus the packaged workflow templates |
@@ -105,7 +105,7 @@ which runs, in order:
 lockcheck install static test coverage-report
 ```
 
-`static` runs `lint deadcode typecheck package-check actionlint check-naming` in
+`static` runs `lint deadcode typecheck package-check actionlint check-naming test-scripts` in
 parallel (the Makefile's `STATIC_CHECKS`), so the gate pays for the slowest of them.
 
 This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —

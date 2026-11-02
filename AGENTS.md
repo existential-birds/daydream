@@ -37,7 +37,7 @@ and validation, with routine cleanup and implementation history left out of the 
 
 ```bash
 make check      # lockcheck + install + static + test + coverage-report (the gate)
-                # static runs lint, deadcode, typecheck, package-check, actionlint, check-naming in parallel
+                # static runs lint, deadcode, typecheck, package-check, actionlint, check-naming, test-scripts in parallel
 ```
 
 The pre-push hook checks signatures and runs this gate. Follow
