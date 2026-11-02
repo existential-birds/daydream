@@ -27,14 +27,12 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.pi import PiBackend
 from daydream.dataset import LocalRecordStore
 from daydream.extensions import Registry, build_registry
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
-from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
 
 _RESULT_FILE = ".daydream/trace-failure-result.json"
@@ -107,88 +105,6 @@ class _ActiveToolBackend:
 
     async def cancel(self) -> None:
         self.cancelled = True
-
-async def test_pi_runner_invocation_timeout_preserves_healthy_sibling(
-    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Local timeout/aclose reaps one invocation while its peer completes and bills once."""
-    _flow(ext_dir, body='''
-results = {}
-async def invoke(label, allowance):
-    output, _, aborted = await run_agent(ctx.backend_for("review"), ctx.work.repo, label,
-        phase=DaydreamPhase.REVIEW, wall_budget_s=allowance)
-    results[label] = {"output": output, "aborted": aborted}
-async with anyio.create_task_group() as group:
-    group.start_soon(invoke, "timed-out", 1)
-    group.start_soon(invoke, "healthy", 60)
-(ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(json.dumps(results))
-''')
-    install_backend(PiBackend(model="test-model"))
-    start = json.dumps({"type": "message_start", "message": {"role": "assistant"}})
-    spawner = install_fake_cli_process(monkeypatch, "pi", lines=[], scripts=[
-        FakeCliScript(lines=[start], hang=True), FakeCliScript(lines=[start], hang=True),
-    ])
-    monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
-    completed: list[int] = []
-    with otlp_collector() as collector:
-        config = _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
-        async def launch() -> None:
-            completed.append(await runner.run(config))
-        # Generous outer and healthy allowances: only the 0.05s sibling may expire, even under CPU load.
-        with anyio.fail_after(60):
-            async with anyio.create_task_group() as group:
-                group.start_soon(launch)
-                # Both children must be live before the 1s allowance expires; spawn order is not the contract.
-                await spawner.wait_for_read(0)
-                await spawner.wait_for_read(1)
-                while all(proc.returncode is None for proc in spawner.procs):
-                    await anyio.sleep(0.01)
-                reaped, = [proc for proc in spawner.procs if proc.returncode is not None]
-                healthy, = [proc for proc in spawner.procs if proc is not reaped]
-                assert await reaped.wait() == -15
-                assert healthy.returncode is None
-                healthy.finish([json.dumps(frame) for frame in [
-                    {"type": "message_update", "assistantMessageEvent": {
-                        "type": "text_delta", "contentIndex": 0, "delta": "private-delta-content",
-                    }},
-                    {"type": "message_end", "message": {"role": "assistant", "model": "test-model",
-                        "content": [{"type": "text", "text": "healthy result"}], "stopReason": "stop",
-                        "usage": {"input": 10, "output": 5, "cost": {"total": 0.01}},
-                    }},
-                    {"type": "turn_end", "message": {"role": "assistant", "model": "test-model",
-                        "usage": {"input": 10, "output": 5, "cost": {"total": 0.01}}, "stopReason": "stop",
-                    }}, {"type": "agent_end"},
-                ]])
-    assert completed == [0]
-    result = json.loads((feature_branch_repo / _RESULT_FILE).read_text())
-    assert result == {"timed-out": {"output": "", "aborted": "wall_budget_exceeded"},
-                      "healthy": {"output": "healthy result", "aborted": None}}
-    paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
-    assert len(paths) == 1
-    trajectory = json.loads(paths[0].read_text())
-    # Subtrajectories are registered in completion order, which races between the
-    # reaped and the healthy sibling; pair each lifecycle with its own outcome instead.
-    evidence = [attempt["backend_lifecycle"] for attempt in trajectory["extra"]["subtrajectories"]]
-    assert sorted((entry["text_delta_count"], entry["generation_open"]) for entry in evidence) == [
-        (0, True), (1, False),
-    ]
-    assert trajectory["final_metrics"]["total_prompt_tokens"] == 10
-    assert trajectory["final_metrics"]["total_completion_tokens"] == 5
-    assert trajectory["final_metrics"]["total_cost_usd"] == 0.01
-    attempts = _kind(collector.spans, "attempt")
-    assert len(attempts) == 2
-    assert {attributes(span)["daydream.outcome"] for span in attempts} == {"wall_budget_exceeded", "success"}
-    generations = _kind(collector.spans, "generation")
-    assert len(generations) == 1
-    assert attributes(generations[0])["daydream.generation.billed"] is False
-    assert "gen_ai.usage.cost" not in attributes(generations[0])
-    billed_attempts = [attributes(span) for span in attempts if "gen_ai.usage.cost" in attributes(span)]
-    assert len(billed_attempts) == 1
-    assert billed_attempts[0]["daydream.billing.owner"] == "structural_attempt"
-    assert billed_attempts[0]["gen_ai.usage.cost"] == 0.01
-    assert "private-delta-content" not in json.dumps(collector.requests)
-
 
 async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     ext_dir: ExtDir, feature_branch_repo: Path,

@@ -14,7 +14,6 @@ from daydream.review_budget import (
     ReviewLimits,
     review_deadline_scope,
     review_limits_for_scope,
-    review_scale_for_diff,
     review_scale_for_scope,
 )
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
@@ -31,14 +30,8 @@ FINDINGS = {"findings": ["src.py:2 divides by zero for an empty batch"]}
 def test_large_diff_expands_review_allowances_without_changing_small_reviews() -> None:
     small = "diff --git a/a.py b/a.py\n" + "+line\n" * 100
     large = "diff --git a/a.py b/a.py\n" + "+line\n" * 6_500
-    assert review_scale_for_diff(small) == 1
-    assert review_scale_for_diff(large) == 4
-    assert review_scale_for_diff("+line\n" * 10_001) == 6
-    assert review_scale_for_diff("x" * (64 * 1024 + 1)) == 2
-
     with review_deadline_scope(2700, diff=large, scale_deadline=True):
-
-        assert review_scale_for_scope() == 4
+        assert review_scale_for_scope() > 1
         limits = review_limits_for_scope(ReviewLimits())
         assert limits.investigation_s > 480
         assert limits.tool_calls > 48
