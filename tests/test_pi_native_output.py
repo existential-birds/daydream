@@ -51,7 +51,7 @@ from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.harbor_review import assignment_from_request, looked_up_targets
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
-from tests.test_committed_review import immutable_input_for
+from tests.test_committed_review import _adaptive_repo, immutable_input_for
 
 # Declared loopback model limits must fit committed review's native-capacity preflight.
 FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 16384
@@ -1709,7 +1709,8 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
     history, or unavailable selections erasing earlier admissions all went unnoticed.
     Investigation then continues toward exhaustion: a two-member batch after 95 of 96
     starts previously spent the protected submission start and killed the assignment;
-    an unresolved cross-source concern must neither be dropped nor repeat challenge.
+    an unresolved cross-source concern is retained and re-challenged once, after another
+    claim progressed, then stops rather than spending reserves on evidence-free repeats.
     The scripted model proves software behavior, not review quality.
     """
     repo = tmp_path / "source"
@@ -1861,3 +1862,72 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
     assert trajectory["final_metrics"]["total_completion_tokens"] == sum(u["completion_tokens"] for u in billed)
     rejection = next(m for r in native_provider.requests for m in r["messages"] if m.get("tool_call_id") == "call-55")
     assert "no available regular blob" in rejection["content"]
+
+
+async def test_adaptive_native_review_challenges_a_spanning_defect_in_a_fresh_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
+) -> None:
+    """Installed Pi runs concurrent local assignments, required cross-assignment and fresh challenge.
+
+    Scripted program journeys substitute run_agent, so they cannot show that the host
+    dispatches cross-assignment through real native sessions when every local
+    assignment is empty, that each sibling's native starts are charged to its own
+    share, or that challenge of the spanning claim carries none of its author's history.
+    """
+    repo, base = _adaptive_repo(tmp_path)
+    (native_provider.config / "settings.json").write_text(json.dumps({
+        "defaultProvider": "output-fixture", "defaultModel": "output-model", "defaultProjectTrust": "always",
+        "retry": {"enabled": False, "maxRetries": 0}}))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    seen: dict[str, list[dict[str, Any]]] = {}
+
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        assignment = assignment_from_request(request)
+        work = assignment["work"]
+        seen.setdefault(work["work_id"], []).append(request)
+        if work["kind"] == "discovery":
+            # Every local assignment is empty: decided targets, no concerns.
+            return [(f"{work['work_id']}-final", "structured_output", {"targets": [
+                {"target_id": t, "status": "reviewed", "reason": "", "evidence_refs": []}
+                for t in work["targets"]["ids"]], "claims": []})]
+        if work["kind"] == "cross_assignment":
+            targets = looked_up_targets(request)
+            if not targets:
+                # A parallel two-member lookup of original source across both assignments.
+                return [(f"cross-{name}", "review_source", {"target_id": name, "path": None, "cursor": None})
+                        for name in ("a.py", "f.py")]
+            refs = [{"source_id": next(o["source_id"] for o in targets[name]["source_options"] if o["side"] == "new"),
+                     "basis": "supplied_diff", "source_range": None} for name in ("a.py", "f.py")]
+            return [("cross-final", "structured_output", {"targets": [], "claims": [{
+                "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
+                "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
+                            "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
+                            "file": "f.py", "line": None, "evidence_refs": refs}}]})]
+        claim, = assignment["claims"]
+        return [("challenge-final", "structured_output", {"verdicts": [{
+            "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+            "grounds": "No guard precedes the division in captured a.py.", "evidence_refs": []}], "claims": []})]
+
+    native_provider.choose = choose
+    result = await run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
+        limits=ReviewLimits(240, 12, 40), assignment_policy="adaptive"))
+    value = result.to_dict()
+    validate_committed_result(value)
+    assert result.complete
+    entries = {e["work_id"]: e for e in value["execution"]}
+    kinds = {r["work_id"]: r["kind"] for r in value["work"]}
+    assert sorted(kinds.values()) == ["challenge", "cross_assignment", "discovery", "discovery"]
+    cross = next(w for w, k in kinds.items() if k == "cross_assignment")
+    challenge = next(w for w, k in kinds.items() if k == "challenge")
+    # Native starts are charged per work item from its own stream: siblings 1 each, cross 2 lookups + submit.
+    assert sorted((entries[w]["allocation"], entries[w]["observed_starts"])
+                  for w, k in kinds.items() if k == "discovery") == [(7, 1), (8, 1)]
+    assert (entries[cross]["allocation"], entries[cross]["observed_starts"]) == (18, 3)
+    assert entries[challenge]["allocation"] == 40 - 5
+    finding, = value["findings"]
+    assert finding["work_id"] == cross and finding["challenge_evidence"][0]["work_id"] == challenge
+    # Fresh challenge context: its first native request carries no cross-assignment history.
+    first = seen[challenge][0]
+    assert [m["role"] for m in first["messages"] if m["role"] not in {"system", "developer"}] == ["user"]
+    assert "cross-final" not in json.dumps(seen[challenge]) and "cross-a.py" not in json.dumps(seen[challenge])

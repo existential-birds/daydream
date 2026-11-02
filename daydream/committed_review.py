@@ -230,8 +230,12 @@ class Review:
         return sources.canonicalize(selectors, (ref for part in parts for ref in part["source_refs"]),
                                     require_assigned=required)
 
+    def _holds(self, work_id: str, uid: str, revision: int) -> bool:
+        """A revision is this work's own, or an unowned revision it authored; never another's."""
+        return self._claim_owner.get((uid, revision), work_id) == work_id
+
     def _claim_change(self, sources: _SubmissionSources, claim: dict[str, Any],
-                      allowed: dict[str, int]) -> dict[str, Any]:
+                      allowed: dict[str, int], work_id: str) -> dict[str, Any]:
         """Validate one proposed claim against frozen sources; installation applies it later."""
         claim["payload"]["evidence_refs"] = self._refs(sources, claim["payload"]["evidence_refs"])
         payload = claim["payload"]
@@ -256,7 +260,8 @@ class Review:
                 raise HostToolRejected('new claims require uid="" and revision=0')
             return claim
         existing = self._claims.get(claim["uid"])
-        if claim["uid"] not in allowed or existing is None or existing["revision"] != claim["revision"]:
+        if (claim["uid"] not in allowed or existing is None or existing["revision"] != claim["revision"]
+                or not self._holds(work_id, claim["uid"], claim["revision"])):
             raise HostToolRejected("claim.uid/revision: revise a currently assigned retained claim revision")
         if claim["source_uids"] != existing["source_uids"]:
             raise HostToolRejected("claim.source_uids: an existing claim retains its predecessor identity")
@@ -523,7 +528,7 @@ class Review:
                 for submitted in canonical["claims"]:
                     if submitted["uid"] and any(c["uid"] == submitted["uid"] for c in changes):
                         raise HostToolRejected("claims: update a retained uid at most once per submission")
-                    changes.append(self._claim_change(sources, submitted, work.claims))
+                    changes.append(self._claim_change(sources, submitted, work.claims, work_id))
 
                 def install() -> dict[str, Any]:
                     # No await, I/O, or model decision between final checks and installation.
@@ -560,7 +565,8 @@ class Review:
                         else:
                             uid = change["uid"]
                             existing = claims[uid]
-                            if existing["revision"] != change["revision"]:
+                            if (existing["revision"] != change["revision"]
+                                    or not self._holds(work_id, uid, change["revision"])):
                                 raise HostToolRejected(f"claims: claim {uid} changed before installation; "
                                                        "revise its current revision")
                             if change["payload"] != existing["payload"]:
@@ -593,7 +599,8 @@ class Review:
                     for identifier in decisions:
                         del self._target_owner[identifier]
                     self._claims = claims
-                    for uid in [*verdicts, *revised]:
+                    # An unresolved verdict leaves the revision with this work so a successor supersedes it.
+                    for uid in [*(u for u, v in verdicts.items() if v["verdict"] != "unresolved"), *revised]:
                         # A judged or superseded revision is no longer anyone's responsibility.
                         self._claim_owner.pop((uid, self._claims[uid]["revision"] - (uid in revised)), None)
                     judged.update(verdicts)
@@ -1128,8 +1135,10 @@ class _Schedule:
         self.local_calls = self.investigation_calls - (cross_calls if self.decompose else 0)
         self.cross_deadline = started + window / 2
         self.local_deadline = started + window * (3 / 8 if self.decompose else 1 / 2)
-        # agent.run_agent narrows the allowance once; every work item then shares its consumption.
+        # One run-wide recovery window: activated against the review deadline, so the first
+        # failing work cannot clamp it for later phases; agent.run_agent narrows the allowance.
         self.recovery = RetryRecoveryBudget(math.inf)
+        self.recovery.activate(started, deadline)
         self.spent = self.local_spent = 0
         challenge = {"challenge_tool_calls": limits.tool_calls - self.investigation_calls,
                      "challenge_s": round(deadline - self.cross_deadline, 3), "finalization_s": limits.finalization_s}

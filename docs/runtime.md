@@ -188,14 +188,16 @@ claim ordinals. A sibling conflict is a correctable rejection; closure or deadli
 remains fatal.
 
 All work shares one ledger of observed tool starts, wall clock and a single
-retry-recovery budget; backoff cannot renew them. Investigation receives half of the
+retry-recovery budget, activated for the whole review window so the first failing work
+cannot clamp it for later phases; backoff cannot renew them. Investigation receives half of the
 tool allowance and challenge the remainder. Under decomposition, cross-assignment keeps
 `max(2, half // 4)` starts; local work runs until 3/8 of the review window,
 cross-assignment until 1/2 and challenge for the rest. Otherwise discovery runs until
 1/2. `finalization_s` is always reserved. Earlier work cannot spend later reserves;
 unspent capacity carries forward. Challenge takes every pending revision not held by
-live work in a fresh context, and is re-dispatched only for new revisions, after
-progress, or once after a failure, superseding the failed challenge work.
+live work in a fresh context. It is re-dispatched for new revisions, after a round
+that resolved a verdict or changed a claim, or once after an evidence-free failure; an
+unresolved verdict keeps the revision with its work, so the next round supersedes it.
 
 Each shard's status derives from its targets and the current (non-superseded) work
 responsible for them; required phases are `challenge` and `cross_assignment`.

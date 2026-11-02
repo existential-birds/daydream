@@ -634,7 +634,9 @@ async def _run_agent(
                         )
                         stop_recorded = True
                     break
-                if ((investigation_budget is not None and investigation_budget.remaining_tool_calls == 0)
+                # With host tools the binding's charged ledger (which excludes protected denials) governs.
+                if ((investigation_budget is not None and host_tools is None
+                     and investigation_budget.remaining_tool_calls == 0)
                     or ((investigation_budget is not None or host_tools is not None)
                         and remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
                     aborted_reason = "tool_call_budget_exceeded"

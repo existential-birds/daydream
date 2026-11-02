@@ -379,7 +379,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         recovery = kwargs["investigation_budget"].retry_recovery_budget
         dispatches.append(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"],
-             "recovery_spent": recovery.spent_s}
+             "recovery_spent": recovery.spent_s, "recovery_active": recovery.active}
         )
         if assignment["kind"] == "discovery":
             # Retry overhead spent by discovery must stay spent for every later work item.
@@ -595,6 +595,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     assert dispatches[0]["allocation"] == 5
     # One cumulative retry-recovery ledger: challenge previously received a fresh allowance.
     assert all(d["recovery_spent"] >= 1.5 for d in dispatches[1:])
+    # Activated for the whole review window up front, so a local failure cannot clamp it.
+    assert all(d["recovery_active"] for d in dispatches)
     # The broad default never decomposes; cross-assignment is an explicit host no-op.
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": False,
                                                      "planned_assignments": 1, "cross_assignment": "not_applicable"}
@@ -691,6 +693,8 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     value = result.to_dict()
     assert result.output_installed and not result.complete
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
+    # The deliberate #1628 bump: work records, attribution and capacity evidence are restart-only.
+    assert RESULT_VERSIONS == {'committed': 7, 'immutable': 8, 'local': 9}
     assert value['schema_version'] == RESULT_VERSIONS['local'] and value['terminal_result']['schema_version'] == 2
     validate_committed_result(value)
     relabeled = deepcopy(value)
@@ -849,7 +853,8 @@ async def test_hosted_policy_refuses_unsupported_authority_before_source_prepara
 
 
 @pytest.mark.parametrize("corruption", ["wrong-source", "unchallenged-revision", "foreign-plan", "empty-execution",
-                                        "self-judged", "double-credit"])
+                                        "self-judged", "double-credit", "forged-author", "unrecorded-verdict",
+                                        "overlap"])
 async def test_sealed_result_cannot_rebind_publication_or_planned_work(
     review_inputs: StageInputFactory,
     corruption: str,
@@ -872,6 +877,14 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
     elif corruption == "self-judged":
         # A verdict from the context that authored the revision is not a fresh challenge.
         value["claims"][0]["revised_by"] = value["claims"][0]["challenge_evidence"][0]["work_id"]
+    elif corruption == "forged-author":
+        # Attribution must match the work that admitted the claim, not any retained work.
+        value["claims"][0]["work_id"] = value["claims"][0]["challenge_evidence"][0]["work_id"]
+    elif corruption == "unrecorded-verdict":
+        value["work"][1]["verdicts"] = []
+    elif corruption == "overlap":
+        value["work"].append({**deepcopy(value["work"][0]), "work_id": "work:3", "admitted_targets": [],
+                              "admitted_claims": []})
     elif corruption == "double-credit":
         credited = value["work"][0]["admitted_targets"][:1]
         value["work"].append({**deepcopy(value["work"][0]), "work_id": "work:3", "kind": "follow_up",
@@ -884,8 +897,10 @@ async def test_sealed_result_cannot_rebind_publication_or_planned_work(
         assert value["execution"] == []
         _forge_completion(value)
     value["findings"] = deepcopy(value["claims"])
-    with pytest.raises(ValueError, match={"self-judged": "challenge evidence",
-                                          "double-credit": "duplicate completion credit"}.get(corruption, "")):
+    with pytest.raises(ValueError, match={
+        "self-judged": "identity/provenance", "unrecorded-verdict": "challenge evidence",
+        "forged-author": "identity/provenance", "overlap": "overlap",
+        "double-credit": "overlap|duplicate completion credit"}.get(corruption, "")):
         validate_committed_result(value)
 
 
@@ -1969,7 +1984,11 @@ def _decide(binding: HostToolBinding, targets: Sequence[str]) -> list[dict[str, 
             "source_id"], "basis": "supplied_diff", "source_range": None}]} for target in targets]
 
 
-@pytest.mark.parametrize("scenario", ["empty-local", "follow-up", "evidence-free", "contention"])
+_SCENARIOS = ["empty-local", "follow-up", "evidence-free", "contention", "native-capacity", "revision", "title",
+              "undecomposed"]
+
+
+@pytest.mark.parametrize("scenario", _SCENARIOS)
 async def test_adaptive_review_transfers_unfinished_work_and_investigates_across_assignments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str,
 ) -> None:
@@ -1977,110 +1996,189 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
 
     Broad-only journeys never split work, so they missed: unfinished targets lost or
     double-credited on supersession, a closed parent's late callback admitting work,
-    one sibling's install fatally closing another, and empty local results skipping the
-    spanning defect between a.py (ratio) and f.py (its caller) in different assignments.
+    one sibling's install between another's validation and installation closing it,
+    renewed sibling allocations, and empty local results skipping the spanning defect
+    between a.py (ratio) and f.py (its caller) in different assignments. Revision rows
+    prove the scheduler dispatches a new challenge only for a semantic revision.
     """
     repo, base = _adaptive_repo(tmp_path)
     dispatches: list[dict[str, Any]] = []
     stale: list[HostToolBinding] = []
-    arrived, both = 0, asyncio.Event()
+    arrivals: dict[str, tuple[HostToolBinding, dict[str, Any]]] = {}
+    both, installed = asyncio.Event(), asyncio.Event()
+    sibling_receipt: dict[str, Any] = {}
+
+    def spend(binding: HostToolBinding, count: int) -> None:
+        for number in range(count):
+            binding.admit(f"read-{binding.calls}-{number}", "read", {})
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
-        nonlocal arrived
         assignment = _assignment(kwargs)
         work, binding = assignment["work"], kwargs["host_tools"]
-        dispatches.append({**work, "binding": binding, "persist": kwargs["persist_session"],
-                           "allocation": kwargs["tool_call_budget"], "claims": assignment["claims"]})
+        work_id, targets = work["work_id"], work["targets"]["ids"]
+        dispatches.append({**work, "binding": binding, "allocation": kwargs["tool_call_budget"],
+                           "claims": assignment["claims"]})
         binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
-        targets = work["targets"]["ids"]
-        async with binding.session():
-            if work["kind"] == "challenge":
-                value = {"verdicts": [_verdict_for(claim) for claim in assignment["claims"]], "claims": []}
-            elif work["kind"] == "cross_assignment":
-                # Required even though no local work asked for it; it rereads original captured source.
-                assert "retained_conclusions" in work and (cwd / "a.py").read_text().endswith("(count - 1)\n")
-                assert "ratio(4, 1)" in (cwd / "f.py").read_text()
-                refs = [_decide(binding, [entry["target_id"]])[0]["evidence_refs"][0]
-                        for entry in _charged(binding, "review_source", {"target_id": None, "path": None,
-                                                                         "cursor": None})["entries"]
-                        if entry["file"] in {"a.py", "f.py"}]
-                value = {"targets": _decide(binding, targets), "claims": [{
-                    "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
-                    "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
-                                "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
-                                "file": "f.py", "line": None, "evidence_refs": refs}}]}
-            else:
-                first = work["work_id"] == "work:1"
-                if scenario == "contention":
-                    # Siblings reach the acceptance point together; a foreign target is a correctable rejection.
-                    sibling = next(t for t in [p["target_id"] for p in _owner(binding).assignments]
-                                   if t not in targets)
-                    with pytest.raises(HostToolRejected, match="not assigned to this work"):
-                        _charged(binding, "review_admit", {"targets": _decide(binding, [sibling]), "claims": []})
-                    assert binding.authority_open
-                    arrived += 1
-                    if arrived == 2:
-                        both.set()
-                    with anyio.fail_after(10):
-                        await both.wait()
-                if first and scenario in {"follow-up", "evidence-free"}:
-                    if scenario == "follow-up":
-                        _charged(binding, "review_admit", {"targets": _decide(binding, targets[:1]), "claims": []})
-                    stale.append(binding)
-                    raise PiError("native local assignment failed")
-                if stale:
-                    # The superseded parent's handle cannot reopen authority or admit anything.
-                    with pytest.raises(HostToolFatal):
-                        stale[0].call("late", "review_admit", {"targets": [], "claims": []})
-                    with pytest.raises(HostToolFatal, match="closed"):
-                        async with stale[0].session():
-                            pytest.fail("superseded authority reopened")
-                value = {"targets": _decide(binding, targets), "claims": []}
-            binding.admit("terminal", "structured_output", value, terminal=True)
-            accepted = binding.submit("terminal", value)
+        if scenario == "native-capacity" and work_id == "work:1":
+            # The assignment cannot fit the native model before provider work; the host splits it.
+            binding.fail(HostToolFatal("native limits cannot fit this assignment", code="native_capacity"))
+            raise PiError("native capacity preflight failed")
+        try:
+            async with binding.session():
+                accepted = await local(work, binding, targets, cwd, assignment, kwargs["tool_call_budget"])
+                binding.native_settled = True
+        finally:
             kwargs["investigation_budget"].observed_tool_starts += binding.calls
-            binding.native_settled = True
         return accepted, None, None
+
+    def submit(binding: HostToolBinding, value: dict[str, Any]) -> dict[str, Any]:
+        binding.admit(f"terminal-{binding.calls}", "structured_output", value, terminal=True)
+        return binding.submit(f"terminal-{binding.calls - 1}", value)
+
+    async def local(work: dict[str, Any], binding: HostToolBinding, targets: list[str], cwd: Path,
+                    assignment: dict[str, Any], allocation: int) -> dict[str, Any]:
+        work_id = work["work_id"]
+        if work["kind"] == "challenge":
+            claim = assignment["claims"][0]
+            first_round = sum(d["kind"] == "challenge" for d in dispatches) == 1
+            if scenario in {"revision", "title"} and first_round:
+                changed = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
+                changed["payload"]["evidence_refs"] = [_decide(binding, [t])[0]["evidence_refs"][0]
+                                                       for t in ("a.py", "f.py")]
+                if scenario == "revision":
+                    changed["payload"]["grounds"] = "a.py now subtracts one from every count."
+                    return submit(binding, {"verdicts": [], "claims": [changed]})
+                changed["title"] = "**Caller** divides by zero"
+                return submit(binding, {"verdicts": [_verdict_for(claim)], "claims": [changed]})
+            return submit(binding, {"verdicts": [_verdict_for(claim)], "claims": []})
+        if work["kind"] == "cross_assignment":
+            # Required even though no local work asked for it; it rereads original captured source.
+            assert (cwd / "a.py").read_text().endswith("(count - 1)\n") and "ratio(4, 1)" in (cwd / "f.py").read_text()
+            if scenario == "evidence-free":
+                summary = next(w for w in work["retained_conclusions"]["work"] if w["work_id"] == "work:1")
+                # Its unfinished targets now belong to this work; the summary records no admission.
+                assert (summary["admitted_targets"], summary["unfinished_targets"]) == (0, 0)
+                assert work["parents"] == ["work:1"] and work["targets"]["total"] == 4
+                assert work["retained_conclusions"]["claims"] == []
+            catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
+            refs = [_decide(binding, [e["target_id"]])[0]["evidence_refs"][0]
+                    for e in catalog["entries"] if e["file"] in {"a.py", "f.py"}]
+            return submit(binding, {"targets": _decide(binding, targets), "claims": [{
+                "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
+                "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
+                            "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
+                            "file": "f.py", "line": None, "evidence_refs": refs}}]})
+        value = {"targets": _decide(binding, targets), "claims": []}
+        if scenario == "contention":
+            # The model-facing catalog names each sibling target's owner; deciding one is correctable.
+            entries = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})["entries"]
+            foreign = next(e for e in entries if e["owner"] not in {None, work_id})
+            with pytest.raises(HostToolRejected, match="not assigned to this work"):
+                _charged(binding, "review_admit", {"targets": _decide(binding, [foreign["target_id"]]),
+                                                   "claims": []})
+            arrivals[work_id] = (binding, value)
+            if len(arrivals) == 2:
+                both.set()
+            with anyio.fail_after(10):
+                await both.wait()
+            if work_id == "work:2":
+                with anyio.fail_after(10):
+                    await installed.wait()
+                receipt: dict[str, Any] = sibling_receipt["work:2"]
+                return receipt
+            canonical = _owner(binding).inputs.canonical[0].path
+            real_open, fired = os.open, False
+
+            def sibling_installs_mid_validation(path: Any, *args: Any, **kwargs: Any) -> int:
+                nonlocal fired
+                if Path(path) == canonical and not fired:
+                    fired = True
+                    sibling_receipt["work:2"] = submit(*arrivals["work:2"])
+                return real_open(path, *args, **kwargs)
+
+            with monkeypatch.context() as patching:
+                patching.setattr(os, "open", sibling_installs_mid_validation)
+                receipt = submit(binding, value)
+            installed.set()
+            assert fired and receipt["progress"]["remaining"] == 0
+            return receipt
+        if work_id == "work:1" and scenario in {"follow-up", "evidence-free"}:
+            if scenario == "follow-up":
+                _charged(binding, "review_admit", {"targets": _decide(binding, targets[:1]), "claims": []})
+            stale.append(binding)
+            raise PiError("native local assignment failed")
+        if stale:
+            # The superseded parent's handle cannot reopen authority or admit anything.
+            with pytest.raises(HostToolFatal) as late:
+                stale[0].admit("late", "review_admit", {"targets": [], "claims": []})
+            assert late.value.code == "authority_closed"
+            with pytest.raises(HostToolFatal, match="closed"):
+                async with stale[0].session():
+                    pytest.fail("superseded authority reopened")
+        if scenario == "empty-local" and work_id == "work:1":
+            spend(binding, allocation - 1)  # Spends its whole share: a renewed allowance would show.
+        return submit(binding, value)
 
     def _verdict_for(claim: dict[str, Any]) -> dict[str, Any]:
         return {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
                 "grounds": "Counterevidence search found no guard before the division.", "evidence_refs": []}
 
     monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    calls = 8 if scenario == "undecomposed" else 40
     with anyio.fail_after(60):
         result = await run_committed_review(CommittedReviewRequest(
-            repo, base, limits=ReviewLimits(90, 12, 40), assignment_policy="adaptive"))
+            repo, base, limits=ReviewLimits(90, 12, calls), assignment_policy="adaptive"))
     value = result.to_dict()
     validate_committed_result(value)
     work = {record["work_id"]: record for record in value["work"]}
-    local = [d for d in dispatches if d["kind"] in {"discovery", "follow_up"}]
+    allocations = [(d["work_id"], d["kind"], d["allocation"]) for d in dispatches]
+    credited = [t for r in value["work"] for t in r["admitted_targets"]]
+    assert sorted(credited) == sorted(p["target_id"] for p in value["assignments"])  # Each credited once.
+    assert result.complete and value["terminal_result"]["required_phases"] == ["challenge", "cross_assignment"]
+    if scenario == "undecomposed":
+        # Capacity cannot give each assignment a usable allocation: one broad assignment, no cross phase.
+        assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": False,
+                                                         "planned_assignments": 1,
+                                                         "cross_assignment": "not_applicable"}
+        assert allocations == [("work:1", "discovery", 4)] and value["claims"] == []
+        with pytest.raises(ValueError, match="assignment_policy"):
+            await run_committed_review(CommittedReviewRequest(repo, base, assignment_policy="hierarchical"))
+        return
     assert value["settings"]["assignment_policy"] == {"name": "adaptive", "decomposed": True,
                                                      "planned_assignments": 2, "cross_assignment": "required"}
-    assert [work[d["work_id"]]["kind"] for d in local[:2]] == ["discovery", "discovery"]
+    # 40 calls: investigation 20 = local 15 (shares 8/7) + protected cross 5; challenge keeps 20.
+    assert sorted(allocations[:2]) == [("work:1", "discovery", 8), ("work:2", "discovery", 7)]
     cross = next(r for r in value["work"] if r["kind"] == "cross_assignment")
-    # Every target is credited to exactly one admitting work.
-    credited = [t for r in value["work"] for t in r["admitted_targets"]]
-    assert sorted(credited) == sorted(p["target_id"] for p in value["assignments"])
+    challenges = [d for d in dispatches if d["kind"] == "challenge"]
+    if scenario == "empty-local":
+        assert allocations[2:] == [("work:3", "cross_assignment", 11), ("work:4", "challenge", 29)]
     if scenario == "follow-up":
         parent, follow = work["work:1"], next(r for r in value["work"] if r["kind"] == "follow_up")
         assert parent["state"] == "superseded" and follow["parents"] == ["work:1"]
         assert follow["targets"] == parent["targets"][1:] and parent["admitted_targets"] == parent["targets"][:1]
+        assert allocations[2] == ("work:3", "follow_up", 13)  # 15 minus the two charged sibling starts.
+    elif scenario == "native-capacity":
+        halves = [r for r in value["work"] if r["kind"] == "follow_up"]
+        assert [r["parents"] for r in halves] == [["work:1"], ["work:1"]]
+        assert [r["targets"] for r in halves] == [work["work:1"]["targets"][:2], work["work:1"]["targets"][2:]]
+        assert sorted(a for _, kind, a in allocations if kind == "follow_up") == [7, 7]
     elif scenario == "evidence-free":
         # No follow-up without progress: the required cross-assignment inherits exactly the unfinished targets.
         assert not any(r["kind"] == "follow_up" for r in value["work"])
         assert cross["parents"] == ["work:1"] and cross["targets"] == work["work:1"]["targets"]
-    else:
+    elif scenario != "contention":
         assert cross["targets"] == [] and cross["parents"] == []
     finding, = value["findings"]
-    challenge = next(d for d in dispatches if d["kind"] == "challenge")
-    # The spanning claim is judged by a distinct fresh native invocation, not its author's context.
-    assert finding["work_id"] == finding["revised_by"] == cross["work_id"]
-    assert finding["challenge_evidence"][0]["work_id"] == challenge["work_id"] != cross["work_id"]
-    assert challenge["binding"] is not next(d for d in dispatches if d["kind"] == "cross_assignment")["binding"]
-    assert all(d["persist"] is False for d in dispatches)
-    assert challenge["allocation"] == 40 - sum(e["observed_starts"] - e["overshoot"]
-                                               for e in value["execution"] if e["assignment"] != "challenge")
-    assert result.complete and value["terminal_result"]["required_phases"] == ["challenge", "cross_assignment"]
+    # The spanning claim is judged by a distinct fresh invocation, never its author's context.
+    assert finding["work_id"] == cross["work_id"]
+    assert finding["challenge_evidence"][-1]["work_id"] == challenges[-1]["work_id"] != finding["revised_by"]
+    if scenario == "revision":
+        assert len(challenges) == 2 and finding["revision"] == 2
+        assert finding["revised_by"] == challenges[0]["work_id"] and challenges[1]["claims"][0]["revision"] == 2
+    else:
+        assert len(challenges) == 1 and finding["revision"] == 1 and finding["revised_by"] == cross["work_id"]
+    if scenario == "title":
+        assert finding["title"] == "**Caller** divides by zero"
 
 
 async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_work(tmp_path: Path) -> None:
@@ -2102,6 +2200,8 @@ async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_w
     parent.close_authority()
     with pytest.raises(ValueError, match="transfer every unfinished responsibility"):
         review.plan("follow_up", [targets[1:2]])
+    with pytest.raises(ValueError, match="not held by live work"):
+        review.plan("follow_up", [targets[3:4]])
     (child_id,) = review.plan("follow_up", [targets[1:3]])
     with pytest.raises(HostToolFatal, match="closed"):
         async with parent.session():
@@ -2109,8 +2209,66 @@ async def test_supersession_transfers_exactly_the_unfinished_targets_of_closed_w
     child, _ = review.open(child_id, deadline=clock.monotonic() + 30)
     async with child.session():
         _charged(child, "review_admit", {"targets": _decide(child, targets[1:3]), "claims": []})
-    work = {record["work_id"]: record for record in review.seal({})["work"]}
+    sealed = review.seal({})
+    validate_committed_result(sealed)
+    assert sealed["terminal_result"]["analysis_state"] == "incomplete"
+    work = {record["work_id"]: record for record in sealed["work"]}
     assert work[parent_id]["state"] == "superseded" and work[parent_id]["superseded_by"] == [child_id]
     assert work[parent_id]["admitted_targets"] == list(targets[:1])
     assert work[child_id]["parents"] == [parent_id] and work[child_id]["admitted_targets"] == list(targets[1:3])
     assert work[sibling_id]["state"] == "planned" and work[sibling_id]["admitted_targets"] == []
+
+
+def _clean(review: Review, work_id: str, reason: str | None = None) -> None:
+    """Execution evidence the scheduler would retain for one dispatched work item."""
+    review.execution.append({"assignment": review.work[work_id].kind, "work_id": work_id,
+                             "accepted": reason is None, "settled": reason is None, "cleanup_complete": True,
+                             "reason": reason, "allocation": 4, "observed_starts": 1, "overshoot": 0})
+
+
+async def test_unfinished_challenge_revisions_transfer_to_a_fresh_challenge(
+    review_inputs: StageInputFactory,
+) -> None:
+    """A failed challenge that only recorded an unresolved verdict still holds its revision.
+
+    Popping its ownership on the unresolved verdict left a later successful challenge
+    without a parent, so the stale failure kept the review incomplete; and a live
+    challenge could revise a revision another live challenge held, erasing its duty.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    await _submit(review, "discovery", _discovery(review_inputs))
+    _clean(review, "work:1")
+    claim = review.pending()[0]
+    failed, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    async with failed.session():
+        _charged(failed, "review_admit", {"verdicts": [_verdict(
+            review_inputs, claim, verdict="unresolved", grounds="Counterevidence search is unfinished.")],
+            "claims": []})
+    failed.close_authority()
+    _clean(review, "work:2", "host_wall_budget_exhaustion")
+    reviser, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
+    revised["payload"].update(grounds="Revised grounds.", evidence_refs=_selectors(review_inputs))
+    async with reviser.session():
+        _charged(reviser, "review_admit", {"verdicts": [], "claims": [revised]})
+        # The new revision belongs to a fresh challenge; its live author cannot revise it away.
+        judge, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+        again = {**revised, "revision": 2, "payload": {**revised["payload"], "grounds": "Third grounds."}}
+        with pytest.raises(HostToolRejected, match="currently assigned"):
+            _charged(reviser, "review_admit", {"verdicts": [], "claims": [again]})
+        final: dict[str, Any] = {"verdicts": [], "claims": []}
+        reviser.admit("terminal", "structured_output", final, terminal=True)
+        reviser.submit("terminal", final)
+    _clean(review, "work:3")
+    async with judge.session():
+        value = {"verdicts": [_verdict(review_inputs, review.pending()[0])], "claims": []}
+        judge.admit("terminal", "structured_output", value, terminal=True)
+        judge.submit("terminal", value)
+    _clean(review, "work:4")
+    sealed = review.seal({})
+    work = {record["work_id"]: record for record in sealed["work"]}
+    # The failed holder is superseded by the next challenge, so current accepted work completes.
+    assert work["work:2"]["state"] == "superseded" and work["work:3"]["parents"] == ["work:2"]
+    assert work["work:4"]["claims"] == [{"uid": claim["uid"], "revision": 2}]
+    assert sealed["findings"][0]["revision"] == 2 and sealed["findings"][0]["revised_by"] == "work:3"
+    assert sealed["terminal_result"]["analysis_state"] == "complete"

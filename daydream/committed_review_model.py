@@ -267,7 +267,9 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             or claim["revision"] < 1
             or claim["uid"] in claim["source_uids"]
             or not set(claim["source_uids"]) <= known
-            or claim["work_id"] not in work or claim["revised_by"] not in work
+            or {"uid": claim["uid"], "revision": 1} not in work.get(claim["work_id"], {}).get("admitted_claims", [])
+            or {"uid": claim["uid"], "revision": claim["revision"]}
+            not in work.get(claim["revised_by"], {}).get("admitted_claims", [])
         ):
             raise ValueError("invalid retained claim identity/provenance")
         check_refs(claim["payload"]["evidence_refs"], expected_refs)
@@ -278,6 +280,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
                 or verdict["revision"] > claim["revision"]
                 or not verdict["grounds"].strip()
                 or work.get(verdict["work_id"], {}).get("kind") != "challenge"
+                or {"uid": verdict["uid"], "revision": verdict["revision"]} not in work[verdict["work_id"]]["verdicts"]
                 # A current-revision verdict comes from a context distinct from that revision's author.
                 or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
             ):
@@ -314,7 +317,12 @@ def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]
         raise ValueError("duplicate work identity")
     order = {record["work_id"]: index for index, record in enumerate(records)}
     admitted: dict[str, str] = {}
+    held: set[str] = set()
     for index, record in enumerate(records):
+        if record["state"] != "superseded":
+            if held & set(record["targets"]):
+                raise ValueError("current work responsibilities overlap")
+            held.update(record["targets"])
         if (
             any(order.get(parent, index) >= index for parent in record["parents"])
             or any(order.get(child, index) <= index for child in record["superseded_by"])
