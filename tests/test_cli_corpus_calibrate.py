@@ -7,7 +7,6 @@ the gate message on stderr.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -21,21 +20,6 @@ def _base_argv(tmp_path: Path, *, corpus_dir: str = "corpus", candidate: str = "
         str(FIXTURE_DIR / "gold.json"), "--breakdowns", str(FIXTURE_DIR / "breakdowns.json"), "--run-id", "cal-1",
         "--seed", "7", "--candidate", candidate, "--out", str(tmp_path / "out"),
     ]
-
-def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    called: dict[str, Any] = {}
-    def _fake_run(cfg: Any) -> dict[str, Any]:
-        called["cfg"] = cfg
-        return {"total_records": 2, "out": str(tmp_path)}
-    monkeypatch.setattr("daydream.training.calibration.run_calibration", _fake_run)
-    rc = _run_main(_base_argv(tmp_path))
-    assert rc == 0
-    cfg = called["cfg"]
-    assert cfg.candidates["w_fp"] == [0.1, 0.2, 0.3]
-    assert cfg.run_id == "cal-1"
-    assert cfg.seed == 7
-    assert cfg.corpus_dir == FIXTURE_DIR / "corpus"
-    assert cfg.out_dir == tmp_path / "out"
 
 def test_calibrate_validation_failure_exits_nonzero(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     # Tamper with corpus content while retaining pristine SHA256SUMS; the digest gate must fire

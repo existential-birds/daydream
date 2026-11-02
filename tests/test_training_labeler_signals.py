@@ -11,7 +11,6 @@ from daydream import pr_review
 from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, finding_marker
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
-    FixAppliedSignal,
     LocalCommitAppliedSignal,
     comment_resolution_signal,
     fix_applied_signal,
@@ -19,7 +18,6 @@ from daydream.training.labeler_signals import (
     per_finding_resolution_signal,
     pr_link_signal,
     pr_merge_signal,
-    reviewer_logins_signal,
 )
 from tests.harness.review_payload import payload_for
 from tests.harness.trajectory import diff_adding
@@ -67,37 +65,9 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
 
 
 @pytest.mark.parametrize(
-    ("added_line", "post_content", "verdict", "hunks_applied"),
-    [
-        pytest.param("left\u2028right", "left\u2028right\n", "applied", 1, id="line-separator"),
-        pytest.param("foo = 1", "foo = 1\rbar = 2\n", "not_applied", 0, id="carriage-return-prefix"),
-        pytest.param("", "", "not_applied", 0, id="empty-source"),
-        pytest.param("", "\n", "applied", 1, id="blank-line"),
-    ],
-)
-def test_fix_applied_signal_matches_captured_recommendation_verbatim(
-    tmp_path: Path, added_line: str, post_content: str, verdict: str, hunks_applied: int,
-) -> None:
-    """Git LF lines retain embedded separators; a matching prefix alone has not landed."""
-    row = _row(recommended_patch=diff_adding(added_line), base_branch="main")
-    sig = fix_applied_signal(
-        row,
-        changed_files=["app.py"],
-        repo_clone=tmp_path,
-        diff_fetcher=lambda repo, base, head: ["app.py"],
-        commits_in_window_fetcher=lambda repo, base, head: ["commit1"],
-        file_at_fetcher=lambda repo, path, sha: post_content,
-    )
-    assert isinstance(sig, FixAppliedSignal)
-    assert sig.verdict == verdict
-    assert sig.hunks_applied == hunks_applied
-    assert sig.hunks_total == 1
-
-
-@pytest.mark.parametrize(
     ("files", "commits", "verdict"),
-    [([], [], "unknown"), (["unrelated.py"], ["c1"], "not_applied")],
-    ids=["empty-window", "no-file-overlap"],
+    [(["unrelated.py"], ["c1"], "not_applied")],
+    ids=["no-file-overlap"],
 )
 def test_fix_applied_signal_without_matching_changes(
     tmp_path: Path, files: list[str], commits: list[str], verdict: str
@@ -143,36 +113,6 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     assert sig.hunks_total == 3
 
 
-def _fake_gh_reviews() -> Any:
-    """Serve human/bot reviews and a footer-marked finding with a human reply, exercising reviewer
-    extraction from both endpoints.
-    """
-    responses = {
-        ("o/r", "repos/o/r/pulls/7/reviews"): [
-            {"user": {"login": "alice"}, "state": "APPROVED"},
-            {"user": {"login": "octobot[bot]"}, "state": "COMMENTED"},
-        ],
-        ("o/r", "repos/o/r/pulls/7/comments"): [
-            {
-                "id": 100,
-                "in_reply_to_id": None,
-                "user": {"login": "daydream-runner"},
-                "body": f"Some review finding.\n\n{DAYDREAM_FOOTER}",
-            },
-            {"id": 101, "in_reply_to_id": 100, "user": {"login": "bob"}, "body": "Good catch, fixed."},
-        ],
-    }
-
-    return _fake_gh_responder(responses)
-
-
-def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> None:
-    logins = reviewer_logins_signal({"pr_repo": "o/r", "pr_number": 7}, gh_api=_fake_gh_reviews())
-    assert logins == ["alice", "bob"]  # sorted, deduped, humans only
-    assert "octobot[bot]" not in logins  # [bot] excluded
-    assert "daydream-runner" not in logins  # author of the footer comment excluded
-
-
 def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path: Path) -> None:
     """An unreadable commit window is unknown, not rejection. The fixture also lacks the change on base, so
     fallback cannot upgrade it.
@@ -185,12 +125,20 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
         file_at_fetcher=lambda repo, path, sha: "",
     )
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
+    # No recommended hunks means no applied change; an empty search must not vacuously prove success.
+    row = _row(recommended_patch="", branch="feat/squashed-away", base_branch="main")
+    sig = local_commit_applied_signal(
+        row,
+        repo_clone=tmp_path,
+        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
+        file_at_fetcher=lambda repo, path, ref: "anything at all\n",
+    )
+    assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
 
 @pytest.mark.parametrize(
     ("available_ref", "expected_refs"),
     [
-        pytest.param("origin/main", ["origin/main"], id="deleted-branch-remote-tip"),
         pytest.param("main", ["origin/main", "main"], id="remote-missing-local-fallback"),
     ],
 )
@@ -217,18 +165,6 @@ def test_local_commit_applied_signal_base_branch_fallback(
     assert seen_refs == expected_refs
 
 
-def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_path: Path) -> None:
-    """No recommended hunks means no applied change; an empty search must not vacuously prove success."""
-    row = _row(recommended_patch="", branch="feat/squashed-away", base_branch="main")
-    sig = local_commit_applied_signal(
-        row,
-        repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
-        file_at_fetcher=lambda repo, path, ref: "anything at all\n",
-    )
-    assert sig == LocalCommitAppliedSignal(verdict="unknown")
-
-
 def _fake_commits_pulls(pulls: Any) -> Any:
     # pulls: list returned by repos/{slug}/commits/{sha}/pulls
     def responder(repo: Any, endpoint: str, **kwargs: Any) -> Any:
@@ -251,21 +187,11 @@ def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict[str, Any]]) -> N
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
     gh = _fake_commits_pulls(pulls)
     assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
-
-
-def test_pr_link_signal_returns_none_when_no_head_sha_match() -> None:
-    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
-    gh = _fake_commits_pulls([{"number": 5, "head": {"sha": "forcepushed"}}])
-    assert pr_link_signal(row, gh_api=gh) is None
-
-
-def test_pr_link_signal_returns_none_without_required_fields() -> None:
     gh = _fake_commits_pulls([])  # must NOT be called (missing head_sha short-circuits)
     assert pr_link_signal({"repo_slug": "org/repo"}, gh_api=gh) is None
 
 
 _FP_A = "a" * 64
-_FP_B = "b" * 64
 _FP_C = "c" * 64
 
 

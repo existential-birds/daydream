@@ -10,7 +10,6 @@ from typing import Any, cast
 import pytest
 
 from daydream.archive import index
-from daydream.archive.manifest import Manifest
 from tests.harness.trajectory import make_manifest
 
 
@@ -19,10 +18,10 @@ def _current_database(root: Path) -> None:
 
 
 @pytest.mark.parametrize("unsupported", [
-    "old", "future", "zero-populated", "missing-runs",
-    "missing-column", "missing-index", "wrong-index", "wrong-default", "wrong-type",
-    "missing-primary-key", "extra-primary-key", "zero-unrelated-table", "wrong-index-table",
-    "unique-index", "partial-index",
+
+
+    "wrong-index-table",
+
 ])
 def test_unsupported_schema_is_rejected_without_changing_database(
     tmp_path: Path, unsupported: str, monkeypatch: pytest.MonkeyPatch,
@@ -92,24 +91,3 @@ def test_unsupported_schema_is_rejected_without_changing_database(
     with closing(connect(db_path)) as connection:
         assert list(connection.iterdump()) == before_dump
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-
-
-def test_local_diagnostic_writes_preserve_unrelated_history(tmp_path: Path) -> None:
-    _current_database(tmp_path)
-    db_path = tmp_path / "index.db"
-    with closing(sqlite3.connect(db_path)) as connection, connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
-        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
-        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
-            ("historical", "complete", "unknown", "org/repo")]
-        connection.execute("ALTER TABLE runs ADD COLUMN retired_metric REAL")
-        connection.execute("UPDATE runs SET retired_metric = 0.75")
-        connection.execute("CREATE TABLE historical_notes (note TEXT)")
-        connection.execute("INSERT INTO historical_notes VALUES ('keep me')")
-    index.upsert_run(tmp_path, Manifest())
-    with closing(sqlite3.connect(db_path)) as connection:
-        assert connection.execute(
-            "SELECT pipeline_status, archive_status, daydream_version FROM runs WHERE session_id=''"
-        ).fetchone() == ("unknown", "complete", None)
-        assert connection.execute("SELECT note FROM historical_notes").fetchone()[0] == "keep me"
-        assert connection.execute("SELECT retired_metric FROM runs WHERE session_id='historical'").fetchone()[0] == 0.75

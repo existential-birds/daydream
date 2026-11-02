@@ -21,6 +21,7 @@ def test_scan_flags_credential_url_in_manifest(tmp_path: Path) -> None:
     """
     run_dir = tmp_path / "run"
     _write_manifest(run_dir, "https://user:[REDACTED_PASSWORD]@github.com/o/r.git")
+    (run_dir / "deep").mkdir()  # Directories are traversed, never reported as artifacts.
     config = run_dir / "config.py"
     config.write_text(
         "SORT_KEY = \"created_at\"\nPRIMARY_KEY = 'id'\nCACHE_KEY = 'v1'\nAUTH=none\n"

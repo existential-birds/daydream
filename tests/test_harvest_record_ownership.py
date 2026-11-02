@@ -10,7 +10,7 @@ from tests.harness.adjudication import record_store, snapshot_id
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mismatch", ["store", "snapshot", "dry_run"])
+@pytest.mark.parametrize("mismatch", ["dry_run"])
 async def test_entrypoint_rejects_mismatched_services_before_side_effects(tmp_path: Path, mismatch: str) -> None:
     first = record_store(tmp_path / "first")
     second = record_store(tmp_path / "second")

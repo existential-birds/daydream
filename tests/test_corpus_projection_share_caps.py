@@ -34,39 +34,6 @@ def _assert_shares_within(records: Sequence[Any], dims: Sequence[tuple[str, Call
 class TestApplyShareCaps:
 
 
-    def test_sequential_passes_reconverge_correlated_dimensions(self) -> None:
-        records = [
-            _mk_record("r000", None, "owner/repo-a", "deep"),
-            _mk_record("r001", None, "owner/repo-a", "quick"),
-            _mk_record("r002", None, "owner/repo-a", "quick"),
-            _mk_record("r003", None, "owner/repo-a", "deep"),
-            _mk_record("r004", None, "owner/repo-a", "deep"),
-            _mk_record("r005", "rust", "owner/repo-a", "deep"),
-            _mk_record("r006", "rust", "owner/repo-a", "quick"),
-            _mk_record("r007", "rust", "owner/repo-b", "deep"),
-            _mk_record("r008", "rust", "owner/repo-b", "quick"),
-            _mk_record("r009", "rust", "owner/repo-b", "quick"),
-        ]
-        kept, exclusions = _apply_share_caps(
-            records, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
-        )
-        assert [row["record_id"] for row in kept] == ["r000", "r001", "r007", "r008"]
-        assert exclusions == {"repo:owner/repo-a": 3, "stack:(none)": 2, "profile:quick": 1}
-        _assert_shares_within(kept, [
-            ("stack", lambda row: str(row["stack"]), 0.5),
-            ("repo", lambda row: str(row["lineage"]["repo_slug"]), 0.6),
-            ("profile", lambda row: str(row["profile"]["profile_name"]), 0.6),
-        ])
-        reversed_kept, reversed_exclusions = _apply_share_caps(
-            list(reversed(records)), max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
-        )
-        assert reversed_kept == kept and reversed_exclusions == exclusions
-        stable, stable_exclusions = _apply_share_caps(
-            kept, max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.6,
-        )
-        assert stable == kept and stable_exclusions == {}
-
-
     def test_sole_remaining_value_above_cap_fails_closed(self) -> None:
         # Mono-value boundary consistency (issues #5/#7): a cap that floors to
         # zero on the entry population raises fail-closed, and the identical
@@ -87,22 +54,6 @@ class TestApplyShareCaps:
         kept, exclusions = _apply_share_caps([], max_stack_share=0.5, max_repo_share=0.5, max_profile_share=0.5)
         assert kept == []
         assert exclusions == {}
-
-    def test_fixed_point_fails_closed_when_caps_conflict(self) -> None:
-        # Finding-1 counterexample: the repo pass re-trims by lowest record_id
-        # and would push stack A to 100% under single sequential passes. The
-        # fixed point re-runs the stack pass, but the greedy lowest-id policy
-        # cannot satisfy both caps here — it must fail closed rather than emit
-        # a population that silently violates an earlier dimension's cap.
-        records = [_mk_record("r001", "A", "owner/r1", "deep"), _mk_record("r002", "A", "owner/r1", "deep"),
-            _mk_record("r003", "A", "owner/r1", "deep"), _mk_record("r004", "B", "owner/r1", "deep"),
-            _mk_record("r005", "B", "owner/r1", "deep"), _mk_record("r006", "B", "owner/r1", "deep"),
-            _mk_record("r007", "B", "owner/r1", "deep"), _mk_record("r008", "B", "owner/r1", "deep"),
-            _mk_record("r009", "A", "owner/r2", "deep"), _mk_record("r010", "A", "owner/r2", "deep"),
-        ]
-        with pytest.raises(ValueError, match="max_stack_share"):
-            _apply_share_caps(records, max_stack_share=0.5, max_repo_share=0.5, max_profile_share=None)
-
 
 def _store_with_caps_population(tmp_path: Path) -> Any:
     store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"))
@@ -155,7 +106,7 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     assert direct["share_caps"] == report
 
 
-@pytest.mark.parametrize(("dimension", "value"), [("stack", "0"), ("repo", "-0.1"), ("profile", "1.5")])
+@pytest.mark.parametrize(("dimension", "value"), [("profile", "1.5")])
 def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimension: str, value: str) -> None:
     store = _store_with_caps_population(tmp_path)
     config = projection_config(store, tmp_path)

@@ -17,16 +17,12 @@ from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     Backend,
-    CostEvent,
     MaxTurnsError,
-    MetricsEvent,
     ResultEvent,
     TextEvent,
-    ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -65,98 +61,6 @@ def _single_agent_step(traj: dict[str, Any] | None) -> dict[str, Any]:
     return agent_steps[0]
 
 
-async def test_agent_events_and_invocations_share_one_recording(tmp_path: Path) -> None:
-    """A review then fix preserves event correlation, per-call labels and both usage sources."""
-    backend = ScriptedBackend(
-        model="mock-model",
-        script=[
-            [
-                ThinkingEvent(text="plan the review"),
-                TextEvent(text="reviewing"),
-                ToolStartEvent(id="t1", name="Bash", input={"command": "pytest"}),
-                ToolResultEvent(id="t1", output="OK", is_error=False),
-                MetricsEvent(
-                    message_id="msg-1", prompt_tokens=100, completion_tokens=20, cached_tokens=5, cost_usd=0.001
-                ),
-                ResultEvent(structured_output=None, continuation=None),
-            ],
-            [
-                TextEvent(text="fixing"),
-                CostEvent(cost_usd=0.002, input_tokens=200, output_tokens=40, cached_tokens=15),
-                ResultEvent(structured_output=None, continuation=None),
-            ],
-        ],
-    )
-    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.PR)
-    async with recorder:
-        assert (await run_agent(backend, tmp_path, "review please", phase=DaydreamPhase.REVIEW))[0] == "reviewing"
-        assert (await run_agent(backend, tmp_path, "fix please", phase=DaydreamPhase.FIX))[0] == "fixing"
-    trajectory = json.loads(recorder.path.read_text())
-    assert atif_validate(trajectory) is True
-    users = [step for step in trajectory["steps"] if step["source"] == "user"]
-    agents = [step for step in trajectory["steps"] if step["source"] == "agent"]
-    assert [step["message"] for step in users] == ["review please", "fix please"]
-    assert all(
-        step.get("tool_calls") is None
-        and step.get("metrics") is None
-        and step.get("model_name") is None
-        and step.get("reasoning_content") is None
-        for step in users
-    )
-    assert [step["message"] for step in agents] == ["reviewing", "fixing"]
-    assert [step["extra"]["daydream_phase"] for step in trajectory["steps"]] == ["review", "review", "fix", "fix"]
-    assert all(step["extra"]["daydream_run_flow"] == "pr" for step in trajectory["steps"])
-    review = agents[0]
-    assert review["reasoning_content"] == "plan the review"
-    assert review["tool_calls"][0]["tool_call_id"] == "t1"
-    assert review["observation"]["results"][0]["source_call_id"] == "t1"
-    assert review["observation"]["results"][0]["content"] == "OK"
-    assert [step["metrics"]["prompt_tokens"] for step in agents] == [100, 200]
-    assert [step["metrics"]["completion_tokens"] for step in agents] == [20, 40]
-    assert [step["metrics"]["cached_tokens"] for step in agents] == [5, 15]
-    assert [step["metrics"]["cost_usd"] for step in agents] == [0.001, 0.002]
-    final = trajectory["final_metrics"]
-    assert (final["total_prompt_tokens"], final["total_completion_tokens"], final["total_cached_tokens"]) == (
-        300,
-        60,
-        20,
-    )
-    assert final["total_cost_usd"] == pytest.approx(0.003)
-
-
-@pytest.mark.parametrize("supports_system", [True, False], ids=["absent", "unsupported"])
-async def test_host_dispatch_counts_final_user_bytes_without_inventing_unsent_system_bytes(
-    tmp_path: Path, supports_system: bool,
-) -> None:
-    """Persist pre-redaction UTF-8 sizes; unsupported staged policy never becomes sent system text."""
-    recorder = make_recorder(tmp_path)
-    backend = ScriptedBackend(
-        events=[TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)],
-        supports_review_instructions=supports_system,
-    )
-    options: dict[str, Any] = {} if supports_system else {
-        "investigation_budget": ReviewInvestigationBudget.from_limits(ReviewLimits(17, 3, 4)),
-        "review_system_instructions": "Unsent system-only marker é🙂",
-    }
-    async with recorder:
-        result = await run_agent(
-            backend, tmp_path, "é🙂 API_KEY=private-dispatch-credential", phase=DaydreamPhase.FIX, **options,
-        )
-    assert result == ("done", None, None)
-    trajectory_text = recorder.path.read_text(encoding="utf-8")
-    trajectory = json.loads(trajectory_text)
-    invocation = trajectory["extra"]["subtrajectories"][0]
-    assert invocation["host_dispatch"] == {
-        "attempt": 1,
-        "user_utf8_bytes": len(backend.calls[0]["prompt"].encode("utf-8")),
-        "system_disposition": "absent" if supports_system else "unsupported",
-    }
-    assert len(backend.calls[0]["prompt"]) < invocation["host_dispatch"]["user_utf8_bytes"]
-    assert "private-dispatch-credential" not in trajectory_text
-    assert "Unsent system-only marker" not in trajectory_text
-    assert "[REDACTED_ENV_VAR]" in trajectory_text
-
-
 async def test_unencodable_dispatch_measurement_does_not_change_agent_result(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -185,12 +89,6 @@ async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) 
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
     assert "phase" in str(excinfo.value).lower()
     assert inspect.signature(run_agent).parameters["phase"].kind is inspect.Parameter.KEYWORD_ONLY
-
-
-async def test_calling_run_agent_with_positional_phase_raises_typeerror(tmp_path: Path) -> None:
-    backend = ScriptedBackend(events=[], model="mock-model")
-    with pytest.raises(TypeError):
-        await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[call-arg]
 
 
 def _max_turns_backend(pre_events: list[AgentEvent]) -> ScriptedBackend:

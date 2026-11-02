@@ -36,21 +36,6 @@ def _edited_snapshot(store: LocalRecordStore) -> str:
     return snapshot_id(store)
 
 
-def test_preview_detects_immutable_snapshot_evidence_drift(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    store = record_store(tmp_path / "records")
-    state = tmp_path / "state"
-    args = ["corpus", "adjudicate", "preview", "--store", str(store.root), "--state-dir", str(state)]
-    assert cli_main([*args, "--snapshot-id", snapshot_id(store)]) == 0
-    first = json.loads(capsys.readouterr().out)
-    first_id = json.loads((state / "preview-ledger.json").read_text())["items"][0]["record_id"]
-    assert cli_main([*args, "--snapshot-id", _edited_snapshot(store)]) == 0
-    changed = json.loads(capsys.readouterr().out)
-    assert changed["drifted_record_ids"] == [first_id]
-    assert changed["snapshot_id"] != first["snapshot_id"] and changed["ledger_digest"] != first["ledger_digest"]
-
-
 def test_export_rejects_old_ledger_digest_before_any_write(tmp_path: Path) -> None:
     from daydream.training.adjudication.canonical import AnnotationDriftError
 

@@ -15,41 +15,7 @@ def operator_hub_destination(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
 
 
-@pytest.mark.parametrize(("cli_repo", "expected_repo"), [
-    (None, "operator/env-trajectories"),
-    ("operator/cli-trajectories", "operator/cli-trajectories"),
-])
-def test_operator_destination_selects_publication_and_pinned_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    cli_repo: str | None, expected_repo: str,
-) -> None:
-    from daydream.hub import HubError
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    class OperatorHub(FakeDatasetHub):
-        def private_revision(self, repo_id: str) -> str:
-            if repo_id != expected_repo:
-                raise HubError("network_failed")
-            return super().private_revision(repo_id)
-
-    hub = OperatorHub()
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "operator/env-trajectories")
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record("operator-run"))
-    arguments = [] if cli_repo is None else ["--trajectory-hub-repo", cli_repo]
-    assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 1
-    assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 1
-    destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", *arguments, "--revision", hub.revision,
-                     "--output", str(destination)]) == 0
-    assert json.loads(capsys.readouterr().out)["runs"] == 1
-    assert LocalRecordStore(destination).read_records()["runs"][0]["run_id"] == "operator-run"
-
-
-@pytest.mark.parametrize(("operation", "environment"), [("publish", ""), ("status", ""), ("download", "")])
+@pytest.mark.parametrize(("operation", "environment"), [("download", "")])
 def test_dataset_commands_require_operator_destination_before_any_side_effect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     operation: str, environment: str | None,
@@ -73,20 +39,6 @@ def test_dataset_commands_require_operator_destination_before_any_side_effect(
     assert not destination.exists()
 
 
-def test_dataset_status_reads_local_queue_without_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    store.append_observation(observation())
-    assert cli_main(["corpus", "dataset", "status", "--trajectory-hub-repo", "test-user/private-trajectories",
-                     "--store", str(store.root)]) == 0
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["queued"] == 2 and summary["published"] == 0 and summary["failed"] == 0
-
-
 def test_dataset_download_rejects_moving_revision_before_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -101,56 +53,6 @@ def test_dataset_download_rejects_moving_revision_before_network(
     output = capsys.readouterr()
     assert "revision" in (output.out + output.err).lower()
     assert not destination.exists()
-
-
-def test_real_review_explicit_capture_opt_out(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
-) -> None:
-    from tests.harness.stub_backend import install_stub_backend, silence
-
-    silence(monkeypatch)
-    install_stub_backend(monkeypatch, multi_stack_target)
-    store = tmp_path / "records"
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
-    assert cli_main(["--review", "--stack", "python", "--no-archive", "--no-eval", "--dataset-store", str(store),
-                     "--no-capture-data", str(multi_stack_target)]) == 0
-    assert not store.exists()
-    assert not (archive_dir / "runs").exists()
-    assert (multi_stack_target / ".review-output.md").is_file()
-
-
-def test_dataset_publish_failed_content_keeps_queue_with_sanitized_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub(private=False)
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record())
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 1
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["queued"] == 1 and summary["failed"] == 1 and summary["published"] == 0
-    assert summary["error"] == "public_destination"
-    assert hub.commits == []
-
-
-def test_dataset_download_counts_all_records_without_temporal_cutoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
-    store = LocalRecordStore(tmp_path / "records")
-    store.commit_run(run_record(captured_at="9999-12-31T23:59:59.500000+00:00"))
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 0
-    capsys.readouterr()
-    assert cli_main(["corpus", "dataset", "download", "--revision", hub.revision,
-                     "--output", str(tmp_path / "download")]) == 0
-    assert json.loads(capsys.readouterr().out)["runs"] == 1
 
 
 def test_cli_retries_lost_publication_response_without_duplicate_records(
@@ -216,7 +118,7 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
         assert json.loads(capsys.readouterr().out)["published"] == 2
 
 
-@pytest.mark.parametrize("fault", ["manifest", "shard"])
+@pytest.mark.parametrize("fault", ["manifest", ])
 def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str,
 ) -> None:

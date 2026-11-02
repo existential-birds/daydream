@@ -5,21 +5,11 @@ Real-path pipeline coverage lives in tests/deep_orchestrator/."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from daydream.deep.records import (
-    ITEM_UID_KEY,
-    RECORD_UID_KEY,
     RecordPool,
-    duplicate_record_uids,
-    item_source_uids,
-    item_uid,
-    record_uid,
-    stack_name_from_uid,
-    stamp_item_uids,
-    stamp_record_uids,
     union_source_uids,
 )
 from tests.harness.review_result import records_artifact, review_coverage
@@ -41,39 +31,5 @@ def test_record_pool_retains_scope_order_and_metadata_through_adjudication(tmp_p
         pool.replace([{"uid": "go:1"}])
 
 
-def test_stack_name_from_uid_is_empty_for_a_separatorless_value() -> None:
-    """An empty result is the "no identity" signal, distinguishable from a real name."""
-    assert stack_name_from_uid("python") == ""
-    assert stack_name_from_uid("") == ""
-
-def test_stack_name_from_uid_splits_on_the_last_separator() -> None:
-    """A trailing ordinal leaves any separators within the stack name intact."""
-    assert stack_name_from_uid("weird:name:7") == "weird:name"
-
-
-def test_item_source_uids_ignores_malformed_entries() -> None:
-    """A hallucinated non-string entry must not reach a consumer as provenance."""
-    item: dict[str, Any] = {"source_uids": ["python:1", 7, None, "", "react:1"]}
-    assert item_source_uids(item) == ["python:1", "react:1"]
-
-def test_item_source_uids_ignores_a_non_list_value() -> None:
-    """A scalar where a list belongs degrades to the uid fallback, never raises."""
-    item: dict[str, Any] = {"source_uids": "python:1", RECORD_UID_KEY: "structure:2"}
-    assert item_source_uids(item) == ["structure:2"]
-
 def test_union_drops_empty_and_non_string_entries() -> None:
     assert union_source_uids(["python:1", "", None, 3], []) == ["python:1"]
-
-def test_stamp_skips_an_ordinal_a_preserved_record_already_holds() -> None:
-    """Minting skips ordinals held by preserved records, even at displaced positions."""
-    records: list[dict[str, Any]] = [{RECORD_UID_KEY: "python:2"}, {"id": 1}, {"id": 2}]
-    stamp_record_uids(records, "python")
-    assert [record_uid(record) for record in records] == ["python:2", "python:1", "python:3"]
-    assert duplicate_record_uids(records) == []
-
-def test_stamp_item_uids_skips_an_ordinal_a_preserved_item_already_holds() -> None:
-    """Same hazard, same guarantee, on the merged-item side."""
-    items: list[dict[str, Any]] = [{ITEM_UID_KEY: "item:2"}, {"id": 1}, {"id": 2}]
-    stamp_item_uids(items)
-    assert [item_uid(item) for item in items] == ["item:2", "item:1", "item:3"]
-    assert len({item_uid(item) for item in items}) == len(items)

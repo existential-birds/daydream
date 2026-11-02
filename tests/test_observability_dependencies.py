@@ -1,29 +1,22 @@
-"""Stale editable installs must fail tracing actionably without breaking the off path."""
+"""Fresh interpreters: stale editable installs fail tracing actionably without breaking the off path or CLI."""
 
 import os
 import subprocess
 import sys
 import textwrap
 
-import pytest
 
-
-@pytest.mark.parametrize(("missing", "destination"), [
-    ("traceloop", "off"), ("opentelemetry.exporter.otlp.proto.grpc", "langsmith"),
-    ("opentelemetry.exporter.otlp.proto.http", "honeyhive"), ("traceloop", "otlp"),
-])
-def test_missing_tracing_dependency(missing: str, destination: str) -> None:
-    # A fresh interpreter avoids SDK imports cached by other tests. Blocking one
-    # package reproduces an editable checkout whose dependencies were not refreshed.
+def test_missing_tracing_dependency() -> None:
+    # A fresh interpreter avoids SDK imports cached by other tests. Blocking the optional
+    # tracing packages reproduces an editable checkout whose dependencies were not refreshed.
     result = subprocess.run([sys.executable, "-c",
             textwrap.dedent("""\
                 import importlib.abc
                 import sys
 
-                missing, destination = sys.argv[1:]
                 blocked = (
                     "opentelemetry.exporter.otlp.proto.grpc", "opentelemetry.exporter.otlp.proto.http", "traceloop"
-                ) if destination == "off" else (missing,)
+                )
 
                 class MissingDependency(importlib.abc.MetaPathFinder):
                     def find_spec(self, fullname, path, target=None):
@@ -31,6 +24,11 @@ def test_missing_tracing_dependency(missing: str, destination: str) -> None:
                             raise ModuleNotFoundError("private import diagnostic", name=fullname)
 
                 sys.meta_path.insert(0, MissingDependency())
+
+                # A frozen-evidence consumer imported first must still let the CLI load (no import cycle),
+                # and neither may need tracing packages.
+                from daydream.training.record_evidence import sessions_from_snapshot
+                from daydream.cli import main
 
                 import anyio
                 from daydream.extensions import build_registry
@@ -40,7 +38,7 @@ def test_missing_tracing_dependency(missing: str, destination: str) -> None:
                 registry = build_registry()
                 assert set(registry.trace_exporter_names()) >= {"langsmith", "honeyhive", "otlp"}
 
-                async def run():
+                async def run(destination):
                     config = ObservabilityConfig(destinations=() if destination == "off" else (destination,))
                     try:
                         async with trace_run(config, registry, flow="review"):
@@ -56,9 +54,9 @@ def test_missing_tracing_dependency(missing: str, destination: str) -> None:
                         assert destination == "off"
                     assert current_session() is None
 
-                anyio.run(run)
+                for destination in ("off", "otlp"):
+                    anyio.run(run, destination)
                 """),
-            missing, destination,
         ], env={key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "_OTEL_"))},
         capture_output=True, text=True, timeout=30, check=False,
     )

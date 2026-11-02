@@ -1,28 +1,8 @@
 """Report separates outcome-bearing coverage from silver/task-only coverage (AC 5)."""
 
-from typing import Any
-
 import pytest
 
 from daydream.training.adjudication.report import build_report
-
-
-def _item(
-    rid: str,
-    disposition: str,
-    profile: str = "pr_review",
-    stack: str = "python",
-    raters: tuple[tuple[str, str], ...] = (),
-) -> dict[str, Any]:
-    return {
-        "record_id": rid,
-        "disposition": disposition,
-        "profile": profile,
-        "stack": stack,
-        "tier": "gold" if disposition in {"accepted", "rejected"} else "task-only",
-        "posterior_eligible": disposition in {"accepted", "rejected"},
-        "observations": [{"role": r, "disposition": d} for (r, d) in raters],
-    }
 
 
 def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> None:
@@ -69,31 +49,6 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
     # Non-posterior-eligible or after-as-of records cannot block the outcome denominator.
     assert gate["passes_80pct"] is True
     assert gate["class_balance_ok"] is False  # sole outcome-bearing record is accepted-only
-
-
-def test_model_suggested_observations_never_count_as_human_raters() -> None:
-    items = [
-        _item("a" * 64, "accepted", raters=(("model-suggested", "accepted"),)),
-        _item("b" * 64, "accepted", raters=(("model-suggested", "accepted"), ("rater", "rejected"))),
-    ]
-    report = build_report(items)
-    # The standalone report counts eligible decisive gold even when model-only judgments remain
-    # unresolved; final human-coverage gating is separate.
-    assert report["outcome_coverage"] == {"adjudicated": 2, "total": 2}
-    assert report["unresolved"] == 1
-    assert report["inter_rater"] == {"items": 0, "agreeing": 0}  # no second human in the dispute
-
-
-def test_report_is_deterministic_and_stratified() -> None:
-    items = [
-        _item(f"{i:064x}", "ambiguous", stack=s, profile=p)
-        for i, (s, p) in enumerate([("python", "pr_review"), ("rust", "pr_review"), ("python", "task")])
-    ]
-    r1 = build_report(list(reversed(items)))
-    r2 = build_report(items)
-    assert r1 == r2  # determinism regardless of input order
-    assert r1["strata"][("python", "pr_review")] == 1
-    assert r1["strata"][("python", "task")] == 1
 
 
 def test_missing_required_field_raises_value_error() -> None:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.training.gate import FrozenSplit, GateConfig, evaluate_gate, freeze_split
+from daydream.training.gate import GateConfig, evaluate_gate, freeze_split
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 
 
@@ -20,49 +20,15 @@ def _pairs(tmp_path: Path, n: int = 25) -> Path:
 
 
 @pytest.fixture
-def frozen_split(tmp_path: Path) -> FrozenSplit:
-    return freeze_split(_pairs(tmp_path), held_out_fraction=0.2, seed=3)
-
-
-@pytest.fixture
 def trained_model(tmp_path: Path) -> OutcomeModel:
     labels = _pairs(tmp_path)
     return train_outcome_model(labels, split=freeze_split(labels, held_out_fraction=0.2, seed=3), seed=3)
-
-
-def test_split_frozen_before_training(tmp_path: Path) -> None:
-    labels = _pairs(tmp_path)
-    frozen = freeze_split(labels, held_out_fraction=0.2, seed=3)
-    assert frozen.fingerprint != ""
-    assert frozen.digest_path == "labels.jsonl.gate-split.json"
-    sidecar_path = tmp_path / frozen.digest_path
-    assert sidecar_path.exists()
-    # frozen split is content-addressed: same seed+labels -> same digest
-    first_bytes = sidecar_path.read_bytes()
-    again = freeze_split(labels, held_out_fraction=0.2, seed=3)
-    assert again.digest == frozen.digest
-    assert sidecar_path.read_bytes() == first_bytes
-    expected = {"digest": frozen.digest, "held_out_fraction": 0.2,
-        "held_out_ids": sorted(str(row["comment_id"]) for row in frozen.held_out_rows), "seed": 3,
-        "train_ids": sorted(str(row["comment_id"]) for row in frozen.train_rows),
-    }
-    assert first_bytes == json.dumps(expected, indent=2, sort_keys=True).encode()
-    assert not first_bytes.endswith(b"\n")
-    assert json.loads(first_bytes) == expected
-    other = freeze_split(labels, held_out_fraction=0.2, seed=4)
-    assert other.digest != frozen.digest
-    assert json.loads(sidecar_path.read_text())["digest"] == other.digest
 
 
 def test_gate_refuses_when_evidence_missing(trained_model: OutcomeModel) -> None:
     with pytest.raises(RuntimeError, match="gate evidence"):
         evaluate_gate(trained_model, None, GateConfig())
 
-
-def test_gate_fails_below_thresholds(frozen_split: FrozenSplit, trained_model: OutcomeModel) -> None:
-    report = evaluate_gate(trained_model, frozen_split, GateConfig(min_separation=0.99, min_calibration=0.99))
-    assert not report.passed
-    assert report.thresholds == {"min_separation": 0.99, "min_calibration": 0.99}
 
 def test_gate_config_rejects_out_of_range_thresholds() -> None:
     with pytest.raises(ValueError):

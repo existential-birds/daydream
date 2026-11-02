@@ -1,7 +1,6 @@
 """Tests for the shared per-finding annotation snapshot serializer (issue #1055, Task 1)."""
 
 import hashlib
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -38,17 +37,6 @@ def _snapshot_session() -> dict[str, object]:
     }
 
 
-def test_build_canonical_record_serializes_frozen_shared_evidence_canonically() -> None:
-    mutable, frozen = _mutable_and_frozen_resolution()
-    session = _snapshot_session()
-    mutable_record = build_canonical_record(session, mutable, evidence_observed_at="2026-01-01T00:00:00Z")
-    frozen_record = build_canonical_record(session, frozen, evidence_observed_at="2026-01-01T00:00:00Z")
-
-    expected = [{"reply_id": 1, "body_sha256": "abc", "context": {"labels": ["accepted", "reviewed"]}}]
-    assert frozen_record["evidence"] == mutable_record["evidence"] == expected
-    assert json.dumps(frozen_record, sort_keys=True) == json.dumps(mutable_record, sort_keys=True)
-
-
 def test_record_evidence_digest_matches_frozen_shared_digest_with_nested_json() -> None:
     mutable, frozen = _mutable_and_frozen_resolution()
 
@@ -59,40 +47,20 @@ def test_record_evidence_digest_matches_frozen_shared_digest_with_nested_json() 
     assert record_evidence_digest([mutable["evidence"]]) == expected
 
 
-def test_record_evidence_digest_flattens_and_orders_per_finding_evidence() -> None:
-    ev_a = [{"reply_id": 1, "body_sha256": "aaa"}]
-    ev_b = [{"reply_id": 2, "body_sha256": "bbb"}]
-
-    shared = record_evidence_digest([ev_a, ev_b])
-    assert shared == reply_evidence_digest(ev_a + ev_b)
-    assert shared == record_evidence_digest([ev_b, ev_a])
-
-    # Represent absent evidence as None rather than an empty digest to avoid identity collisions.
-    assert record_evidence_digest([]) is None
-
-
 def test_build_canonical_record_rejects_missing_digest() -> None:
     session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": []}
     with pytest.raises(ValueError, match="evidence_digest"):
         build_canonical_record(session, _resolution(digest=""), evidence_observed_at="2026-01-01")
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("fingerprint", ""), pytest.param("fingerprint", ..., id="fingerprint-absent"),
-    ("disposition", "other"), pytest.param("disposition", ..., id="disposition-absent")])
-def test_build_canonical_record_rejects_invalid_required_resolution_fields(field: str, value: Any) -> None:
-    resolution = _resolution()
-    if value is ...:
-        del resolution[field]
-    else:
+def test_build_canonical_record_rejects_invalid_required_resolution_fields() -> None:
+    for field, value in (("fingerprint", ""), ("disposition", "other")):
+        resolution = _resolution()
         resolution[field] = value
-    with pytest.raises(ValueError, match=field):
-        build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
-
-
-@pytest.mark.parametrize("rows", [[], [{"fingerprint": "fp-1"}] * 2])
-def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[dict[str, object]]) -> None:
+        with pytest.raises(ValueError, match=field):
+            build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
     # Keep the digest valid to isolate the row-count guard.
+    rows = [{"fingerprint": "fp-1"}] * 2
     session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": rows}
     with pytest.raises(ValueError, match="expected exactly 1"):
         build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01")

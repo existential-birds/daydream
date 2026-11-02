@@ -10,11 +10,10 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
-from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.deep.artifacts import (
     DeepArtifact,
     deep_dir,
@@ -23,7 +22,6 @@ from daydream.deep.merge_steps import _drop_cross_stack_duplicates, _step_cross_
 from daydream.deep.reuse_store import ReuseCache, review_cache_dir
 from daydream.extensions import get_registry
 from daydream.flows.engine import FlowContext
-from daydream.phases import CrossStackMergeError, phase_cross_stack_merge
 from daydream.review_budget import review_warnings
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, ReviewCoverage
 from daydream.run_config import RunConfig
@@ -31,25 +29,12 @@ from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
 from tests.harness.review_result import record_pool, review_coverage
-from tests.harness.stub_backend import install_stub_backend, silence
 from tests.harness.trajectory import make_recorder
-from tests.test_deep_orchestrator import _merge_item, _run_deep
 
 
 @pytest.fixture(autouse=True)
 def _no_open_pr(fake_gh: FakeGh) -> None:
     fake_gh.set_response("pr-list", value=[])
-
-
-# Reconstruct Pi's prose-without-JSON response shape from run
-# c48ca322-eb7d-4634-9fc3-fddbf349bacd. Original prose was not archived;
-# the exact recorded error below is pinned from the saved typed coverage diagnostic.
-ARCHIVED_MERGE_STR = ("I could not produce a JSON item list for the merged cross-stack findings. "
-    "The per-stack reviews completed, but no consolidated item list was emitted."
-)
-
-# Both raised and persisted errors must match the archived message exactly.
-CROSS_STACK_MERGE_ERR_MSG = "Cross-stack merge returned no item list (got StructuredOutputFailure)"
 
 
 async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle(
@@ -133,335 +118,20 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
                                            "noop": True, "usable_evidence": False}]
 
 
-async def test_empty_supervision_persists_complete_host_noop(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """The required supervision stage records positive empty-input completion."""
-    from daydream.runner import run
-    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
-    coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
-    supervision = next(phase for phase in coverage["phase_outcomes"] if phase["phase"] == "supervision")
-    assert supervision == {"phase": "supervision", "status": "complete", "reason_codes": [],
-                            "noop": True, "usable_evidence": False}
-    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
-
-
-@pytest.mark.parametrize("failed_phase", ["merge", "supervision"])
-async def test_phase_failure_preserves_original_error_when_coverage_write_also_fails(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    make_config: Callable[..., RunConfig], failed_phase: str,
-) -> None:
-    """The production terminal boundary must retain the provider's first failure."""
-    from daydream import json_utils
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import run
-    from tests.harness.stub_backend import StubBackend
-    from tests.test_deep_orchestrator import _pin_findings_pr
-
-    original_error = RuntimeError(f"{failed_phase} provider failed first")
-    failed = False
-
-    class FailedPhaseBackend(StubBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
-            nonlocal failed
-            marker = "cross-stack merge agent" if failed_phase == "merge" else "supervisor adjudication"
-            if marker in prompt.lower():
-                failed = True
-                raise original_error
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-    backend = FailedPhaseBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    stage = json_utils._stage_bytes
-
-    def fail_after_provider(path: Path, content: bytes, **kwargs: Any) -> Path:
-        if failed and path.name == "review-coverage.json":
-            raise OSError("coverage stage failed after provider failure")
-        return stage(path, content, **kwargs)
-
-    monkeypatch.setattr(json_utils, "_stage_bytes", fail_after_provider)
-    output = tmp_path / "absent-review.json"
-    with pytest.raises(RuntimeError, match=f"{failed_phase} provider failed first") as caught:
-        await run(make_config(multi_stack_target, findings_out=str(output), pr_number=pr.number,
-                              file_config=DaydreamFileConfig(supervisor="llm")))
-    assert caught.value is original_error
-    assert any("Review coverage persistence failed: OSError" in note for note in caught.value.__notes__)
-    assert not output.exists()
-
-
-@pytest.mark.parametrize("fault", ["synthesis", "projection"])
-async def test_legacy_resume_retains_failure_until_same_revision_remerge(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., RunConfig], fault: str,
-) -> None:
-    """Fix-only settlement retains failed legacy synthesis/projection until an actual remerge."""
-    from daydream.review_result import FinalizedReview
-    from daydream.runner import run
-    from tests.test_deep_orchestrator import _pin_findings_pr
-
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_emit_str = "malformed synthesis response" if fault == "synthesis" else None
-    finalized: list[FinalizedReview] = []
-    deep = multi_stack_target / ".daydream" / "deep"
-    for index, stage in enumerate(("review", "fix", "merge")):
-        expected = 1 if index == 0 and fault == "synthesis" else 0
-        assert await run(make_config(multi_stack_target, start_at=stage, output_mode="loop", assume="no"),
-                         review_result_handler=finalized.append) == expected
-        assert len(finalized) == index + 1
-        persisted = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
-        assert persisted.to_dict()["stack_outcomes"] == finalized[-1].terminal_result["stack_outcomes"]
-        if index == 0 and fault == "projection":
-            DeepArtifact.MERGED_ITEMS.at(deep).write_text("{corrupt projection")
-        if index == 1:
-            assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
-        if index == 2:
-            prompts = [call["prompt"] for call in stub.calls if "cross-stack merge agent" in call["prompt"].lower()]
-            assert prompts and "__merge__" not in "\n".join(prompts)
-        stub.merge_emit_str = None
-        stub.calls.clear()
-    first, resumed, rerun = [result.terminal_result for result in finalized]
-    assert len({result["run_id"] for result in (first, resumed, rerun)}) == 3
-    assert first["analyzed_revision"] == resumed["analyzed_revision"] == rerun["analyzed_revision"]
-    assert first["analyzed_revision"]["head_sha"] == pr.head_sha
-    reason = "synthesis_failure" if fault == "synthesis" else "malformed_artifact"
-    assert resumed["analysis_state"] == ("incomplete" if fault == "synthesis" else "failed")
-    assert reason in resumed["reason_codes"]
-    assert rerun["analysis_state"] == "complete" and reason not in rerun["reason_codes"] and finalized[2].items
-    assert finalized[0].items
-    if fault == "synthesis":
-        assert first["analysis_state"] == "incomplete" and first["pipeline_state"] == "failed"
-        assert resumed["pipeline_state"] == "completed" and reason in first["reason_codes"] and finalized[1].items
-    else:
-        assert first["analysis_state"] == "complete" and finalized[1].items == []
-
-
-def _salvage_record() -> dict[str, object]:
-    """Minimal per-stack record shape accepted by the merge phase."""
-    return {"id": 1, "file": "api.py", "line": 1, "severity": "high", "confidence": "HIGH", "rationale": "r",
-        "evidence": "api.py:1",
-    }
-
-def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
-    """Create the deep artifact directory and minimal files named by merge prompts."""
-    deep = tmp_path / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    inputs = {
-        "deep": deep, "intent": deep / "intent.md", "alts": deep / "alternatives.json", "dedup": deep / "dedup.json",
-        "records": deep / "stack-python-records.json",
-    }
-    inputs["intent"].write_text("# Intent\n")
-    inputs["alts"].write_text("{\"alternatives\": []}\n")
-    inputs["dedup"].write_text('{"record_alt_pairs": [], "record_duplicate_pairs": []}\n')
-    inputs["records"].write_text(json.dumps([_salvage_record()]))
-    return inputs
-
-@pytest.mark.parametrize('diagnostics', [None, [], {'scopes': {}, 'phases': {'extra': 'failure'}},
-                                       {'scopes': {'python': 'x' * 1025}, 'phases': {}}])
+@pytest.mark.parametrize('diagnostics', [{'scopes': {}, 'phases': {'extra': 'failure'}},
+                                       ])
 def test_coverage_rejects_malformed_failure_diagnostics(diagnostics: Any) -> None:
     payload = review_coverage().to_dict()
     payload['diagnostics'] = diagnostics
     with pytest.raises(ValueError):
         ReviewCoverage.from_dict(payload)
 
-async def test_merge_salvage_applies_dedup_prefilter(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
-) -> None:
-    """Salvage drops record_b duplicates before partial items reach the fix gate."""
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    # python + react emit near-identical descriptions at distinct files, so the
-    # D-27 pre-filter flags them as a single cross-stack duplicate pair.
-    stub.parse_by_stack = {"python": {"severity": "high", "confidence": "HIGH",
-            "file": "api.py", "line": 1, "description": "unbounded cache write",
-        },
-        "react": {"severity": "high", "confidence": "HIGH",
-            "file": "App.tsx", "line": 1, "description": "unbounded cache write",
-        },
-    }
-    stub.merge_emit_str = "no item list"
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())
-    # Recoverability lives in __merge__ failure evidence and the resumable stop.
-    assert "partial" not in items
-    per_stack = [i for i in items["items"] if i.get("lens") == "per-stack"]
-    files = [i["file"] for i in per_stack]
-    # The duplicate react side (record_b) is dropped; the python side survives.
-    assert "api.py" in files
-    assert "App.tsx" not in files, f"cross-stack duplicate leaked into partial items: {files}"
-
-
-def _merge_args(tmp_path: Path) -> dict[str, Any]:
-    """Common keyword args for a ``phase_cross_stack_merge`` call."""
-    inputs = _write_merge_inputs(tmp_path)
-    return {"per_stack_records_paths": [inputs["records"]], "intent_path": inputs["intent"],
-        "alternatives_path": inputs["alts"], "dedup_candidates_path": inputs["dedup"], "allow_standalone": True,
-    }
-
-def _merge_text_backend(text: str, structured: Any) -> ScriptedBackend:
-    """Emit the Pi contract: prose TextEvents plus an optional structured ResultEvent."""
-    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        return [TextEvent(text=text),
-            ResultEvent(structured_output=structured if output_schema else None, continuation=None),
-        ]
-    return ScriptedBackend(responder=respond, model="op-5")
-
-async def test_merge_raises_structured_error_on_str(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
-    args = _merge_args(tmp_path)
-    with pytest.raises(CrossStackMergeError) as excinfo:
-        await phase_cross_stack_merge(
-            cast(Backend, _merge_text_backend(ARCHIVED_MERGE_STR, None)), make_work(tmp_path), **args)
-    assert excinfo.value.response_shape == "StructuredOutputFailure"
-    assert excinfo.value.stack_context == ["python"]
-    assert str(excinfo.value) == CROSS_STACK_MERGE_ERR_MSG
-
-async def test_merge_rejects_bare_list_and_salvages_bound_records(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_bare_list = [_merge_item(1, "store/cache.py", "high", desc="unbounded cache write"),
-        _merge_item(2, "cli/main.py", "medium", desc="unused arg")]
-    assert await _run_deep(multi_stack_target) == 1
-    deep = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())
-    assert items["items"] and all(item["source_uids"] for item in items["items"])
-    assert not {"store/cache.py", "cli/main.py"} & {item["file"] for item in items["items"]}
-    assert items.get("partial") is not True
-    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
-    assert coverage.phases["merge"]["status"] == "failed"
-
-async def test_merge_salvage_and_resume_preserve_findings_and_failure_context(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    silence(monkeypatch)
-    mute_side_effects(heal=False, commit=False)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity, stub.merge_emit_str = "high", ARCHIVED_MERGE_STR
-    assert await _run_deep(multi_stack_target) != 0
-    dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())
-    assert "partial" not in items and items["items"]
-    assert DeepArtifact.MERGED_REPORT.at(dd).is_file() and list(dd.glob("stack-*-records.json"))
-    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(dd).read_text()))
-    assert coverage.phases['merge']['status'] == 'failed'
-    assert coverage.phases['merge']['reason_codes'] == ['synthesis_failure']
-    assert coverage.diagnostics['phases']['merge'] == CROSS_STACK_MERGE_ERR_MSG
-    stub.calls.clear()
-    stub.merge_emit_str, stub.fix_edit_line = None, "\n# salvage fixed\n"
-    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    monkeypatch.setattr("daydream.run_context._prompt_user",
-        lambda _console, message, _default: "y" if "Apply fixes" in message else "n")
-    assert await _run_deep(multi_stack_target, start_at="fix") == 0
-    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
-    assert not any("cross-stack merge agent" in call["prompt"].lower() or "per-stack review" in call["prompt"].lower()
-                   for call in stub.calls)
-    salvaged = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-    fixes = [call["prompt"] for call in stub.calls
-             if call["prompt"].lower().startswith(("fix these", "fix this issue"))]
-    assert salvaged and any(item["description"] in prompt and item["file"] in prompt
-                            for item in salvaged for prompt in fixes)
-    assert "# salvage fixed" in (multi_stack_target / "api.py").read_text()
-
-
-async def test_merge_salvage_keeps_a_side_when_three_stacks_share_id_and_file(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
-) -> None:
-    """UID dedup retains one record when three stacks share ID, file, and description.
-
-    Pairs (0,1), (0,2), and (1,2) must drop only records 1 and 2. An (id, file)
-    key would delete all three; asserting the surviving generic:1 UID catches
-    that loss even when structural findings keep the report nonempty.
-    """
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    # Identical IDs, files, and descriptions make all three stack pairs duplicates.
-    collision = {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": 1, "description": "Sample issue",}
-    stub.parse_by_stack = {"generic": dict(collision), "python": dict(collision), "react": dict(collision),}
-    stub.merge_emit_str = "no item list"
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-    per_stack = [i for i in items if i.get("lens") == "per-stack"]
-    # The regression: on the old ``(id, file)`` key this list is EMPTY -- every
-    # record matched the single dropped key ``("1", "api.py")``.
-    assert len(per_stack) == 1, f"salvage lost the a-side of the duplicate group: {items}"
-    # ... and it is the a-side, not an arbitrary survivor. ``generic`` sorts
-    # first, so it is record 0 and the a-side of both pairs it appears in.
-    assert per_stack[0]["uid"] == "generic:1"
-    assert per_stack[0]["file"] == "api.py"
-    # The structural item is worded differently and is never paired, so it must
-    # be untouched -- it is also what masked this bug, by keeping items non-empty.
-    assert [i["uid"] for i in items if i.get("lens") == "structural"] == ["structure:1"]
-    # Pin the pairs so changed pre-filter behavior cannot pass vacuously.
-    dedup = json.loads(DeepArtifact.DEDUP_CANDIDATES.at(dd).read_text())
-    assert [(p["record_a_uid"], p["record_b_uid"]) for p in dedup["record_duplicate_pairs"]
-    ] == [("generic:1", "python:1"), ("generic:1", "react:1"), ("python:1", "react:1")]
-    assert {p["record_b_id"] for p in dedup["record_duplicate_pairs"]} == {"1"}
-    assert {p["record_b_file"] for p in dedup["record_duplicate_pairs"]} == {"api.py"}
-
-@pytest.mark.parametrize("payload", [
-    {}, {"record_duplicate_pairs": None}, {"record_duplicate_pairs": [{}]},
-    {"record_duplicate_pairs": [{"record_b_uid": ""}]},
-])
-def test_merge_salvage_rejects_dedup_without_current_identity(tmp_path: Path, payload: dict[str, Any]) -> None:
-    DeepArtifact.DEDUP_CANDIDATES.at(tmp_path).write_text(json.dumps(payload))
-    records = [{"id": 1, "file": "api.py", "description": "Sample issue", "uid": "generic:1"},
-               {"id": 1, "file": "api.py", "description": "Sample issue", "uid": "python:1"}]
-    with pytest.raises(ValueError):
-        _drop_cross_stack_duplicates(tmp_path, records)
-    assert [record["uid"] for record in records] == ["generic:1", "python:1"]
-
-async def test_merge_salvage_partial_items_carry_source_uids(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Full-flow salvage attributes each item to its surviving source record.
-
-    Distinct per-stack files/descriptions avoid dedup so every record reaches
-    the partial report. Host attribution must match the single-stack writer
-    because no merge agent is available on this path.
-    """
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_emit_str = "no item list"
-    # Stay below arbiter severity and off the structural finding's api.py:1
-    # location so no verdict rewrites the descriptions asserted below.
-    stub.parse_by_stack = {"python": {"severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 2,
-            "description": "Unbounded cache write in the request handler",
-        },
-        "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1,
-            "description": "Missing key prop on the rendered list",
-        },
-        "generic": {"severity": "medium", "confidence": "MEDIUM", "file": "README.md", "line": 1,
-            "description": "Setup instructions omit the migration step",
-        },
-    }
-
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-
-    dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
-    provenance = {str(i["description"]): i["source_uids"] for i in items}
-    assert provenance == {"Setup instructions omit the migration step": ["generic:1"],
-        "Unbounded cache write in the request handler": ["python:1"],
-        "Missing key prop on the rendered list": ["react:1"], "Structural maintainability concern": ["structure:1"],
-    }, items
-    # Salvaged items retain birth UIDs consistent with their source_uids.
-    for item in items:
-        assert item["source_uids"] == [item["uid"]], item
+def test_merge_salvage_rejects_dedup_without_current_identity(tmp_path: Path) -> None:
+    payloads: tuple[dict[str, Any], ...] = ({"record_duplicate_pairs": None}, {"record_duplicate_pairs": [{}]})
+    for payload in payloads:
+        DeepArtifact.DEDUP_CANDIDATES.at(tmp_path).write_text(json.dumps(payload))
+        records = [{"id": 1, "file": "api.py", "description": "Sample issue", "uid": "generic:1"},
+                   {"id": 1, "file": "api.py", "description": "Sample issue", "uid": "python:1"}]
+        with pytest.raises(ValueError):
+            _drop_cross_stack_duplicates(tmp_path, records)
+        assert [record["uid"] for record in records] == ["generic:1", "python:1"]

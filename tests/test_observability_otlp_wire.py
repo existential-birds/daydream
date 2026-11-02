@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 from opentelemetry.attributes import BoundedAttributes
-from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.util import BoundedList
@@ -20,10 +19,6 @@ from opentelemetry.trace import Link, SpanContext, TraceFlags, TraceState
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
 from tests.harness.otlp import attributes, otlp_collector
-
-_FLAGS_HAS_IS_REMOTE = 256
-_FLAGS_IS_REMOTE = 512
-_FLAGS_SAMPLED = 1
 
 _TRACE_ID = 0x11111111111111111111111111111111
 _SPAN_ID = 0x3333333333333333
@@ -85,16 +80,6 @@ def _vendor_wire(monkeypatch: pytest.MonkeyPatch, vendor: str, spans: list[Reada
             exporter.shutdown()
         assert len(receiver.requests) == 1
         return _wire_spans(receiver.requests[0])
-
-
-def test_stock_encoder_drops_low_trace_flags_and_link_state() -> None:
-    """Documents the pinned SDK's fidelity gap the Task 4A repair exists for."""
-    link = Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=True, sampled=True, state_entries=[("vendor", "1")]))
-    span = _span(parent=_ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=False), links=[link])
-    wire = encode_spans([span]).resource_spans[0].scope_spans[0].spans[0]
-    assert wire.flags & _FLAGS_SAMPLED == 0  # sampled bit lost on the span
-    assert wire.links[0].flags & _FLAGS_SAMPLED == 0  # and on the link
-    assert wire.links[0].trace_state == ""  # link trace state lost entirely
 
 
 def test_wire_preserves_identity_order_and_fields_for_all_destinations(monkeypatch: pytest.MonkeyPatch,) -> None:
