@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_workflow_templates import _wf_triggers, job_steps, load_workflow
+from tests.harness.workflows import job_steps, load_workflow, workflow_triggers
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,6 +51,14 @@ def _gate_steps() -> list[str]:
         if match:
             return match.group(1).split()
     raise AssertionError("the Makefile declares no `check:` gate target")
+
+
+def _static_steps() -> list[str]:
+    """The checks the gate's `static` step runs in parallel."""
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    match = re.search(r"^STATIC_CHECKS = (.+)$", makefile, re.MULTILINE)
+    assert match, "the Makefile declares no STATIC_CHECKS group"
+    return match.group(1).split()
 
 
 def _documented_gate_steps() -> dict[str, list[str]]:
@@ -91,7 +99,7 @@ def _execute_shard_plan(
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     """Execute the shipped planner step, resolving only its Actions input context."""
     workflow = load_workflow(_CI_WORKFLOW)
-    input_spec = _wf_triggers(workflow)["workflow_dispatch"]["inputs"]["test_jobs"]
+    input_spec = workflow_triggers(workflow)["workflow_dispatch"]["inputs"]["test_jobs"]
     value = str(input_spec["default"]) if requested_count is None else requested_count
     inputs = {"test_jobs": value} if dispatch else {}
     step = next(step for step in job_steps(workflow, "plan") if step["name"] == "Plan pytest shards")
@@ -122,7 +130,7 @@ def test_ci_shard_planner_emits_complete_supported_matrices(
     assert outputs["count"] == str(count)
     assert outputs["workers"] == str(workers)
     assert json.loads(outputs["matrix"]) == {"index": list(range(count))}
-    input_spec = _wf_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
+    input_spec = workflow_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
     if dispatch and requested_count is not None and input_spec["type"] == "choice":
         assert requested_count in input_spec["options"], "the workflow UI must offer the supported treatment"
 
@@ -184,7 +192,7 @@ def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.Mo
     script_recipe = _dry_run_recipe("test-scripts").strip()
     assert script_recipe in _dry_run_recipe("test")
     assert all(reason.strip() for reason in _CI_ONLY_STEPS.values())
-    targets = {*_gate_steps(), "test-scripts"}
+    targets = {*_gate_steps(), *_static_steps(), "test-scripts"}
     for step in steps:
         command = step.get("run")
         if not isinstance(command, str) or step.get("name") in _CI_ONLY_STEPS:
@@ -198,7 +206,7 @@ def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.Mo
 def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> None:
     """Queue/manual checks retain all full gates; PR basic never publishes proof."""
     workflow = load_workflow(_CI_WORKFLOW)
-    triggers = _wf_triggers(workflow)
+    triggers = workflow_triggers(workflow)
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert all(job["runs-on"] == "ubuntu-24.04" for job in workflow["jobs"].values())
     jobs = workflow["jobs"]

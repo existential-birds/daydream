@@ -1,4 +1,4 @@
-.PHONY: install lint typecheck test test-scripts actionlint rl-check check lockcheck package-check hooks deadcode coverage-report check-naming
+.PHONY: install lint typecheck test test-scripts actionlint rl-check check static lockcheck package-check hooks deadcode coverage-report check-naming
 
 # CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
 PYTEST_WORKERS ?= auto
@@ -91,7 +91,15 @@ lockcheck:
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you
 # change rl/daydream_review; its vulture scan still runs here via `deadcode`.
-check: lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
+check: lockcheck install static test coverage-report
+
+# Independent static checks run in parallel, so the gate pays for the slowest
+# one rather than their sum. Pytest runs after them, never alongside: a loaded
+# host starves its real-Git timing windows.
+STATIC_CHECKS = lint deadcode typecheck package-check actionlint check-naming
+
+static:
+	$(MAKE) -j $(words $(STATIC_CHECKS)) $(STATIC_CHECKS)
 
 # Naming grep-gate (#1093): fails when a project-owned versioned identifier
 # reappears anywhere in tracked files. External tool-protocol version strings

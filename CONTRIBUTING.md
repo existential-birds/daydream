@@ -102,8 +102,11 @@ make check
 which runs, in order:
 
 ```text
-lockcheck install lint deadcode typecheck package-check test actionlint coverage-report check-naming
+lockcheck install static test coverage-report
 ```
+
+`static` runs `lint deadcode typecheck package-check actionlint check-naming` in
+parallel (the Makefile's `STATIC_CHECKS`), so the gate pays for the slowest of them.
 
 This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
 `rl-check` is the only CI job the gate deliberately omits. One scope difference:
