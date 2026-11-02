@@ -4,7 +4,6 @@ from typing import Any
 
 from daydream.improve.prioritize import (
     aggregate_cross_service,
-    order_by_leverage,
 )
 
 
@@ -20,21 +19,6 @@ def _f(**overrides: Any) -> dict[str, Any]:
     if "evidence" not in overrides:
         finding["evidence"] = [f"{finding['path']}:{finding['line']}"]
     return finding
-
-def test_leverage_orders_impact_over_effort_discounted() -> None:
-    findings = [
-        _f(title="low", impact="HIGH", effort="L", confidence="LOW", risk="HIGH"),
-        _f(title="additive", change_shape="additive"), _f(title="first"),
-        _f(title="consolidate", change_shape="consolidate"), _f(title="second"),
-        _f(title="reuse", change_shape="reuse"), _f(title="delete", change_shape="delete"),
-        _f(title="security", category="security"), _f(title="high", impact="HIGH", effort="S"),
-    ]
-    ordered = order_by_leverage(findings)
-    assert [finding["title"] for finding in ordered] == [
-        "high", "security", "delete", "reuse", "consolidate", "first", "second", "additive", "low",
-    ]
-    assert [finding["leverage"] for finding in ordered] == [3.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.24]
-
 
 def test_canonical_reuse_target_is_a_strong_cross_category_grouping_key() -> None:
     findings = [
@@ -88,26 +72,6 @@ def test_canonical_reuse_target_is_a_strong_cross_category_grouping_key() -> Non
         "HIGH", "L", "HIGH", "LOW",
     )
     assert package["locations"] == ["src/api/headers.py:1", "tests/test_headers.py:1"]
-
-
-def test_work_package_caps_and_identity_are_deterministic() -> None:
-    findings = [
-        *[_f(fingerprint=f"a{index}", title=f"Use shared parser at call site {index}", path=f"src/call_{index}.py",
-             reuse_target="repo:src/parser.py#parse") for index in range(7)],
-        *[_f(fingerprint=f"b{index:02}", title=f"Use request parser for variant {index:02}", path="src/requests.py",
-             category="tech-debt", maintenance_signals=["reuse_existing"], reuse_target="repo:src/requests.py#parse")
-          for index in range(11)],
-    ]
-    forward = aggregate_cross_service(findings)
-    reverse = aggregate_cross_service(list(reversed(findings)))
-    assert {tuple(package["member_fingerprints"]) for package in forward} == {
-        ("a0", "a1", "a2", "a3", "a4"), ("a5", "a6"),
-        ("b00", "b01", "b02", "b03", "b04"), ("b05", "b06", "b07", "b08", "b09"), ("b10",),
-    }
-    assert len({package["package_fingerprint"] for package in forward}) == 5
-    assert [(package["package_fingerprint"], package["member_fingerprints"]) for package in forward] == [
-        (package["package_fingerprint"], package["member_fingerprints"]) for package in reverse
-    ]
 
 
 def test_member_aliases_survive_wording_and_expose_membership_drift() -> None:

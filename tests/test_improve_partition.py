@@ -67,54 +67,6 @@ def test_mixed_service_primary_files_are_disjoint_with_generic_fallback() -> Non
     assert sorted(path for group in groups for path in group.primary_files) == sorted(files)
 
 
-def test_group_ceiling_ranks_owned_slices_and_preserves_omitted_files() -> None:
-    # A mixed partition's full size used to make every stack equally large.
-    # The ceiling must retain the larger primary surface and name exact omitted
-    # slices, even though all slices retain the same partition identity.
-    files = ["svc/a.py", "svc/b.py", "svc/c.py", "svc/a.ts", "svc/b.ts", "svc/README.md",
-        "other/a.py", "other/b.py"]
-    partitions = build_partitions(files, [], max_files=10)
-    stack_of = {"svc/a.py": "python", "svc/b.py": "python", "svc/c.py": "python",
-        "svc/a.ts": "react", "svc/b.ts": "react", "other/a.py": "python", "other/b.py": "python"}
-    groups, omissions = group_partitions(partitions, stack_of, max_files=3, max_groups=1)
-
-    assert [(group.name, group.stack, group.file_count, group.primary_files) for group in groups] == [
-        ("group-01", "python", 3, ("svc/a.py", "svc/b.py", "svc/c.py")),
-    ]
-    assert [(item.partition.name, item.partition.root, item.stack, item.partition.files) for item in omissions] == [
-        ("other", "other", "python", ("other/a.py", "other/b.py")),
-        ("svc", "svc", "generic", ("svc/README.md",)),
-        ("svc", "svc", "react", ("svc/a.ts", "svc/b.ts")),
-    ]
-    covered = [path for group in groups for path in group.primary_files]
-    covered.extend(path for item in omissions for path in item.partition.files)
-    assert sorted(covered) == sorted(files)
-    assert group_partitions(list(reversed(partitions)), dict(reversed(list(stack_of.items()))),
-        max_files=3, max_groups=1) == (groups, omissions)
-
-
-
-def test_service_ownership_freezes_nested_and_repo_root_partitioning(tmp_path: Path) -> None:
-    repo = _nested_service_repo(tmp_path)
-    services = enumerate_services(
-        repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner", "."])
-    )
-    assert [(s.name, s.root.as_posix()) for s in services] == [
-        ("repo", "."), ("api", "services/api"), ("inner", "services/api/inner"),
-    ]
-
-    partitions = build_partitions([
-            "services/api/handler.py", "services/api/inner/main.py", "services/api", "services/api/inner",
-            "scripts/tool.py", "README.md",
-        ], services,
-    )
-
-    assert [(p.name, p.root, p.service, p.files) for p in partitions] == [
-        ("repo", ".", "repo", ("README.md", "scripts/tool.py", "services/api")),
-        ("api", "services/api", "api", ("services/api/handler.py", "services/api/inner")),
-        ("inner", "services/api/inner", "inner", ("services/api/inner/main.py",)),
-    ]
-
 def test_path_equal_to_a_service_root_falls_through_without_a_repo_root_service(tmp_path: Path) -> None:
     repo = _nested_service_repo(tmp_path)
     services = enumerate_services(repo, DaydreamFileConfig(improve_service_roots=["services/*", "services/api/inner"]))

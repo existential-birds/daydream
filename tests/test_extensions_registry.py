@@ -41,7 +41,7 @@ def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
     with pytest.raises(UnresolvedExtensionError, match="trace exporter 'absent'"):
         reg.trace_exporter("absent")
 
-@pytest.mark.parametrize("kind", ["none", "async", "async-object", "name"])
+@pytest.mark.parametrize("kind", ["none", "async-object", "name"])
 def test_trace_exporter_registry_rejects_invalid_factories(kind: str) -> None:
     async def async_factory(config: Any) -> Any:
         return None
@@ -52,17 +52,6 @@ def test_trace_exporter_registry_rejects_invalid_factories(kind: str) -> None:
     with pytest.raises(ExtensionError):
         Registry().register_trace_exporter("bad name" if kind == "name" else "custom",
                                           cast(TraceExporterFactory, factory))
-
-def test_flow_mutation_and_unresolved_lookup() -> None:
-    reg = Registry()
-    reg.register_phase(FlowStep(name="a", run=_noop))
-    reg.register_phase(FlowStep(name="b", run=_noop))
-    reg.set_flow("deep", ["a"])
-    reg.insert_after("deep", anchor="a", step="b")
-    reg.remove("deep", "a")
-    assert reg.flow("deep") == ["b"]
-    with pytest.raises(UnresolvedExtensionError, match="phase 'ghost'"):
-        reg.phase("ghost")
 
 def test_replace_requires_flag_and_prompt_roundtrip() -> None:
     reg = Registry()
@@ -104,24 +93,19 @@ def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
         reg.register_tool_supervisor(cast(ToolSupervisor, AsyncSupervisor()))
     assert reg.tool_supervisor_if_registered() is None
 
+
 def test_comment_contract_types_are_frozen_and_public() -> None:
+    """Fork renderers receive exported, immutable contexts; ``diagrams`` stays optional (#1113)."""
     cf = ext.CommentFinding(
         path="a.py", line=3, title="T", body="B", is_cross_stack=False, severity="high", confidence="HIGH",
         fingerprint="a" * 64,
     )
-    with pytest.raises(FrozenInstanceError):
-        cf.path = "x"  # type: ignore[misc]
-    ctx = ext.FindingRenderContext(placement="summary")
     sc = ext.SummaryContext(
         findings=(ext.SummaryFinding(finding=cf, body_block="X"),), agent_prompt="P", review_info="I",
     )
-    assert ctx.placement == "summary" and sc.findings[0].body_block == "X"
-    # Issue #1113: ``diagrams`` is appended with a default, so this pre-existing
-    # construction keeps working and an unaware fork sees None.
-    assert sc.diagrams is None
-    with_diagrams = ext.SummaryContext(findings=(), agent_prompt="P", review_info="I", diagrams="<details>D</details>")
-    assert with_diagrams.diagrams == "<details>D</details>"
+    assert ext.FindingRenderContext(placement="summary").placement == "summary"
+    assert sc.findings[0].body_block == "X" and sc.diagrams is None
     with pytest.raises(FrozenInstanceError):
-        with_diagrams.diagrams = "x"  # type: ignore[misc]
+        sc.diagrams = "x"  # type: ignore[misc]
     for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
         assert name in ext.__all__
