@@ -123,9 +123,6 @@ def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType)
             module.validate_candidate_artifact(too_large)
 
 
-_MISSING = object()  # sentinel: bare "verifier_core" absent from sys.modules
-
-
 def test_range_distance_cannot_drift_from_hunk_index() -> None:
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
     cases: list[tuple[int, int, int]] = [

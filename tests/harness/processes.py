@@ -6,17 +6,8 @@ reaping delay under load.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from pathlib import Path
-
-# Fork a sleep grandchild inheriting stdout, then print readiness and hang. Python avoids Bash
-# deferring SIGTERM on macOS; readiness after the fork ensures tests exercise a live process group.
-GROUP_HOLDER_CLI = ("import subprocess, time; "
-    "subprocess.Popen(['sleep', '30']); "
-    "print('UP', flush=True); "
-    "time.sleep(1000)"
-)
 
 
 async def wait_for_process_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
@@ -64,17 +55,3 @@ async def wait_for_fd_baseline(baseline: int | None, *, timeout_s: float = 30.0)
         await asyncio.sleep(0.01)
 
 
-async def wait_for_process_ids(path: Path, *, timeout_s: float = 5.0) -> dict[str, int]:
-    """Await the fake CLI's direct/grandchild PID JSON; timeout raises AssertionError naming the path.
-
-    """
-    deadline = asyncio.get_running_loop().time() + timeout_s
-    while asyncio.get_running_loop().time() < deadline:
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded.get("direct"), int) and isinstance(loaded.get("grandchild"), int):
-                return {"direct": loaded["direct"], "grandchild": loaded["grandchild"]}
-        except (FileNotFoundError, json.JSONDecodeError, AttributeError):
-            pass
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"blocking fake gh did not publish {path}")

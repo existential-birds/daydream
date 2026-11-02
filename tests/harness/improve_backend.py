@@ -230,16 +230,6 @@ def group_scope(prompt: str) -> tuple[str, str]:
     return group.group(1), root.group(1)
 
 
-def group_roots(prompt: str) -> list[str]:
-    """Return every partition root named in an audit prompt's group block."""
-    return re.findall(r"^- .+ — `(.+?)/` \(", prompt, flags=re.MULTILINE)
-
-
-def group_file_counts(prompt: str) -> list[int]:
-    """Return each member partition's file count from an audit prompt."""
-    return [int(count) for count in re.findall(r"^- .+ — `.+?/` \((\d+) files", prompt, flags=re.MULTILINE)]
-
-
 def _citable_file(target: Path, root: str) -> str:
     """Return a real committed file inside ``root`` for a stub finding to cite."""
     base = target if root == "." else target / root
@@ -947,33 +937,6 @@ def install_capable_improve_backend(monkeypatch: pytest.MonkeyPatch, backend: _I
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)
     return backend
-
-
-def install_per_phase_improve_stubs(monkeypatch: pytest.MonkeyPatch, target: Path,) -> list[dict[str, Any]]:
-    """Install a factory that mints one stub per resolved backend cache key.
-
-    ``_resolve_backend`` caches on ``(name, model, reasoning_effort,
-    audit_root)``, so one stub per tuple is exactly one stub per distinct phase
-    tier and audit boundary. Every stub shares a single ``calls`` list, and
-    each recorded call carries the ``model``/``reasoning_effort`` the turn
-    actually ran on — the observable at the ``Backend.execute`` seam.
-    """
-    shared_calls: list[dict[str, Any]] = []
-
-    def _factory(name: str, model: str | None = None, *, cwd: Path | None = None, reasoning_effort: str | None = None,
-        audit_root: Path | None = None, audit_outward_symlinks: frozenset[Path] = frozenset(),
-    ) -> ImproveStubBackend:
-        stub = ImproveStubBackend(target)
-        stub.calls = shared_calls
-        stub.model = model or "mock-model"
-        stub.reasoning_effort = reasoning_effort
-        stub.audit_root = audit_root
-        stub.audit_outward_symlinks = audit_outward_symlinks
-        stub.audit_root_isolation = (AUDIT_ROOT_ISOLATION if audit_root is not None else None)
-        return stub
-
-    monkeypatch.setattr("daydream.runner.create_backend", _factory)
-    return shared_calls
 
 
 def improve_artifact(repo: Path, name: str) -> Path:

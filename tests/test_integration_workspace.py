@@ -9,52 +9,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
 from daydream import runner
-from daydream.flows.engine import BackendFactory
-from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
-from daydream.run_context import current_run_context
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _git, tracked_source_state
 from tests.test_github_app_integration import _minimal_backend
 
 # --- Helpers ---------------------------------------------------------------
-
-
-def _make_feature_branch_on_origin(tmp_path: Path, bare_origin: Path, branch: str = "feat/X") -> str:
-    """Push a branch from a sidecar clone and return its SHA, leaving the main
-    working repository without a local checkout of that branch.
-    """
-    sidecar = tmp_path / f"sidecar-{branch.replace('/', '_')}"
-    _git(tmp_path, "clone", str(bare_origin), str(sidecar))
-    _git(sidecar, "config", "user.email", "test@test.com")
-    _git(sidecar, "config", "user.name", "Test")
-    _git(sidecar, "checkout", "-b", branch)
-    (sidecar / f"{branch.replace('/', '_')}.txt").write_text("payload\n")
-    _git(sidecar, "add", ".")
-    _git(sidecar, "commit", "-m", f"feature commit on {branch}")
-    sha = _git(sidecar, "rev-parse", "HEAD")
-    _git(sidecar, "push", "origin", branch)
-    return sha
-
-
-def _stub_run_loop_deep(monkeypatch: pytest.MonkeyPatch, on_dispatch: Callable[[Any, Any], None]) -> None:
-    """Capture the real workspace/config dispatch and return success."""
-
-    async def _stub(
-        work: Any, config: Any, run_artifacts: Any = None, *, run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
-    ) -> int:
-        assert run_context is current_run_context()
-        assert backend_factory is None
-        on_dispatch(work, config)
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _stub)
 
 
 @pytest.fixture(autouse=True)

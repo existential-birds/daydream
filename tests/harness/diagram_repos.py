@@ -66,61 +66,6 @@ def build_cross_module_repo(root: Path) -> Path:
     return _build_cross_module_variant(root, "cross_module", CLIENT_PY)
 
 
-def _large_core_body(marker: str, lines: int) -> str:
-    """``pkg_a/core.py`` with a ``handle`` definition and ``lines`` total lines."""
-    body = [f"    # pkg_a/core.py {marker} line {i:03d}" for i in range(lines - 2)]
-    return "\n".join(["def handle(payload):", *body, "    return payload"]) + "\n"
-
-
-def _large_module_body(module: str, marker: str, lines: int) -> str:
-    """A generic generated module: every line carries the version marker."""
-    return "\n".join(f"# {module} {marker} line {i:03d}" for i in range(lines)) + "\n"
-
-
-def _large_client_body(marker: str, lines: int) -> str:
-    """``pkg_b/client.py``: imports ``handle`` from ``pkg_a.core`` (the edge)."""
-    body = [f"# pkg_b/client.py {marker} line {i:03d}" for i in range(lines - 2)]
-    return (
-        "\n".join(["from pkg_a.core import handle", *body, "def call_handle(payload):", "    return handle(payload)"])
-        + "\n"
-    )
-
-
-def build_large_cross_module_repo(root: Path, *, modules: int = 220, lines: int = 110) -> Path:
-    """Exceed the advisory-input byte budget with a deterministic cross-module diff.
-
-    Split modules between pkg_a and pkg_b, including core.handle and a client
-    import edge, and rewrite every file on the feature branch. Contents depend
-    only on module, version marker and lines, never root. Citations differ from
-    the canonical fixture; use this for budget/status assertions, not rendering."""
-    repo = root / "large_cross_module"
-    pkg_a_count = modules // 2
-    pkg_b_count = modules - pkg_a_count
-    pkg_a_names = ["core.py", *(f"mod_{i:03d}.py" for i in range(1, pkg_a_count))]
-    pkg_b_names = ["client.py", *(f"mod_{i:03d}.py" for i in range(1, pkg_b_count))]
-
-    def _write(marker: str) -> None:
-        for name in pkg_a_names:
-            body = (_large_core_body(marker, lines)
-                if name == "core.py"
-                else _large_module_body(f"pkg_a/{name}", marker, lines)
-            )
-            (repo / "pkg_a" / name).write_text(body, encoding="utf-8")
-        for name in pkg_b_names:
-            body = (_large_client_body(marker, lines)
-                if name == "client.py"
-                else _large_module_body(f"pkg_b/{name}", marker, lines)
-            )
-            (repo / "pkg_b" / name).write_text(body, encoding="utf-8")
-
-    (repo / "pkg_a").mkdir(parents=True)
-    (repo / "pkg_b").mkdir(parents=True)
-    _write("initial")
-    _branch_off_main(repo)
-    _write("feature")
-    return _finish(repo)
-
-
 def build_branch_heavy_repo(root: Path) -> Path:
     """Four new branch points satisfy flowchart eligibility. One code file and
     module without service/import edges keep sequence diagrams ineligible."""
@@ -139,24 +84,6 @@ def build_both_signals_repo(root: Path) -> Path:
     After the CLIENT_PY prefix and two newlines, run starts at line 11, its branch
     points are 12/14/16/17, and fast_path starts at line 22."""
     return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + PIPELINE_PY)
-
-
-def build_cross_service_repo(root: Path) -> Path:
-    """Two changed services with manifests but no import edge: only the
-    cross-service rule can detect this boundary."""
-    repo = root / "cross_service"
-    for service in ("alpha", "beta"):
-        service_root = repo / "services" / service
-        service_root.mkdir(parents=True)
-        (service_root / "pyproject.toml").write_text(f'[project]\nname = "{service}"\n', encoding="utf-8")
-        (service_root / "api.py").write_text(f'def endpoint():\n    return "{service}"\n', encoding="utf-8")
-    (repo / "pyproject.toml").write_text('[project]\nname = "cross-service"\n', encoding="utf-8")
-    _branch_off_main(repo)
-    for service in ("alpha", "beta"):
-        (repo / "services" / service / "api.py").write_text(
-            f'def endpoint():\n    return "{service}-v2"\n', encoding="utf-8"
-        )
-    return _finish(repo)
 
 
 def build_flat_repo(root: Path) -> Path:
@@ -274,18 +201,3 @@ def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> di
     }
 
 
-def cross_service_sequence_spec() -> dict[str, Any]:
-    """A three-message sequence spec for the cross-service fixture."""
-    return {"participants": [_participant("Alpha", ["services/alpha/api.py"], service="alpha"),
-            _participant("Beta", ["services/beta/api.py"], service="beta"),
-        ], "messages": [_message("Alpha", "Alpha", "Call alpha endpoint", "call",
-                file="services/alpha/api.py", line=1, symbol="endpoint",
-            ),
-            _message(
-                "Alpha", "Alpha", "Return alpha body", "reply", file="services/alpha/api.py", line=2, symbol="endpoint",
-            ),
-            _message(
-                "Beta", "Beta", "Serve beta endpoint", "self", file="services/beta/api.py", line=1, symbol="endpoint",
-            ),
-        ], "blocks": [],
-    }

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -27,19 +26,7 @@ from tests.test_deep_orchestrator import (
     _merge_item,
     _prime_merge_resume,
     _record,
-    _silence,
-    _StubBackend,
 )
-
-
-def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence noise-only UI in the deep path WITHOUT mocking prompt_user.
-
-    Unlike ``_silence``, this deliberately leaves the real ``prompt_user`` in
-    both the orchestrator and phases so the apply-fixes gate runs the genuine
-    production code path under test.
-    """
-    _silence(monkeypatch, prompts=False)
 
 
 def _forbidden_input(*_a: Any, **_kw: Any) -> str:
@@ -65,23 +52,6 @@ def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[dict[
     async def _record_post(*_args: Any, **kwargs: Any) -> None:
         received.append(kwargs)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
-
-
-def _prime_merge_resume_records(target: Path, *, python_severity: str | None) -> Path:
-    """Write the per-stack records a `--start-at merge` resume needs on disk.
-
-    Every detected stack (python, react, generic, structure) must have a records
-    file or be a recorded failure, else the resume guard returns 1. The python
-    record optionally carries ``python_severity`` to drive arbiter selection.
-    """
-    py_record = _record(description="py issue", evidence="api.py:1")
-    if python_severity is not None:
-        py_record |= {"severity": python_severity, "confidence": "HIGH", "rationale": "stub"}
-    return _prime_merge_resume(
-        target, python=[py_record], react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
-        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
-        structure=[_record(description="structural issue", evidence="api.py:1")],
-    )
 
 
 def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
@@ -125,19 +95,6 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
             if isinstance(ev, dict) and ev.get("event") == event:
                 found.append(ev)
     return found
-
-
-def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict[str, Any]]:
-    """Match a fix prompt's primary File line, ignoring sibling paths in Allowed files."""
-    out: list[dict[str, Any]] = []
-    for c in stub.calls:
-        prompt = c["prompt"]
-        if not prompt.lower().startswith("fix this issue"):
-            continue
-        m = re.search(r"^File: (.+)$", prompt, re.M)
-        if m is not None and Path(m.group(1).strip()).name == file_basename:
-            out.append(c)
-    return out
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:

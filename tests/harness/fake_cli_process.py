@@ -11,15 +11,11 @@ idle windows, and shielded terminate/kill teardown remain active.
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from daydream.backends import CostEvent, RequestEvent, ResultEvent, TextEvent, TurnEndEvent
 
 SIGTERM_RC = -15
 SIGKILL_RC = -9
@@ -39,21 +35,6 @@ class _FakeStdin:
         self.closed = True
 
 
-class LimitAwareStdout:
-    def __init__(self, lines: list[bytes], limit: int) -> None:
-        self._limit = limit
-        self._lines = iter(lines)
-
-    async def readline(self) -> bytes:
-        try:
-            line = next(self._lines)
-        except StopIteration:
-            return b""
-        if len(line) > self._limit:
-            raise ValueError("Separator is found, but chunk is longer than limit")
-        return line
-
-
 class ImmediateStdout:
     def __init__(self, lines: list[str]) -> None:
         self._lines = iter(lines)
@@ -63,31 +44,6 @@ class ImmediateStdout:
             return (next(self._lines) + "\n").encode()
         except StopIteration:
             return b""
-
-
-class BlockingStdout:
-    """Block the first readline until released; reject a concurrent read like asyncio.StreamReader.
-
-    """
-
-    def __init__(self, lines: list[str] | None = None) -> None:
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-        self._waiting = False
-        self._lines = iter(lines or [])
-
-    async def readline(self) -> bytes:
-        if self._waiting:
-            raise RuntimeError("readuntil() called while another coroutine is already waiting for incoming data")
-        self._waiting = True
-        self.entered.set()
-        try:
-            await self.release.wait()
-            return (next(self._lines) + "\n").encode()
-        except StopIteration:
-            return b""
-        finally:
-            self._waiting = False
 
 
 def cli_process(stdout: object) -> MagicMock:
@@ -102,45 +58,6 @@ def cli_process(stdout: object) -> MagicMock:
     process.terminate = MagicMock()
     process.kill = MagicMock()
     return process
-
-
-async def assert_concurrent_streams_isolated(
-    backend: Any, first_lines: list[str], *, second_lines: list[str] | None = None,
-) -> None:
-    """Overlap two executions of one backend with separate scripted processes. The second reader blocks
-    while the first reaches TurnEnd/Cost, proving stdout ownership is per execution.
-    Both executions must then deliver their own result and close their streams.
-    """
-    first_proc = cli_process(ImmediateStdout(first_lines))
-    second_stdout = BlockingStdout(second_lines)
-    second_proc = cli_process(second_stdout)
-    procs = iter([first_proc, second_proc])
-
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        return next(procs)
-
-    async def consume_second() -> list[object]:
-        return [event async for event in backend.execute(Path("/tmp"), "second")]
-
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        async with aclosing(backend.execute(Path("/tmp"), "first")) as first_iter:
-            assert isinstance(await anext(first_iter), RequestEvent)
-            first_event = await anext(first_iter)
-            assert isinstance(first_event, TextEvent)
-
-            second_task = asyncio.create_task(consume_second())
-            try:
-                await second_stdout.entered.wait()
-                turn_end = await anext(first_iter)
-                assert isinstance(turn_end, TurnEndEvent)
-                next_first_event = await anext(first_iter)
-                assert isinstance(next_first_event, CostEvent)
-                remaining = [event async for event in first_iter]
-                assert sum(isinstance(event, ResultEvent) for event in remaining) == 1
-            finally:
-                second_stdout.release.set()
-                second_events = await second_task
-        assert sum(isinstance(event, ResultEvent) for event in second_events) == 1
 
 
 class _FakePipeTransport:

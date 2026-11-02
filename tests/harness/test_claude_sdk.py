@@ -13,15 +13,8 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import CostEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.claude import ClaudeBackend
 from tests.harness.claude_sdk import (
-    MockAssistantMessage,
-    MockResultMessage,
-    MockTextBlock,
-    MockToolResultBlock,
-    MockToolUseBlock,
-    MockUserMessage,
     patch_claude_sdk,
     scripted_client,
 )
@@ -32,22 +25,3 @@ async def _drive(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[A
     backend = ClaudeBackend(model="opus")
     return [event async for event in backend.execute(Path("/tmp"), "go")]
 
-@pytest.mark.asyncio
-async def test_patched_blocks_reach_the_backend_as_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every mock block type the harness patches maps onto its AgentEvent."""
-    events = await _drive(monkeypatch,
-        [MockAssistantMessage(content=[
-                    MockTextBlock(text="hello"), MockToolUseBlock(id="t1", name="Read", input={"file_path": "a.py"}),
-                ]
-            ), MockUserMessage(content=[MockToolResultBlock(tool_use_id="t1", content="contents")]),
-            MockResultMessage(total_cost_usd=0.02),
-        ],
-    )
-
-    assert [e.text for e in events if isinstance(e, TextEvent)] == ["hello"]
-    starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert (starts[0].name, starts[0].id) == ("Read", "t1")
-    assert (results[0].id, results[0].output) == ("t1", "contents")
-    assert [e.cost_usd for e in events if isinstance(e, CostEvent)] == [0.02]
-    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1

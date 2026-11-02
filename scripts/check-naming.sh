@@ -17,8 +17,6 @@ EXCLUDED_PATHS=(
   "scripts/check-naming.sh"           # the gate's own pattern list necessarily names the versioned identifiers
   ".beagle/"                          # planning notes describing the renames themselves
   "CHANGELOG.md"                      # historical release notes; entries name paths as they were at release time
-  "tests/test_neutral_names.py"       # deletion-pin test: asserts the versioned identifiers are gone
-  "tests/test_corpus_projection.py"   # deletion-pin test: asserts the legacy build-v2 subverb is gone
   "rl/daydream_review/tests/test_env_identity.py"  # deletion-pin test: asserts the v1 package name is gone
 )
 

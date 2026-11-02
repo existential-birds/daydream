@@ -236,11 +236,3 @@ def tracked_source_state(repo: Path) -> dict[str, Any]:
     }
 
 
-def seed_base_support_files(repo: Path, files: dict[str, str]) -> None:
-    """Add existing dependency sources to main and merge them into a fixture branch."""
-    branch = git(repo, 'branch', '--show-current')
-    git(repo, 'checkout', 'main')
-    _write_and_stage_files(repo, files)
-    commit(repo, 'fixture: existing dependency sources')
-    git(repo, 'checkout', branch)
-    git(repo, 'merge', 'main', '-m', 'fixture: merge existing dependency sources')

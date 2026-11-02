@@ -54,17 +54,15 @@ from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.dataset import read_records
+from tests.harness.deep_review_sdk import FakeSDKClient
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.trajectory import make_recorder
-from tests.test_deep_pr_comment_integration import (
-    _FakeSDKClient,
-)
 
 
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
-    patch_claude_sdk(monkeypatch, _FakeSDKClient)
+    patch_claude_sdk(monkeypatch, FakeSDKClient)
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 

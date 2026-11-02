@@ -1,20 +1,11 @@
-"""Exercise model, usage, cost, and phase rows in real deep-run PR comments.
-
-Mock the Claude SDK and GitHub boundary; production phases, trajectory
-recording, and comment rendering supply the observable payload.
-"""
+"""A fake Claude SDK client that answers deep-review exploration, review and merge prompts."""
 
 from __future__ import annotations
 
 import re
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from daydream import pr_review
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -22,10 +13,7 @@ from tests.harness.claude_sdk import (
     MockToolResultBlock,
     MockToolUseBlock,
     MockUserMessage,
-    patch_claude_sdk,
 )
-from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import merge_result
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 
@@ -65,14 +53,14 @@ _REVIEW_FINDING = {
     "confidence": "MEDIUM", "rationale": "The current name is ambiguous.", "evidence": "foo.py:1",
 }
 
-class _FakeSDKClient:
+class FakeSDKClient:
     """Per-call canned response + simulated tool-use side effects."""
 
     def __init__(self, options: Any = None) -> None:
         self.options = options
         self._prompt: str = ""
 
-    async def __aenter__(self) -> "_FakeSDKClient":
+    async def __aenter__(self) -> "FakeSDKClient":
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -124,15 +112,15 @@ class _FakeSDKClient:
         # Exploration specialists run under maybe_fork; the production-bug path
         # where the 'Exploration' rollup row renders 'unknown' / '$0.00'.
         if "pattern-scanner" in pl:
-            return _FakeSDKClient._exploration_messages(
+            return FakeSDKClient._exploration_messages(
                 {"conventions": [], "guidelines": []}, tool_name="Read", tool_input={"file_path": "AGENTS.md"},
             )
         if "dependency-tracer" in pl:
-            return _FakeSDKClient._exploration_messages(
+            return FakeSDKClient._exploration_messages(
                 {"affected_files": [], "dependencies": []}, tool_name="Grep", tool_input={"pattern": "import foo"},
             )
         if "test-mapper" in pl:
-            return _FakeSDKClient._exploration_messages(
+            return FakeSDKClient._exploration_messages(
                 {"affected_files": []}, tool_name="Read", tool_input={"file_path": "tests/test_foo.py"},
             )
 
@@ -177,69 +165,3 @@ class _FakeSDKClient:
         ]
 
 # Repo + monkeypatch fixtures.
-
-@pytest.fixture
-def deep_target_multi(tmp_path: Path) -> Path:
-    """Change four Python files to exercise parallel exploration and forked trajectories."""
-    repo = tmp_path / "deep_repo_multi"
-    _init_repo(repo)
-    # Seed five Python files on main so the tree-sitter index can resolve them.
-    for name in ("foo.py", "bar.py", "baz.py", "qux.py", "quux.py"):
-        (repo / name).write_text(f"def {name[:-3]}():\n    return 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "init")
-    _git(repo, "checkout", "-b", "feature")
-    # Mutate four so count_changed_files >= 4 -> tier="parallel".
-    for name in ("foo.py", "bar.py", "baz.py", "qux.py"):
-        (repo / name).write_text(f"def {name[:-3]}():\n    return 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "tweak four files")
-    # Assert diff count up-front so a threshold-breaking refactor trips here.
-    diff_out = subprocess.run(  # noqa: S603 - controlled args
-        ["git", "diff", "--name-only", "main..HEAD"],  # noqa: S607
-        cwd=repo, capture_output=True, check=True, text=True,
-    )
-    changed = [ln for ln in diff_out.stdout.splitlines() if ln]
-    assert len(changed) >= 4, (f"deep_target_multi fixture should produce >=4 changed files; "
-        f"got {len(changed)}: {changed!r}"
-    )
-    return repo
-
-@pytest.fixture
-def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch every SDK symbol that ClaudeBackend.execute does isinstance on."""
-    patch_claude_sdk(monkeypatch, _FakeSDKClient)
-
-# Fake PR lookup and gh transport capture the production-rendered payload.
-
-@dataclass
-class _CapturedPost:
-    gh: FakeGh
-
-    @property
-    def payloads(self) -> list[dict[str, Any]]:
-        return [call.payload for call in self.gh.calls("POST", "repos/test-owner/test-repo/pulls/123/reviews")]
-
-@pytest.fixture
-def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
-    """Wire PR discovery and fake gh so the complete submission runs and we see
-    the rendered markdown without ever touching GitHub."""
-
-    captured = _CapturedPost(fake_gh)
-    fake_pr = pr_review.PRInfo(
-        number=123, head_sha="0" * 40, base_sha="1" * 40, base_ref="main", head_ref="feature", owner="test-owner",
-        repo="test-repo", url="https://example/pr/123",
-    )
-
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda target_dir, **_kwargs: fake_pr,)
-
-    fake_gh.set_response("POST", "repos/test-owner/test-repo/pulls/123/reviews",
-        {"html_url": "https://example/pr/123#review-1"},
-    )
-    return captured
-
-# Misc: silence Rich UI noise + answer interactive prompts.
-
-# Markdown extraction helpers.
-
-# The test.
