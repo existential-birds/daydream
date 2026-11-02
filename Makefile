@@ -23,10 +23,11 @@ typecheck:
 # Whole-project dead-code detection (#935). Both projects' scans live in their
 # own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
 # is resolved. Scan pkg+tests together (one process) so test references keep
-# package symbols alive. Exit 0 == clean.
+# package symbols alive. Exit 0 == clean. The RL scan uses the root environment
+# because syncing RL's own environment only to parse its source costs far more.
 deadcode:
 	uv run vulture --config pyproject.toml daydream tests
-	cd rl/daydream_review && uv run vulture --config pyproject.toml daydream_review tests
+	uv run vulture --config rl/daydream_review/pyproject.toml rl/daydream_review/daydream_review rl/daydream_review/tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by

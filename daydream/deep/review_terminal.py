@@ -15,7 +15,7 @@ from daydream.artifact_visibility import ArtifactSourceUnavailableError
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
-from daydream.json_utils import atomic_write_bytes, atomic_write_json
+from daydream.json_utils import atomic_write_bytes, atomic_write_json, validate_json_schema
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, parsed_issues_from_items, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
@@ -107,7 +107,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
             item_schema["additionalProperties"] = True
             item_schema["required"].remove("related_files")
             item_schema["properties"]["confidence"] = {"enum": ["HIGH", "MEDIUM", "LOW"]}
-            jsonschema.validate(payload, schema)
+            validate_json_schema(payload, schema)
             items = payload["items"]
             raw_held = payload.get('held')
             if isinstance(raw_held, list) and all(isinstance(item, dict)

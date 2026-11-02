@@ -12,7 +12,7 @@ from typing import Any
 
 import jsonschema
 
-from daydream.json_utils import canonical_json
+from daydream.json_utils import canonical_json, validate_json_schema
 from daydream.output_schema import strict_object
 
 _SHA = {"type": "string", "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$"}
@@ -41,7 +41,7 @@ IMMUTABLE_REVIEW_INPUT_SCHEMA = strict_object({
 def validate_immutable_input(value: dict[str, Any]) -> None:
     """Reject unknown fields/versions and contradictory original/local identities."""
     try:
-        jsonschema.validate(value, IMMUTABLE_REVIEW_INPUT_SCHEMA)
+        validate_json_schema(value, IMMUTABLE_REVIEW_INPUT_SCHEMA)
     except jsonschema.ValidationError as exc:
         raise ValueError(f"invalid immutable review input at {exc.json_path}") from exc
     original, local = value["provenance"], value["materialization"]

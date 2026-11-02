@@ -10,6 +10,7 @@ import jsonschema
 from daydream import git_ops
 from daydream.config import DIAGRAM_KINDS
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
+from daydream.json_utils import validate_json_schema
 from daydream.repository_paths import valid_repository_file_path
 from daydream.reviews.identity import DAYDREAM_FOOTER, diagram_marker
 from daydream.reviews.models import PRInfo
@@ -371,7 +372,7 @@ def validate_diagram_payload(
         if not isinstance(result, dict) or result.get("status") != "rendered":
             continue
         try:
-            jsonschema.validate(result.get("spec_final"), schemas[kind])
+            validate_json_schema(result.get("spec_final"), schemas[kind])
         except jsonschema.ValidationError as exc:
             return f"{kind} spec_final failed schema validation: {exc.message}"
         spec = result["spec_final"]

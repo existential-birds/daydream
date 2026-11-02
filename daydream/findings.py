@@ -19,7 +19,7 @@ import jsonschema
 
 from daydream import git_ops, pr_review
 from daydream.immutable_review import IMMUTABLE_REVIEW_INPUT_SCHEMA, validate_immutable_input
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, validate_json_schema
 from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
 from daydream.review_rationale import valid_review_context
@@ -98,7 +98,7 @@ def _validate_artifact(data: Any) -> None:
     if type(version) is not int or version not in (FINDINGS_SCHEMA_VERSION, IMMUTABLE_FINDINGS_SCHEMA_VERSION):
         raise FindingsValidationError(f"artifact failed schema validation: unsupported schema version {version!r}")
     try:
-        jsonschema.validate(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
+        validate_json_schema(data, IMMUTABLE_FINDINGS_SCHEMA if version == IMMUTABLE_FINDINGS_SCHEMA_VERSION
                             else FINDINGS_SCHEMA)
         if data["kind"] == "review":
             if 'source_id' in data['terminal_result']['analyzed_revision']:
