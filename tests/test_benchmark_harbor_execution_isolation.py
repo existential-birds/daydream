@@ -1,6 +1,7 @@
 """The actual frozen Harbor bundle enters the shared offline native review API."""
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import json
 import os
@@ -9,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from daydream.benchmark.harbor import build, candidate, entrypoint, package as pkg
+from daydream.benchmark.harbor import build, candidate, entrypoint, package as pkg, verifier_core
 from daydream.committed_review_model import CommittedReviewResult
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
@@ -115,12 +116,13 @@ def _assert_committed_projection_bounds(result: dict[str, Any], immutable: dict[
 
 async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
-    dataset_hub: Any, operator_dataset_sentinel: Path,
+    dataset_hub: Any, operator_dataset_sentinel: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The actual compiled bundle enters the native review offline; failed installs and tampering publish nothing.
+    """The actual compiled bundle enters the native review offline and publishes one valid candidate.
 
     This owns the consumer boundary: actual compiled bundle, real native host tools,
-    trusted provenance confinement, truthful partial evidence and filesystem installs.
+    native credential filtering, trusted provenance confinement and atomic installs.
+    A missing model, a failed candidate install or a tampered bundle publishes nothing.
     """
     case, repo, immutable = _compiled_case(tmp_path, fake_gh)
     _assert_compiled_case_is_file_level_isolated(
@@ -143,6 +145,41 @@ async def test_compiled_harbor_review_is_offline_source_bound_and_failure_atomic
     parent_before = dict(os.environ)
     baseline_runs = {path.name: path.read_bytes() for path in (operator_dataset_sentinel / "runs").glob("*.jsonl")}
     native_provider.choose = answer_review
+    # A required reviewer model is refused before any native process or evidence.
+    for model in (None, "", " \t "):
+        refused = {key: value for key, value in environment.items() if key != "DAYDREAM_REVIEW_MODEL"}
+        if model is not None:
+            refused["DAYDREAM_REVIEW_MODEL"] = model
+        assert await entrypoint.main(refused) == 1, repr(model)
+        assert "DAYDREAM_REVIEW_MODEL" in capsys.readouterr().err
+    assert native_provider.requests == [] and not (tmp_path / "logs").exists()
+
+    # Success: trajectory delivery precedes one valid published candidate. The native
+    # child receives only its selected reviewer key, never host or judge credentials.
+    real_spawn = asyncio.create_subprocess_exec
+    native_children: list[dict[str, str]] = []
+
+    async def observe_native_environment(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        if args and Path(str(args[0])).name == "pi" and args[1:3] == ("--mode", "json"):
+            native_children.append(dict(kwargs.get("env") or {}))
+        return await real_spawn(*args, **kwargs)
+
+    success = {**environment, "DAYDREAM_REVIEW_ARTIFACT_PATH": str(tmp_path / "published/review.json"),
+               "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(tmp_path / "published/logs/trajectory.json")}
+    with monkeypatch.context() as observed, forbid_github() as attempts:
+        observed.setattr(asyncio, "create_subprocess_exec", observe_native_environment)
+        assert await entrypoint.main(success) == 0
+    assert attempts == [] and native_children
+    for child in native_children:
+        assert child.get("OPENROUTER_API_KEY") == "synthetic-loopback-only"
+        for name, secret in forbidden_credentials.items():
+            assert name not in child and secret not in child.values(), name
+    published, = verifier_core.validate_candidate_artifact(
+        json.loads((tmp_path / "published/review.json").read_text()))
+    assert published.path == "feature.py" and published.start_line == 2
+    assert (tmp_path / "published/logs/trajectory.json").is_file()
+
+    # Failure: a candidate install failure keeps the prior candidate bytes.
     artifact = tmp_path / "review.json"
     artifact.write_bytes(b"prior candidate")
     real_replace = os.replace

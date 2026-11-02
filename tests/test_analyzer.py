@@ -46,19 +46,14 @@ def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "20
     )
 
 
-@pytest.mark.parametrize(("status", "cutoff_at"), [
-    ("partial", "2026-01-01T00:00:10Z"),
-])
-def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
-    status: Literal["complete", "partial"], cutoff_at: str,
-) -> None:
+def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path) -> None:
     root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
         "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
         "final_metrics": {"total_cost_usd": 0.5},
         "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
             "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
     }
-    snapshot = _snapshot(root, status=status, cutoff_at=cutoff_at)
+    snapshot = _snapshot(root, status="partial", cutoff_at="2026-01-01T00:00:10Z")
     snapshot.validate("frozen")
     live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
     live_path.parent.mkdir(parents=True)
@@ -282,11 +277,8 @@ def _big_function(max_x: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-@pytest.mark.parametrize("candidate_paths", [{"app.py", "api_generated.py"}], ids=["candidate"])
-def test_quality_excludes_vendored_and_internal_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
-) -> None:
-    """Standalone scope prunes excluded trees and preserves leaf-file symlink compatibility."""
+def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Standalone candidate scope prunes excluded trees and generated candidates before traversal."""
     ws = _quality_workspace(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
@@ -317,31 +309,18 @@ def test_quality_excludes_vendored_and_internal_dirs(
         return scandir(path)
 
     monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
-
-    expected = (["app.py", "eligible.py/child.py", "linked_file.py", "vendorish/mod.py"]
-        if candidate_paths is None else ["app.py"])
-    assert result["scoped_files"] == len(expected)
-    assert list(result["per_file"]) == expected
-    if candidate_paths is None:
-        assert result["per_file"]["linked_file.py"]["sloc"] == 1
+    result = analyze_quality(ws / ".daydream", candidate_paths={"app.py", "api_generated.py"})
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
 
 
-@pytest.mark.parametrize("layout", ["linked"])
-@pytest.mark.parametrize("candidate_paths", [None, ], ids=["workspace", ])
 def test_quality_git_scope_confines_targets_and_clone_peers(
     git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    layout: str, candidate_paths: set[str] | None,
 ) -> None:
-    """Git membership owns reads and clones; standalone peer tests cannot detect ignored pollution."""
-    workspace = git_repo
-    if layout == "nested":
-        workspace = git_repo / "service"
-        workspace.mkdir()
-        (git_repo / "outside.py").write_text("OUTSIDE = 1\n")
-    elif layout == "linked":
-        workspace = tmp_path / "linked"
-        git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
+    """Git membership owns reads and clones in a linked worktree; standalone peer tests cannot
+    detect ignored pollution."""
+    workspace = tmp_path / "linked"
+    git(git_repo, "worktree", "add", "--detach", str(workspace), "HEAD")
     block = "    if x > 1:\n        return 1\n    return 0\n"
     solo_block = "    if y > 7:\n        return 8\n    return 9\n"
     contents = {
@@ -391,10 +370,8 @@ def test_quality_git_scope_confines_targets_and_clone_peers(
 
     monkeypatch.setattr(Path, "open", open_source)
     monkeypatch.setattr(os, "scandir", scan)
-    result = analyze_quality(workspace / ".daydream", candidate_paths=candidate_paths)
+    result = analyze_quality(workspace / ".daydream")
     expected = [".rules/hidden.py", "app.py", "deps/tracked.py", "peer.py", "solo.py"]
-    if candidate_paths is not None:
-        expected = ["app.py", "solo.py"]
     assert result["scoped_files"] == len(expected)
     assert list(result["per_file"]) == expected
     assert sorted(reads) == sorted(allowed_reads)
@@ -407,10 +384,9 @@ def test_quality_git_scope_confines_targets_and_clone_peers(
     assert analyze_quality(workspace / ".daydream", candidate_paths={"app.py"})["verbosity"] == 0.0
 
 
-@pytest.mark.parametrize("source_state", ["missing", ])
-@pytest.mark.parametrize("change_at", ["after-inventory"])
+@pytest.mark.parametrize("source_state", ["missing", "symlink"])
 def test_quality_reattests_workspace_after_git_inventory(
-    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str, change_at: str,
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
 ) -> None:
     """Root changes around real Git inventory remain unavailable or unsafe, without widening scope."""
     (git_repo / "app.py").write_bytes(b"ORIGINAL = 1\n")
@@ -421,13 +397,11 @@ def test_quality_reattests_workspace_after_git_inventory(
     inventory = search_files
 
     def enumerate_then_change(*args: Any, **kwargs: Any) -> list[str]:
-        paths = inventory(*args, **kwargs) if change_at == "after-inventory" else []
+        paths = inventory(*args, **kwargs)
         git_repo.rename(moved)
-        if source_state == "replacement":
-            replacement.rename(git_repo)
-        elif source_state == "symlink":
+        if source_state == "symlink":
             git_repo.symlink_to(replacement, target_is_directory=True)
-        return paths if change_at == "after-inventory" else inventory(*args, **kwargs)
+        return paths
 
     monkeypatch.setattr(quality_mod, "search_files", enumerate_then_change)
     with pytest.raises(ArtifactVisibilityError) as caught:
@@ -437,8 +411,7 @@ def test_quality_reattests_workspace_after_git_inventory(
     else:
         assert type(caught.value) is ArtifactVisibilityError
     assert (moved / "app.py").read_bytes() == b"ORIGINAL = 1\n"
-    retained = git_repo if source_state == "replacement" else replacement
-    assert (retained / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
+    assert (replacement / "app.py").read_bytes() == b"REPLACEMENT = 2\n"
     if source_state == "missing":
         assert not git_repo.exists()
 
@@ -618,10 +591,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
 
 
-@pytest.mark.parametrize("candidate_paths", [{"app.py"}], ids=["candidate"])
-def test_quality_reuses_eligibility_bytes_for_parsing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
-) -> None:
+def test_quality_reuses_eligibility_bytes_for_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Eligibility and parsing share one read, including peers and failed inputs."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     ws = _quality_workspace(tmp_path, {
@@ -643,23 +613,19 @@ def test_quality_reuses_eligibility_bytes_for_parsing(
         return open_path(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", open_source)
+    candidate_paths = {"app.py"}
     result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
 
     assert opens == {name: 1 for name in (
         "app.py", "peer.py", "broken.py", "gen_tool.py", "denied.py", "undecodable.py",
     )}
-    assert result["scoped_files"] == (4 if candidate_paths is None else 1)
-    expected_paths = ["app.py", "peer.py", "undecodable.py"] if candidate_paths is None else ["app.py"]
-    assert list(result["per_file"]) == expected_paths
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
     assert result["per_file"]["app.py"] == {
         "erosion": 0.0, "verbosity": 0.75, "sloc": 4, "functions": 1, "high_cc_functions": 0,
     }
     assert result["erosion"] == 0.0
-    assert result["verbosity"] == (0.6 if candidate_paths is None else 0.75)
-    if candidate_paths is None:
-        assert result["per_file"]["undecodable.py"] == {
-            "erosion": 0.0, "verbosity": 0.0, "sloc": 2, "functions": 1, "high_cc_functions": 0,
-        }
+    assert result["verbosity"] == 0.75
     # Remove the valid clone peer while leaving the broken file's identical body in place.
     # A malformed tree must not create a false clone in either workspace or candidate scope.
     (ws / "peer.py").write_text("PEER = 7\n")

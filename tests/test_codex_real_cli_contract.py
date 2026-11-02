@@ -1,4 +1,4 @@
-"""The sanitized real Codex capture keeps truthful provenance; its maintenance script only writes candidates.
+"""Committed real Codex captures parse and keep truthful provenance; maintenance scripts only write candidates.
 
 The separate sanitized codex 0.153.4 omission capture retains raw/sanitized digests. Its maintenance
 script creates only an unpublished public candidate for exact-run corroboration and review.
@@ -11,8 +11,12 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
-from tests.harness.codex_replay import FIXTURES_DIR
+from daydream.backends import DiagnosticEvent, MetricsEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends.codex import CodexBackend
+from tests.harness.codex_replay import FIXTURES_DIR, make_mock_process_from_fixture
 
 REAL_GENERIC_TOOL_FAILURE = "real/generic-tool-failure.jsonl"
 REAL_GENERIC_TOOL_FAILURE_META = "real/generic-tool-failure.meta.json"
@@ -162,3 +166,25 @@ def test_codex_capture_provenance_is_sanitized_and_candidates_never_replace_it(t
     assert not [path for path in rejected_root.iterdir() if not path.name.startswith(".")]
     assert committed_fixture.read_bytes() == before_fixture
     assert committed_metadata.read_bytes() == before_metadata
+
+
+async def test_real_golden_parses_to_expected_events() -> None:
+    """The committed real Codex golden parses structurally: text, paired tools, usage and a terminal result.
+
+    scripts/capture-codex-golden.sh regenerates the golden; reworded model output must not break this.
+    """
+    events: list[Any] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec",
+               return_value=make_mock_process_from_fixture("real/golden.jsonl")):
+        async for event in CodexBackend(model="gpt-5.5").execute(Path("/tmp"), "Read README.md then hello.py"):
+            events.append(event)
+    assert not any(isinstance(event, DiagnosticEvent) for event in events)
+    assert any(isinstance(event, TextEvent) for event in events)
+    starts = {event.id for event in events if isinstance(event, ToolStartEvent)}
+    results = [event.id for event in events if isinstance(event, ToolResultEvent)]
+    assert len(starts) == len(results) == 2 and set(results) == starts
+    metrics = next(event for event in events if isinstance(event, MetricsEvent))
+    for value in (metrics.prompt_tokens, metrics.completion_tokens, metrics.cached_tokens,
+                  metrics.reasoning_tokens, metrics.cost_usd):
+        assert value is not None and value > 0
+    assert any(isinstance(event, ResultEvent) for event in events)

@@ -3,24 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent
 from daydream.deep.routing_record import read_routing_record
 from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import _arbiter_stacks
-from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
@@ -104,11 +99,10 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     assert not [call for call in stub.calls if "you are the arbiter" in call["prompt"].lower()]
 
 
-@pytest.mark.parametrize("stop", ["cancel", ])
 async def test_precision_overlap_closes_both_streams_without_publishing_completion(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation and inherited deadlines must unwind both live provider streams.
+    """Cancellation must unwind both live adjudication provider streams.
 
     Existing reviewer-cancellation coverage does not enter the new adjudication
     fan-out, where a leaked sibling could continue writing after run finalization.
@@ -117,29 +111,7 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
     backend.fanout_concurrency = 2
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     profile = independent_alternatives_profile()
-    if stop == "deadline":
-        # Exclude runner setup from the small allowance; AnyIO's real timers
-        # still expire and close both blocked provider streams.
-        FakeClock().install(monkeypatch)
-        setattr(backend, "supports_budget_preamble", True)
-        execute = backend.execute
-
-        async def budget_provider(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if not ("you are the arbiter" in prompt.lower()
-                    or "you are the suppression reviewer" in prompt.lower()):
-                # Only the adjudication fixture consumes live budget fields;
-                # its inherited provider for other phases has a smaller API.
-                kwargs.pop("wall_budget_s", None)
-                kwargs.pop("tool_call_budget", None)
-            async for event in execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-        monkeypatch.setattr(backend, "execute", budget_provider)
-        # Adjudication reserves 60 seconds for finalization. This leaves a real
-        # four-second shared investigation allowance on the frozen host clock.
-        profile = replace(profile, profile=replace(profile.profile,
-            pipeline=replace(profile.profile.pipeline, review_wall_budget_s=64)))
-    config = empty_review_config(multi_stack_target, tmp_path / f"{stop}-overlap.json", precision_mode=True,
+    config = empty_review_config(multi_stack_target, tmp_path / "cancel-overlap.json", precision_mode=True,
         latency_profile="forensic", review_profile=profile, review_cache_enabled=True)
 
     async def wait_for_overlap() -> None:
@@ -157,13 +129,9 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
             await ready
         live = backend.input_paths["suppression"].parent
         assert not (live / "adjudication-complete.marker").exists()
-        if stop == "cancel":
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            with anyio.fail_after(15):
-                assert await task == 0
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     finally:
         if not ready.done():
             ready.cancel()
@@ -178,14 +146,6 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
     assert not (deep / "adjudication-complete.marker").exists()
     assert all(json.loads(path.read_text())["unit"] != "arbiter"
                for path in (deep.parent / "review-cache/entries").glob("*/manifest.json"))
-    if stop == "deadline":
-        coverage = saved_coverage(deep)
-        assert all(coverage.phases[phase]["status"] == "incomplete" for phase in ("arbiter", "suppression"))
-        allowances = [call["wall_budget_s"] for call in backend.calls
-                      if "you are the arbiter" in call["prompt"].lower()
-                      or "you are the suppression reviewer" in call["prompt"].lower()]
-        assert len(allowances) == 2 and all(0 < allowance <= 4 for allowance in allowances)
-        assert allowances[0] == pytest.approx(allowances[1], abs=0.25)
 
 
 def test_sharded_arbiter_plan_names_each_forcing_signal_and_records_effort_pins() -> None:

@@ -6,8 +6,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.deep.detection import StackAssignment
 from daydream.hunk_index import write_hunk_index
@@ -20,9 +18,8 @@ from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
-@pytest.mark.parametrize('advance_refs', [False, ])
-async def test_small_pi_review_keeps_structural_dispatch(
-    tmp_path: Path, make_work: Any, advance_refs: bool,
+async def test_small_pi_review_keeps_structural_dispatch_bound_to_captured_refs(
+    tmp_path: Path, make_work: Any,
 ) -> None:
     """Small-diff navigation and source attribution stay bound to captured revisions.
 
@@ -40,15 +37,15 @@ async def test_small_pi_review_keeps_structural_dispatch(
     calls: list[str] = []
     base, head = git(tmp_path, "rev-parse", "main"), git(tmp_path, "rev-parse", "HEAD")
     work = make_work(tmp_path, base_sha=base, head_sha=head, head_branch="feature")
-    if advance_refs:
-        git(tmp_path, "checkout", "main")
-        (tmp_path / "base-only.txt").write_text("Advanced base tip\n")
-        git(tmp_path, "add", "base-only.txt")
-        git(tmp_path, "commit", "-m", "advance base")
-        git(tmp_path, "checkout", "feature")
-        (tmp_path / "head-only.txt").write_text("Advanced head tip\n")
-        git(tmp_path, "add", "head-only.txt")
-        git(tmp_path, "commit", "-m", "advance head")
+    # Both named refs move after capture; navigation must stay bound to the captured revisions.
+    git(tmp_path, "checkout", "main")
+    (tmp_path / "base-only.txt").write_text("Advanced base tip\n")
+    git(tmp_path, "add", "base-only.txt")
+    git(tmp_path, "commit", "-m", "advance base")
+    git(tmp_path, "checkout", "feature")
+    (tmp_path / "head-only.txt").write_text("Advanced head tip\n")
+    git(tmp_path, "add", "head-only.txt")
+    git(tmp_path, "commit", "-m", "advance head")
 
     backend = NativeStageBackend(tmp_path)
     backend.model = "fixture"

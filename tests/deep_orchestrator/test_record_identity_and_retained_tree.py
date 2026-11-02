@@ -65,18 +65,18 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
         "1 of 2 merged item(s) now carry no record attribution." in out
     ), out
 
-@pytest.mark.parametrize("provenance", ["string"])
+@pytest.mark.parametrize("provenance", ["null", "string"])
 async def test_unattributable_merge_source_uids_require_current_schema(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     provenance: str,
 ) -> None:
-    """Null attribution ships honestly as []; missing and wrong-typed keys reject synthesis."""
+    """Null attribution ships honestly as []; a wrong-typed key rejects synthesis but keeps valid siblings."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
     stub.merge_items = [_provenance_item(1, "Unattributable finding",
-        source_uids="python:1" if provenance == "string" else None, omit_source_uids=provenance == "missing")]
+        source_uids="python:1" if provenance == "string" else None)]
     stub.merge_emit_str = json.dumps({"items": [{"related_files": None, **item} for item in stub.merge_items]})
 
     assert await _run_deep(multi_stack_target, start_at="merge") == (0 if provenance == "null" else 1)
@@ -96,11 +96,10 @@ async def test_unattributable_merge_source_uids_require_current_schema(
     out = _panel_text(capsys)
     assert "match no record in this run" not in out, out
 
-@pytest.mark.parametrize("base_evidenced", [False], ids=["structure-survives"])
 def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Host-only bypass/salvage folding preserves both identities and structural severity."""
+    """An unevidenced language twin folds into the structural survivor, keeping both identities and severity."""
 
     _silence(monkeypatch)
     deep = _prime_source_uid_merge_resume(multi_stack_target,
@@ -109,7 +108,7 @@ def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
     )
     language = [_record(
             id=1, description=_TWIN_DESCRIPTION, line=5,
-            evidence="api.py:5" if base_evidenced else "", uid="python:1",
+            evidence="", uid="python:1",
         ), _record(id=2, description="Unrelated react concern", file="App.tsx", evidence="App.tsx:1", uid="react:1"),
     ]
 
@@ -118,9 +117,9 @@ def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
     )
     twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
     assert len(twins) == 1
-    survivor = "base" if base_evidenced else "structural"
-    source_uids = ["python:1", "structure:1"] if base_evidenced else ["structure:1", "python:1"]
-    assert twins[0]["lens"] == ("per-stack" if base_evidenced else "structural")
+    survivor = "structural"
+    source_uids = ["structure:1", "python:1"]
+    assert twins[0]["lens"] == "structural"
     assert twins[0]["source_uids"] == source_uids
     assert twins[0]["severity"] == "high"
     assert _source_uids_by_description(deep)["Unrelated react concern"] == ["react:1"]

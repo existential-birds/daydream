@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import json
-from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
-from rich.console import Console
 
 from daydream.agent import run_agent
 from daydream.backends import (
@@ -25,13 +23,6 @@ from tests.harness.backend import ScriptedBackend
 def _scripted(events: list[Any]) -> ScriptedBackend:
     """ScriptedBackend whose turn ends with an empty structured result."""
     return ScriptedBackend(events=[*events, ResultEvent(structured_output=None, continuation=None)], model="mock-model")
-
-@pytest.fixture
-def rec(monkeypatch: pytest.MonkeyPatch) -> Console:
-    """Install a recording console as ``daydream.agent.console`` and return it."""
-    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", console)
-    return console
 
 async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -62,10 +53,9 @@ async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     assert sentinel not in out          # no raw leak through the agent's log-mode emission
     assert out.count("[result]") == 1 and "OpenAPI First" in out
 
-@pytest.mark.parametrize("primary", [{"issues": "invalid", "description": "REJECTED_RESULT"}])
-async def test_log_presents_only_resolved_result_once(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], primary: Any,
-) -> None:
+async def test_log_presents_only_resolved_result_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A rejected primary result is never logged; only the resolved fallback appears, once and redacted."""
+    primary = {"issues": "invalid", "description": "REJECTED_RESULT"}
     sentinel = "ghp_" + "x" * 16
     payload = {"issues": [{"id": 1, "description": "Accepted " + sentinel}]}
     backend = ScriptedBackend(events=[TextEvent(text=json.dumps(payload)),
@@ -92,4 +82,4 @@ async def test_salvageable_text_requires_lists_in_required_array_slots(tmp_path:
     assert result == {"issues": [], "summary": 5}
     result, _, _ = await run_agent(_scripted([TextEvent(text='{"issues": "none", "summary": "ok"}')]), tmp_path,
                                    "review", phase=DaydreamPhase.REVIEW, output_schema=schema)
-    assert result != {"issues": "none", "summary": "ok"}
+    assert result == '{"issues": "none", "summary": "ok"}'  # unsalvageable prose stays raw text, never an object

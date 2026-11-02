@@ -266,27 +266,15 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     jsonschema.validate(row, json.loads((config.out_dir / "schema.json").read_text()))
 
 
-@pytest.mark.parametrize("target", ["store-alias"])
 def test_cli_output_refuses_record_store_overlap_without_mutating_input(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path)
     input_root = store.root
-    if target == "store-root":
-        output_root = store.root
-    elif target == "shards":
-        output_root = store.root / "runs"
-    elif target == "ancestor":
-        output_root = store.root.parent
-    elif target == "output-alias":
-        alias = tmp_path / "output-alias"
-        alias.symlink_to(store.root, target_is_directory=True)
-        output_root = alias / "runs"
-    else:
-        input_root = tmp_path / "store-alias"
-        input_root.symlink_to(store.root, target_is_directory=True)
-        output_root = store.root
+    input_root = tmp_path / "store-alias"
+    input_root.symlink_to(store.root, target_is_directory=True)
+    output_root = store.root
     (tmp_path / "operator-notes.txt").write_text("existing local evidence and notes must survive")
     before_files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     before_paths = set(tmp_path.rglob("*"))

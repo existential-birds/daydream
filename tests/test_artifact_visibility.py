@@ -385,6 +385,16 @@ def _no_reversal() -> Callable[[], Any]:
     return factory
 
 
+@contextmanager
+def _case_note(label: str) -> Iterator[None]:
+    """Name the table row in any failure raised by a merged loop."""
+    try:
+        yield
+    except BaseException as error:
+        error.add_note(label)
+        raise
+
+
 async def _run_case(
     case: Callable[..., Any], *, root: Path, monkeypatch: pytest.MonkeyPatch, **extra: Any,
 ) -> None:
@@ -395,9 +405,13 @@ async def _run_case(
     if "source" in parameters:
         available["source"] = root / "source"
         _init_repo(available["source"])
-    result = case(**{name: available[name] for name in parameters})
-    if inspect.isawaitable(result):
-        await result
+    try:
+        result = case(**{name: available[name] for name in parameters})
+        if inspect.isawaitable(result):
+            await result
+    except BaseException as error:
+        error.add_note(f"merged case: {case.__name__} {extra!r}")
+        raise
 
 
 @pytest.fixture
@@ -955,17 +969,15 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
     assert stray.read_bytes() == b"unrelated"
 
 
-async def test_artifact_session_rejects_closed_recovery_manifest_untouched(tmp_path: Path) -> None:
+async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     for index, manifest_problem in enumerate(
         ("duplicate-path", "embedded-dot", "bool-schema-version", "missing-proof", "bool-device-proof"),
     ):
-        root = tmp_path / f"case-{index}"
-        case_source = root / "source"
-        _init_repo(case_source)
-        await _artifact_session_rejects_closed_recovery_manifest_untouched_case(
-            source=case_source, manifest_problem=manifest_problem,
-        )
+        await _run_case(_artifact_session_rejects_closed_recovery_manifest_untouched_case,
+                        root=tmp_path / f"case-{index}", monkeypatch=monkeypatch, manifest_problem=manifest_problem)
 
 
 async def _artifact_session_rejects_closed_recovery_manifest_untouched_case(source: Path, manifest_problem: str,
@@ -1094,13 +1106,10 @@ async def test_publication_preparation_cleanup_preserves_primary_and_retains_evi
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     cases = [(primary, cleanup) for primary in ("error", "cancel") for cleanup in ("source-stage", "transaction")]
     for index, (primary_kind, cleanup_failure) in enumerate(cases):
-        root = tmp_path / f"case-{index}"
-        case_source = root / "source"
-        _init_repo(case_source)
         with monkeypatch.context() as patch:
-            await _publication_preparation_cleanup_preserves_primary_and_retains_evidence_case(
-                source=case_source, monkeypatch=patch, primary_kind=primary_kind, cleanup_failure=cleanup_failure,
-            )
+            await _run_case(_publication_preparation_cleanup_preserves_primary_and_retains_evidence_case,
+                            root=tmp_path / f"case-{index}", monkeypatch=patch, primary_kind=primary_kind,
+                            cleanup_failure=cleanup_failure)
 
 
 async def _publication_preparation_cleanup_preserves_primary_and_retains_evidence_case(
@@ -1178,14 +1187,10 @@ async def _publication_preparation_cleanup_preserves_primary_and_retains_evidenc
 
 async def test_code_workspace_missing_git_query_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
-    for index, loss in enumerate(("marker", "corrupt-marker")):
-        root = tmp_path / f"case-{index}"
-        case_source = root / "source"
-        _init_repo(case_source)
+    for index, loss in enumerate(("marker", "source-at-query", "corrupt-marker")):
         with monkeypatch.context() as patch:
-            await _code_workspace_missing_git_query_input_case(
-                tmp_path=root, source=case_source, monkeypatch=patch, loss=loss,
-            )
+            await _run_case(_code_workspace_missing_git_query_input_case, root=tmp_path / f"case-{index}",
+                            monkeypatch=patch, loss=loss)
 
 
 async def _code_workspace_missing_git_query_input_case(
@@ -1234,55 +1239,47 @@ async def _code_workspace_missing_git_query_input_case(
         session.validate_code_workspace()
 
 
-@pytest.mark.parametrize("source_state", ["replacement", ])
-@pytest.mark.parametrize(
-    "loss_after", ["public-directory", ]
-)
 async def test_publication_rechecks_source_between_public_and_deferred_installs(
-    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, source_state: str, loss_after: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Source loss between real installs cannot redirect the next artifact write.
 
     Session-entry checks miss a replacement after the public directory install,
-    or after the report install but before a source-internal deferred export.
+    or before a source-internal deferred export.
     """
+    for index, loss_after in enumerate(("public-directory", "deferred-syscall")):
+        with monkeypatch.context() as patch:
+            await _run_case(_publication_rechecks_source_case, root=tmp_path / f"case-{index}", monkeypatch=patch,
+                            loss_after=loss_after)
+
+
+async def _publication_rechecks_source_case(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, loss_after: str,
+) -> None:
     expected = _seed_public_artifacts(source)
     owner = _owner(source)
     primary = RuntimeError("retain publication body failure")
-    replacement = source if source_state == "replacement" else tmp_path / "symlink-target"
+    replacement = source
     lost = False
-    original_replace, original_link, original_read = os.replace, os.link, artifact_filesystem._read_regular
+    original_replace, original_link = os.replace, os.link
     publication_error: ArtifactVisibilityError | None = None
 
     def lose_source(target: Path) -> None:
         nonlocal lost
-        name = {"public-verification": ".review-output.md", "deferred-syscall": "findings.json"}.get(
-            loss_after, ".daydream"
-        )
-        trigger = source / name
+        trigger = source / ("findings.json" if loss_after == "deferred-syscall" else ".daydream")
         if lost or target != trigger:
             return
         lost = True
         source.rename(tmp_path / "held-source")
         _init_repo(replacement)
-        if source_state == "symlink":
-            source.symlink_to(replacement, target_is_directory=True)
 
     def replace_then_lose(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
         target = Path(dst)
         if "dst_dir_fd" in kwargs:
             target = source / target
-        if loss_after == "public-syscall":
-            lose_source(target)
         original_replace(src, dst, *args, **kwargs)
         if loss_after == "public-directory":
             lose_source(target)
-
-    def read_then_lose(path: Path, metadata: os.stat_result) -> bytes:
-        content = original_read(path, metadata)
-        if loss_after == "public-verification":
-            lose_source(path)
-        return content
 
     def link_then_lose(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
         if loss_after == "deferred-syscall":
@@ -1301,7 +1298,6 @@ async def test_publication_rechecks_source_between_public_and_deferred_installs(
             frozen = _freeze_run(session, "loss-between-installs")
             monkeypatch.setattr(os, "replace", replace_then_lose)
             monkeypatch.setattr(os, "link", link_then_lose)
-            monkeypatch.setattr(artifact_filesystem, "_read_regular", read_then_lose)
             try:
                 _publish(session, frozen)
             except ArtifactVisibilityError as exc:
@@ -1394,8 +1390,9 @@ async def _artifact_session_rejects_symlinked_source_and_runtime_ancestry_case(t
 
 
 async def test_artifact_session_detects_source_mutation_without_deleting_unique_bytes(
-    source: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Concurrent public writes during detach or publication are refused and survive untouched."""
     _seed_public_artifacts(source)
 
     def mutate_before_removal(state: str) -> None:
@@ -1408,6 +1405,43 @@ async def test_artifact_session_detects_source_mutation_without_deleting_unique_
             pass
     assert (source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
     assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+
+    # Publication window: an insertion after backup is refused before install, and every transfer
+    # intent was durable before the detach's first move (#1162).
+    published_source = tmp_path / "published-source"
+    _init_repo(published_source)
+    seeded = _seed_public_artifacts(published_source)
+    observed: list[tuple[Path, dict[str, Any]]] = []
+
+    def capture_first_move(path: Path, moved: Path) -> None:
+        if not observed:
+            stage = next(candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file())
+            observed.append((path, _load_json(stage / "intents.json")))
+
+    monkeypatch.setattr(artifact_transactions, "_transition_observer", None)
+    monkeypatch.setattr(artifact_transfer, "_transfer_observer", capture_first_move)
+    session_id = "publish-mutation"
+    with pytest.raises(ArtifactVisibilityError, match="changed during recovery"):
+        async with open_artifact_session(_work(published_source), session_id=session_id) as session:
+            frozen = _freeze_run(session, session_id)
+
+            def insert_before_install(state: str) -> None:
+                if state == "PUBLISH_BACKED_UP":
+                    concurrent = published_source / ".daydream" / "concurrent.bin"
+                    concurrent.parent.mkdir()
+                    concurrent.write_bytes(b"unique concurrent bytes")
+
+            monkeypatch.setattr(artifact_transactions, "_transition_observer", insert_before_install)
+            with pytest.raises(ArtifactVisibilityError, match="changed before publication"):
+                _publish(session, frozen)
+    assert (published_source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
+    canonical = frozen.root.parents[2] / "canonical"
+    assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
+    (first_source, intents), = observed
+    assert intents["schema_version"] == 1
+    assert sorted(cast(str, intent["relative"]) for intent in intents["intents"]) == sorted(
+        entry.path for entry in seeded if entry.kind == "file")
+    assert str(first_source) in [cast(str, intent["source"]) for intent in intents["intents"]]
 
 
 async def test_publication_preparation_failure_restores_source_without_orphan_state(
@@ -1497,14 +1531,10 @@ async def test_recoverable_publication_failure_reconciles_before_unlock(
              for loss in (False, True)]
     cases += [("PUBLISH_VERIFIED", "keyboard", False), ("PUBLISH_STAGED", "keyboard", False)]
     for index, (transition, exception_kind, source_loss) in enumerate(cases):
-        root = tmp_path / f"case-{index}"
-        case_source = root / "source"
-        _init_repo(case_source)
         with monkeypatch.context() as patch:
-            await _recoverable_publication_failure_reconciles_before_unlock_case(
-                tmp_path=root, source=case_source, monkeypatch=patch, transition=transition,
-                exception_kind=exception_kind, source_loss=source_loss,
-            )
+            await _run_case(_recoverable_publication_failure_reconciles_before_unlock_case,
+                            root=tmp_path / f"case-{index}", monkeypatch=patch, transition=transition,
+                            exception_kind=exception_kind, source_loss=source_loss)
 
 
 async def _recoverable_publication_failure_reconciles_before_unlock_case(
@@ -1630,14 +1660,11 @@ async def test_artifact_session_rejects_forged_snapshot_object(tmp_path: Path, s
             _publish(session, forged)
 
 
-@pytest.mark.parametrize(("disposition", "status"),
-    [
-        (artifact_visibility.ArtifactDisposition.ROLLBACK, "complete"),
-    ],
-)
 async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
-    source: Path, disposition: artifact_visibility.ArtifactDisposition, status: str,
+    source: Path,
 ) -> None:
+    disposition = artifact_visibility.ArtifactDisposition.ROLLBACK
+    status = "complete"
     _seed_public_artifacts(source)
     custom_relative = Path("deep") / "custom outputs" / "nested root.json"
     requested = source / ".daydream" / custom_relative
@@ -1677,7 +1704,7 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
         assert (session.daydream_dir / custom_relative.parent / "unrelated.bin").read_bytes() == b"unrelated"
         assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-        selected = route.full if status == "complete" else route.partial
+        selected = route.full
         root_document = TrajectoryDocumentSnapshot(session_id, cast(Path, selected.write_path), root_bytes)
         session.write_trajectory_document(route, root_document, cast(Any, status))
         assert cast(Path, selected.write_path).read_bytes() == root_bytes
@@ -1905,15 +1932,13 @@ async def _nonstatic_subtree_authorization_rejects_corrupt_canonical_proof_case(
     assert selected.read_bytes() == payload
 
 
-async def test_public_subtree_trajectory_rejects_unsafe_private_counterpart(tmp_path: Path) -> None:
+async def test_public_subtree_trajectory_rejects_unsafe_private_counterpart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Each case retains private evidence in its workspace, so every case owns a fresh repository.
     for index, (location, kind) in enumerate((("ancestor", "file"), ("leaf", "symlink"), ("leaf", "directory"))):
-        root = tmp_path / f"case-{index}"
-        case_source = root / "source"
-        _init_repo(case_source)
-        await _public_subtree_trajectory_rejects_unsafe_private_counterpart_case(
-            tmp_path=root, source=case_source, location=location, kind=kind,
-        )
+        await _run_case(_public_subtree_trajectory_rejects_unsafe_private_counterpart_case,
+                        root=tmp_path / f"case-{index}", monkeypatch=monkeypatch, location=location, kind=kind)
 
 
 async def _public_subtree_trajectory_rejects_unsafe_private_counterpart_case(
@@ -2279,29 +2304,30 @@ async def test_external_entry_interruption_reconciles_before_unlock(tmp_path: Pa
             if (state, observed) == expected:
                 raise primary
 
-        payload = _payload("external-interrupted")
-        with pytest.raises(KeyboardInterrupt) as caught:
-            original = artifact_external._external_entry_observer
-            artifact_external._external_entry_observer = interrupt
-            try:
-                async with open_artifact_session(_work(source), session_id="external-interrupted") as session:
-                    route = session.register_trajectory_output(requested)
-                    session.write_trajectory_document(
-                        route, TrajectoryDocumentSnapshot("external-interrupted", requested, payload), "complete",
-                    )
-            finally:
-                artifact_external._external_entry_observer = original
-        assert caught.value is primary
-        if requested.exists():
-            assert requested.read_bytes() in (b"prior full", payload)
-        if conflict:
-            with pytest.raises(ArtifactVisibilityError, match="conflict|unattested"):
+        with _case_note(f"external checkpoint {checkpoint}:{purpose}"):
+            payload = _payload("external-interrupted")
+            with pytest.raises(KeyboardInterrupt) as caught:
+                original = artifact_external._external_entry_observer
+                artifact_external._external_entry_observer = interrupt
+                try:
+                    async with open_artifact_session(_work(source), session_id="external-interrupted") as session:
+                        route = session.register_trajectory_output(requested)
+                        session.write_trajectory_document(
+                            route, TrajectoryDocumentSnapshot("external-interrupted", requested, payload), "complete",
+                        )
+                finally:
+                    artifact_external._external_entry_observer = original
+            assert caught.value is primary
+            if requested.exists():
+                assert requested.read_bytes() in (b"prior full", payload)
+            if conflict:
+                with pytest.raises(ArtifactVisibilityError, match="conflict|unattested"):
+                    async with open_artifact_session(_work(source), session_id="after-interruption"):
+                        pass
+                assert any((_owner(source).artifact_state_root / "transactions").iterdir())
+            else:
                 async with open_artifact_session(_work(source), session_id="after-interruption"):
                     pass
-            assert any((_owner(source).artifact_state_root / "transactions").iterdir())
-        else:
-            async with open_artifact_session(_work(source), session_id="after-interruption"):
-                pass
 
 
 async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_bytes(tmp_path: Path, source: Path,
@@ -2337,6 +2363,30 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
             assert requested.read_bytes() == full_bytes
             assert route.full.frozen_path is not None
             assert route.full.frozen_path.read_bytes() == full_bytes
+            # A concurrent reader only ever sees one complete document, never a missing or torn target.
+            payloads = tuple(_payload(session_id, session_id, turn=turn) for turn in range(5)) + (full_bytes,)
+            observed: list[bytes] = []
+            missing: list[bool] = []
+            stop = threading.Event()
+
+            def read_until_stopped() -> None:
+                while not stop.is_set():
+                    try:
+                        observed.append(requested.read_bytes())
+                    except FileNotFoundError:
+                        missing.append(True)
+
+            reader = threading.Thread(target=read_until_stopped)
+            reader.start()
+            try:
+                for payload in payloads:
+                    session.write_trajectory_document(
+                        route, TrajectoryDocumentSnapshot(session_id, requested, payload), "complete")
+            finally:
+                stop.set()
+                reader.join(timeout=5)
+            assert not reader.is_alive() and not missing and observed
+            assert set(observed) <= set(payloads)
 
             requested.unlink()
             partial_path.write_bytes(b"mutable path is not evidence")
@@ -2495,10 +2545,10 @@ async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
     assert first in retained_after
 
 
-@pytest.mark.parametrize("label", [OutputLabel.DUMP_DIRECTORY])
 async def test_current_entry_replacement_is_preserved_during_publication(
-    source: Path, monkeypatch: pytest.MonkeyPatch, label: OutputLabel,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    label = OutputLabel.DUMP_DIRECTORY
     dump = label is OutputLabel.DUMP_DIRECTORY
     session_id = "current-dump" if dump else "current-explicit"
     requested = source / ("dump" if dump else "findings.json")

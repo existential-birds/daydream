@@ -72,9 +72,9 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     return contents['diff'], index
 
 
-@pytest.mark.parametrize('outcome', ['success', ])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir) -> None:
+    """A schema-rejected stage retries once with fresh grounding; both attempts charge their tool starts."""
     ext_dir.write_module(
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
@@ -103,7 +103,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             yield from read_events(review.repo, path, event_id=f'attempt-{attempts}-{path}')
         if not initial_assignment:
             assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['notes'])
-        elif attempts == 1 or outcome == 'second-rejection':
+        elif attempts == 1:
             output['targets'][0]['PRIVATE_UNKNOWN_PROPERTY_MARKER'] = None
             output['notes'] = 'FAILED_ATTEMPT_MARKER'
             output['candidates'] = [candidate(disposition='confirmed', finding=dict(
@@ -121,17 +121,15 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         yield TurnEndEvent()
         yield ResultEvent(structured_output=None, continuation=None)
 
-    await review.finish('python', findings=('Grounded defect',) if outcome == 'success' else (),
-                        reason=None if outcome == 'success' else 'malformed_output')
+    await review.finish('python', findings=('Grounded defect',))
     assert attempts == 2
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert metadata[0]['admitted'] is False and metadata[0]['attempt_tool_starts'] == 4
     assert metadata[0]['schema_rejection']['error_count'] > 0
     assert metadata[1]['attempt'] == 2 and metadata[1]['observed_tool_starts'] == 8
     assert metadata[1]['remaining_tool_calls'] == 40
-    assert metadata[1]['admitted'] is (outcome == 'success')
-    if outcome == 'success':
-        assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
+    assert metadata[1]['admitted'] is True
+    assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
     measurements = assert_host_dispatch_measurements(review)
     assert all(item['attempt'] == 1 for item in measurements)
     retry_scopes = {item['stage_scope_id'] for item in measurements
@@ -171,9 +169,9 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     assert 'PRIVATE_DIAGNOSTIC_PATH_SENTINEL' not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('sandbox', [True], ids=['inline'])
 async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An inline (sandboxed) reviewer keeps old-only and later continuation ranges canonical."""
 
     from tests.harness.git_helpers import git
 
@@ -184,11 +182,10 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     seed_feature_branch(repo, base={'api.py': before}, feature={'api.py': prefix + 'VALUE = 1\n' + added})
     git(repo, 'config', 'diff.context', '0')
     review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend.sandbox = sandbox
-    if sandbox:
-        native = CodexBackend(model=review.backend.model)
-        monkeypatch.setattr(native, 'execute', review.backend.execute)
-        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
+    review.backend.sandbox = True
+    native = CodexBackend(model=review.backend.model)
+    monkeypatch.setattr(native, 'execute', review.backend.execute)
+    monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
     decisions: list[dict[str, Any]] = []
@@ -198,8 +195,7 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
         schema = review.backend.calls[-1]['output_schema']
-        if sandbox:
-            assert Draft202012Validator(schema).is_valid(output)
+        assert Draft202012Validator(schema).is_valid(output)
         fragments_only = all(reference['fragment'] is not None for part in stage['assignment_parts']
                              for reference in part['source_refs'])
         fragment_stages.append(fragments_only)

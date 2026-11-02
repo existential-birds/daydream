@@ -77,3 +77,27 @@ async def test_codex_diagnostics_survive_atif_validation_and_json_round_trip(
 
     validator = TrajectoryValidator()  # type: ignore[no-untyped-call]
     assert validator.validate(raw, validate_images=False), validator.get_errors()
+    parser = diagnostics[-1]["metadata"]
+    assert parser["unknown_event_types"] == {
+        "total": 35, "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)}, "overflow": 2,
+    }
+    assert parser["unknown_item_types"] == {
+        "total": 3, "labels": {"mystery.item": 2, 'token="[REDACTED_CREDENTIAL]"': 1}, "overflow": 0,
+    }
+    assert parser["malformed_shapes"] == {"event_not_object": 2, "event_type_not_scalar": 1, "item_not_object": 1}
+
+
+async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -> None:
+    """Nonzero command exits retain failure metadata; uncompleted calls receive schema-valid interruption markers."""
+    _, recorder = await _drive_codex_through_recorder(tmp_path, fixture="command_failures_issue1126.jsonl")
+    steps = [s for s in recorder.steps if s.source == "agent" and s.observation and s.observation.results]
+    assert steps, "no agent steps with observation results"
+    failed, ok = steps[0].observation.results[:2]  # type: ignore[union-attr]  # filtered above
+    assert failed.extra == {"is_error": True, "exit_code": 128, "status": "completed"}
+    assert ok.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
+    dangling = steps[-1].observation.results[-1]  # type: ignore[union-attr]  # filtered above
+    assert dangling.source_call_id is None
+    assert dangling.content == "[interrupted: call did not complete before invocation ended]"
+    assert dangling.extra == {"is_error": True, "status": "interrupted"}
+    validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
+    assert validator.validate(tmp_path / "trajectory.json"), validator.get_errors() or "validation failed"

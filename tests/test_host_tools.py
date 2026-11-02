@@ -299,8 +299,6 @@ async def test_native_rejections_spend_original_allowance_and_retry_does_not_ren
         with pytest.raises(HostToolRejected, match="Invalid structured_output arguments"):
             unencodable.admit("nan", NATIVE_SUBMIT, {"verdict": float("nan"), "findings": []}, terminal=True)
         assert unencodable.authority_open and not unencodable.accepted
-    unencodable.mark_cleanup_failed()
-    assert not unencodable.cleanup_complete
 
 
 async def test_http_operator_grants_are_frozen_and_retries_only_narrow_them() -> None:
@@ -677,3 +675,37 @@ async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return()
     for fault in ["pending", "eof", "valid", "reply-error"]:
         with pytest.MonkeyPatch.context() as mp:
             await _endpoint_cleanup_joins_incomplete_callback_frames_before_return_case(monkeypatch=mp, fault=fault)
+
+
+async def test_correctable_callback_keeps_its_code_and_accepts_only_the_correction() -> None:
+    """Callback-authored correction details survive binding and transport intact.
+
+    Schema errors originate in the binding, and terminal-callback tests never
+    reach another accepted submission; neither catches reconstructing a callback
+    rejection with a generic code or forbidding an ordinary semantic correction.
+    """
+    installed: list[Any] = []
+    rejected = False
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        nonlocal rejected
+        if not rejected:
+            rejected = True
+            raise HostToolRejected("target.py judgment: add the required explanation; "
+                                   "Authorization: Bearer callback-secret-123", code="missing_judgment")
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept)
+    async with _endpoint(binding) as client:
+        assert (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA})).json()["ready"]
+        for identifier in ["invalid", "corrected"]:
+            assert (await client.post("/admit", json={"id": identifier, "name": NATIVE_SUBMIT,
+                "arguments": _RESULT, "terminal": True})).json()["allowed"]
+            response = (await client.post("/submit", json={"id": identifier, "arguments": _RESULT})).json()
+            if identifier == "invalid":
+                assert response["outcome"] == "correctable" and response["code"] == "missing_judgment"
+                assert "target.py judgment" in response["error"] and response["accepted"] is False
+                assert "callback-secret" not in response["error"] and "REDACTED" in response["error"]
+                assert binding.authority_open and not binding.possibly_accepted and installed == []
+            else:
+                assert response == {"id": identifier, "accepted": True, "result": _RESULT}
+    assert installed == [_RESULT] and binding.calls == 2 and binding.rejections == 1 and binding.cleanup_complete

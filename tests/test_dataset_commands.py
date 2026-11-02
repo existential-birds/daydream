@@ -15,15 +15,12 @@ def operator_hub_destination(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
 
 
-@pytest.mark.parametrize(("operation", "environment"), [("download", "")])
 def test_dataset_commands_require_operator_destination_before_any_side_effect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    operation: str, environment: str | None,
 ) -> None:
-    if environment is None:
-        monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    else:
-        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", environment)
+    operation = "download"
+    environment = ""
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", environment)
     monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
 
     def forbidden_network() -> None:
@@ -31,8 +28,7 @@ def test_dataset_commands_require_operator_destination_before_any_side_effect(
 
     monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
     destination = tmp_path / "records"
-    arguments = (["--revision", "a" * 40, "--output", str(destination)] if operation == "download"
-                 else ["--store", str(destination)])
+    arguments = (["--revision", "a" * 40, "--output", str(destination)])
     assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
     output = capsys.readouterr()
     assert "--trajectory-hub-repo" in output.err
@@ -118,9 +114,8 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
         assert json.loads(capsys.readouterr().out)["published"] == 2
 
 
-@pytest.mark.parametrize("fault", ["manifest", ])
 def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     from tests.harness.dataset_hub import FakeDatasetHub
 
@@ -132,13 +127,9 @@ def test_cli_rejects_corrupt_pinned_snapshot_before_exposing_records(
     capsys.readouterr()
     revision = hub.revision
     tree = hub.trees[revision]
-    if fault == "manifest":
-        manifest = json.loads(tree["manifest.json"])
-        manifest["schema_version"] = "unsupported"
-        tree["manifest.json"] = json.dumps(manifest).encode()
-    else:
-        path = next(path for path in tree if path.endswith(".jsonl"))
-        tree[path] = b"SECRET_CORRUPT_SNAPSHOT"
+    manifest = json.loads(tree["manifest.json"])
+    manifest["schema_version"] = "unsupported"
+    tree["manifest.json"] = json.dumps(manifest).encode()
     destination = tmp_path / "download"
     assert cli_main(["corpus", "dataset", "download", "--revision", revision,
                      "--output", str(destination)]) == 1

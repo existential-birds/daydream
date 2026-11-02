@@ -106,8 +106,9 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     assert direct["share_caps"] == report
 
 
-@pytest.mark.parametrize(("dimension", "value"), [("profile", "1.5")])
-def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimension: str, value: str) -> None:
+def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path) -> None:
+    dimension = "profile"
+    value = "1.5"
     store = _store_with_caps_population(tmp_path)
     config = projection_config(store, tmp_path)
     assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,

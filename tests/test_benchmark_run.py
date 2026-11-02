@@ -371,7 +371,7 @@ def test_run_gates_refuse_before_spend_and_failed_runs_stay_cleanable(
         root = tmp_path / check.__name__
         root.mkdir()
         check(root)
-    for index, model in enumerate(("", " rm ")):
+    for index, model in enumerate(("", " \t ", " rm ")):
         root = tmp_path / f"model-{index}"
         root.mkdir()
         _default_run_requires_model_before_spend_and_preserves_harbor_exit_code(root, model, capsys)

@@ -1,11 +1,9 @@
 """Operator observability configuration, independent of reviewed repository settings."""
 
-import sys
 
 import pytest
 
 from daydream.commands.improve import _parse_improve_args
-from daydream.commands.review import _parse_args
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 
 
@@ -31,15 +29,10 @@ def test_invalid_operator_settings_do_not_echo_values() -> None:
             resolve_observability_config(environ=env)
         assert "secret" not in str(exc.value)
 
-@pytest.mark.parametrize("improve", [True])
-def test_cli_invalid_environment_is_parser_error(improve: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_invalid_environment_is_parser_error( monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "invalid")
     with pytest.raises(SystemExit) as exc:
-        if improve:
-            _parse_improve_args(["/tmp/project"])
-        else:
-            monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
-            _parse_args()
+        _parse_improve_args(["/tmp/project"])
     assert exc.value.code == 2
 
 

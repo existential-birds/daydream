@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from copy import deepcopy
@@ -715,7 +716,10 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
 
     named, stale, ordinary = operational / "run-B-reanchor", operational / "run-C-reanchor", operational / "feature"
     for sibling in (named, stale, ordinary):
-        git(repo, "worktree", "add", "--detach", str(sibling), "HEAD")
+        git(repo, "worktree", "add", "--detach", *(("--lock", "--reason", "run-dead") if sibling == stale else ()),
+            str(sibling), "HEAD")
+    # A dead run's lock older than any staleness window is reclaimed; the live run's fresh lock is not.
+    os.utime(git_ops.git_dir(stale) / "locked", (0, 0))
     (named / "daydream_plans").mkdir()
     (named / "daydream_plans/001-x.md").write_text("# first\n")
     (named / "daydream_plans/002-y.md").write_text("# second\n")
@@ -723,7 +727,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     assert list_reanchor_worktrees(repo, private_workspace_owner=owner) == [worktree, named, stale]
     outcome = prune_named_reanchor_worktree(repo, named.name, private_workspace_owner=owner)
     assert outcome.verdict == PRUNE_REMOVED and outcome.plan_count == 2 and not named.exists()
-    assert git_ops.worktree_lock_mtime(stale) is None
+    assert git_ops.worktree_lock_mtime(stale) == 0
     assert prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner) == 1
     assert not stale.exists() and worktree.is_dir() and ordinary.is_dir()
     assert git_ops.worktree_lock_mtime(worktree) is not None
@@ -770,17 +774,11 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
     ]
 
 
-@pytest.mark.parametrize("bad_name",
-    [
-        "a" * 81,           # over _SAFE_DIRNAME's 0-79 tail bound
-    ],
-)
-def test_prune_named_reanchor_worktree_rejects_unsafe_names(monkeypatch: pytest.MonkeyPatch, repo: Path, bad_name: str,
-) -> None:
+def test_prune_named_reanchor_worktree_rejects_unsafe_names(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     root = _operational_root(repo)
     _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
     before = set(root.iterdir())
-    outcome = prune_named_reanchor_worktree(repo, bad_name)
+    outcome = prune_named_reanchor_worktree(repo, "a" * 81)  # over _SAFE_DIRNAME's 0-79 tail bound
     assert outcome.verdict == PRUNE_UNSAFE_NAME
     after = set(root.iterdir())
     assert before == after  # nothing reached the filesystem or git
@@ -803,46 +801,39 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(repo: Pat
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 
-def _unsafe_legacy_reanchor_namespace(repo: Path, tmp_path: Path, *, namespace_shape: str,
-) -> tuple[Path, Path, Path | None]:
-    """Register an out-of-repo worktree, then point the legacy namespace at it."""
-    outside = tmp_path / f"outside-{namespace_shape}"
-    name = "run-outside-reanchor"
-    external = (outside / "worktrees" / name if namespace_shape.startswith("ancestor") else outside / name)
+def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(repo: Path, tmp_path: Path, owner: Any,) -> None:
+    """A legacy public namespace file beside a registered worktree stops pruning before any mutation."""
+    external = tmp_path / "outside" / "run-outside-reanchor"
     git_ops.worktree_add(repo, external, "main", detach=True)
     canary = external / "operator.bin"
     canary.write_bytes(b"outside operator bytes\x00")
-    if namespace_shape.startswith("terminal"):
-        (repo / ".daydream").mkdir()
-        anchor = repo / ".daydream" / "worktrees"
-    else:
-        anchor = repo / ".daydream"
-    if namespace_shape.endswith("symlink"):
-        anchor.symlink_to(outside, target_is_directory=True)
-        return external, canary, None
-    anchor.write_bytes(b"operator namespace bytes\x00")
-    return external, canary, anchor
-
-
-@pytest.mark.parametrize("reanchor_op", ["prune-stale"])
-@pytest.mark.parametrize("namespace_shape", ["terminal-file"],)
-def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
-    repo: Path, tmp_path: Path, owner: Any, namespace_shape: str, reanchor_op: str,
-) -> None:
-
-    scan = list_reanchor_worktrees if reanchor_op == "list" else prune_stale_reanchor_worktrees
-    external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(repo, tmp_path, namespace_shape=namespace_shape,)
+    (repo / ".daydream").mkdir()
+    namespace = repo / ".daydream" / "worktrees"
+    namespace.write_bytes(b"operator namespace bytes\x00")
     before = git(repo, "worktree", "list", "--porcelain")
 
     with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
-        scan(repo, private_workspace_owner=owner)
+        prune_stale_reanchor_worktrees(repo, private_workspace_owner=owner)
 
     assert external.is_dir()
     assert canary.read_bytes() == b"outside operator bytes\x00"
-    if unsafe_file is not None:
-        assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
+    assert namespace.read_bytes() == b"operator namespace bytes\x00"
     assert git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational" / external.name).exists()
+
+
+def test_planner_credentials_are_redacted_in_plan_prose_and_the_plan_index(repo: Path, head_sha: str) -> None:
+    plans_dir = repo / "daydream_plans"
+    plan = _authored_plan()
+    plan["title"] = "Rotate AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE in deploys"
+    plan["why_this_matters"]["problem"] = "Callers keep sending secret: hunter2realvalue in production traffic today."
+    _write_plans(plans_dir, [_selection(repo, plan=plan)], planned_at=head_sha)
+    sidecar_text = (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    assert json.loads(sidecar_text)["plans"][0]["title"] == "Rotate AWS_SECRET_ACCESS_KEY=[REDACTED_ENV_VAR] in deploys"
+    texts = {path.name: path.read_text(encoding="utf-8") for path in plans_dir.rglob("*") if path.is_file()}
+    assert all("AKIAIOSFODNN7EXAMPLE" not in text and "hunter2realvalue" not in text for text in texts.values())
+    plan_text = next(text for name, text in texts.items() if name.startswith("001-"))
+    assert "secret: <redacted>" in plan_text
 
 
 def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sha: str) -> None:
@@ -869,15 +860,11 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     ] == [(1, "DONE", False)]
 
 
-@pytest.mark.parametrize("payload",
-    [
-        pytest.param('{"schema_version": 99, "plans": []}', id="wrong-version"),
-    ],
-)
-def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head_sha: str, payload: str,) -> None:
+def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head_sha: str) -> None:
+    """A wrong-version plan index is unusable; numbering still avoids plans already on disk."""
     plans_dir = repo / "daydream_plans"
     _write_plans(plans_dir, [_plan_selection(repo, "Batch catalog queries")], planned_at=head_sha,)
-    (plans_dir / PLAN_INDEX_FILENAME).write_text(payload, encoding="utf-8")
+    (plans_dir / PLAN_INDEX_FILENAME).write_text('{"schema_version": 99, "plans": []}', encoding="utf-8")
     (plans_dir / "README.md").unlink()
     first_plan = (plans_dir / "001-batch-catalog-queries.md").read_text(encoding="utf-8")
     result = _write_plans(plans_dir, [_plan_selection(repo, "Catalog observability")], planned_at=head_sha,)
@@ -887,7 +874,7 @@ def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head
     ) == ["001-batch-catalog-queries.md", "002-catalog-observability.md",]
 
 
-@pytest.mark.parametrize("failure_kind", ["validation"])
+@pytest.mark.parametrize("failure_kind", ["transport", "validation"])
 def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: Path, head_sha: str, failure_kind: str,
 ) -> None:
     plans_dir = repo / "daydream_plans"

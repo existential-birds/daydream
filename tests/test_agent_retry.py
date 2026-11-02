@@ -2,15 +2,19 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from rich.console import Console
 
 from daydream import agent_retry
 from daydream.agent import run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiBackend, PiError
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
@@ -217,3 +221,42 @@ async def test_run_agent_honours_or_stops_on_a_server_hint(
     assert [notice for notice in notices if notice.startswith("[retry]")] == ([
         "[retry] Backend error (PiError), retrying attempt 2/2 after 10.5s (server-advertised wait)...",
     ] if retries else [])
+
+
+class _PermanentWithHigherCap(PiError):
+    max_retries = 5
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_calls"),
+    [
+        pytest.param(StreamStalledError("pi", 1.0), 2, id="stall-cap-below-backend-budget"),
+        pytest.param(PiError("model not found: gpt-5 (503)", retryable=True, category="SERVER_ERROR"), 1,
+                     id="permanent-beats-transient-token"),
+        pytest.param(_PermanentWithHigherCap("model not found: gpt-5", category="AUTH_CONFIG"), 1,
+                     id="cap-override-cannot-raise"),
+    ],
+)
+async def test_failure_classification_and_per_error_caps_decide_retries(
+    tmp_path: Path, error: Exception, expected_calls: int,
+) -> None:
+    """A per-error cap bounds retries below the backend budget; permanent categories never retry."""
+    backend = ScriptedBackend(events=[error], retry_attempts=3, retry_base_delay_s=0.0, retry_max_delay_s=0.0)
+    with pytest.raises(type(error)):
+        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+    assert backend.call_count == expected_calls
+
+
+async def test_backend_error_reaches_the_console_redacted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A categoryless backend failure surfaces its message with embedded credentials redacted."""
+    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.agent.console", recording)
+    backend = ScriptedBackend(events=[RuntimeError("overloaded-502 ZAI_API_KEY=leaked-secret-abc123")],
+                              retry_attempts=0)
+    context = RunContext(InteractionPolicy())
+    with pytest.raises(RuntimeError, match="overloaded-502"):
+        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW, run_context=context)
+    out = recording.export_text()
+    assert "Backend Execution Error" in out and "overloaded-502" in out
+    assert "leaked-secret-abc123" not in out and "[REDACTED_ENV_VAR]" in out
+    assert context.active_backends() == ()

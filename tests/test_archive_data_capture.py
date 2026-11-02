@@ -202,13 +202,10 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]
 
 
-@pytest.mark.parametrize(("file_contents", "expected_verdict"),
-    [
-        pytest.param("existing\nreviewed = 2\n", "rejected", id="recommended-line-absent"),
-    ],
-)
-def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file_contents: str, expected_verdict: str,
+def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path,
 ) -> None:
+    file_contents = "existing\nreviewed = 2\n"
+    expected_verdict = "rejected"
     (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
     row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature",

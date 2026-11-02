@@ -2,12 +2,14 @@
 
 ``verifier_core.aggregate_metrics`` is the canonical scorer: these tests pin
 its observable aggregation contract (pooling, zero-denominator semantics,
-absent-axis handling) plus the compiled metric's subprocess behavior, so
+absent-axis handling) plus the compiled metric's in-process behavior, so
 later canonicalization work must preserve behavior rather than source text.
 """
 
 import importlib.util
+import shutil
 import sys
+import types
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -21,6 +23,7 @@ from daydream.benchmark.harbor.build import _copy_assets
 from daydream.hunk_index import range_distance as hunk_range_distance
 
 REPO = Path(__file__).resolve().parents[1]
+_MISSING = object()
 
 
 @pytest.fixture
@@ -139,3 +142,19 @@ def test_range_distance_cannot_drift_from_hunk_index() -> None:
     ]
     for line, start, end in cases:
         assert vc._range_distance(line, start, end) == hunk_range_distance(line, start, end)
+
+
+def test_render_metric_loads_colocated_canonical_and_matches_host(tmp_path: Path) -> None:
+    """The compiled Harbor metric loads its colocated scorer without leaking it and matches the host."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "metric.py").write_bytes(build.render_metric())
+    shutil.copy(Path(verifier_core.__file__), stage / "verifier_core.py")
+    prior_verifier_core = sys.modules.get("verifier_core", _MISSING)
+    mod = types.ModuleType("metric")
+    mod.__dict__["__file__"] = str(stage / "metric.py")  # uv run --script provides this
+    exec(compile((stage / "metric.py").read_text(), "metric.py", "exec"), mod.__dict__)
+    # A later bare `import verifier_core` must not resolve to the compiled copy.
+    assert sys.modules.get("verifier_core", _MISSING) is prior_verifier_core
+    rows: list[dict[str, object] | None] = [{"reward": 0.5, "tp": 1, "fp": 0, "fn": 1, "verifier_error": 0}, None]
+    assert mod.aggregate_metrics(rows) == verifier_core.aggregate_metrics(rows)

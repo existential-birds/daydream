@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -57,42 +58,30 @@ def _patch_subprocess_run(
     )
 
 
-def _repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
-    bare = _bare_remote(tmp_path / "remote.git")
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "remote", "add", "origin", str(bare))
-    return repo, bare
-
-
-def _resolve_diff_merge_base_rejects_and_redacts_external_git_failures_case(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, expected_message: str, private_fragment: str,
-                                                                           repo: Path,
-) -> None:
-    head = _git(repo, "rev-parse", "HEAD")
-    with install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head):
-        with pytest.raises(GitError) as raised:
-            git_ops.resolve_diff_merge_base(repo, "main", head)
-    message = str(raised.value)
-    assert message == expected_message
-    assert private_fragment not in message
-    assert str(repo) not in message
-    assert head not in message
-    assert len(message) < 200
-
-
 def test_resolve_diff_merge_base_rejects_and_redacts_external_git_failures(
     tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Only one canonical lowercase SHA-1 is admitted; external Git failures never echo private output."""
+    head = _git(repo, "rev-parse", "HEAD")
+    hidden = "A PRIVATE VALUE THAT CANNOT APPEAR"
     cases = [
         ("malformed-head", "branch-focus recorded head commit cannot be resolved", "PRIVATE_STDOUT_SENTINEL"),
+        ("invalid-utf8-head", "branch-focus recorded head commit probe failed", "\\xff\\xfe"),
+        ("uppercase-head", "branch-focus recorded head commit cannot be resolved", hidden),
+        ("abbreviated-head", "branch-focus recorded head commit cannot be resolved", hidden),
+        ("sha256-head", "branch-focus recorded head commit cannot be resolved", hidden),
         ("malformed-merge", "branch-focus diff merge-base cannot be resolved", "PRIVATE_MERGE_SENTINEL"),
+        ("remove-after-preference", "branch-focus recorded head commit probe failed", "diff base git shim"),
     ]
     for index, (mode, expected_message, private_fragment) in enumerate(cases):
-        with pytest.MonkeyPatch.context() as mp:
-            _resolve_diff_merge_base_rejects_and_redacts_external_git_failures_case(
-                monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), repo=repo, mode=mode,
-                expected_message=expected_message, private_fragment=private_fragment,
-            )
+        with pytest.MonkeyPatch.context() as shimmed:
+            with install_diff_base_git_shim(_case_dir(tmp_path, index), shimmed, mode=mode, head=head):
+                with pytest.raises(GitError) as raised:
+                    git_ops.resolve_diff_merge_base(repo, "main", head)
+        message = str(raised.value)
+        assert message == expected_message, mode
+        assert private_fragment not in message and str(repo) not in message and head not in message, mode
+        assert len(message) < 200, mode
 
     def failed_probe(*_args: Any, **_kwargs: Any) -> str:
         raise GitError("PRIVATE_PROBE_SENTINEL")
@@ -157,12 +146,7 @@ def test_independent_snapshot_rejects_shared_alternates(
         git_ops.prepare_independent_snapshot(repo, tmp_path / "snapshot", include_untracked=False)
 
 
-def _independent_snapshot_rejects_inherited_git_overrides_before_mutation_case(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    settings: dict[str, str],
-    diagnostic: str,
-) -> None:
+def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(tmp_path: Path) -> None:
     """Every unsafe key must appear in the complete rejection of one real inherited environment."""
     repo = tmp_path / "source"
     _init_repo(repo)
@@ -180,45 +164,41 @@ def _independent_snapshot_rejects_inherited_git_overrides_before_mutation_case(
         return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
     paths = {"SOURCE_OBJECTS": repo / ".git/objects", "EXTERNAL_OBJECTS": external / "objects", "EXTERNAL": external}
-    environment = {name: str(paths.get(value, value)) for name, value in settings.items()}
     before_source, before_external = file_bytes(repo), file_bytes(external)
-    with monkeypatch.context() as poison:
-        for name in tuple(os.environ):
-            if name.startswith("GIT_CONFIG"):
-                poison.delenv(name)
-        for name, value in environment.items():
-            poison.setenv(name, value)
-        with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
-            git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
-        assert {name: os.environ[name] for name in environment} == environment
-    assert str(raised.value) == (
-        "snapshot refuses inherited Git repository, configuration, diff, or trace overrides; offending variables: "
-        + diagnostic
-    )
-    assert str(external) not in str(raised.value) and "INVALID_SIGNING_VALUE" not in str(raised.value)
-    assert not destination.exists()
-    assert file_bytes(repo) == before_source and file_bytes(external) == before_external
-
-
-def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(tmp_path: Path) -> None:
-    cases = [
-        (
-            {
-                "GIT_CONFIG_COUNT": "2",
-                "GIT_CONFIG_KEY_0": "commit.gpgsign",
-                "GIT_CONFIG_VALUE_0": "INVALID_SIGNING_VALUE",
-                "GIT_CONFIG_KEY_1": "core.excludesfile",
-                "GIT_CONFIG_VALUE_1": "/dev/null",
-            },
-            "GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0, GIT_CONFIG_KEY_1, GIT_CONFIG_VALUE_0, GIT_CONFIG_VALUE_1",
-        ),
+    redirects = ("GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_COMMON_DIR", "GIT_DIFF_OPTS",
+                 "GIT_DIR", "GIT_EXTERNAL_DIFF", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NAMESPACE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_PREFIX", "GIT_REFERENCE_BACKEND", "GIT_REPLACE_REF_BASE",
+                 "GIT_SHALLOW_FILE", "GIT_TEMPLATE_DIR", "GIT_TRACE", "GIT_WORK_TREE")
+    namespace = ("GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_KEY_0", "GIT_CONFIG_NOSYSTEM",
+                 "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_VALUE_0")
+    cases: list[tuple[dict[str, str], str]] = [
+        ({name: {"GIT_ALTERNATE_OBJECT_DIRECTORIES": "SOURCE_OBJECTS",
+                 "GIT_OBJECT_DIRECTORY": "EXTERNAL_OBJECTS"}.get(name, "EXTERNAL") for name in redirects},
+         ", ".join(redirects)),
+        (dict.fromkeys(namespace, "EXTERNAL"), ", ".join(namespace)),
+        ({"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "commit.gpgsign", "GIT_CONFIG_VALUE_0": "INVALID_SIGNING_VALUE",
+          "GIT_CONFIG_KEY_1": "core.excludesfile", "GIT_CONFIG_VALUE_1": "/dev/null"},
+         "GIT_CONFIG_COUNT, GIT_CONFIG_KEY_0, GIT_CONFIG_KEY_1, GIT_CONFIG_VALUE_0, GIT_CONFIG_VALUE_1"),
         ({"GIT_EXEC_PATH": "EXTERNAL"}, "GIT_EXEC_PATH"),
     ]
-    for index, (settings, diagnostic) in enumerate(cases):
-        with pytest.MonkeyPatch.context() as mp:
-            _independent_snapshot_rejects_inherited_git_overrides_before_mutation_case(
-                monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), settings=settings, diagnostic=diagnostic
-            )
+    for settings, diagnostic in cases:
+        environment = {name: str(paths.get(value, value)) for name, value in settings.items()}
+        with pytest.MonkeyPatch.context() as poison:
+            for name in tuple(os.environ):
+                if name.startswith("GIT_CONFIG"):
+                    poison.delenv(name)
+            for name, value in environment.items():
+                poison.setenv(name, value)
+            with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git") as raised:
+                git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+            assert {name: os.environ[name] for name in environment} == environment
+        assert str(raised.value) == (
+            "snapshot refuses inherited Git repository, configuration, diff, or trace overrides; offending variables: "
+            + diagnostic
+        )
+        assert str(external) not in str(raised.value) and "INVALID_SIGNING_VALUE" not in str(raised.value)
+        assert not destination.exists(), diagnostic
+        assert file_bytes(repo) == before_source and file_bytes(external) == before_external, diagnostic
 
 
 def test_independent_snapshot_refuses_ambient_git_overrides_before_mutation(
@@ -259,6 +239,23 @@ def test_independent_snapshot_refuses_ambient_git_overrides_before_mutation(
         with pytest.raises(git_ops.SnapshotPreparationError, match="inherited Git"):
             git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
         assert dict(os.environ) == before
+
+    with monkeypatch.context() as traced:
+        # A known violation refuses before probing GIT_EXEC_PATH, so the trace sink is never written.
+        trace_file = tmp_path / "git-trace-side-effect.log"
+        traced.setenv("GIT_TRACE", str(trace_file))
+        traced.setenv("GIT_EXEC_PATH", str(tmp_path / "invalid git exec path"))
+        with pytest.raises(git_ops.SnapshotPreparationError) as raised:
+            git_ops.prepare_independent_snapshot(repo, destination, include_untracked=False)
+        assert "GIT_TRACE" in str(raised.value) and str(trace_file) not in str(raised.value)
+        assert not trace_file.exists()
+
+    with monkeypatch.context() as hook_environment:
+        # Git exports its own default exec path to hooks; that value is not an override.
+        hook_environment.setenv("GIT_EXEC_PATH", _git(repo, "--exec-path"))
+        before = dict(os.environ)
+        accepted = git_ops.prepare_independent_snapshot(repo, tmp_path / "accepted", include_untracked=False)
+        assert accepted.repo.is_dir() and dict(os.environ) == before
 
     newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
     oversized_name = "GIT_CONFIG_" + "S" * 500
@@ -336,6 +333,22 @@ def test_git_workspace_detection_fails_closed_on_unrecognized_or_boundary_errors
 
     A filesystem-boundary diagnostic must still inspect real ancestor markers.
     """
+    # Real Git: nested and linked directories are workspaces, standalone ones are not, bare storage refuses.
+    repo = _make_repo_with_main(tmp_path / "real")
+    (repo / "src").mkdir()
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+    for directory in (repo, repo / "src", linked):
+        assert git_ops.is_git_workspace(directory), directory
+    standalone = tmp_path / "standalone"
+    standalone.mkdir()
+    assert not git_ops.is_git_workspace(standalone)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    _git(bare, "init", "--bare")
+    (bare / "src").mkdir()
+    with pytest.raises(GitError):
+        git_ops.is_git_workspace(bare / "src")
     for diagnostic in (
         "fatal: not a git repository: unexpected failure\n",
         "fatal: not a git repository (or any parent up to mount point /)\n",
@@ -458,24 +471,6 @@ def _timeout_run(*, cmd: list[str], timeout: float, calls: dict[str, int] | None
     return run
 
 
-def _flaky_timeout_run(
-    calls: dict[str, int],
-    ok: subprocess.CompletedProcess[Any],
-    *,
-    cmd: list[str],
-    timeout: float,
-) -> Any:
-    """Return a double that times out on the first call and returns *ok* after."""
-
-    def run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
-        return ok
-
-    return run
-
-
 def test_immutable_diff_refuses_to_replay_completed_setup_after_timeout(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -533,7 +528,9 @@ def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
     shim = shim_dir / "git"
-    shim.write_text('#!/bin/sh\nif [ "$1" = overflow ]; then head -c 65536 /dev/zero; fi\nexec sleep 30\n')
+    shim.write_text('#!/bin/sh\nif [ "$1" = overflow ]; then head -c 65536 /dev/zero; fi\n'
+                    'if [ "$1" = stderr-overflow ]; then head -c 65536 /dev/zero >&2; fi\n'
+                    'if [ "$1" = nonzero ]; then echo "bounded failure diagnostic" >&2; exit 7; fi\nexec sleep 30\n')
     shim.chmod(0o755)
     processes: list[subprocess.Popen[Any]] = []
     real_popen = subprocess.Popen
@@ -545,11 +542,14 @@ def test_bounded_git_capture_reaps_failures_and_retries_only_timeouts(
 
     monkeypatch.setattr(subprocess, "Popen", launch)
     monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.defpath)
-    for mode, error, timeout, launches in [
-        ("overflow", GitError, 5.0, 1), ("timeout", git_ops.GitTimeoutError, 0.2, 2),
+    oversized = "output exceeds the supported size"
+    for mode, error, expected, timeout, launches in [
+        ("overflow", GitError, oversized, 5.0, 1), ("stderr-overflow", GitError, oversized, 5.0, 1),
+        ("nonzero", GitError, "bounded failure diagnostic", 5.0, 1),
+        ("timeout", git_ops.GitTimeoutError, "timed out", 0.2, 2),
     ]:
         processes.clear()
-        with pytest.raises(error, match="output exceeds the supported size|timed out"):
+        with pytest.raises(error, match=expected):
             git_process._run_git(tmp_path, [mode], timeout=timeout, retries=1, max_output_bytes=1024,
                                  error_context="bounded command failed")
         assert len(processes) == launches, mode
@@ -601,12 +601,27 @@ def test_gh_timeouts_retry_only_idempotent_reads(
         else:
             assert expected_warning in caplog.text
 
+    # A zero or malformed timeout keeps the 60s default and warns.
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "0")
+    for raw, problem in (("0", "must be positive"), ("6O", "is not a valid integer")):
+        caplog.clear()
+        monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", raw)
+        with pytest.raises(git_ops.GitTimeoutError, match="timed out after 60s"):
+            git_ops.gh_repo_view(tmp_path)
+        assert f"DAYDREAM_GH_TIMEOUT_SECONDS='{raw}' {problem}; using default 60" in caplog.text
+
     caplog.clear()
     monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", "7")
     monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "1")
     ok = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="octocat/hello\n", stderr="")
     calls["n"] = 0
-    monkeypatch.setattr(subprocess, "run", _flaky_timeout_run(calls, ok, cmd=["gh"], timeout=7))
+    def flaky(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=["gh"], timeout=7)
+        return ok
+
+    monkeypatch.setattr(subprocess, "run", flaky)
     assert git_ops.gh_repo_view(tmp_path) == ("octocat", "hello")
     assert calls["n"] == 2  # timed out once, then succeeded
     calls["n"] = 0
@@ -625,6 +640,11 @@ def test_gh_timeouts_retry_only_idempotent_reads(
     warnings = [record.getMessage() for record in caplog.records]
     assert any(warning.startswith("gh timed out after") for warning in warnings)
     assert all("jwt-super-secret-xyz" not in warning and "Authorization" not in warning for warning in warnings)
+    caplog.clear()
+    with pytest.raises(git_ops.GitTimeoutError) as masked:
+        git_ops.gh_api(tmp_path, "/app-manifests/manifest-code-sentinel/conversions", method="POST", idempotent=True)
+    assert "manifest-code-sentinel" not in str(masked.value) and "/app-manifests/***/" in str(masked.value)
+    assert caplog.records and all("/app-manifests" not in record.getMessage() for record in caplog.records)
 
 
 def test_gh_issue_wrappers_keep_bodies_out_of_argv_and_return_rows(
@@ -699,19 +719,42 @@ def test_gh_read_wrappers_reject_invalid_output(tmp_path: Path, monkeypatch: pyt
         (42, "GraphQL: Could not resolve to a PullRequest with the number of 42. (repository.pullRequest)\n"),
     ]:
         _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
-        assert git_ops.gh_pr_view(tmp_path, pr) is None
-    for stdout in ("not-json", "[]"):
+        assert git_ops.gh_pr_view(tmp_path, pr) is None, stderr
+    invalid: list[tuple[str, str, Any]] = [
+        *[(stdout, "invalid JSON|JSON object", lambda: git_ops.gh_pr_view(tmp_path, 42))
+          for stdout in ("not-json", "[]")],
+        *[(stdout, "invalid JSON|JSON list|row", lambda: git_ops.gh_pr_list_for_branch(tmp_path, "feature"))
+          for stdout in ("not-json", "{}", '[{"number": 1}, null]')],
+        *[(slug + "\n", "invalid repository slug", lambda: git_ops.gh_repo_view_required(tmp_path))
+          for slug in ("owner/repo/extra", "owner/ ")],
+    ]
+    for stdout, match, read in invalid:
         _patch_subprocess_run(monkeypatch, stdout=stdout)
-        with pytest.raises(GitError, match="invalid JSON|JSON object"):
-            git_ops.gh_pr_view(tmp_path, 42)
-    for stdout in ("not-json", "{}", '[{"number": 1}, null]'):
-        _patch_subprocess_run(monkeypatch, stdout=stdout)
-        with pytest.raises(GitError, match="invalid JSON|JSON list|row"):
-            git_ops.gh_pr_list_for_branch(tmp_path, "feature")
-    for slug in ("owner/repo/extra", "owner/ "):
-        _patch_subprocess_run(monkeypatch, stdout=slug + "\n")
-        with pytest.raises(GitError, match="invalid repository slug"):
-            git_ops.gh_repo_view_required(tmp_path)
+        try:
+            with pytest.raises(GitError, match=match):
+                read()
+        except BaseException as exc:
+            exc.add_note(f"case: {stdout!r}")
+            raise
+    # Unanchored or mismatched failures are errors, never absence.
+    for pr, stderr in [
+        (42, "GraphQL: Could not resolve to a PullRequest with the number of 41. (repository.pullRequest)"),
+        (None, 'prefix: no pull requests found for branch "feature"'), (42, "HTTP 404: resource not found"),
+    ]:
+        _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
+        try:
+            with pytest.raises(GitError, match=re.escape(stderr)):
+                git_ops.gh_pr_view(tmp_path, pr)
+        except BaseException as exc:
+            exc.add_note(f"case: {stderr!r}")
+            raise
+    # A bare GitHub token is redacted while the safe diagnostic survives.
+    _patch_subprocess_run(monkeypatch, returncode=1,
+                          stderr="HTTP 401: authentication required for token ghp_abcdefghijklmnopqrstuvwxyz1234567890")
+    with pytest.raises(GitError) as unauthenticated:
+        git_ops.gh_repo_view_required(tmp_path)
+    assert "ghp_abcdefghij" not in str(unauthenticated.value)
+    assert "authentication required" in str(unauthenticated.value)
     # Failed dedup lookup must allow filing the finding instead of dropping or blocking it.
     _patch_subprocess_run(monkeypatch, returncode=1, stderr="gh: not authenticated\n")
     assert git_ops.gh_issue_list(tmp_path) == []
@@ -726,18 +769,22 @@ def test_gh_read_wrappers_reject_invalid_output(tmp_path: Path, monkeypatch: pyt
     with pytest.raises(GitError) as failed:
         git_ops.gh_api(tmp_path, "/app/installations", headers={"Authorization": "Bearer jwt-super-secret-xyz"})
     assert "jwt-super-secret-xyz" not in str(failed.value) and "Authorization: ***" in str(failed.value)
+    # App manifest conversion codes are masked on spawn, API, rate-limit and invalid-JSON failures.
+    conversion = "/app-manifests/manifest-code-sentinel/conversions"
+    with pytest.raises(GitError) as failed:
+        git_ops.gh_api(tmp_path, conversion, method="POST")
+    for stderr, returncode, stdout in ((f"synthetic API failure: {conversion}", 1, ""),
+                                       (f"secondary rate limit: {conversion}", 1, ""), ("", 0, "not-json")):
+        _patch_subprocess_run(monkeypatch, returncode=returncode, stdout=stdout, stderr=stderr)
+        with pytest.raises(GitError) as masked:
+            git_ops.gh_api(tmp_path, conversion, method="POST")
+        assert "manifest-code-sentinel" not in str(masked.value), stderr or stdout
+        assert "/app-manifests/***/conversions" in str(masked.value), stderr or stdout
+    assert "manifest-code-sentinel" not in str(failed.value) and "/app-manifests/***/" in str(failed.value)
 
 
-def _gh_api_input_data_preserves_tempfile_on_failure_case(
-    repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
-    expected_type: type[GitError],
-) -> None:
-    """Preserve failed API payloads and disclose their recovery path in the error."""
-    captured: dict[str, Any] = {}
-    attempts: list[list[str]] = []
-
+def test_gh_api_input_data_preserves_tempfile_only_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed API payloads are preserved and disclosed for recovery; a successful payload file is deleted."""
     class RequestAuth:
         calls = 0
 
@@ -745,65 +792,52 @@ def _gh_api_input_data_preserves_tempfile_on_failure_case(
             self.calls += 1
             return {"OWNING_RUN": "payload-metadata-test"}
 
-    auth = RequestAuth()
-
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        attempts.append(cmd)
-        idx = cmd.index("--input")
-        captured["input_path"] = cmd[idx + 1]
-        assert kwargs["env"] == {"OWNING_RUN": "payload-metadata-test"}
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
-        if failure == "invalid-json":
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="not-json", stderr="")
-        if failure == "rate-limit":
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr="HTTP 429: rate limit; retry-after: 7"
-            )
-        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="HTTP 422: Validation failed")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "4")
-    with pytest.raises(expected_type) as excinfo:
-        git_ops.gh_api(
-            repo,
-            "repos/owner/repo/pulls/1/reviews",
-            method="POST",
-            input_data={"bad": "payload"},
-            auth=auth,
-        )
-    preserved = Path(captured["input_path"])
-    try:
-        assert type(excinfo.value) is expected_type
-        assert len(attempts) == 1
-        assert auth.calls == 1
-        msg = str(excinfo.value)
-        if failure == "timeout":
-            assert "timed out" in msg
-        else:
-            assert "payload preserved at" in msg
-            assert str(preserved) in msg
-        assert preserved.exists()
-        assert json.loads(preserved.read_text(encoding="utf-8")) == {"bad": "payload"}
-        assert excinfo.value.preserved_payload_path == preserved
-        if isinstance(excinfo.value, git_ops.RateLimitError):
-            assert excinfo.value.retry_after == 7
-    finally:
-        preserved.unlink(missing_ok=True)
+    responses: dict[str, tuple[int, str, str]] = {
+        "http": (1, "", "HTTP 422: Validation failed"), "invalid-json": (0, "not-json", ""),
+        "rate-limit": (1, "", "HTTP 429: rate limit; retry-after: 7"), "success": (0, '{"id": 1}', ""),
+    }
+    for failure, expected_type in [("http", GitError), ("invalid-json", GitError),
+                                   ("timeout", git_ops.GitTimeoutError), ("rate-limit", git_ops.RateLimitError),
+                                   ("success", None)]:
+        attempts: list[list[str]] = []
+        auth = RequestAuth()
 
+        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            attempts.append(cmd)
+            assert kwargs["env"] == {"OWNING_RUN": "payload-metadata-test"}
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            returncode, stdout, stderr = responses[failure]
+            return subprocess.CompletedProcess(args=cmd, returncode=returncode, stdout=stdout, stderr=stderr)
 
-def test_gh_api_input_data_preserves_tempfile_on_failure(repo: Path) -> None:
-    cases = [
-        ("http", GitError),
-        ("invalid-json", GitError),
-        ("timeout", git_ops.GitTimeoutError),
-        ("rate-limit", git_ops.RateLimitError),
-    ]
-    for failure, expected_type in cases:
-        with pytest.MonkeyPatch.context() as mp:
-            _gh_api_input_data_preserves_tempfile_on_failure_case(
-                monkeypatch=mp, repo=repo, failure=failure, expected_type=expected_type
-            )
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        try:
+            request = {"bad": "payload"}
+            if expected_type is None:
+                assert git_ops.gh_api(tmp_path, "repos/o/r/pulls/1/reviews", method="POST", input_data=request,
+                                      auth=auth) == {"id": 1}
+                assert not Path(attempts[0][attempts[0].index("--input") + 1]).exists()
+                continue
+            with pytest.raises(expected_type) as excinfo:
+                git_ops.gh_api(tmp_path, "repos/o/r/pulls/1/reviews", method="POST", input_data=request, auth=auth)
+            preserved = Path(attempts[0][attempts[0].index("--input") + 1])
+            try:
+                assert type(excinfo.value) is expected_type and len(attempts) == 1 and auth.calls == 1
+                message = str(excinfo.value)
+                if failure == "timeout":
+                    assert "timed out" in message
+                else:
+                    assert "payload preserved at" in message and str(preserved) in message
+                assert json.loads(preserved.read_text(encoding="utf-8")) == request
+                assert excinfo.value.preserved_payload_path == preserved
+                if isinstance(excinfo.value, git_ops.RateLimitError):
+                    assert excinfo.value.retry_after == 7
+            finally:
+                preserved.unlink(missing_ok=True)
+        except BaseException as exc:
+            exc.add_note(f"case: {failure}")
+            raise
 
 
 def test_update_refs_rejects_injectable_ref_names_before_shell_out(tmp_path: Path) -> None:
@@ -940,7 +974,8 @@ def test_has_executable_pre_push_hook_honors_mode_and_core_hooks_path(tmp_path: 
 
 def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_path: Path) -> None:
     """A real branch advances through empty, untagged, tagged, divergent and published states."""
-    repo, _bare = _repo_with_origin(tmp_path)
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "remote", "add", "origin", str(_bare_remote(tmp_path / "remote.git")))
     original = [f"line {n}" for n in range(1, 31)]
     write_and_stage(repo, "shared.txt", "\n".join(original) + "\n")
     common = _commit(repo, "shared baseline")
@@ -954,6 +989,7 @@ def test_feature_history_diff_and_publication_follow_the_same_commit_window(tmp_
     assert git_ops.merge_base(repo, "absent") is None
     assert git_ops.diff_name_only(repo, "absent", "HEAD") == []
     assert git_ops.log_shas(repo, "HEAD", since="main") == []
+    assert git_ops.log_shas(repo, "absent", since="main") is None  # a vanished ref is not an empty history
     assert git_ops.daydream_commits(repo, "main") is None
     feature = original.copy()
     feature[14] = "line 15 FEAT"

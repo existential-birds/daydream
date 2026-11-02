@@ -32,14 +32,6 @@ def _block_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     block_real_gh(monkeypatch)
 
 
-def _spy_run(captured: Any, stdout: str = "") -> Any:
-    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args[0], 0, stdout=stdout, stderr="")
-
-    return spy_run
-
-
 def test_run_gh_resolves_auth_once_for_the_complete_retry_sequence() -> None:
     calls = 0
     class CountingAuth:
@@ -166,7 +158,10 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
             return {"token": "ghs_expired", "expires_at": "1970-01-01T00:00:00Z"}
         return {"token": "ghs_fresh", "expires_at": "9999-01-01T00:00:00Z"}
 
-    spy_run = _spy_run(captured, "{}")
+    def spy_run(*args: list[Any], **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
+
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
         session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True, base_environment=base)
         base["GH_REPO"] = "mutated/repository"
@@ -186,10 +181,16 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
 
 
 def test_resolve_run_identity_validates_explicit_credentials_before_read_only_fallback(tmp_path: Path,) -> None:
+    """Partial App config fails even read-only; complete config never mints for a read-only run."""
     with pytest.raises(GitHubAppError, match="DAYDREAM_APP_PRIVATE_KEY"):
         resolve_run_identity(
             tmp_path, None, is_posting=False, base_environment={"PATH": "/tools", "DAYDREAM_APP_ID": "12345"},
         )
+    base = {"PATH": "/tools", "DAYDREAM_APP_ID": "12345", "DAYDREAM_APP_PRIVATE_KEY": _TEST_PEM, "GH_TOKEN": "ambient"}
+    with patch("daydream.github_app._mint_installation_token", side_effect=AssertionError("read-only run minted")):
+        session = resolve_run_identity(tmp_path, "acme/widgets", is_posting=False, base_environment=base)
+    environment = session.execution.auth.environment_for_request()
+    assert environment is not None and environment["GH_TOKEN"] == "ambient"
 
 
 _TEST_PEM = generate_rsa_pem()

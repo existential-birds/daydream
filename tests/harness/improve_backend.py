@@ -3,21 +3,18 @@
 :class:`ImproveStubBackend` is a *dispatch* fake: it classifies each improve
 turn off prompt substrings (repo-survey / ``IMPROVE_RECON`` / audit-specialist /
 vet / plan-writer), records every call, and serves a synthetic response per
-marker. Its many public attributes are per-test switches — set them on the
+marker. Its public attributes are per-test switches — set them on the
 instance after construction to shape one turn's payload (a rejected vet
-verdict, a schema-invalid enum, a crashing plan writer, an injected credential).
+verdict, a schema-invalid enum, a crashing plan writer).
 
 Subclasses specialize the same dispatch fake for focused production-path checks:
 
-* :class:`AuditAbsoluteWorkingDirectoryBackend` — rewrites the first recon
-  command's working directory relative to the actual audit snapshot cwd.
 * :class:`ProductionPathBackend` — Pi-shaped delays, a 42-command recon menu and
   a provider concurrency ceiling, for the full production-path regressions.
+* :class:`ManifestReadingBackend` — reads each audit assignment's primary manifest
+  and files from the actual snapshot, as a provider would.
 * :class:`RendezvousImproveBackend` — coordinates audit/vet overlap and reversed
   completion with event barriers, and observes cancellation before snapshot cleanup.
-* :class:`IncrementalPlanBackend` — holds one plan writer open and observes the
-  plan directory from inside it (proves plans land as each writer finishes).
-* :class:`OutOfOrderPlanBackend` — makes the first-selected writer finish last.
 
 """
 from __future__ import annotations
@@ -25,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from itertools import islice
 from pathlib import Path
 from typing import Any, TypeVar
@@ -38,9 +35,7 @@ from daydream.backends import (
     AgentEvent,
     ResultEvent,
     TextEvent,
-    ToolStartEvent,
 )
-from daydream.backends._subprocess import StreamStalledError
 from daydream.config import AUDIT_CATEGORIES
 
 # The per-category audit prompt heading, shared by the base dispatch and the
@@ -81,22 +76,18 @@ def _recon_command(
     }
 
 
-def stub_recon_commands(*, all_invalid: bool = False, start_line: int = 5) -> list[dict[str, Any]]:
-    """Two whole-repository verification commands, anchored from ``start_line``.
-
-    The second command's evidence anchor follows on the next line, so a caller
-    validating against a REAL ``pyproject.toml`` can point both at its lines.
-    """
-    scope_kind = "unsupported" if all_invalid else "whole-repository"
+def stub_recon_commands() -> list[dict[str, Any]]:
+    """Two whole-repository verification commands anchored at ``pyproject.toml`` lines 5 and 6."""
+    start_line = 5
     return [_recon_command(
             command_id="test-suite", purpose="Run the repository Python test suite", command="uv run pytest",
             line=start_line, excerpt='test-command = "uv run pytest"',
             observable_result="exit 0 and the selected pytest tests pass",
-            rationale="The root configuration declares the test command.", scope_kind=scope_kind,
+            rationale="The root configuration declares the test command.",
         ), _recon_command(command_id="git-diff", purpose="Check that unrelated paths remain unchanged",
             command="git diff --exit-code", line=start_line + 1, excerpt='scope-command = "git diff --exit-code"',
             observable_result="exit 0 and no unexpected diff is reported",
-            rationale="The root configuration declares the scope command.", scope_kind=scope_kind,
+            rationale="The root configuration declares the scope command.",
         ),
     ]
 
@@ -191,26 +182,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_MENU_ID = re.compile(r"^- id `([a-z0-9-]+)`", re.MULTILINE)
-
-
-def _menu_ids(prompt: str) -> list[str]:
-    """Return the recon command ids offered to the plan writer, in order."""
-    return _MENU_ID.findall(prompt)
-
-
-def _set_plan_verification(plan: dict[str, Any], verification: dict[str, Any] | None) -> dict[str, Any]:
-    """Point every verification slot at one value (a recon ref, or ``None``)."""
-    plan["additional_command_refs"] = []
-    for step in plan["steps"]:
-        step["verification"] = verification
-    for case in plan["test_plan"]["cases"]:
-        case["verification"] = verification
-    for criterion in plan["done_criteria"]:
-        criterion["verification"] = verification
-    return plan
-
-
 def _finding_from_prompt(prompt: str) -> dict[str, Any]:
     for block in re.findall(r"```json\n(.*?)\n```", prompt, flags=re.DOTALL):
         try:
@@ -230,16 +201,6 @@ def group_scope(prompt: str) -> tuple[str, str]:
     return group.group(1), root.group(1)
 
 
-def _citable_file(target: Path, root: str) -> str:
-    """Return a real committed file inside ``root`` for a stub finding to cite."""
-    base = target if root == "." else target / root
-    direct = sorted(path for path in base.iterdir() if path.is_file())
-    if direct:
-        return direct[0].relative_to(target).as_posix()
-    nested = sorted(path for path in base.rglob("*") if path.is_file() and ".git" not in path.parts)
-    return nested[0].relative_to(target).as_posix() if nested else f"{root}/api.py"
-
-
 class ImproveStubBackend:
     """Backend stub for improve-flow tests."""
 
@@ -248,7 +209,6 @@ class ImproveStubBackend:
     def __init__(
         self, target: Path, *, n_findings: int | None = None, fanout_concurrency: int = 4,
     ) -> None:
-        self._target = target
         self.audit_root_isolation: str | None = None
         self.audit_root: Path | None = None
         self.audit_outward_symlinks: frozenset[Path] = frozenset()
@@ -264,34 +224,14 @@ class ImproveStubBackend:
         self.fail_categories: set[str] = set()
         self.vet_reject_titles: set[str] = set()
         self.return_legacy_plan = False
-        self.return_secret_invalid_enum = False
         self.return_secret_invalid_enum_once = False
         self.plan_writer_calls = 0
-        self.inject_credential = False
-        self.all_recon_commands_invalid = False
-        self.recon_commands_extra: list[dict[str, Any]] = []
-        self.recon_languages_override: Any = None
         self.recon_output_override: Any = None
-        self.plan_tool_calls_before_result = 0
-        self.plan_file_role_override: str | None = None
-        self.plan_problem_override: str | None = None
         self.plan_instruction_override: str | None = None
-        self.plan_ungate_steps = False
-        self.plan_gate_on_first_menu_id = False
-        self.plan_sloppy = False
-        self.plan_bad_recon_id_attempts = 0
-        self.plan_missing_path_attempts = 0
         self.plan_unquoted_path_attempts = 0
         self.plan_crash_attempts = 0
-        self.plan_stall_attempts = 0
-        self.plan_rate_limit_always = False
-        self.plan_stop_condition_path: str | None = None
-        self.group_scoped_findings = False
         self.findings_per_category: int | None = None
         self.fail_vet_titles: set[str] = set()
-        # Fires once on the first plan-writer turn, so a test can mutate the repo
-        # (e.g. advance HEAD) with a plan-write session already open.
-        self.on_first_plan_write: Callable[[], None] | None = None
 
     async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any,) -> list[AgentEvent] | None:
         """Per-turn hook run before the dispatch body.
@@ -350,9 +290,6 @@ class ImproveStubBackend:
             marker = "vet"
         elif _is_plan_writer_prompt(prompt, output_schema):
             marker = "plan-writer"
-            if self.on_first_plan_write is not None:
-                hook, self.on_first_plan_write = self.on_first_plan_write, None
-                hook()
         self._record_call(
             cwd, prompt, marker, output_schema=output_schema, agents=agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session,
@@ -373,12 +310,8 @@ class ImproveStubBackend:
             if self.recon_output_override is not None:
                 yield ResultEvent(structured_output=self.recon_output_override, continuation=None,)
                 return
-            commands = stub_recon_commands(all_invalid=self.all_recon_commands_invalid)
-            commands = [*commands, *self.recon_commands_extra]
-            yield ResultEvent(structured_output={"languages": (self.recon_languages_override
-                        if self.recon_languages_override is not None
-                        else ["python", "typescript", "FastAPI"]
-                    ), "commands": commands,
+            yield ResultEvent(structured_output={"languages": ["python", "typescript", "FastAPI"],
+                    "commands": stub_recon_commands(),
                     "conventions": ["OpenAPI First: openapi.yaml is the HTTP contract (source: AGENTS.md)"],
                     "guidelines": ["Keep API examples synchronized with openapi.yaml."],
                     "intent_docs": ["README.md"],
@@ -413,11 +346,7 @@ class ImproveStubBackend:
                 impact = "LOW"
                 effort = "L"
             cited = "apps/billing/api.py"
-            if self.group_scoped_findings:
-                group, root = group_scope(prompt)
-                cited = _citable_file(self._target, root)
-                title = f"{title} in {group}"
-            findings = [{"title": (f"{title} OPENAI_API_KEY=sk-secret123456" if self.inject_credential else title),
+            findings = [{"title": title,
                     "category": "wrong-agent-category", "path": cited, "line": 1,
                     "body": f"Concrete {category} impact and fix.", "impact": impact, "effort": effort, "risk": "LOW",
                     "confidence": "HIGH", "evidence": [f"{cited}:1"], **_neutral_maintenance_fields(),
@@ -457,16 +386,8 @@ class ImproveStubBackend:
             return
         if marker == "plan-writer":
             self.plan_writer_calls += 1
-            if self.plan_rate_limit_always:
-                raise _ProductionPathRateLimitError("provider rate limit")
             if self.plan_writer_calls <= self.plan_crash_attempts:
                 raise _ProductionPathPlannerError("plan writer process exited")
-            if self.plan_writer_calls <= self.plan_stall_attempts:
-                raise StreamStalledError(cli="pi", timeout_s=1.0)
-            if self.inject_credential:
-                yield TextEvent(text="OPENAI_API_KEY=sk-secret123456")
-            for index in range(self.plan_tool_calls_before_result):
-                yield ToolStartEvent(id=f"plan-read-{index}", name="Read", input={"file_path": "apps/billing/api.py"},)
             finding = _finding_from_prompt(prompt)
             if self.return_legacy_plan:
                 yield ResultEvent(structured_output={
@@ -477,54 +398,15 @@ class ImproveStubBackend:
                 )
                 return
             plan = _authored_plan_result(finding)
-            if self.plan_gate_on_first_menu_id:
-                # A writer can only gate on what the menu actually offers.
-                offered = _menu_ids(prompt)
-                plan = _set_plan_verification(plan, plan_ref(offered[0])) if offered else plan
-            if self.plan_file_role_override is not None:
-                plan["scope"]["existing_paths"][0]["role"] = (self.plan_file_role_override)
-                plan["context_excerpts"][0]["file_role"] = (self.plan_file_role_override)
-            if self.plan_problem_override is not None:
-                plan["why_this_matters"]["problem"] = self.plan_problem_override
             if self.plan_instruction_override is not None:
                 plan["steps"][0]["changes"][0]["instruction"] = (self.plan_instruction_override)
-            if self.plan_ungate_steps:
-                # The shape a plan takes when recon verified no commands: the
-                # contract tells the writer to use null verification everywhere.
-                plan = _set_plan_verification(plan, None)
-            if self.plan_sloppy:
-                plan["debug_notes"] = ("Planner scratch notes that must never reach the artifact.")
-                plan["markdown"] = "## Steps\n\nMake the change."
-                plan["scope"]["out_of_scope_paths"].append({"path": "apps/billing/api.py",
-                        "reason": ("The billing implementation file must not change further."),
-                    }
-                )
-                plan["scope"]["existing_paths"][0]["role"] = ("Billing role " + "x" * 293)
-                plan["why_this_matters"]["problem"] = ("Callers keep sending secret: hunter2realvalue in "
-                    "production traffic today."
-                )
-            if self.plan_stop_condition_path is not None:
-                plan["false_assumption"]["related_paths"].append(self.plan_stop_condition_path)
-            if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
-                plan["steps"][0]["verification"] = plan_ref("make-tests")
             if self.plan_writer_calls <= self.plan_unquoted_path_attempts:
                 plan["context_excerpts"] = []
-            if self.plan_writer_calls <= self.plan_missing_path_attempts:
-                plan["scope"]["existing_paths"].append({"path": "apps/billing/legacy_api.py",
-                        "role": "Reference the retired billing module for parity.",
-                    }
-                )
-            if self.all_recon_commands_invalid:
-                plan = _set_plan_verification(plan, None)
-            if self.return_secret_invalid_enum or (self.return_secret_invalid_enum_once
-                and self.plan_writer_calls == 1
-            ):
+            if self.return_secret_invalid_enum_once and self.plan_writer_calls == 1:
                 # A schema-invalid enum carrying a credential: the value must
                 # fail validation AND never surface in any host observable.
                 plan["steps"][0]["changes"][0]["operation"] = ("TOKEN=PRIVATE_SCHEMA_SECRET")
                 plan["title"] = "PRIVATE_SCHEMA_SECRET rejected title"
-            if self.inject_credential:
-                plan["steps"][0]["changes"][0]["operation"] = ("OPENAI_API_KEY=sk-secret123456")
             yield ResultEvent(structured_output=plan, continuation=None,)
             return
         raise AssertionError(f"unexpected improve prompt: {prompt[:120]}")
@@ -544,7 +426,6 @@ class ManifestReadingBackend(ImproveStubBackend):
     def __init__(self, target: Path) -> None:
         super().__init__(target, n_findings=0)
         self.assignment_reads: list[dict[str, Any]] = []
-        self.fail_assignments: set[tuple[str, str]] = set()
 
     async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any) -> list[AgentEvent] | None:
         if "read-only improve audit specialist" not in prompt:
@@ -592,8 +473,6 @@ class ManifestReadingBackend(ImproveStubBackend):
             "submodule_references": submodules,
         }
         self.assignment_reads.append(record)
-        if (category, group) in self.fail_assignments:
-            raise RuntimeError("provider assignment failed after reading its primary manifest")
         findings = []
         if category == "correctness":
             for path, raw in reads.items():
@@ -629,21 +508,6 @@ class ManifestReadingBackend(ImproveStubBackend):
     @classmethod
     def _read_snapshot(cls, cwd: Path, relative: str) -> bytes:
         return cls._snapshot_path(cwd, relative).read_bytes()
-
-
-class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
-    """Spell one recon working directory absolutely from the execution cwd."""
-
-    def __init__(self, target: Path, *, rel: str) -> None:
-        super().__init__(target)
-        self._rel = rel
-
-    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any,) -> list[AgentEvent] | None:
-        if "IMPROVE_RECON" in prompt:
-            assert isinstance(self.recon_output_override, dict)
-            commands = self.recon_output_override["commands"]
-            commands[0]["working_directory"] = str(cwd / self._rel)
-        return None
 
 
 class _ProductionPathPlannerError(RuntimeError):
@@ -833,83 +697,6 @@ class RendezvousImproveBackend(ImproveStubBackend):
             self.closed_before_cleanup[phase].append(cwd.exists())
             self.completion_order[phase].append(rank)
             self.finished[phase][rank].set()
-
-
-class IncrementalPlanBackend(ImproveStubBackend):
-    """Holds one plan writer open until another writer's plan reaches disk.
-
-    ``observed_while_slow_writer_ran`` is the plan-directory listing taken from
-    inside the slow writer's ``execute``. Batch writing leaves it empty: no
-    plan file exists until every writer has returned.
-    """
-
-    def __init__(self, target: Path, *, slow_title: str, crash: bool = False,) -> None:
-        super().__init__(target, n_findings=2)
-        self._slow_title = slow_title
-        self._crash = crash
-        self._plans_dir = target / "daydream_plans"
-        self.observed_while_slow_writer_ran: list[str] = []
-        self.observed_index_while_slow_writer_ran = ""
-
-    async def _pre_execute(self, cwd: Path, prompt: str, output_schema: Any = None, **turn_kwargs: Any,
-    ) -> list[AgentEvent] | None:
-        if (_is_plan_writer_prompt(prompt, output_schema)
-            and _finding_from_prompt(prompt)["title"] == self._slow_title
-        ):
-            with anyio.move_on_after(10):
-                while not self.observed_while_slow_writer_ran:
-                    await anyio.sleep(0.01)
-                    self.observed_while_slow_writer_ran = sorted(path.name
-                        for path in self._plans_dir.glob("[0-9][0-9][0-9]-*.md")
-                    )
-                    index_path = self._plans_dir / "README.md"
-                    self.observed_index_while_slow_writer_ran = (index_path.read_text(encoding="utf-8")
-                        if index_path.is_file()
-                        else ""
-                    )
-            if self._crash:
-                raise _ProductionPathPlannerError("plan writer process exited")
-        return None
-
-
-class OutOfOrderPlanBackend(ImproveStubBackend):
-    """Make the first-selected plan writer be the last one to return.
-
-    The hold is on the other writers' completion count, not on a sleep, so the
-    completion sequence is deterministic: every writer but the first-selected
-    one returns immediately, and the first-selected one only returns once the
-    rest are done. ``completion_order`` is the selection rank of each writer in
-    the order they actually finished.
-    """
-
-    def __init__(self, target: Path, *, n_findings: int) -> None:
-        super().__init__(target, n_findings=n_findings)
-        self._expected_writers = n_findings
-        self._selection_order: list[str] = []
-        self.completion_order: list[int] = []
-
-    @property
-    def selection_order(self) -> list[str]:
-        """Fingerprints in the host's observed writer-dispatch order."""
-        return list(self._selection_order)
-
-    async def _pre_execute(self, cwd: Path, prompt: str, output_schema: Any = None, **turn_kwargs: Any,
-    ) -> list[AgentEvent] | None:
-        if _is_plan_writer_prompt(prompt, output_schema):
-            fingerprint = _finding_from_prompt(prompt)["fingerprint"]
-            if fingerprint not in self._selection_order:
-                self._selection_order.append(fingerprint)
-            rank = self._selection_order.index(fingerprint)
-            if rank == 0:
-                with anyio.move_on_after(10):
-                    while len(self.completion_order) < self._expected_writers - 1:
-                        await anyio.sleep(0.01)
-        return None
-
-    async def _post_execute(self, prompt: str, output_schema: Any = None, **turn_kwargs: Any,) -> None:
-        if _is_plan_writer_prompt(prompt, output_schema):
-            fingerprint = _finding_from_prompt(prompt)["fingerprint"]
-            self.completion_order.append(self._selection_order.index(fingerprint))
 
 
 _ImproveBackendT = TypeVar("_ImproveBackendT", bound=ImproveStubBackend)

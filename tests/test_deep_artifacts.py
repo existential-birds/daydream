@@ -47,13 +47,12 @@ def _seed_fresh_resume_artifacts(deep_dir: Path) -> int:
     return key_mtime
 
 
-@pytest.mark.parametrize(('stage', 'earlier'), [
-    ("fix", "merge"),
-])
 def test_check_deep_artifacts_added_prerequisite_requires_presence_and_freshness(
-    deep_artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch, stage: str, earlier: str,
+    deep_artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Declaring a predecessor must gate resume without a second freshness inventory."""
+    stage = "fix"
+    earlier = "merge"
     key_mtime = _seed_fresh_resume_artifacts(deep_artifacts_dir)
     monkeypatch.setitem(
         artifacts._DEEP_STAGE_PREREQS, stage, [*artifacts._DEEP_STAGE_PREREQS[stage], DeepArtifact.DIAGRAM],

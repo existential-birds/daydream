@@ -22,6 +22,8 @@ from daydream.pr_review import (
     classify,
     default_render_finding,
     default_render_summary,
+    extract_anchors,
+    parse_finding_markers,
     resolve_review_renderers,
 )
 from daydream.reconcile import PriorDiagramComment
@@ -68,30 +70,6 @@ def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],)
     return fake_submit
 
 
-def test_custom_renderers_fall_back_and_warn_on_error(caplog: pytest.LogCaptureFixture, pr: PRInfo) -> None:
-    """A failing finding or summary renderer falls back to the built-in output and warns."""
-    _finding_renderer_falls_back_and_warns_on_error(caplog=caplog)
-    _summary_renderer_falls_back_and_warns_on_error(pr=pr, caplog=caplog)
-
-
-def _finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
-
-    def boom(finding: Any, ctx: Any) -> str:
-        raise RuntimeError("boom")
-
-    reg = Registry()
-    register_builtins(reg)
-    reg.override_renderer("finding", boom)
-    with caplog.at_level("WARNING"):
-        body = format_comment_body(ParsedIssue(
-                path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH",
-                fingerprint="a" * 64,
-            ), "inline", renderers=resolve_review_renderers(reg),
-        )
-    assert body == (SNAP / "inline.md").read_text()
-    assert "finding" in caplog.text and "boom" in caplog.text
-
-
 _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
 _RUN_INFO = pr_comment_renderer.render_run_info_block([_FIXTURE])
 # Input findings handed to _post/post_review_to_pr_from_report below. They are inert whenever
@@ -100,29 +78,63 @@ _POST_ISSUE = ParsedIssue(path="a.py", line=1, title="t", body="b")
 _NO_ISSUES = pr_review.ClassifiedIssues()
 
 
-def _summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pytest.LogCaptureFixture) -> None:
+def _registry_with(kind: str, renderer: Any) -> ReviewRenderers:
+    registry = Registry()
+    register_builtins(registry)
+    registry.override_renderer(kind, renderer)
+    return resolve_review_renderers(registry)
 
-    def boom(ctx: Any) -> str:
+
+def test_custom_renderers_are_framed_by_the_host_and_fall_back_on_error(
+    caplog: pytest.LogCaptureFixture, pr: PRInfo,
+) -> None:
+    """A working summary renderer is framed with host count, commit, markers and footer; it owns diagrams.
+
+    A failing finding or summary renderer falls back to the built-in output and warns.
+    """
+    note = ParsedIssue(path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM",
+                       severity="low", fingerprint="b" * 64)
+    classified = pr_review.ClassifiedIssues(body_only=[note])
+
+    def collapsible(ctx: Any) -> str:
+        rows = [f"<details><summary>{f.finding.path} — {f.finding.title}</summary>\n{f.body_block}\n</details>"
+                for f in ctx.findings]
+        return "**Custom Summary**\n\n" + "\n".join(rows)
+
+    body = payload_for(pr, classified, renderers=_registry_with("summary", collapsible), run_info=_RUN_INFO)["body"]
+    assert body.startswith("Actionable comments posted: 1\n\n")
+    assert body.index("Reviewed commit") < body.index("**Custom Summary**")
+    assert "<summary>b.py — File note</summary>" in body
+    assert parse_finding_markers(body) == ["b" * 64]
+    assert body.rstrip().endswith("</sub>")
+
+    blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
+    seen: list[str | None] = []
+    for keep in (True, False):
+        def diagram_renderer(ctx: Any, keep: bool = keep) -> str:
+            seen.append(ctx.diagrams)
+            return f"**Custom**\n\n{ctx.diagrams}" if keep else "**Custom**"
+        rendered = payload_for(pr, _NO_ISSUES, diagram_blocks=blocks, renderers=_registry_with(
+            "summary", diagram_renderer), run_info=_RUN_INFO)["body"]
+        assert (blocks in rendered) is keep  # the host cannot restore blocks a renderer omits
+    assert seen == [blocks, blocks]
+
+    def boom_finding(finding: Any, ctx: Any) -> str:
+        raise RuntimeError("boom")
+
+    def boom_summary(ctx: Any) -> str:
         raise RuntimeError("kaboom")
 
-    reg = Registry()
-    register_builtins(reg)
-    reg.override_renderer("summary", boom)
-    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
-                path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",
-                fingerprint="b" * 64,
-            )
-        ]
-    )
-    default_body = payload_for(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
-    )["body"]
     with caplog.at_level("WARNING"):
-        body = payload_for(pr, classified, renderers=resolve_review_renderers(reg),
-            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-        )["body"]
-    assert body == default_body
-    assert "summary" in caplog.text and "kaboom" in caplog.text
+        finding_body = format_comment_body(ParsedIssue(
+            path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH",
+            fingerprint="a" * 64,
+        ), "inline", renderers=_registry_with("finding", boom_finding))
+        summary_body = payload_for(pr, classified, renderers=_registry_with("summary", boom_summary),
+                                   run_info=_RUN_INFO)["body"]
+    assert finding_body == (SNAP / "inline.md").read_text()
+    assert summary_body == payload_for(pr, classified, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO)["body"]
+    assert "boom" in caplog.text and "kaboom" in caplog.text
 
 
 @pytest.fixture
@@ -258,8 +270,12 @@ def test_pr_info_rejects_malformed_or_contradictory_head_identity(
     ]
     for index, (field, value) in enumerate(malformed, start=1):
         fake_gh.serve_pr_view({**valid, field: value})
-        with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
-            pr_review.find_pr_by_number(git_repo, 7)
+        try:
+            with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
+                pr_review.find_pr_by_number(git_repo, 7)
+        except BaseException as exc:
+            exc.add_note(f"case: {field}={value!r}")
+            raise
         assert len(fake_gh.command_calls("pr view")) == index, field
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     for missing_field in ("headRepository", "headRepositoryOwner"):
@@ -267,6 +283,10 @@ def test_pr_info_rejects_malformed_or_contradictory_head_identity(
         del row[missing_field]
         with pytest.raises(GitError, match="invalid PR row"):
             pr_review._pr_info_from_row(git_repo, row)
+    # A same-repository PR may report null head metadata.
+    for head_owner in (None, {"login": "former-owner"}):
+        assert pr_review._pr_info_from_row(
+            git_repo, {**valid, "headRepository": None, "headRepositoryOwner": head_owner}).head_repo is None
 
 
 def test_fork_pr_uses_upstream_base_for_both_lookup_paths(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
@@ -281,7 +301,13 @@ def test_fork_pr_uses_upstream_base_for_both_lookup_paths(monkeypatch: pytest.Mo
     for info in (pr_review.find_open_pr(git_repo), pr_review.find_pr_by_number(git_repo, 7)):
         assert info is not None
         assert info.base_sha == base
-        assert info.head_repo == "forky/r"
+        assert (info.owner, info.repo, info.head_repo) == ("acme", "widgets", "forky/r")
+    # Commit links follow the fork's head repository while the review posts to the base repository.
+    assert info is not None
+    head = info.head_sha
+    body = payload_for(info, pr_review.ClassifiedIssues(), run_info="run info", renderers=BUILTIN_RENDERERS)["body"]
+    assert f"- **Reviewed commit:** [`{head[:7]}`](https://github.com/forky/r/commit/{head})" in body
+    assert f"https://github.com/acme/widgets/commit/{head}" not in body
 
 
 def test_pr_base_remote_matching_is_credential_safe(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
@@ -356,6 +382,16 @@ async def _post_payload_approves_when_clean_and_enabled_case(
 
 async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRInfo) -> None:
     """Approval, empty-report diagrams, failed diagram replacement and base-tip reads follow captured state."""
+    # An authorized plan snapshots its issues; later classification mutation cannot change the submission.
+    mutable = pr_review.ClassifiedIssues(inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10,
+                                         title="planned", body="b")], body_only=[ParsedIssue(path="b.py", line=None,
+                                         title="planned note", body="d")])
+    plan = pr_review.ClassifiedReviewPlan.from_classified(pr, mutable, event=pr_review.ReviewEvent.COMMENT,
+                                                          run_info=_RUN_INFO, renderers=BUILTIN_RENDERERS)
+    mutable.inline_issues[0].title = mutable.body_only[0].title = "mutated"
+    mutable.inline.append(_inline(line=20))
+    assert [issue.title for issue in (*plan.inline_issues, *plan.body_only)] == ["planned", "planned note"]
+    assert len(plan.inline) == 1
     # A rationale that only repeats the description is not posted twice.
     repeated, = pr_review.parsed_issues_from_items([{"file": "a.py", "line": 1, "description": "Same text",
                                                      "rationale": "Same text", "severity": "low"}])
@@ -367,19 +403,17 @@ async def test_publication_decisions_follow_review_state(tmp_path: Path, pr: PRI
         assert pr_review._resolve_pr(tmp_path, _FakeConsole(), 7,  # type: ignore[arg-type]
                                      auth=git_ops.StaticGitHubAuth({})) is None
         assert warnings == ["PR #7 not found via `gh pr view`; skipping PR post."]
-    await _post_payload_approves_when_clean_and_enabled(tmp_path=_case_dir(tmp_path, 0), pr=pr)
-    await _post_review_from_report_empty_items_posts_diagram(tmp_path=_case_dir(tmp_path, 1), pr=pr)
-    with pytest.MonkeyPatch.context() as mp:
-        _diagram_replacement_post_failure_keeps_prior_comment(pr=pr, monkeypatch=mp, tmp_path=_case_dir(tmp_path, 2))
-    _base_tip_api_read_rejects_advanced_pr(pr=pr)
-
-
-async def _post_payload_approves_when_clean_and_enabled(tmp_path: Path, pr: PRInfo) -> None:
-    for index, complete in enumerate([False, True]):
+    for index, flag in enumerate([False, True]):
         with pytest.MonkeyPatch.context() as mp:
             await _post_payload_approves_when_clean_and_enabled_case(
-                monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), pr=pr, complete=complete
-            )
+                monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), pr=pr, complete=flag)
+        with pytest.MonkeyPatch.context() as mp:
+            await _post_review_from_report_empty_items_posts_diagram_case(
+                monkeypatch=mp, tmp_path=_case_dir(tmp_path, 2 + index), pr=pr, with_diagram=flag)
+        with pytest.MonkeyPatch.context() as mp:
+            _base_tip_api_read_rejects_advanced_pr_case(monkeypatch=mp, pr=pr, advanced=flag)
+    with pytest.MonkeyPatch.context() as mp:
+        _diagram_replacement_post_failure_keeps_prior_comment(pr=pr, monkeypatch=mp, tmp_path=_case_dir(tmp_path, 4))
 
 
 async def test_pinned_publication_revalidates_and_places_the_captured_comparison(
@@ -466,14 +500,6 @@ async def _post_review_from_report_empty_items_posts_diagram_case(
     assert "No confirmed findings" in captured["plan"].review_summary
 
 
-async def _post_review_from_report_empty_items_posts_diagram(tmp_path: Path, pr: PRInfo) -> None:
-    for index, with_diagram in enumerate([False, True]):
-        with pytest.MonkeyPatch.context() as mp:
-            await _post_review_from_report_empty_items_posts_diagram_case(
-                monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), pr=pr, with_diagram=with_diagram
-            )
-
-
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
     """Write *path* under *repo*, commit it, and return the new HEAD SHA."""
     file_path = repo / path
@@ -531,6 +557,10 @@ def test_classify_places_findings_against_real_changed_ranges(git_repo: Path) ->
     assert [issue.title for issue in result.body_only] == ["unchanged", "cross stack"]
     assert "posted on line 24; reviewer cited line 2" in result.inline[5].body
     assert "<!-- daydream-finding:" not in result.inline[0].body
+    # Default anchor ordering feeds persisted fingerprints; rationale prose still crowds `ttl` out of the cap.
+    assert extract_anchors(f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}") == [
+        "environment", "unavailable", "immediately", "Expiration", "downstream", "additional", "collapses", "override",
+    ]
     note = "**Placement:** posted on line 7; reviewer cited line 4."
     assert note in issues[1].body and note in result.inline[1].body
     classify(git_repo, _pr_for(base, head), issues)
@@ -681,9 +711,3 @@ def _base_tip_api_read_rejects_advanced_pr_case(
 
     monkeypatch.setattr(git_ops, "gh_api", unavailable)
     assert pr_review.capture_pr_base_tip(Path("."), pr) is None
-
-
-def _base_tip_api_read_rejects_advanced_pr(pr: PRInfo) -> None:
-    for advanced in [False, True]:
-        with pytest.MonkeyPatch.context() as mp:
-            _base_tip_api_read_rejects_advanced_pr_case(monkeypatch=mp, pr=pr, advanced=advanced)

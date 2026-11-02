@@ -1,11 +1,12 @@
 # tests/test_phases.py
 """Tests for phase functions with backend abstraction."""
 
+import functools
 import json
 import shlex
 import sys
 from collections.abc import AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
@@ -477,55 +478,48 @@ def _footprint(repo: Path) -> AuthorizedFixFootprint:
     return AuthorizedFixFootprint.build(repo, set(), [])
 
 
-@pytest.mark.parametrize("outcome_case", ["exception"])
 @pytest.mark.asyncio
 async def test_confinement_runs_for_every_repair_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None, outcome_case: str,
+    _quiet_phase_ui: None,
 ) -> None:
     """Requirement 12: timeout and exception are covered, not just completion."""
-
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
-    calls: list[str] = []
-    repair_turn: Callable[[], Any]
-    if outcome_case == "timeout":
-        monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
 
-        async def stall(**_kwargs: Any) -> AsyncIterator[TextEvent]:
-            while True:
-                yield TextEvent(text="partial")
-                await anyio.sleep(0)
+    async def stall() -> AsyncIterator[TextEvent]:
+        while True:
+            yield TextEvent(text="partial")
+            await anyio.sleep(0)
 
-        def _stall(*_a: Any, **_k: Any) -> AsyncIterator[TextEvent]:
-            return stall()
-        repair_turn = _stall
-    elif outcome_case == "exception":
-        def _boom(*_a: Any, **_k: Any) -> Any:
-            raise RuntimeError("boom")
-        repair_turn = _boom
-    else:
-        def _complete(*_a: Any, **_k: Any) -> tuple[AgentEvent, ...]:
-            return _FIX_TURN
-        repair_turn = _complete
-    def responder(_cwd: Path, prompt: str, *_rest: Any) -> Any:
-        if prompt.lower().startswith("the tests failed"):
-            return repair_turn()
-        return _handoff_turn("Repair stopped")
+    def boom() -> Any:
+        raise RuntimeError("boom")
 
-    call = phases.phase_test_and_heal(
-        ScriptedBackend(responder=responder), make_work(tmp_path), config=_host_suite_config(tmp_path), session_id="s1",
-        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
-        confinement=lambda: calls.append("ran"), allow_standalone=True,
-    )
-    if outcome_case == "exception":
-        # The host error still reaches the caller; confinement must not swallow it.
-        with pytest.raises(RuntimeError, match="boom"):
-            await call
-    else:
-        result = await call
-        assert result.repairs[0].outcome is (RepairOutcome.BUDGET_INTERRUPTED if outcome_case == "timeout"
-                                             else RepairOutcome.DIAGNOSIS_UNRESOLVED)
-    assert calls == ["ran"], f"confinement skipped for outcome={outcome_case}"
+    turns: dict[str, Callable[[], Any]] = {"normal": lambda: _FIX_TURN, "timeout": stall, "exception": boom}
+    for outcome_case, repair_turn in turns.items():
+        repo = tmp_path / outcome_case
+        repo.mkdir()
+        calls: list[str] = []
+
+        def responder(_cwd: Path, prompt: str, *_rest: Any, repair_turn: Callable[[], Any] = repair_turn) -> Any:
+            if prompt.lower().startswith("the tests failed"):
+                return repair_turn()
+            return _handoff_turn("Repair stopped")
+
+        call = phases.phase_test_and_heal(
+            ScriptedBackend(responder=responder), make_work(repo), config=_host_suite_config(repo), session_id="s1",
+            capture_tree_key=lambda: "tree-1", footprint=_footprint(repo),
+            confinement=functools.partial(calls.append, "ran"), allow_standalone=True,
+        )
+        if outcome_case == "exception":
+            # The host error still reaches the caller; confinement must not swallow it.
+            with pytest.raises(RuntimeError, match="boom"):
+                await call
+        else:
+            result = await call
+            assert result.repairs[0].outcome is (RepairOutcome.BUDGET_INTERRUPTED if outcome_case == "timeout"
+                                                 else RepairOutcome.DIAGNOSIS_UNRESOLVED), outcome_case
+        assert calls == ["ran"], f"confinement skipped for outcome={outcome_case}"
 
 
 @pytest.mark.asyncio
@@ -708,11 +702,10 @@ async def test_grouped_fix_delivers_scopes_verdicts_evidence_and_test_map_then_r
     assert any("Failed singleton" in str(message) for message in messages)
 
 
-@pytest.mark.parametrize("inline", [True])
 async def test_bound_phase_fix_transports_only_named_private_inputs(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool,
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
 ) -> None:
-    """A production fix gets intent/index bytes without an artifact-dir grant."""
+    """A production fix gets intent/index bytes inline without an artifact-dir grant."""
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -722,9 +715,9 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
     git(repo, "add", ".")
     git_commit(repo, "base")
     work = make_work(repo)
-    backend = _inline_or_exact_backend(repo, inline=inline)
+    backend = _inline_or_exact_backend(repo, inline=True)
 
-    async with _private_session(tmp_path, work, f"phase-fix-{inline}"):
+    async with _private_session(tmp_path, work, "phase-fix-inline"):
         deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
         intent = deep / "intent.md"
         affected = deep / "exploration" / "affected_files.md"
@@ -740,15 +733,10 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
         prompt = backend.last_prompt
         pointer_free = prompt.replace(str(affected), "").replace(str(intent), "")
         assert str(affected.parent) not in pointer_free
-        if inline:
-            assert "deliberate intent" in prompt
-            assert "src/app.py -> tests/test_app.py" in prompt
-            assert str(intent) not in prompt
-            assert str(affected) not in prompt
-        else:
-            assert str(intent) in prompt
-            assert str(affected) in prompt
-            assert "deliberate intent" not in prompt
+        assert "deliberate intent" in prompt
+        assert "src/app.py -> tests/test_app.py" in prompt
+        assert str(intent) not in prompt
+        assert str(affected) not in prompt
 
         # An exploration dir without its index must not reach the fix prompt.
         affected.unlink()
@@ -1222,9 +1210,8 @@ async def test_phase_test_and_heal_option4_clipboard_offer_and_summarizer_fallba
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recorded", [True])
 async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A standalone handoff belongs to the source even when archive storage is unavailable."""
 
@@ -1241,11 +1228,11 @@ async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
     unavailable = tmp_path / "unavailable-archive"
     unavailable.touch()
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
-    recorder = make_recorder(worktree, on_write=lambda *_args: None) if recorded else None
+    recorder = make_recorder(worktree, on_write=lambda *_args: None)
     backend = ScriptedBackend(events=_handoff_turn(""))
 
     try:
-        async with recorder if recorder is not None else nullcontext():
+        async with recorder:
             body, handoff_path, written = await _run_failure_summarizer(
                 backend, work, "1 failed, 0 passed", allow_standalone=True,
             )
@@ -1253,7 +1240,7 @@ async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
 
         assert written is True
         expected = source / ".daydream"
-        assert handoff_path.parent == (expected / "runs" / recorder.session_id if recorder is not None else expected)
+        assert handoff_path.parent == expected / "runs" / recorder.session_id
         assert handoff_path.read_text(encoding="utf-8") == body
         assert "trajectory unavailable for this run" in body
         assert str(unavailable) not in body
@@ -1343,9 +1330,8 @@ def test_changed_files_skips_unsafe_lexical_names(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private_leaf", ["sibling-run/log.txt"])
 async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, make_work: Callable[..., WorkContext], private_leaf: str,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, make_work: Callable[..., WorkContext],
 ) -> None:
     """A model cannot echo private control or sibling-workspace identities."""
 
@@ -1354,17 +1340,18 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     work = make_work(repo)
     async with _private_session(tmp_path, work, "handoff-private-roots") as session:
         session.register_destination(session.layout.public_daydream_dir, label=OutputLabel.PUBLIC_DAYDREAM,)
-        private_root = (session.layout.artifact_runtime_root
-            if private_leaf == "control.json"
-            else session.layout.operational_workspaces_root
-        )
-        leaked = private_root / private_leaf
-        backend = ScriptedBackend(events=_handoff_turn(f"# Handoff\n\n{leaked}\n"))
-
+        control = session.layout.artifact_runtime_root / "control.json"
+        leaked = session.layout.operational_workspaces_root / "sibling-run/log.txt"
         with caplog.at_level("WARNING", logger="daydream.phases"):
-            body, handoff_path, written = await _run_failure_summarizer(
-                backend, work, "1 failed", artifact_session=session,
+            control_body, _, _ = await _run_failure_summarizer(
+                ScriptedBackend(events=_handoff_turn(f"# Handoff\n\n{control}\n")), work, "1 failed",
+                artifact_session=session,
             )
+            body, handoff_path, written = await _run_failure_summarizer(
+                ScriptedBackend(events=_handoff_turn(f"# Handoff\n\n{leaked}\n")), work, "1 failed",
+                artifact_session=session,
+            )
+        assert str(control) not in control_body and "structured handoff" in control_body
         # A failed summarizer falls back to the test output, unless it names a private path too.
         fallback, _, _ = await _run_failure_summarizer(
             ScriptedBackend(script=[(RuntimeError("summarizer down"),)]), work, f"1 failed at {leaked}",
@@ -1389,17 +1376,15 @@ _MERGE_ITEMS = merge_result([{
 }])
 
 
-@pytest.mark.parametrize("inline", [True])
-@pytest.mark.parametrize("unavailable", ["missing", ])
 async def test_merge_rejects_unavailable_requested_structural_input(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, unavailable: str,
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
 ) -> None:
     """A requested structural source cannot silently disappear or expand access through a symlink."""
     repo = tmp_path / "repo"
     init_repo(repo)
     work = make_work(repo)
-    backend = _inline_or_exact_backend(repo, inline=inline, events=_structured_turn(_MERGE_ITEMS))
-    async with _private_session(tmp_path, work, f"merge-unavailable-{inline}-{unavailable}"):
+    backend = _inline_or_exact_backend(repo, inline=True, events=_structured_turn(_MERGE_ITEMS))
+    async with _private_session(tmp_path, work, "merge-unavailable"):
         deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
         deep.mkdir(parents=True)
         language = deep / "python-records.json"
@@ -1411,16 +1396,17 @@ async def test_merge_rejects_unavailable_requested_structural_input(
         dedup = deep / "dedup.json"
         dedup.write_text("[]")
         structural = deep / "structural-records.json"
-        if unavailable == "symlink":
-            outside = tmp_path / "outside-records.json"
-            outside.write_text('{"issues": []}')
-            structural.symlink_to(outside)
-
-        with pytest.raises(SanctionedInputUnavailable, match="structural"):
-            await phase_cross_stack_merge(
-                backend, work, per_stack_records_paths=[language], intent_path=intent, alternatives_path=alternatives,
-                dedup_candidates_path=dedup, structural_records_path=structural, allow_standalone=True,
-            )
+        outside = tmp_path / "outside-records.json"
+        outside.write_text('{"issues": []}')
+        for unavailable in ("missing", "symlink"):
+            if unavailable == "symlink":
+                structural.symlink_to(outside)
+            with pytest.raises(SanctionedInputUnavailable, match="structural"):
+                await phase_cross_stack_merge(
+                    backend, work, per_stack_records_paths=[language], intent_path=intent,
+                    alternatives_path=alternatives, dedup_candidates_path=dedup, structural_records_path=structural,
+                    allow_standalone=True,
+                )
         assert backend.call_count == 0
 
 

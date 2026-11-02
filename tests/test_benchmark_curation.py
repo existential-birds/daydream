@@ -4,8 +4,11 @@ Exercise evidence derivation, transitions, and validation independently of
 the shared mirror's continued availability.
 """
 
+import fcntl
 import hashlib
+import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +26,7 @@ from daydream.benchmark.storage import (
 from daydream.benchmark.workspace import init_workspace
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
+from tests.harness.transaction_faults import TransactionFaultDriver
 from tests.test_benchmark_import_prs import _PR_HEADER, _seed_preflight
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -315,12 +319,54 @@ def _mutations_reopen_stale_and_derive_fragment_provenance(tmp_path: Path, fake_
     assert "task_spec_sha256" not in stale and "task_spec_approved_at" not in stale
 
 
+def _locked_mutation_waits_for_the_lock_and_heals_interrupted_journal(tmp_path: Path, fake_gh: FakeGh) -> None:
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    mutated = dict(raw)
+    mutated["curation"] = dict(raw["curation"])
+    mutated["curation"]["state"] = "excluded"          # an interrupted mutation left in flight
+    faults = TransactionFaultDriver(ws, op_id=f"curate-{case_id}", kind="curation:exclude-case")
+    with faults.transaction as tx:
+        tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
+        faults.halt_at("target-1")                     # target applied under 'committing', then halt
+    assert load_yaml_strict(path)["curation"]["state"] == "excluded"
+    # Another holder of the workspace lock (a separate open file description) blocks the mutation.
+    holder = os.open(ws / ".benchmark.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    errors: list[BaseException] = []
+
+    def add() -> None:
+        try:
+            cu.add_finding(ws, case_id, title="recovered", body="b", severity="low",
+                           location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
+        except BaseException as exc:  # surfaced on the test thread below
+            errors.append(exc)
+
+    writer = threading.Thread(target=add, daemon=True)
+    try:
+        writer.start()
+        writer.join(timeout=0.3)
+        assert writer.is_alive(), "curation mutated without taking the workspace lock"
+        assert load_yaml_strict(path)["curation"]["state"] == "excluded"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+    writer.join(timeout=10)
+    assert not writer.is_alive() and not errors, errors
+    assert not list((ws / "transactions").iterdir())   # prior journal healed before the new write
+    final = load_yaml_strict(path)
+    assert final["curation"]["state"] == "draft"       # interrupted 'excluded' write was rolled back
+    assert [f["title"] for f in final["curation"]["findings"]] == ["recovered"]
+
+
 def test_service_rejections_keep_case_bytes_and_curated_error_contract(tmp_path: Path, fake_gh: FakeGh) -> None:
     for check in (_non_candidate_evidence_is_citable_and_excludable, _mark_ready_empty_not_clean_attested_still_raises,
                   _exclude_and_reinclude_case_transitions, _reject_before_persistence_leaves_file_unchanged,
                   _corrupt_bundle_path_fails_clean_with_curation_error,
                   _validate_case_accepts_clean_and_rejects_duplicate_and_over_cap,
-                  _mutations_reopen_stale_and_derive_fragment_provenance):
+                  _mutations_reopen_stale_and_derive_fragment_provenance,
+                  _locked_mutation_waits_for_the_lock_and_heals_interrupted_journal):
         root = tmp_path / check.__name__
         root.mkdir()
         check(root, fake_gh)

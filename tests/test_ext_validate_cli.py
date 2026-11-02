@@ -16,11 +16,10 @@ def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-@pytest.mark.parametrize('width', [80])
 def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],
-                                         width: int, monkeypatch: pytest.MonkeyPatch,
+                                         monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv('COLUMNS', str(width))
+    monkeypatch.setenv('COLUMNS', "80")
     ext_dir.write_module("def register(r): ...\n", api_version=7)
     assert _run_main(["ext", "validate"]) == 1
     out = collapse_panel_text(capsys)

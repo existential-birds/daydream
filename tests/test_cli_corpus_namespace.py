@@ -78,10 +78,10 @@ def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest
     assert store.read_snapshot(snapshot["snapshot_id"]).observations == selected.observations
 
 
-@pytest.mark.parametrize("flag", ["--allow-copyleft"])
 def test_record_build_cli_rejects_removed_flags(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    flag = "--allow-copyleft"
     store = seed_projection_store(tmp_path, dispositions=("accepted",))
     snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
     output = tmp_path / "out"

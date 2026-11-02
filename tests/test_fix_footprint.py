@@ -154,30 +154,29 @@ def test_model_and_reviewed_paths_normalize_or_fail_closed(tmp_path: Path) -> No
     with pytest.raises(InvalidRepositoryFilePath, match="invalid repository file path"):
         canonicalize_repository_file_path(repo, "src/a.py")
 
-@pytest.mark.parametrize("reviewed_path", ["native-\udcff.py"])
-def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path, reviewed_path: str,) -> None:
-
-    if reviewed_path == "odd\n$name[1].txt":
+def test_footprint_treats_reviewed_git_names_separately_from_model_paths(git_repo: Path) -> None:
+    """Git-observed names (control characters, globs, non-UTF-8 bytes) are authorized verbatim, not re-parsed."""
+    for reviewed_path in ("odd\n$name[1].txt", "native-\udcff.py"):
+        try:
+            _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
+        except OSError as exc:
+            if exc.errno == errno.EILSEQ:
+                continue  # this host filesystem rejects non-UTF-8 names; Linux CI exercises them
+            raise
         assert git_observed_path_is_confined(git_repo, reviewed_path)
-    try:
-        _seed(git_repo, {reviewed_path: b"before\n", "normal.py": b"before\n"})
-    except OSError as exc:
-        if exc.errno == errno.EILSEQ:
-            pytest.skip("host filesystem rejects non-UTF-8 filenames; exercised on Linux CI")
-        raise
-    (git_repo / reviewed_path).write_bytes(b"reviewed\n")
-    reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
-    assert reviewed == {reviewed_path}
-    item = {"item_uid": "item:normal", "file": "normal.py"}
-    footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
+        (git_repo / reviewed_path).write_bytes(b"reviewed\n")
+        reviewed = set(git_ops.changed_paths_z(git_repo, "HEAD"))
+        assert reviewed == {reviewed_path}
+        item = {"item_uid": "item:normal", "file": "normal.py"}
+        footprint = AuthorizedFixFootprint.build(git_repo, reviewed, [item])
 
-    assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
-    assert footprint.group_paths([item]) == frozenset({"normal.py"})
-    reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
-    assert reviewed_event.path == reviewed_path
-    assert reviewed_event.path_kind == "git"
-    assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
-    assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+        assert footprint.run_allowed_paths == frozenset({reviewed_path, "normal.py"})
+        assert footprint.group_paths([item]) == frozenset({"normal.py"})
+        reviewed_event = next(event for event in footprint.events if event.origin == "reviewed")
+        assert (reviewed_event.path, reviewed_event.path_kind) == (reviewed_path, "git")
+        assert footprint.accept_retarget(git_repo, "item:normal", reviewed_path, phase="fix", round_number=1,) is None
+        assert json.loads(json.dumps(footprint.audit_payload("run")))["run_allowed_paths"]
+
 
 def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_removed(git_repo: Path) -> None:
     _seed(git_repo, {"allowed.txt": b"base\n", "outside.txt": b"outside base\n"})

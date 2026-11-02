@@ -141,3 +141,22 @@ def test_pricing_or_render_failure_returns_unavailable(
 
     assert result.diagnostic == "run info: rendering unavailable"
     assert FALLBACK_NOTE in result.markdown
+
+
+def test_live_provider_renders_parent_and_completed_sibling_with_user_prices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed fix-phase sibling joins the parent's rows, and user price overrides synthesize missing cost."""
+    custom_model = "custom-live-model"
+    prices_file = tmp_path / "prices.toml"
+    prices_file.write_text(f'[prices."{custom_model}"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
+                           encoding="utf-8")
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
+    child = _trajectory("run-info", "child", phase="fix")
+    sibling = TrajectoryDocumentSnapshot("child", tmp_path / "child.json", child.model_dump_json().encode())
+    recorder = _recorder(tmp_path, model=custom_model, prompt_tokens=1_000_000, cost_usd=None)
+    result = render_live_run_info(_source_with_snapshots(tmp_path, (sibling,), recorder=recorder))
+    assert result.diagnostic is None and FALLBACK_NOTE not in result.markdown
+    assert "| Review |" in result.markdown and "| Fix |" in result.markdown
+    assert "- **Steps / tool calls:** 2 / 0" in result.markdown
+    assert "- **Cost:** $2.01" in result.markdown

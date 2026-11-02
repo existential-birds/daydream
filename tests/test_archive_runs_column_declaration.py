@@ -17,55 +17,16 @@ def _current_database(root: Path) -> None:
     index.upsert_run(root, make_manifest(session_id="historical", repo_slug="org/repo"))
 
 
-@pytest.mark.parametrize("unsupported", [
-
-
-    "wrong-index-table",
-
-])
 def test_unsupported_schema_is_rejected_without_changing_database(
-    tmp_path: Path, unsupported: str, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _current_database(tmp_path)
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute("PRAGMA journal_mode=DELETE")
-        if unsupported in {"old", "future", "zero-populated", "zero-unrelated-table"}:
-            version = {"old": 8, "future": 10, "zero-populated": 0, "zero-unrelated-table": 0}[unsupported]
-            connection.execute(f"PRAGMA user_version = {version}")
-        if unsupported in {"zero-unrelated-table", "missing-runs"}:
-            connection.execute("DROP TABLE runs")
-        elif unsupported == "missing-column":
-            connection.execute("ALTER TABLE runs DROP COLUMN profile_digest")
-        elif unsupported in {"missing-index", "wrong-index", "unique-index", "partial-index"}:
-            connection.execute("DROP INDEX idx_runs_repo_slug")
-            if unsupported == "wrong-index":
-                connection.execute("CREATE INDEX idx_runs_repo_slug ON runs(session_id)")
-            elif unsupported == "unique-index":
-                connection.execute("CREATE UNIQUE INDEX idx_runs_repo_slug ON runs(repo_slug)")
-            elif unsupported == "partial-index":
-                connection.execute("CREATE INDEX idx_runs_repo_slug ON runs(repo_slug) WHERE repo_slug IS NOT NULL")
-        elif unsupported == "wrong-index-table":
-            connection.execute("DROP INDEX idx_runs_repo_slug")
-            connection.execute("CREATE TABLE unrelated (repo_slug TEXT)")
-            connection.execute("CREATE INDEX idx_runs_repo_slug ON unrelated(repo_slug)")
-        elif unsupported in {"wrong-default", "wrong-type", "missing-primary-key", "extra-primary-key"}:
-            ddl = connection.execute("SELECT sql FROM sqlite_master WHERE name='runs'").fetchone()[0]
-            indexes = connection.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL").fetchall()
-            connection.execute("DROP TABLE runs")
-            if unsupported == "wrong-default":
-                ddl = ddl.replace("DEFAULT 'unknown'", "DEFAULT 'complete'")
-            elif unsupported == "wrong-type":
-                ddl = ddl.replace("model TEXT", "model INTEGER")
-            elif unsupported == "missing-primary-key":
-                ddl = ddl.replace("session_id TEXT PRIMARY KEY", "session_id TEXT")
-            else:
-                ddl = ddl.replace("session_id TEXT PRIMARY KEY", "session_id TEXT")
-                ddl = ddl.rstrip().removesuffix(")") + ", extra TEXT, PRIMARY KEY (session_id, extra))"
-            connection.execute(ddl)
-            for (sql,) in indexes:
-                connection.execute(sql)
+        connection.execute("DROP INDEX idx_runs_repo_slug")
+        connection.execute("CREATE TABLE unrelated (repo_slug TEXT)")
+        connection.execute("CREATE INDEX idx_runs_repo_slug ON unrelated(repo_slug)")
         connection.execute("CREATE TABLE historical_notes (note TEXT)")
         connection.execute("INSERT INTO historical_notes VALUES ('keep historical evidence')")
         connection.commit()

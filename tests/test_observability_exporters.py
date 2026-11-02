@@ -145,9 +145,8 @@ def _assert_grpc_bridge_drift_refused(monkeypatch: pytest.MonkeyPatch, drift: st
                 delegate.shutdown()
 
 
-@pytest.mark.parametrize("destination", ["langsmith", ])
 def test_presets_do_not_forward_redirected_payloads_or_credentials(
-    destination: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     with otlp_collector() as second:
         with otlp_collector(status=302, response_headers={"Location": second.base_url + "/stolen"}) as first:
@@ -156,15 +155,14 @@ def test_presets_do_not_forward_redirected_payloads_or_credentials(
             monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "workspace-7")
             monkeypatch.setenv("HH_API_URL", first.base_url)
             monkeypatch.setenv("HH_API_KEY", "opaque-key")
-            factory = langsmith_exporter if destination == "langsmith" else honeyhive_exporter
+            factory = langsmith_exporter
             exporter = factory(ObservabilityConfig())
             with diagnostic_scope(PrivacyPolicy()):
                 assert exporter.export(_emit_spans()) != SpanExportResult.SUCCESS
                 exporter.shutdown()
             assert len(first.requests) == 1
             assert second.requests == []
-            if destination == "langsmith":
-                assert first.requests[0]["headers"]["x-tenant-id"] == "workspace-7"
+            assert first.requests[0]["headers"]["x-tenant-id"] == "workspace-7"
             assert "redirected" in caplog.text
 
 

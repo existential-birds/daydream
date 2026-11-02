@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from daydream import pr_review
 from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, finding_marker
 from daydream.training.labeler_signals import (
@@ -64,14 +62,11 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     )
 
 
-@pytest.mark.parametrize(
-    ("files", "commits", "verdict"),
-    [(["unrelated.py"], ["c1"], "not_applied")],
-    ids=["no-file-overlap"],
-)
 def test_fix_applied_signal_without_matching_changes(
-    tmp_path: Path, files: list[str], commits: list[str], verdict: str
-) -> None:
+    tmp_path: Path) -> None:
+    files = ["unrelated.py"]
+    commits = ["c1"]
+    verdict = "not_applied"
     row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
     sig = fix_applied_signal(
         row,
@@ -136,18 +131,12 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
 
-@pytest.mark.parametrize(
-    ("available_ref", "expected_refs"),
-    [
-        pytest.param("main", ["origin/main", "main"], id="remote-missing-local-fallback"),
-    ],
-)
 def test_local_commit_applied_signal_base_branch_fallback(
     tmp_path: Path,
-    available_ref: str,
-    expected_refs: list[str],
 ) -> None:
     """A deleted branch uses the remote base before the possibly stale local tip."""
+    available_ref = "main"
+    expected_refs = ["origin/main", "main"]
     row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/squashed-away", base_branch="main")
     seen_refs: list[str] = []
 
@@ -174,16 +163,8 @@ def _fake_commits_pulls(pulls: Any) -> Any:
     return responder
 
 
-@pytest.mark.parametrize(
-    "pulls",
-    [
-        pytest.param(
-            [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}],
-            id="disambiguated-match",
-        ),
-    ],
-)
-def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict[str, Any]]) -> None:
+def test_pr_link_signal_matches_pr_by_head_sha() -> None:
+    pulls = [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}]
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
     gh = _fake_commits_pulls(pulls)
     assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")

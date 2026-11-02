@@ -127,26 +127,32 @@ def test_post_findings_rejects_invalid_targets_and_provenance_before_github(
     assert fake_gh.process_calls() == [], 'Rejected provenance must not reach even GitHub inventory reads'
 
 
-@pytest.mark.parametrize('state', ['incomplete'])
-def test_immutable_publisher_uses_original_head_and_retains_partial_coverage(
-    fake_gh: FakeGh, tmp_path: Path, state: str,
+def test_immutable_publisher_uses_original_head_and_gates_approval_on_complete_coverage(
+    fake_gh: FakeGh, tmp_path: Path,
 ) -> None:
-    """Synthetic source references must survive export while posting targets captured original A."""
+    """Synthetic source references survive export while posting targets captured original A.
+
+    Partial coverage never approves and names its gap; complete empty coverage approves on clean.
+    """
     path = tmp_path / 'immutable.json'
-    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')], state=state)
+    artifact = immutable_findings_artifact([_inline_finding('Confirmed concern')], state='incomplete')
     write_findings_artifact(path, artifact)
-    assert cli_main(_post_argv(path, head_sha='a' * 40, base_sha='b' * 40, comparison_sha='c' * 40)) == 0
+    argv = _post_argv(path, head_sha='a' * 40, base_sha='b' * 40, comparison_sha='c' * 40)
+    assert cli_main([*argv, '--approve-on-clean']) == 0
     posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
     assert len(posts) == 1 and posts[0].payload['commit_id'] == 'a' * 40
     assert posts[0].payload['event'] == 'COMMENT'
     assert 'Confirmed concern' in posts[0].payload['comments'][0]['body']
     body = posts[0].payload['body']
-    assert ('**Review incomplete.**' in body) == (state == 'incomplete')
-    if state == 'incomplete':
-        assert 'python: backend failure' in body
+    assert '**Review incomplete.**' in body and 'python: backend failure' in body
     assert json.loads(path.read_text()) == artifact
     assert artifact['terminal_result']['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0][
         'revision'] == '1' * 40
+    write_findings_artifact(path, immutable_findings_artifact([], state='complete'))
+    assert cli_main([*argv, '--approve-on-clean']) == 0
+    posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
+    assert len(posts) == 2 and posts[1].payload['event'] == 'APPROVE'
+    assert posts[1].payload['commit_id'] == 'a' * 40
 
 def test_malformed_repo_config_warns_and_still_posts(fake_gh: FakeGh, tmp_path: Path,) -> None:
     (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
@@ -389,7 +395,7 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     assert posts[0].payload["body"].startswith("Actionable comments posted: 1\n\n")
     assert "```mermaid" not in posts[0].payload["body"]
 
-@pytest.mark.parametrize("schema_version", [2, ])
+@pytest.mark.parametrize("schema_version", [2, 3])
 def test_post_findings_matched_blocking_finding_prevents_approval(
     fake_gh: FakeGh, tmp_path: Path, schema_version: int,
 ) -> None:

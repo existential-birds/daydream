@@ -15,7 +15,7 @@ from daydream.findings import (
     load_findings_artifact,
     write_findings_artifact,
 )
-from daydream.pr_review import ParsedIssue, PRInfo
+from daydream.pr_review import PRInfo
 from tests.harness.execution import test_execution_identity as execution_identity
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
 from tests.test_review_result import attribution_bytes, large_attributed_terminal
@@ -82,33 +82,18 @@ def test_immutable_handoff_rejects_mixed_identities_before_replacing_prior_outpu
         assert path.read_bytes() == b'prior completed output'
 
 
-@pytest.mark.parametrize("kind", ["diagram"])
-def test_build_write_load_preserves_target_finding_and_diagram_contract(
-    tmp_path: Path, git_repo: Path, kind: str,
-) -> None:
+def test_build_write_load_preserves_the_diagram_contract(tmp_path: Path, git_repo: Path) -> None:
     head = git_ops.head_sha(git_repo)
     pr = PRInfo(7, head, head, "main", "feature", "o", "r", "u")
-    issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
-                          confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)] if kind == "review" else []
-    payload = _diagram_payload() if kind == "diagram" else None
-    options: dict[str, Any] = {}
-    if kind == "review":
-        options = {"terminal_result": terminal_result(head_sha=head),
-                   "snapshot_diff": git_ops.diff_paths(git_repo, head, head, ["."])}
-    artifact = build_findings_artifact(git_repo, pr, issues, run_info=None,
-                                       kind=kind, diagrams=payload, **options)
+    payload = _diagram_payload()
+    artifact = build_findings_artifact(git_repo, pr, [], run_info=None, kind="diagram", diagrams=payload)
     assert (artifact["repo"], artifact["pr_number"], artifact["head_sha"]) == ("o/r", 7, head)
     path = tmp_path / "findings.json"
     write_findings_artifact(path, artifact)
     loaded = _load(path, head_sha=head)
     assert json.loads(path.read_text())["schema_version"] == loaded.schema_version == 2
-    assert loaded.kind == kind and loaded.diagrams == payload
-    if kind == "review":
-        finding = artifact["findings"][0]
-        assert (finding["fingerprint"], finding["placement"], finding["line"]) == ("f" * 64, "body", None)
-        assert loaded.analysis_complete and loaded.terminal_result["analysis_state"] == "complete"
-    else:
-        assert loaded.findings == [] and not loaded.analysis_complete
+    assert loaded.kind == "diagram" and loaded.diagrams == payload
+    assert loaded.findings == [] and not loaded.analysis_complete
 
 
 def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:

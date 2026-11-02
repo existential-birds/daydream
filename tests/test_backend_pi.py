@@ -7,10 +7,9 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -32,6 +31,12 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
     create_backend,
+)
+from daydream.backends._subprocess import (
+    DEFAULT_STREAM_IDLE_TIMEOUT_S,
+    STREAM_IDLE_TIMEOUT_ENV,
+    StreamStalledError,
+    stream_idle_timeout_s,
 )
 from daydream.backends.pi import (
     PiBackend,
@@ -140,11 +145,6 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(tmp_path: Pa
                 monkeypatch=mp, tmp_path=_case_dir(tmp_path, index), kind=kind
             )
 
-
-if TYPE_CHECKING:
-    from daydream.run_config import RunConfig
-
-MakeConfig = Callable[..., "RunConfig"]
 
 
 def test_ordinary_pi_fresh_process_does_not_load_host_admission_endpoint(
@@ -338,11 +338,29 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
         await _native_output_uses_finalized_transcript_order_and_requires_complete_settlement_case(fault=fault)
 
 
-async def test_pi_api_key_unknown_provider_warns_and_skips(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+async def test_pi_api_key_maps_to_provider_credentials_and_never_enters_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An unmapped provider warns and proceeds; the key never reaches argv or any env var."""
+    """A mapped provider receives the captured key in its own variable; an unmapped one warns and skips it.
+
+    The key never reaches argv, and captured run input outranks the ambient environment.
+    """
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setenv("PI_API_KEY", "ambient-pi-key")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    execution = BackendExecutionInput.from_environment(
+        {**os.environ, "PI_API_KEY": "captured-run-key"}, backend="pi")
+    assert "captured-run-key" not in repr(execution)
+    first = execution.child_environment()
+    first["MUTATED"] = "1"
+    assert "MUTATED" not in execution.child_environment()
+    flat_args, mock_exec = await _run_and_capture_args(PiBackend(model="glm-5.2", execution_input=execution))
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert "--api-key" not in flat_args and "captured-run-key" not in flat_args
+    child_env = mock_exec.call_args.kwargs["env"]
+    assert child_env["ZAI_API_KEY"] == "captured-run-key" and "ambient-pi-key" not in child_env.values()
+    assert "PI_API_KEY" not in child_env
+
     sentinel = "synthetic-unknown-provider-key"
     monkeypatch.setenv("PI_PROVIDER", "custom-provider")
     monkeypatch.setenv("PI_API_KEY", sentinel)
@@ -378,9 +396,6 @@ async def test_cancel_terminates_then_kills(monkeypatch: pytest.MonkeyPatch) -> 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
     with pytest.raises(ValueError, match="pi"):
         create_backend("invalid")
-
-
-# Default --provider is nous; PI_PROVIDER overrides (extension-based provider)
 
 
 async def test_default_model_does_not_override_pi_settings(pi_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -447,21 +462,6 @@ async def test_zai_provider_with_fallback_model_warns(
     assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
 
 
-# Real-path through runner.run: real PiBackend, only the pi subprocess mocked
-
-
-# System prompt preamble (--append-system-prompt)
-
-
-# PiError.retryable attribute
-
-
-# pi retry classification
-
-
-# _is_retryable_exit_code
-
-
 # Error turn uses retryable classifier
 
 
@@ -487,8 +487,9 @@ async def _error_turn_sets_retryable_via_classifier_case(
         with pytest.raises(PiError) as exc_info:
             async for event in backend.execute(Path("/tmp"), "p"):
                 events.append(event)
-    assert exc_info.value.retryable is expected_retryable
-    assert exc_info.value.category == expected_category and str(exc_info.value) == error_message
+    assert (exc_info.value.retryable, exc_info.value.category) == (expected_retryable, expected_category), (
+        error_message)
+    assert str(exc_info.value) == error_message
     assert spawn.call_count == 1
     diagnostics = [
         event for event in events if isinstance(event, DiagnosticEvent) and event.code == "pi_terminal_error"
@@ -526,12 +527,24 @@ async def _error_turn_sets_retryable_via_classifier_case(
 
 async def test_error_turn_sets_retryable_via_classifier() -> None:
     for error_message, expected_retryable, expected_category in [
+        ("502 status code (no body)", True, "SERVER_ERROR"),
         ("request timed out after 30 seconds", True, "TIMEOUT"),
         ("Stream ended without finish_reason", True, "STREAM_TRUNCATION"),
+        ("socket hang up", True, "STREAM_DROP"),
         ("Pi CLI exited with return code 1", False, "PROCESS_EXIT"),
         ("model not found: gpt-5 (503)", False, "AUTH_CONFIG"),
         ("JSON schema validation failed: the model is temporarily at capacity.", False, "SCHEMA"),
+        ("provider rate limit", True, "RATE_LIMIT"),
+        ("Upstream error from Wafer: The model is temporarily at capacity. Please retry shortly.", True,
+         "SERVER_ERROR"),
+        ("The MODEL is TEMPORARILY\nAT CAPACITY.", True, "SERVER_ERROR"),
+        ("The model is not temporarily at capacity.", False, "UNKNOWN"),
+        ("Capacity planning: the model is temporarily at capacity.", False, "UNKNOWN"),
+        ("If the model is temporarily at capacity, retry later", False, "UNKNOWN"),
+        ("The model is temporarily at capacity?", False, "UNKNOWN"),
+        ("Service is currently overloaded", True, "SERVER_ERROR"),
         ("capacity exceeded", True, "SERVER_ERROR"),
+        ("Request throttled", True, "SERVER_ERROR"),
         ("service is not overloaded", False, "UNKNOWN"),
     ]:
         await _error_turn_sets_retryable_via_classifier_case(error_message, expected_retryable, expected_category)
@@ -719,8 +732,8 @@ async def test_pi_response_diagnostics_admit_only_bounded_redacted_fields() -> N
         await _pi_response_diagnostics_admit_only_bounded_redacted_fields_case(status=status)
 
 
-async def test_pi_response_without_generation_is_retained_without_previous_attribution() -> None:
-    """An interrupted second request cannot inherit the previous generation's ID.
+async def test_pi_truncated_streams_and_exits_classify_without_misattributing_responses() -> None:
+    """Truncated streams and process exits get their retry class; an interrupted request keeps no stale ID.
 
     Complete native responses always emit message_start; only a partial transport
     replay can isolate headers followed by EOF before that boundary.
@@ -746,20 +759,25 @@ async def test_pi_response_without_generation_is_retained_without_previous_attri
     )
     events = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
-        with pytest.raises(PiError, match="Stream ended without finish_reason"):
+        with pytest.raises(PiError, match="Stream ended without finish_reason") as truncated:
             async for event in PiBackend(model="fixture-model").execute(Path("/tmp"), "Review"):
                 events.append(event)
+    # EOF without a finish reason is a retryable truncation, not a clean or permanent ending.
+    assert truncated.value.retryable is True and truncated.value.category == "STREAM_TRUNCATION"
+    # A child killed by the OOM killer or SIGKILL is retryable; an ordinary nonzero exit is not.
+    for returncode, retryable in ((-9, True), (137, True), (7, False)):
+        killed = make_mock_process([])
+        killed.returncode = killed.wait.return_value = returncode
+        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=killed):
+            with pytest.raises(PiError) as exited:
+                async for _ in PiBackend(model="fixture-model").execute(Path("/tmp"), "Review"):
+                    pass
+        assert (exited.value.retryable, exited.value.category) == (retryable, "PROCESS_EXIT"), returncode
     response = next(
         event for event in events if isinstance(event, DiagnosticEvent) and event.code == "pi_provider_response"
     )
     assert response.metadata["generation_id"] is None
     assert response.metadata["headers"] == {"x-request-id": "interrupted-request"}
-
-
-# Retry env knobs
-
-
-# fanout_concurrency
 
 
 def test_pi_retry_policy_is_built_from_ambient_environment(caplog: pytest.LogCaptureFixture) -> None:
@@ -802,13 +820,7 @@ def test_pi_retry_policy_is_built_from_ambient_environment(caplog: pytest.LogCap
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        "finalization",
-    ],
-)
-async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+async def _pi_request_event_config_matches_exact_argv_case(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_API_KEY", raising=False)
     backend = PiBackend(model="glm-5.2")
@@ -829,8 +841,21 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
         validate_structured_output=mode != "validation-opt-out",
         read_only=True,
         persist_session=False,
+        review_instructions="x" * 200_000 if mode == "native" else None,
     )
     flat_args = list(spawn.call_args.args)
+    # The reader admits large JSONL events instead of asyncio's 64 KiB default.
+    assert spawn.call_args.kwargs["limit"] > 65536
+    # Read-only native output blocks untrusted project extensions; ordinary read-only calls keep them.
+    assert ("--no-extensions" in flat_args) is (mode == "native")
+    if mode == "native":
+        # Large review instructions travel as a system-prompt file, never as an oversized argument.
+        system_arg = flat_args[flat_args.index("--append-system-prompt") + 1]
+        assert Path(system_arg).is_absolute() and len(system_arg) < 4096
+    if mode == "disabled":
+        # Tools-disabled prompts travel on stdin, never as an argv attachment.
+        written = b"".join(call.args[0] for call in process.stdin.write.call_args_list)
+        assert b"structured please" in written and not any(arg.startswith("@") for arg in flat_args)
     request = next(event for event in events if isinstance(event, RequestEvent))
     config = request.config
     assert isinstance(config, PiRequestConfig)
@@ -859,7 +884,17 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
         assert "tool-call allocation is uncapped" in request.system_prompt
 
 
-@pytest.mark.parametrize("real_spawn", [False])
+async def test_pi_request_event_config_matches_exact_argv() -> None:
+    for mode in ["native", "no-schema", "disabled", "finalization", "validation-opt-out"]:
+        with pytest.MonkeyPatch.context() as mp:
+            try:
+                await _pi_request_event_config_matches_exact_argv_case(monkeypatch=mp, mode=mode)
+            except BaseException as exc:
+                exc.add_note(f"case: {mode}")
+                raise
+
+
+@pytest.mark.parametrize("real_spawn", [True, False])
 async def test_prompt_attachment_removed_after_spawn_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1126,3 +1161,34 @@ async def test_native_pi_tool_batch_and_resumed_turn_record_literal_observations
         process._transport.close.assert_called_once()
     assert backend._transports == []
     assert validate(recorder.path, validate_images=False)
+
+
+@pytest.mark.parametrize(("active_tool", "expected_window"), [(False, 0.05), (True, 0.2)],
+                         ids=["response-window", "active-tool-window"])
+async def test_pi_idle_window_follows_active_tool_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_tool: bool, expected_window: float,
+) -> None:
+    """Silence after a finished tool uses the short response window; a running tool keeps the long one."""
+    tool_end = {"type": "tool_execution_end", "toolCallId": "tool-1",
+                "result": {"content": [{"type": "text", "text": "done"}]}}
+    lines = [json.dumps(frame) for frame in (
+        {"type": "session", "id": "sess-idle"}, {"type": "agent_start"}, {"type": "turn_start"},
+        {"type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "bash", "args": {"command": "build"}},
+        *([] if active_tool else [tool_end]),
+    )]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
+    monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
+    monkeypatch.setattr("daydream.backends.pi.DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("daydream.backends.pi.DEFAULT_STREAM_IDLE_TIMEOUT_S", 0.2)
+    with anyio.fail_after(1):
+        with pytest.raises(StreamStalledError) as stalled:
+            async for _ in PiBackend(model="test-model").execute(tmp_path, "do the thing"):
+                pass
+    assert stalled.value.timeout_s == pytest.approx(expected_window) and stalled.value.retryable is True
+    assert len(spawner.procs) == 1 and spawner.procs[0].reaped
+    # Garbage, negative or non-finite overrides never disable or shorten the window; zero disables it.
+    for raw in ("not-a-number", "-5", "nan", "inf"):
+        monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, raw)
+        assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S, raw
+    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "0")
+    assert stream_idle_timeout_s() is None

@@ -63,33 +63,26 @@ def test_preparation_shares_native_graph_with_diagram_and_preserves_scopes_after
     assert build_import_graph(changes, repo) == {path: set() for path in changes}
 
 
-@pytest.mark.parametrize('language', ['python'])
 async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """New and deleted tests stay primary review inputs in automatic language shards."""
-    suffix = 'go' if language == 'go' else 'py'
-    source = 'package sample\n\nfunc Value() int { return 0 }\n' if language == 'go' else 'VALUE = 0\n'
-    old_test = 'removed_test.go' if language == 'go' else 'test_removed.py'
-    new_test = 'added_test.go' if language == 'go' else 'test_added.py'
-    before = {f'module_{index}.{suffix}': source.replace('Value()', f'Value{index}()') for index in range(6)}
-    before[old_test] = ('package sample\n\nimport "testing"\n\n'
-                        'func TestRemoved(t *testing.T) { if Value0() != 0 { t.Fatal("value") } }\n'
-                        if language == 'go' else
-                        'from module_0 import VALUE\n\ndef test_removed():\n    assert VALUE == 0\n')
+    language = 'python'
+    before = {f'module_{index}.py': 'VALUE = 0\n' for index in range(6)}
+    before['test_removed.py'] = 'from module_0 import VALUE\n\ndef test_removed():\n    assert VALUE == 0\n'
     before.update({'README.md': '# Project\n',
                    'App.tsx': 'import React from "react"; export const App = () => <div/>;\n'})
-    comment = '// ' if language == 'go' else '# '
-    additions = ''.join(f'{comment}changed {index}: ' + 'x' * 70 + '\n' for index in range(110))
-    after = {path: text + additions for path, text in before.items() if path.endswith(suffix) and path != old_test}
-    after[new_test] = before[old_test].replace('Removed', 'Added').replace('removed', 'added') + additions
+    additions = ''.join(f'# changed {index}: ' + 'x' * 70 + '\n' for index in range(110))
+    after = {path: text + additions for path, text in before.items()
+             if path.endswith('.py') and path != 'test_removed.py'}
+    after['test_added.py'] = before['test_removed.py'].replace('removed', 'added') + additions
     after.update({'README.md': '# Project\nUpdated contract.\n',
                   'App.tsx': 'import React from "react"; export const App = () => <div>Updated</div>;\n'})
     repo = tmp_path / language
     seed_feature_branch(repo, base=before, feature=after)
     # seed_feature_branch writes additions/modifications; omissions are not deletions.
-    (repo / old_test).unlink()
-    git(repo, 'add', old_test)
+    (repo / 'test_removed.py').unlink()
+    git(repo, 'add', 'test_removed.py')
     git(repo, 'commit', '--amend', '-m', 'feature with removed test')
     diff = git(repo, 'diff', 'main..HEAD')
     assert review_scale_for_diff(diff) < 4

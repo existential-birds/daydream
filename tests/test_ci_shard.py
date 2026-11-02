@@ -268,6 +268,8 @@ def test_run_cannot_publish_success_without_complete_unchanged_execution(
     def run(command: list[str], **kwargs: Any) -> Any:
         if command[1:3] == ["-m", "pytest"]:
             # Stand in for pytest only; the identity and receipt checks stay real.
+            # Group dispatch lets the heaviest-first order spread across workers.
+            assert "--dist=loadgroup" in command
             pytest_effect[0]()
             return subprocess.CompletedProcess(command, 0)
         return real_run(command, **kwargs)

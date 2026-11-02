@@ -114,8 +114,7 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stall_during", ["export", ])
-async def test_shutdown_deadline_is_total_and_shutdown_once(stall_during: str, caplog: pytest.LogCaptureFixture,
+async def test_shutdown_deadline_is_total_and_shutdown_once( caplog: pytest.LogCaptureFixture,
 ) -> None:
     release = threading.Event()
 
@@ -128,16 +127,12 @@ async def test_shutdown_deadline_is_total_and_shutdown_once(stall_during: str, c
 
         def shutdown(self) -> None:
             self.shutdowns += 1
-            if stall_during == "shutdown":
-                self.blocked.set()
-                release.wait()
             super().shutdown()
             self.shutdown_complete.set()
 
         def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-            if stall_during == "export":
-                self.blocked.set()
-                release.wait()
+            self.blocked.set()
+            release.wait()
             return super().export(spans)
 
     exporters = [BlockedExporter(), BlockedExporter()]
@@ -351,46 +346,37 @@ async def test_run_trace_identity_and_delivery_failures_never_block_the_run(
 # --- P18 Task 3: no global providers, ambient metrics/logs, or instrumentation -
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("inherited_stack", "exit_path"), [(None, "normal"), ]
-)
-async def test_stack_binding_preserves_precedence_and_restores_context_on_every_exit(
-    inherited_stack: str | None, exit_path: str, tmp_path: Path,
-) -> None:
-    """Spanless attribution restores the caller even after a cancelled reviewer."""
-    exporter, registry = _memory_tracing()
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        with step_scope("review", stack=inherited_stack, iteration=0):
-            try:
+async def test_stack_binding_preserves_precedence_and_restores_context_on_every_exit(tmp_path: Path) -> None:
+    """Spanless attribution restores the caller after a normal exit and after a cancelled reviewer."""
+    for inherited_stack, exit_path in ((None, "normal"), ("", "cancellation")):
+        exporter, registry = _memory_tracing()
+        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+            with step_scope("review", stack=inherited_stack, iteration=0):
                 with anyio.CancelScope() as cancellation:
                     with stack_scope("react"):
                         with stack_scope("generic"):
                             with agent_scope("bound", backend="pi"):
                                 async with attempt_scope(1) as attempt:
                                     _observe_generation(attempt)
-                        if exit_path == "exception":
-                            raise RuntimeError("review failed")
                         if exit_path == "cancellation":
                             cancellation.cancel()
                             await anyio.sleep(0)
-            except RuntimeError as error:
-                assert str(error) == "review failed"
-            with agent_scope("restored", backend="pi"):
-                async with attempt_scope(1) as attempt:
-                    _observe_generation(attempt)
+                with agent_scope("restored", backend="pi"):
+                    async with attempt_scope(1) as attempt:
+                        _observe_generation(attempt)
 
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 8  # run + step + two agent/attempt/generation subtrees, no binding spans
-    generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
-    assert len(generations) == 2
-    bound, restored = generations
-    expected = inherited_stack if inherited_stack is not None else "react"
-    assert (bound.attributes or {})["daydream.stack"] == expected
-    if inherited_stack is None:
-        assert "daydream.stack" not in (restored.attributes or {})
-    else:
-        assert (restored.attributes or {})["daydream.stack"] == inherited_stack
-    assert all((span.attributes or {})["daydream.iteration"] == 0 for span in generations)
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 8, exit_path  # run + step + two agent/attempt/generation subtrees, no binding spans
+        generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
+        assert len(generations) == 2, exit_path
+        bound, restored = generations
+        expected = inherited_stack if inherited_stack is not None else "react"
+        assert (bound.attributes or {})["daydream.stack"] == expected, exit_path
+        if inherited_stack is None:
+            assert "daydream.stack" not in (restored.attributes or {})
+        else:
+            assert (restored.attributes or {})["daydream.stack"] == inherited_stack, exit_path
+        assert all((span.attributes or {})["daydream.iteration"] == 0 for span in generations)
 
     # Spans opened inside a forked recorder carry that child's trajectory identity.
     exporter, registry = _memory_tracing()
@@ -404,8 +390,8 @@ async def test_stack_binding_preserves_precedence_and_restores_context_on_every_
     assert (step.attributes or {})["daydream.trajectory.id"] == f"{child.session_id}:stack-python"
 
 
-@pytest.mark.parametrize("returncode", [-9])
-async def test_codex_lifecycle_export_retains_exit_without_creating_usage(returncode: int) -> None:
+async def test_codex_lifecycle_export_retains_exit_without_creating_usage() -> None:
+    returncode = -9
     from daydream.backends.lifecycle import BackendLifecycleSnapshot
 
     exporter, registry = _memory_tracing()

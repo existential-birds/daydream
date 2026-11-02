@@ -63,9 +63,17 @@ def test_replace_requires_flag_and_prompt_roundtrip() -> None:
     assert reg.prompt("review")() == "X"
 
 
-def test_remove_loop_internal_step_raises_descriptive_error() -> None:
-    """remove() names the containing LoopGroup when the step is loop-internal."""
+def test_flow_mutation_and_unresolved_lookup() -> None:
+    """set_flow/insert_after/remove edit the order; loop-internal removal and unknown phases fail by name."""
     reg = Registry()
+    reg.register_phase(FlowStep(name="a", run=_noop))
+    reg.register_phase(FlowStep(name="b", run=_noop))
+    reg.set_flow("deep", ["a"])
+    reg.insert_after("deep", anchor="a", step="b")
+    reg.remove("deep", "a")
+    assert reg.flow("deep") == ["b"]
+    with pytest.raises(UnresolvedExtensionError, match="phase 'ghost'"):
+        reg.phase("ghost")
     loop = LoopGroup(name="fix-loop", steps=("inner_step",), max_iterations=lambda ctx: 3)
     reg.set_flow("deep", [loop])
     with pytest.raises(UnresolvedExtensionError, match="inside loop group 'fix-loop'"):

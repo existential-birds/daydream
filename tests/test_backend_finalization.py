@@ -106,8 +106,12 @@ async def _cli_finalization_controls_are_local_to_overlapping_calls_case(
 
 async def test_cli_finalization_controls_are_local_to_overlapping_calls(tmp_path: Path) -> None:
     for index, (kind, effort) in enumerate([("pi", "off"), ("pi", None), ("codex", "high"), ("codex", "none")]):
-        await _cli_finalization_controls_are_local_to_overlapping_calls_case(
-            tmp_path=_case_dir(tmp_path, index), kind=kind, effort=effort)
+        try:
+            await _cli_finalization_controls_are_local_to_overlapping_calls_case(
+                tmp_path=_case_dir(tmp_path, index), kind=kind, effort=effort)
+        except BaseException as exc:
+            exc.add_note(f"case: {kind}/{effort}")
+            raise
 
 
 async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutation(

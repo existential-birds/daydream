@@ -148,9 +148,47 @@ async def test_dispatch_failure_is_caught_and_run_continues(
     assert "will-fail" not in agent_steps[0]["message"]
 
 
-@pytest.mark.parametrize('stage', ['final'])
+async def test_dispatch_body_failure_and_cancellation_own_terminal_status(tmp_path: Path) -> None:
+    """An escaping body exception fails the dispatch; cancellation overrides an optimistic finish."""
+    for ending in ('empty-error', 'optimistic-cancel'):
+        recorder = make_recorder(tmp_path / ending)
+
+        async def dispatch_body(scope: anyio.CancelScope | None, *, recorder: Any = recorder,
+                                ending: str = ending) -> None:
+            async with trajectory_module.dispatch_scope(recorder, phase=DaydreamPhase.FIX,
+                                                         descriptors=('child',)) as dispatch:
+                assert dispatch is not None
+                if ending == 'optimistic-cancel':
+                    dispatch.finish(trajectory_module.LifecycleStatus.SUCCEEDED)
+                async with recorder.fork('child', dispatch=dispatch) as child:
+                    if ending == 'optimistic-cancel':
+                        async with child.invocation(phase=DaydreamPhase.FIX) as invocation:
+                            observe_text_and_result(invocation, 'before cancellation')
+                if scope is None:
+                    raise RuntimeError('dispatch body failed')
+                scope.cancel()
+                await anyio.sleep_forever()
+
+        async with recorder:
+            if ending == 'empty-error':
+                with pytest.raises(RuntimeError, match='dispatch body failed'):
+                    await dispatch_body(None)
+            else:
+                with anyio.CancelScope() as scope:
+                    await dispatch_body(scope)
+        dispatches = [step for step in read_trajectory(recorder.path)['steps']
+                      if step.get('llm_call_count') == 0 and 'dispatch_id' in (step.get('extra') or {})]
+        assert len(dispatches) == 1, ending
+        status = dispatches[0]['extra']
+        if ending == 'empty-error':
+            assert (status['dispatch_status'], status['reason_code']) == ('failed', 'uncaught_exception')
+            assert status['attempted_count'] == 1 and status['completed_count'] == 0
+        else:
+            assert (status['dispatch_status'], status['reason_code']) == ('cancelled', 'cancelled')
+
+
 async def test_filesystem_writer_failure_is_optional(
-    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch, stage: str,
+    recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     warnings: list[str] = []
     monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
@@ -161,13 +199,8 @@ async def test_filesystem_writer_failure_is_optional(
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             observe_text_and_result(invocation, 'retained response')
-        if stage == 'partial':
-            with monkeypatch.context() as patcher:
-                patcher.setattr(Path, 'write_text', fail)
-                recorder.write_partial()
-        else:
-            monkeypatch.setattr('os.replace', fail)
-    expected = 'Partial trajectory write failed' if stage == 'partial' else 'Trajectory write failed'
+        monkeypatch.setattr('os.replace', fail)
+    expected = 'Trajectory write failed'
     assert len(warnings) == 1 and expected in warnings[0]
 
 
@@ -284,21 +317,13 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
 
 
-@pytest.mark.parametrize('label', ['   '])
-async def test_fork_paths_confine_public_descriptors(tmp_path: Path, label: str) -> None:
+async def test_fork_paths_confine_public_descriptors(tmp_path: Path) -> None:
+    label = '   '
     root = make_recorder(tmp_path)
     async with root:
-        if label in {'', '...', '   '}:
-            with pytest.raises(ValueError, match='empty slug'):
-                async with root.fork(label):
-                    pass
-        else:
-            async with root.fork(label) as child:
-                assert child.descriptor == label
-                assert child.path.is_relative_to(tmp_path / '.daydream/runs/test/trajectories')
-                async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
-                    observe_text_and_result(invocation, 'public activity')
-            assert child.path.is_file()
+        with pytest.raises(ValueError, match='empty slug'):
+            async with root.fork(label):
+                pass
 
 
 async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
@@ -336,36 +361,16 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
 # write_partial tests (CLI-03, D-07 SIGINT partial flush)
 
 
-@pytest.mark.parametrize('state', ['tool', ])
-async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Path, state: str) -> None:
+async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Path) -> None:
     root = make_recorder(tmp_path)
     async with root:
-        if state == 'empty':
-            root.write_partial()
-            assert not partial_document_path(root.path).exists()
-            return
-        if state == 'child':
-            async with root.invocation(phase=DaydreamPhase.REVIEW) as parent_invocation:
-                observe_text_and_result(parent_invocation, 'parent before child')
-        async with trajectory_module.maybe_fork(root if state == 'child' else None, 'child') as child:
+        async with trajectory_module.maybe_fork(None, 'child') as child:
             recorder = child if child is not None else root
             async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                 invocation.observe_user_step(prompt='retained prompt')
-                if state == 'tool':
-                    invocation.observe(ToolStartEvent(id='pending', name='Read', input={'file_path': 'a.py'}))
-                elif state == 'diagnostic':
-                    invocation.observe(DiagnosticEvent(code='parser_gap', message='bounded', metadata={'count': 1}))
-                else:
-                    observe_text_and_result(invocation, 'retained response')
+                invocation.observe(ToolStartEvent(id='pending', name='Read', input={'file_path': 'a.py'}))
                 recorder.write_partial()
                 first = partial_document_path(recorder.path).read_bytes()
-                if state == 'child':
-                    parent = read_trajectory(partial_document_path(root.path))
-                    assert 'parent before child' in json.dumps(parent)
-                    reference = next(row for row in parent['extra']['subtrajectories']
-                                     if row.get('trajectory_id') == recorder.trajectory_id)
-                    assert reference['sibling_trajectory_ref'] == recorder.path.relative_to(
-                        tmp_path / '.daydream').as_posix()
             recorder.write_partial()
             joined_bytes = partial_document_path(recorder.path).read_bytes()
             recorder.write_partial()
@@ -376,16 +381,9 @@ async def test_partial_writes_preserve_live_state_and_joined_steps(tmp_path: Pat
     assert len(joined['steps']) == len(final['steps'])
     for document in (json.loads(first), joined, final):
         assert atif_validate(document, validate_images=False)
-        if state == 'tool':
-            observation, = _agent_steps(document)[0]['observation']['results']
-            assert observation == {'content': INCOMPLETE_CONTENT,
-                                   'extra': {'is_error': True, 'status': 'interrupted'}}
-        elif state == 'diagnostic':
-            diagnostics = [record for step in _agent_steps(document)
-                           for record in step.get('extra', {}).get('backend_diagnostics', [])]
-            assert diagnostics == [{'code': 'parser_gap', 'message': 'bounded', 'metadata': {'count': 1}}]
-        else:
-            assert sum('retained response' in step.get('message', '') for step in _agent_steps(document)) == 1
+        observation, = _agent_steps(document)[0]['observation']['results']
+        assert observation == {'content': INCOMPLETE_CONTENT,
+                               'extra': {'is_error': True, 'status': 'interrupted'}}
 
 
 def _partial_path(recorder: TrajectoryRecorder) -> Path:
@@ -406,25 +404,21 @@ async def _hold_fork(
             await release.wait()
 
 
-@pytest.mark.parametrize("failed_recorder", ["root", ])
 async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_recorder: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshots: list[RunWriteSnapshot] = []
     warnings: list[str] = []
     root = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     monkeypatch.setattr('daydream.ui.print_warning', lambda _console, message: warnings.append(message))
     async with root:
-        if failed_recorder == 'child':
-            async with root.invocation(phase=DaydreamPhase.REVIEW) as invocation:
-                observe_text_and_result(invocation, 'root evidence')
         async with root.fork('active-child') as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                 invocation.observe(TextEvent('valid previous evidence'))
                 flush_active_signal_recorders()
                 previous = snapshots[-1]
                 saved = {document.path: document.json_bytes for document in previous.documents}
-                target = root if failed_recorder == 'root' else child
+                target = root
 
                 def fail(**kwargs: Any) -> Any:
                     raise RuntimeError('document preparation failed')
@@ -448,40 +442,24 @@ async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapsho
                 assert {document.path: document.json_bytes for document in previous.documents} == saved
 
 
-@pytest.mark.parametrize("exit_kind", ["system-exit"])
-async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder, exit_kind: str) -> None:
+async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder) -> None:
     """Every child exit shape unregisters before a later root-only flush."""
+    exit_kind = "system-exit"
 
     async def child_body() -> TrajectoryRecorder:
         async with recorder.fork(f"exited-{exit_kind}") as child:
             async with child.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 observe_text_and_result(inv, "EXITED_CHILD_ONLY")
-                if exit_kind == "runtime":
-                    raise RuntimeError("child body")
-                if exit_kind == "system-exit":
-                    raise SystemExit(17)
+                raise SystemExit(17)
             return child
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv, "ROOT_ONLY")
 
-        if exit_kind == "runtime":
-            with pytest.raises(RuntimeError, match="child body"):
-                await child_body()
-        elif exit_kind == "system-exit":
-            with pytest.raises(SystemExit) as exc:
-                await child_body()
-            assert exc.value.code == 17
-        elif exit_kind == "cancel":
-            with anyio.CancelScope() as scope:
-                async with recorder.fork("exited-cancel") as active_child:
-                    async with active_child.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                        observe_text_and_result(inv, "EXITED_CHILD_ONLY")
-                        scope.cancel()
-                        await anyio.sleep_forever()
-        else:
+        with pytest.raises(SystemExit) as exc:
             await child_body()
+        assert exc.value.code == 17
 
         flush_active_signal_recorders()
         assert _partial_path(recorder).exists()
@@ -521,11 +499,11 @@ def _finish_shutdown_panel() -> None:
         panel.finish()
         set_shutdown_panel(None)
 
-@pytest.mark.parametrize('signum', [signal.SIGTERM])
-@pytest.mark.parametrize('denied', [True])
 async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signum: signal.Signals, denied: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    signum = signal.SIGTERM
+    denied = True
     snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot))
     entered = {name: anyio.Event() for name in ('signal-a', 'signal-b')}
@@ -565,30 +543,20 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
                     event.set()
 
 
-@pytest.mark.parametrize('failure', ['final'])
-async def test_document_writer_failure_preserves_capture_and_primary(tmp_path: Path, failure: str) -> None:
-    snapshots: list[RunWriteSnapshot] = []
-
+async def test_explicit_document_writer_failure_never_replaces_primary(tmp_path: Path) -> None:
+    """A failing explicit-path document writer during finalization never replaces the body's primary error."""
     def writer(document: TrajectoryDocumentSnapshot, status: str) -> None:
-        if status == failure or failure == 'final':
-            raise OSError('secondary writer failure')
+        raise OSError('secondary writer failure')
 
-    recorder = make_recorder(tmp_path, document_writer=writer, explicit_path=failure == 'final',
-        on_write=lambda _rec, snapshot: snapshots.append(snapshot))
+    recorder = make_recorder(tmp_path, document_writer=writer, explicit_path=True)
     primary = RuntimeError('authoritative body failure')
     propagated: RuntimeError | None = None
     try:
         async with recorder:
             async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                 observe_text_and_result(invocation, 'retained evidence')
-            if failure == 'final':
-                raise primary
-            recorder.write_partial()
+            raise primary
     except RuntimeError as caught:
         propagated = caught
-    assert propagated is (primary if failure == 'final' else None)
-    if failure == 'final':
-        assert any('trajectory finalization' in note for note in primary.__notes__)
-    if failure == 'partial':
-        assert [snapshot.status for snapshot in snapshots] == ['partial', 'complete']
-        assert json.loads(snapshots[0].documents[0].json_bytes)['extra']['partial'] is True
+    assert propagated is primary
+    assert any('trajectory finalization' in note for note in primary.__notes__)

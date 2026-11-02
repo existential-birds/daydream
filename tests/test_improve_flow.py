@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 from collections.abc import AsyncIterator, Callable
@@ -7,9 +8,9 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from daydream import git_ops
-from daydream.backends import AgentEvent, Backend, ClaudeBackend, TextEvent
-from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDINGS
+from daydream import git_ops, runner as runner_module
+from daydream.backends import AgentEvent, Backend, ClaudeBackend, ResultEvent, TextEvent
+from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, PHASE_DEFAULT_MODELS, VET_BATCH_MAX_FINDINGS
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.deep.detection import StackAssignment
 from daydream.exploration import EXPLORATION_SECTION_PREFIX
@@ -17,6 +18,7 @@ from daydream.exploration_runner import repo_scan
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
+from daydream.improve import authoring
 from daydream.improve.audit import (
     _apply_vet_verdicts,
 )
@@ -73,6 +75,25 @@ def stub(improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch) -> Impr
     return install_improve_stub(monkeypatch, improve_monorepo_target)
 
 
+def _record_phase_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each resolved phase backend its own (model, reasoning_effort) while sharing the call log."""
+    shared_factory = cast(Callable[..., ImproveStubBackend], getattr(runner_module, "create_backend"))
+
+    def _per_phase(*args: Any, **kwargs: Any) -> ImproveStubBackend:
+        backend = copy.copy(shared_factory(*args, **kwargs))
+        backend.model, backend.reasoning_effort = kwargs["model"], kwargs["reasoning_effort"]
+        return backend
+
+    monkeypatch.setattr(runner_module, "create_backend", _per_phase)
+
+
+def _tiers_by_marker(calls: list[dict[str, Any]]) -> dict[str, set[tuple[str, str | None]]]:
+    tiers: dict[str, set[tuple[str, str | None]]] = {}
+    for call in calls:
+        tiers.setdefault(call["marker"], set()).add((call["model"], call["reasoning_effort"]))
+    return tiers
+
+
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(improve_artifact(repo, name).read_text(encoding="utf-8")))
 
@@ -123,7 +144,10 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
 def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: Any,
 ) -> None:
-    """One CLI discovery must retain guidance and nested command evidence downstream."""
+    """One CLI discovery retains tracked guidance and nested command evidence downstream.
+
+    Ignored and untracked source-only manifests never reach a model input or recon.json.
+    """
     repo = improve_monorepo_target
     nested = repo / "platform" / "payments" / "ui"
     nested.mkdir(parents=True)
@@ -133,6 +157,12 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     (nested / "AGENTS.md").write_text("Preserve payment accessibility conventions.\n")
     git(repo, "add", "package.json", "platform")
     commit(repo, "add nested workspace")
+    canaries = ("PRIVATE_IGNORED_MAKE_CANARY", "PRIVATE_UNTRACKED_MAKE_CANARY", "private-ignored-service-canary")
+    (repo / ".git/info/exclude").write_text("/Makefile\n/services/\n", encoding="utf-8")
+    (repo / "Makefile").write_text(f"test-private: ; @echo {canaries[0]}\n")
+    (nested / "Makefile").write_text(f"test-private: ; @echo {canaries[1]}\n")
+    (repo / "services" / canaries[2]).mkdir(parents=True)
+    (repo / "services" / canaries[2] / "pyproject.toml").write_text(f'[project]\nname = "{canaries[2]}"\n')
     before_head = head_sha(repo)
 
     class NestedDiscoveryBackend(ImproveStubBackend):
@@ -150,9 +180,16 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
             return None
 
     backend = install_capable_improve_backend(monkeypatch, NestedDiscoveryBackend(repo, n_findings=1))
+    _record_phase_tiers(monkeypatch)
     result = cli_runner.invoke(["improve", str(repo), "--non-interactive", "--no-archive", "--no-eval"])
 
     assert result.exit_code == 0
+    # Each Improve phase resolves its own built-in model and reasoning tier.
+    models = PHASE_DEFAULT_MODELS["claude"]
+    assert _tiers_by_marker(backend.calls) == {
+        "recon": {(models["recon"], "low")}, "audit": {(models["audit"], "high")},
+        "vet": {(models["vet"], "xhigh")}, "plan-writer": {(models["plan_write"], "max")},
+    }
     discovery = [call for call in backend.calls if call["marker"] in {"repo-scan", "recon"}]
     assert len(discovery) == 1
     assert discovery[0]["marker"] == "recon"
@@ -186,6 +223,8 @@ def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
     assert list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert all(call["read_only"] for call in backend.calls)
     assert not (nested / "candidate-command-ran").exists()
+    model_inputs = [call["prompt"] for call in backend.calls] + [json.dumps(recon)]
+    assert all(canary not in text for canary in canaries for text in model_inputs)
     assert head_sha(repo) == before_head
     assert _git_status_porcelain(repo) == ""
 
@@ -255,11 +294,10 @@ async def test_improve_git_environment_refusal_names_key_without_value(
     assert _git_status_porcelain(repo) == before_status
 
 class _UnbornAuditBackend(ImproveStubBackend):
-    """Capability fake that observes and optionally commits its unborn snapshot."""
+    """Capability fake that observes and commits inside its unborn snapshot."""
 
-    def __init__(self, target: Path, *, failure: BaseException | None = None) -> None:
+    def __init__(self, target: Path) -> None:
         super().__init__(target, n_findings=0)
-        self.failure = failure
         self.audit_paths: list[Path] = []
         self.first_symbolic_head: str | None = None
         self.first_was_unborn: bool | None = None
@@ -271,18 +309,13 @@ class _UnbornAuditBackend(ImproveStubBackend):
             self.first_symbolic_head = git(cwd, "symbolic-ref", "--short", "HEAD")
             self.ignored_visible = (cwd / "ignored-secret.txt").exists()
             self.audit_paths.append(cwd)
-            if self.failure is None:
-                (cwd / "model-scratch.txt").write_text(
-                    "snapshot only\n", encoding="utf-8"
-                )
-                git(cwd, "add", "model-scratch.txt")
-                git(cwd, "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", "commit", "-m",
-                    "snapshot initial commit",
-                )
+            (cwd / "model-scratch.txt").write_text("snapshot only\n", encoding="utf-8")
+            git(cwd, "add", "model-scratch.txt")
+            git(cwd, "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", "commit", "-m",
+                "snapshot initial commit",
+            )
         elif cwd not in self.audit_paths:
             self.audit_paths.append(cwd)
-        if self.failure is not None:
-            raise self.failure
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -716,6 +749,22 @@ def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     assert "Host command enumeration failed" in capsys.readouterr().out
     assert model_commands == [{"id": "test-suite", "command": "uv run pytest", "working_directory": "."}]
 
+_AUDIT_FINDING_SECRET = "sk-audit-title-secret123456"
+
+
+class _AuditFindingCredentialBackend(ProductionPathBackend):
+    """Append a credential to one audit finding body."""
+
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any) -> list[AgentEvent] | None:
+        events = await super()._pre_execute(cwd, prompt, **turn_kwargs)
+        if events and "read-only improve audit specialist" in prompt:
+            output = cast(ResultEvent, events[0]).structured_output
+            for finding in cast(dict[str, Any], output)["findings"]:
+                if finding["title"] == "Production finding 05":
+                    finding["body"] += f" OPENAI_API_KEY={_AUDIT_FINDING_SECRET}"
+        return events
+
+
 @pytest.mark.anyio
 async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_rest(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -730,7 +779,7 @@ async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_re
         return answers[-1]
 
     monkeypatch.setattr("daydream.run_context._prompt_user", _answer)
-    backend = ProductionPathBackend(improve_monorepo_target, failed_title="Production finding 03",)
+    backend = _AuditFindingCredentialBackend(improve_monorepo_target, failed_title="Production finding 03",)
     install_capable_improve_backend(monkeypatch, backend)
     _no_open_issues(monkeypatch)
     created: list[str] = []
@@ -774,6 +823,9 @@ async def test_capable_improve_partial_plan_failure_is_safe_and_publishes_the_re
     assert "Plans blocked by plan-writing failure: 1" in report
     assert all(backend.recon_secret not in text for text in observables)
     assert all(backend.planner_secret not in text for text in observables)
+    # An audit finding carrying a credential is redacted before any artifact, plan or report.
+    assert all(_AUDIT_FINDING_SECRET not in text for text in observables)
+    assert "coverage 05. OPENAI_API_KEY=[REDACTED" in "\n".join(observables)
 
 @pytest.mark.anyio
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
@@ -911,15 +963,28 @@ async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
 
 @pytest.mark.anyio
 async def test_group_scope_slices_search_but_report_names_the_unaudited_rest(
-    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A named group audits every member, names the rest unaudited, and a phase table retunes only its phase."""
+    ledger = improve_monorepo_target / "apps/ledger"
+    ledger.mkdir()
+    (ledger / "pyproject.toml").write_text('[project]\nname = "ledger"\n')
+    (ledger / "api.py").write_text('def service_name():\n    return "ledger"\n')
+    git(improve_monorepo_target, "add", "apps/ledger")
+    commit(improve_monorepo_target, "add ledger service")
+    _record_phase_tiers(monkeypatch)
     code = await _run_improve(make_config, improve_monorepo_target, improve_scope="core",
-        file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing"]}),
+        file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing", "apps/ledger"]},
+            phases={"plan_write": {"model": "file-plan-model", "reasoning_effort": "medium"}}),
     )
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert audit_calls and all("apps/billing" in call["prompt"] for call in audit_calls)
+    assert audit_calls and all("apps/billing" in call["prompt"] and "apps/ledger" in call["prompt"]
+        for call in audit_calls)
     assert not any("apps/catalog" in call["prompt"] for call in audit_calls)
+    tiers = _tiers_by_marker(stub.calls)
+    assert tiers["plan-writer"] == {("file-plan-model", "medium")}
+    assert tiers["recon"] == {(PHASE_DEFAULT_MODELS["claude"]["recon"], "low")}
     # A slice bounds where the audit searches, never what it may read: a
     # cross-service finding must stay reachable (spec.md monorepo requirement).
     assert all("bounds where you search, never what you may read" in call["prompt"] for call in audit_calls)
@@ -1003,6 +1068,24 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     assert {(error["code"], error["pointer"]) for error in first_attempt["errors"]} == {
         ("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")
     }
+
+@pytest.mark.anyio
+async def test_retryable_plan_writer_failure_is_not_regenerated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_agent already spent the retry budget on a retryable failure; authoring must not restart it."""
+    calls: list[str] = []
+
+    class _RateLimited(RuntimeError):
+        retryable = True
+
+    async def _generate_once(_ctx: Any, _backend: Any, prompt: str) -> tuple[Any, str | None]:
+        calls.append(prompt)
+        raise _RateLimited("provider rate limit")
+
+    monkeypatch.setattr(authoring, "_generate_once", _generate_once)
+    with pytest.raises(_RateLimited):
+        await authoring._generate_with_crash_retry(cast(FlowContext, None), cast(Backend, None), "plan")
+    assert calls == ["plan"]
+
 
 def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> None:
     for root, source in (("apps/billing", "first\n" * 10), ("apps/catalog", "first\n" * 20), ("frontend", "x = 1\n")):

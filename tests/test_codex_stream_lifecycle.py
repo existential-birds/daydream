@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -14,13 +15,13 @@ from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.lifecycle import BackendLifecycleCollector
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import LifecycleMode, install_codex_lifecycle_cli
+from tests.harness.codex_replay import make_mock_process
 from tests.harness.processes import wait_for_process_group_gone
 from tests.harness.trajectory import make_recorder
 
 
 @pytest.mark.parametrize("mode,category,expected_metrics", [
-
-    ("unfinished_next_turn", "TRANSPORT", 1),
+    ("completed_next_turn", None, 2), ("unfinished_next_turn", "TRANSPORT", 1),
 ])
 async def test_delayed_consumer_drains_finished_child_without_skipping_latest_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
@@ -49,7 +50,7 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
         snapshot = collector.finalize()
         collector.reset(token)
     assert (error.category if error else None) == category
-    assert snapshot is not None and snapshot.process_returncode == (7 if mode == "nonzero_exit" else 0)
+    assert snapshot is not None and snapshot.process_returncode == 0
     assert snapshot.stdout_eof_s is not None and snapshot.expiry_stage is None
     assert snapshot.terminal_received_s is not None and snapshot.cleanup_expired is False
     assert snapshot.teardown_started_s is not None and snapshot.teardown_completed_s is not None
@@ -63,9 +64,7 @@ async def test_delayed_consumer_drains_finished_child_without_skipping_latest_tu
     assert any(isinstance(row, TextEvent) and "Synthetic lifecycle response" in row.text for row in seen)
     if mode == "unfinished_next_turn":
         assert error is not None and error.retryable is False
-    elif mode == "nonzero_exit":
-        assert "return code 7" in str(error)
-    if mode == "completed_next_turn":
+    else:
         assert any(isinstance(row, TextEvent) and row.text == "Latest public turn" for row in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)
@@ -92,6 +91,7 @@ async def test_finished_child_postdeadline_chatter_cannot_remove_the_drain_bound
 
 @pytest.mark.parametrize("mode,stage", [
     ("terminal_eof_live_child", "process_reap"),
+    ("repeated_terminal", "terminal_drain"),  # repeated terminal events cannot extend the tail allowance
 ])
 async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode, stage: str,
@@ -132,7 +132,25 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
 async def test_codex_process_outcomes_require_completion_and_zero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real silent child cannot turn its initial commentary into a completed result."""
+    """Success needs a completed latest turn and an observed zero exit.
+
+    A completed public turn followed by a nonzero exit is a process failure with no result,
+    and a real silent child cannot turn its initial commentary into a completed result.
+    """
+    completed = [json.dumps(row) for row in (
+        {"type": "thread.started", "thread_id": "exit-check"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+    )]
+    process = make_mock_process(completed)
+    process.wait.return_value = process.returncode = 7
+    nonzero_events: list[AgentEvent] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        with pytest.raises(CodexError, match="return code 7") as exit_failure:
+            async for event in CodexBackend(model="fixture-model").execute(tmp_path, "exit check"):
+                nonzero_events.append(event)
+    assert exit_failure.value.category == "PROCESS_EXIT"
+    assert not any(isinstance(event, ResultEvent) for event in nonzero_events)
     fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="preterminal_silence")
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "1")

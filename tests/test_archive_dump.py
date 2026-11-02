@@ -14,8 +14,8 @@ def _contents(path: Path) -> dict[str, bytes]:
     return {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()}
 
 
-@pytest.mark.parametrize("patch", ["+ghp_canaryfake123\n"])
-def test_destination_publication_error_stays_fatal(tmp_path: Path, archive_dir: Path, patch: str) -> None:
+def test_destination_publication_error_stays_fatal(tmp_path: Path, archive_dir: Path) -> None:
+    patch = "+ghp_canaryfake123\n"
     source, _, recorder = _setup_bundle(tmp_path)
     (source / ".daydream" / "diff.patch").write_text(patch)
     stage = tmp_path / "late"

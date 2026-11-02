@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
 
 def _agent_step(
     *, step_id: int, phase: str, model: str | None, prompt: int = 1000, completion: int = 100, cached: int = 500,
-    cost_usd: float | None = None, tool_calls: int = 0,
+    cost_usd: float | None = None,
 ) -> dict[str, Any]:
     """Build a minimal valid agent step dict for fixture construction."""
     step: dict[str, Any] = {
@@ -39,10 +41,6 @@ def _agent_step(
     }
     if model is not None:
         step["model_name"] = model
-    if tool_calls > 0:
-        tcs = [{"tool_call_id": f"s{step_id}-t{i}", "function_name": "X", "arguments": {}} for i in range(tool_calls)]
-        step["tool_calls"] = tcs
-        step["observation"] = {"results": [{"source_call_id": tc["tool_call_id"], "content": "ok"} for tc in tcs]}
     return step
 
 
@@ -163,3 +161,84 @@ def test_duration_degrades_gracefully(tmp_path: Path) -> None:
     assert "cached" not in out.split("**Tokens:**", 1)[1].split("\n", 1)[0]
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     assert review_row.rstrip().endswith("| — |")
+
+    # Corrupt negative counts clamp per phase while output from zero-input work is retained.
+    clamped = render_run_info_block([_write_trajectory(tmp_path, name="clamped.json", steps=[
+        _user_step(),
+        _agent_step(step_id=2, phase="review", model="gpt-5.5", prompt=-5, completion=-2, cached=-3, cost_usd=0.0),
+        {**_user_step("test"), "step_id": 3},
+        _agent_step(step_id=4, phase="test", model="gpt-5.5", prompt=0, completion=10, cached=0, cost_usd=0.0),
+    ])])
+    assert re.search(r"(?:^|\s|\|\s*)-\d", clamped) is None
+    assert "| Review | gpt-5.5 | 0 | 0 | 0 | $0.00 |" in clamped
+    assert "| Test & Heal | gpt-5.5 | 0 | 0 | 10 | $0.00 |" in clamped and "0 in → 10 out" in clamped
+    # A backend alias is a fallback, never a rendered model identity.
+    alias = render_run_info_block([_single_phase_trajectory(tmp_path, name="alias.json", model="osprey",
+                                                            phase="exploration", prompt=0, completion=0, cached=0)])
+    assert "- **Model:** unknown" in alias and "| osprey |" not in alias
+
+
+def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path) -> None:
+    """A complete report renders heterogeneous phase durations and unions overlapping fork spans."""
+    start = datetime(2026, 5, 2, tzinfo=UTC)
+    spans = [
+        ("intent", 0.0, 0.5),
+        ("review", 1.0, 60.9),
+        ("parse", 61.0, 121.0),
+        ("fix", 122.0, 182.0),
+        ("test", 184.0, 3784.0),
+        ("verify", 3785.0, 7445.0),
+        ("diagram", None, None),
+    ]
+    steps: list[dict[str, Any]] = []
+    for phase, first, last in spans:
+        user = _user_step(phase)
+        user.update(
+            step_id=len(steps) + 1, timestamp=None if first is None else (start + timedelta(seconds=first)).isoformat()
+        )
+        agent = _agent_step(step_id=len(steps) + 2, phase=phase, model="gpt-5.5", cost_usd=0.01)
+        if phase == "intent":
+            agent["metrics"].update(prompt_tokens=10, completion_tokens=5, cached_tokens=20)
+        elif phase == "review":
+            agent["metrics"].update(prompt_tokens=20_000, completion_tokens=1_000, cached_tokens=14_000, cost_usd=None)
+        elif phase == "verify":
+            del agent["model_name"]
+            agent["metrics"].update(prompt_tokens=10_000, completion_tokens=200, cached_tokens=0, cost_usd=None)
+        agent["timestamp"] = None if last is None else (start + timedelta(seconds=last)).isoformat()
+        steps.extend([user, agent])
+    parent = _write_trajectory(tmp_path, steps=steps)
+    fork = _write_trajectory(
+        tmp_path,
+        name="fork.json",
+        session_id="fork",
+        steps=[
+            {**_user_step("fix"), "timestamp": (start + timedelta(seconds=150)).isoformat()},
+            {
+                **_agent_step(step_id=2, phase="fix", model="gpt-5.5", cost_usd=0.01),
+                "timestamp": (start + timedelta(seconds=183)).isoformat(),
+            },
+        ],
+    )
+    report = render_run_info_block([parent, fork])
+    assert "- **Model:** gpt-5.5" in report
+    assert "- **Cost:** $0.18" in report
+    assert "- **Tokens:** 35,010 in (16,510 cached, 47% hit) → 1,705 out" in report
+    assert "- **Steps / tool calls:** 8 / 0" in report
+    assert "| Understand Intent | gpt-5.5 | 0 | 10 (100%) | 5 | $0.01 | <1s |" in report
+    assert "| Review | gpt-5.5 | 0 | 20,000 (70%) | 1,000 | $0.07 | 59s |" in report
+    assert "| Verify Recommendations | gpt-5.5 | 0 | 10,000 | 200 | $0.06 | 1h 1m |" in report
+    latencies = {
+        line.split("|")[1].strip(): line.split("|")[-2].strip()
+        for line in report.splitlines()
+        if line.startswith("| ") and not line.startswith("| Phase |")
+    }
+    assert latencies == {
+        "Understand Intent": "<1s",
+        "Review": "59s",
+        "Parse Feedback": "1m",
+        "Fix": "1m 1s",
+        "Test & Heal": "1h",
+        "Verify Recommendations": "1h 1m",
+        "Diagram": "—",
+    }
+    assert "| Latency |" in report and "- **Duration:** 2h 4m" in report

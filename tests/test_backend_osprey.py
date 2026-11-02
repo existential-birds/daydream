@@ -35,7 +35,7 @@ from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.parametrize("sandbox", [True])
+@pytest.mark.parametrize("sandbox", [False, True])
 async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
     tmp_path: Path, sandbox: bool,
 ) -> None:
@@ -112,6 +112,14 @@ async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() 
     assert "byte limit" not in str(exc_info.value)
     assert "\ufffd" in str(exc_info.value)
     assert backend._transports == []
+
+
+async def test_successful_run_survives_held_or_oversized_stderr() -> None:
+    """Cleanup releases a descendant-held stderr before waiting for EOF; an oversized diagnostic is not a failure."""
+    for options in ({"stderr_held_open": True}, {"stderr_reader": _over_limit_reader(b"diagnostic" * 8)}):
+        events, _ = await asyncio.wait_for(
+            _collect(OspreyBackend(osprey_binary="fake"), osprey_session(), **options), timeout=0.5)
+        assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent], options
 
 
 async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> None:
@@ -283,8 +291,12 @@ async def test_osprey_session_stream_violations_fail_closed() -> None:
     for events, terminal, error, message in cases:
         lines = osprey_session(*events)
         lines[-1].update(terminal)
-        with pytest.raises(error, match=message):
-            await _collect(OspreyBackend(osprey_binary="fake"), lines)
+        try:
+            with pytest.raises(error, match=message):
+                await _collect(OspreyBackend(osprey_binary="fake"), lines)
+        except BaseException as exc:
+            exc.add_note(f"case: {message!r}")
+            raise
 
 
 # --- P18 Task 1: effective request-config admission at the Osprey argv seam --

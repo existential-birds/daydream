@@ -190,6 +190,15 @@ def test_report_retains_failed_and_active_runs_without_counting_them_as_successe
             ("failure", True), (None, False)]
         assert all("gate_seconds" not in row for row in measurements[-2:])
         assert (output / f"run-{len(samples)}.json").is_file()
+    # With only failed/active samples the group renders as pending rather than a measured row.
+    only_incomplete: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
+    for run_id, status, conclusion in ((1, "completed", "failure"), (2, "in_progress", None)):
+        run, jobs = _sample(run_id, 4, 100)
+        run.update(status=status, conclusion=conclusion)
+        jobs[1].update(status=status, conclusion=conclusion)
+        only_incomplete.append((4, run, jobs))
+    output = _report(tmp_path / "only-incomplete", bench, only_incomplete)
+    assert "| 4 / 4 | 0 | pending | pending | pending |" in (output / "report.md").read_text()
 
 
 def test_report_rejects_foreign_revision_attempt_runner_or_dispatch(

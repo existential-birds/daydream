@@ -8,6 +8,7 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import anyio
 import httpx
@@ -16,21 +17,26 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
+    ContinuationToken,
     ResultEvent,
     RetryPolicy,
     TextEvent,
     ToolStartEvent,
 )
+from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
 from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal
+from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompt_budget import prepare_sanctioned_inputs
+from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.supervision import RuleBasedToolSupervisor, apply_findings_verdicts
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder
@@ -271,6 +277,22 @@ async def test_staged_conversations_cannot_renew_retry_recovery_spend(
     ]
     _, stop = _budget_stop(recorder)
     assert stop["retry_recovery_spent_s"] == 0  # Earlier conversations' spend is not billed twice.
+    assert stop["retry_stop_reason"] == "retry_recovery_allowance_exhausted"
+    assert (stop["attempts"], stop["backoff_s"], stop["partial_edit_handling"]) == (0, 0.0, "discarded")
+
+
+async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(events=[_RetryableBackendError("transient")],
+                              retry_policy=RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0))
+    with pytest.raises(_RetryableBackendError):
+        await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=100.0)
+    assert backend.call_count == 4  # 1 + 40 + 40 + 20, then the allowance is spent
+    assert slept == [40.0, 40.0, 20.0]  # a re-basing implementation would sleep 40 forever
 
 
 async def test_host_admitted_starts_remain_charged_when_native_events_are_lost(
@@ -474,7 +496,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
     assert sibling.call_count == 1  # suppressed before its own probe could dispatch
 
 
-@pytest.mark.parametrize("bounded", [True, ], ids=["staged-deadline", ])
+@pytest.mark.parametrize("bounded", [False, True], ids=["unbounded", "staged-deadline"])
 async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool,
 ) -> None:
@@ -602,3 +624,128 @@ async def test_staged_assistant_text_is_bounded_per_turn(tmp_path: Path) -> None
     )
     assert reason is None
     assert isinstance(output, str) and len(output) == limit and "overflow-tail" not in output
+
+
+async def test_cancelling_one_codex_invocation_leaves_its_shared_backend_sibling_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt cancellation closes only its own transport; backend-wide cancellation belongs to run shutdown."""
+    finished = [json.dumps(row) for row in (
+        {"type": "thread.started", "thread_id": "sibling"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "sibling done"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    )]
+    spawner = install_fake_cli_process(monkeypatch, "codex", lines=[], scripts=[
+        FakeCliScript(lines=[json.dumps({"type": "thread.started", "thread_id": "cancelled"})], hang=True),
+        FakeCliScript(lines=finished, hang=True),
+    ])
+    backend = CodexBackend(model="fixture-model")
+    async with asyncio.TaskGroup() as tasks:
+        cancelled = tasks.create_task(run_agent(backend, tmp_path, "first", phase=DaydreamPhase.REVIEW))
+        with anyio.fail_after(5):
+            await spawner.wait_for_read(0)
+        sibling = tasks.create_task(run_agent(backend, tmp_path, "second", phase=DaydreamPhase.REVIEW))
+        with anyio.fail_after(5):
+            await spawner.wait_for_read(1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert spawner.procs[0].reaped and spawner.procs[1].terminate_calls == 0
+        spawner.procs[1].finish([])
+        with anyio.fail_after(5):
+            output, _, reason = await sibling
+    assert (output, reason) == ("sibling done", None)
+
+
+async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tmp_path: Path) -> None:
+    """Review policy reaches only review invocations; a retry snapshot reports the reduced remaining allocation."""
+    commands: list[tuple[str, ...]] = []
+    system_prompts: list[str] = []
+    async def spawn(*args: str, **kwargs: Any) -> Any:
+        commands.append(args)
+        value = args[args.index("--append-system-prompt") + 1]
+        system_prompts.append(Path(value).read_text() if value.startswith("/") else value)
+        if len(commands) == 3:
+            return make_mock_process([json.dumps(event) for event in [
+                {"type": "session", "sessionId": "failed-review"},
+                *[{"type": "tool_execution_start", "toolCallId": path, "toolName": "read", "args": {"path": path}}
+                  for path in ("api.py", "App.tsx")],
+                {"type": "turn_end", "message": {"role": "assistant", "content": [],
+                 "stopReason": "error", "errorMessage": "503 Service Unavailable"}},
+            ]])
+        return make_mock_process_from_fixture("simple_text.jsonl")
+    backend = PiBackend(model="fixture-model", reasoning_effort="high")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 0
+    budget = ReviewInvestigationBudget.from_limits(ReviewLimits(17, 3, 4))
+    access_guide = json.dumps({'supporting_catalog': {'path': str(tmp_path / 'catalog.json'),
+                                                   'status': 'partial', 'omitted_part_count': 1}})
+    invocations: list[tuple[DaydreamPhase, dict[str, Any]]] = [
+        (DaydreamPhase.DEEP, {"review_limits": ReviewLimits(17, 3, 3)}),
+        (DaydreamPhase.FIX, {}),
+        *[(DaydreamPhase.DEEP, {
+            "investigation_budget": budget,
+            "tool_call_budget": 4,
+            "review_system_instructions": build_review_stage_system_instruction({
+                "stage": stage,
+                "assigned_target_ids": [target],
+                "access_guide": access_guide,
+            }),
+            **({'continuation': ContinuationToken('pi', {'session_id': 'retained-navigation'})}
+               if stage == 'integration' else {}),
+        }) for stage, target in (("first_pass", "target-1"), ("integration", "whole-change"))],
+    ]
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
+        for phase, options in invocations:
+            assert (await run_agent(backend, tmp_path, "Assigned work", phase=phase,
+                                    progress_callback=lambda _: None, **options))[2] is None
+    review_system, fix_system, initial, retry, integration = system_prompts
+    paths = [args[args.index("--append-system-prompt") + 1] for args in commands]
+    assert all(not Path(path).exists() for path in paths if path.startswith("/"))
+    assert all(args[args.index("--thinking") + 1] == "high" for args in commands)
+    assert commands[-1][commands[-1].index('--session-id') + 1] == 'retained-navigation'
+    assert "at most 17 seconds and 3 tool calls" in review_system
+    assert REVIEW_STOPPING_GUIDANCE in review_system
+    assert "planted" not in review_system
+    assert "hidden evaluation" not in review_system
+    assert "Reopen a rejected candidate only when new evidence" in review_system
+    assert "an empty findings result is valid" in review_system
+    assert "Closed candidate decisions stay closed" not in review_system
+    assert "repository-scoped" in review_system
+    assert "Search before you read" not in review_system
+    assert "typically 50" not in review_system
+    assert REVIEW_STOPPING_GUIDANCE not in fix_system
+    assert "Investigation allowance" not in fix_system
+    assert budget.observed_tool_starts == 2 and budget.remaining_tool_calls == 2
+    assert "Reviewer dispatch-time snapshot:" in initial
+    assert "current invocation allocation: 4 tool calls" in initial
+    assert "Retry dispatch-time snapshot (supersedes the earlier invocation allocation):" in retry
+    assert "current invocation allocation: 2 tool calls" in retry
+    assert "Failed-attempt calls remain charged; future-stage reserves remain excluded" in retry
+    assert "current invocation allocation: 2 tool calls" in integration
+    for instructions, objective, target in (
+        (initial, "Review assigned changed behavior", "target-1"),
+        (retry, "Review assigned changed behavior", "target-1"),
+        (integration, "Review whole-change interactions and boundaries", "whole-change"),
+    ):
+        assignment_line = next(line for line in instructions.splitlines()
+                               if line.startswith("Daydream final-submission assignment: "))
+        assert json.loads(assignment_line.removeprefix("Daydream final-submission assignment: ")) == {
+            "objective": objective, "target_ids": [target], "candidate_ids": [],
+        }
+        assert 'Persistent exact access guide (supporting metadata): ' + access_guide in instructions
+        assert f'"targets": ["{target}"]' in instructions
+    for instructions in (initial, retry, integration):
+        assert "Cumulative observed starts:" not in instructions
+        assert "remaining cumulative tool starts" not in instructions
+        assert "at most one final-submission warning per native attempt" in instructions
+        assert "not a recurring counter" in instructions
+        assert "refreshed" not in instructions
+        assert "Unused capacity is expected" in instructions
+        assert "submit when those" in instructions
+        assert "planted" not in instructions
+        assert "hidden evaluation" not in instructions
+        assert REVIEW_STOPPING_GUIDANCE not in instructions
+        assert "Closed decisions stay closed" in instructions
+        assert "Return exactly assigned target or triage candidate IDs" in instructions
+        assert "host publishes terminal findings" in instructions

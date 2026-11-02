@@ -106,7 +106,7 @@ class TestBillingOwnerResolution:
     """Decision 5: closed owner before export; children|structural|none."""
 
 
-    def test_contradictory_duplicate_totals_fail_closed_keep_first(self, tmp_path: Path) -> None:
+    def test_contradictory_or_late_totals_fail_closed_and_never_switch_owner(self, tmp_path: Path) -> None:
         recorder, inv = _sealed_invocation(tmp_path)
         _usage(recorder, inv, input_tokens=10, output_tokens=5)
         _total(recorder, inv, input_tokens=13, output_tokens=7)
@@ -118,6 +118,14 @@ class TestBillingOwnerResolution:
         # First authoritative total is never rewritten.
         assert summary["authoritative_total"]["input_tokens"] == 13
         assert summary["drafts"][0]["billed"] is False
+        # A resolved owner never switches: a late total after a partial-only close must not bill.
+        late_recorder, late = _sealed_invocation(tmp_path / "late-total")
+        _usage(late_recorder, late, input_tokens=10, output_tokens=5)
+        late.finish()
+        assert _summary(late)["billing_owner"] == "none"
+        _total(late_recorder, late, input_tokens=13, output_tokens=7)
+        assert _summary(late)["billing_owner"] == "none"
+        assert _summary(late)["drafts"][0]["billed"] is False
 
 class TestPendingBounds:
     """Decision 1 bounds: 512 drafts / 10 MiB retained choice bytes."""

@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from daydream import config
 from tests.harness.workflows import job_steps, load_workflow, workflow_triggers
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -212,7 +213,9 @@ def test_single_bundle_joins_gate_analyze_and_privileged_publication() -> None:
     wf = load_workflow(path)
     _assert_execution_policy(wf)
     assert "pull_request" not in workflow_triggers(wf)
-    assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
+    # `daydream setup` provisions exactly the secrets and handle variable this template reads.
+    assert set(_SECRET_REF_RE.findall(text)) == set(config.SETUP_SECRET_NAMES)
+    assert f"vars.{config.BOT_HANDLE_VAR}" in text
     gate, analyze = wf["jobs"]["gate"], wf["jobs"]["analyze"]
     assert {"approved_head_sha", "approved_at"} <= gate["outputs"].keys()
     assert gate["outputs"]["command"] == "${{ steps.match.outputs.command }}"

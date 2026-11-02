@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import json
 import os
-import shutil
 import signal
 import sys
 import threading
@@ -21,18 +19,16 @@ from tests.harness.codex_lifecycle_cli import install_codex_lifecycle_cli
 from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 
 
-@pytest.mark.parametrize('interruption', [
-
-    'collector_repeated_cancel',
-])
-async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str,
+async def test_collector_failure_and_repeated_cancel_stop_owned_reviewer_and_retain_process_evidence(
+    tmp_path: Path,
 ) -> None:
-    if interruption == 'late_child' and sys.platform != 'linux':
-        pytest.skip('late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
+    """A lost Docker exec await plus repeated host cancellation still joins the detached reviewer.
+
+    The native process rotates its credential before the cancellation rendezvous; the
+    rotation survives, every owned process is gone, and only cancelled evidence remains.
+    """
     environment = public_input(tmp_path)
-    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence',
-        spawn_on_term=interruption == 'late_child')
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence')
     # Exercise rotation in the actual native subprocess, before it reaches the
     # cancellation rendezvous, rather than supplying a pre-finalized auth result.
     native_home = cli.root / 'native-home'
@@ -46,40 +42,19 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         '(home/"auth.json").write_text(json.dumps(auth))\n' +
         f'Path({str(native_home)!r}).write_text(str(home))\n' + body)
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
-    if interruption == 'finalization_git':
-        real_git = shutil.which('git')
-        assert real_git is not None
-        # Delay the real executable-provenance read across shutdown polling.
-        # Its caller tolerates Git failures, so require successful completion too.
-        git_wrapper = cli.bin_dir / 'git'
-        git_wrapper.write_text(f'#!{sys.executable}\nimport os,subprocess,sys,time\nfrom pathlib import Path\n'
-            'if sys.argv[1:] == ["rev-parse","HEAD"] '
-            f'and any(Path({str(logs)!r}).glob("reviewer-cancel-*.json")):\n'
-            f'    Path({str(cli.root / "finalization-git-started")!r}).touch()\n'
-            '    time.sleep(0.2)\n'
-            f'    result = subprocess.run([{real_git!r}, *sys.argv[1:]])\n'
-            '    if result.returncode == 0:\n'
-            f'        Path({str(cli.root / "finalization-git-completed")!r}).touch()\n'
-            '    if result.returncode < 0:\n'
-            '        os.kill(os.getpid(), -result.returncode)\n'
-            '    raise SystemExit(result.returncode)\n'
-            f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
-        git_wrapper.chmod(0o700)
     child_environment = {**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))}
-    collector_failure = (TimeoutError('collector failure secret') if interruption == 'collector_timeout'
-                         else ConnectionError('collector failure secret'))
+    collector_failure = ConnectionError('collector failure secret')
     collector_release = asyncio.Event()
     detached: list[asyncio.Task[Any]] = []
+
     class CollectorFailureEnvironment(LocalReviewerEnvironment):
         async def exec(self, command: str, **kwargs: Any) -> Any:
-            if interruption.startswith('collector_'):
-                # A transport failure loses the Docker client's await without
-                # killing the separate in-container supervisor/native process.
-                detached.append(asyncio.create_task(super().exec(command, **kwargs)))
-                await collector_release.wait()
-                raise collector_failure
-            return await super().exec(command, **kwargs)
+            # A transport failure loses the Docker client's await without
+            # killing the separate in-container supervisor/native process.
+            detached.append(asyncio.create_task(super().exec(command, **kwargs)))
+            await collector_release.wait()
+            raise collector_failure
 
     local = CollectorFailureEnvironment(child_environment, Path(environment['DAYDREAM_RB_REPOSITORY']))
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
@@ -92,58 +67,27 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
             assert asyncio.get_running_loop().time() < deadline, 'scripted native CLI did not reach readiness'
             await asyncio.sleep(0.01)
         evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
-        if interruption == 'force':
-            blocked = next(row for row in cli.observations() if row['mode'] == 'preterminal_silence')
-            os.kill(blocked['ppid'], signal.SIGSTOP)
-        if interruption.startswith('collector_'):
-            collector_release.set()
-            if interruption == 'collector_repeated_cancel':
-                while not list(logs.glob('reviewer-cancel-*.json')) and not running.done():
-                    await asyncio.sleep(0.01)
-                running.cancel()
-                await asyncio.sleep(0.01)
-                running.cancel()
-            with pytest.raises(type(collector_failure)) as raised:
-                await asyncio.wait_for(running, timeout=30)
-            assert raised.value is collector_failure
-            await asyncio.wait_for(asyncio.gather(*detached), timeout=5)
-        elif interruption == 'timeout':
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(running, timeout=0.05)
-        else:
-            running.cancel()
-            if interruption == 'repeated_cancel':
-                await asyncio.sleep(0.01)
-                running.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(running, timeout=30)
+        collector_release.set()
+        while not list(logs.glob('reviewer-cancel-*.json')) and not running.done():
+            await asyncio.sleep(0.01)
+        running.cancel()
+        await asyncio.sleep(0.01)
+        running.cancel()
+        with pytest.raises(ConnectionError) as raised:
+            await asyncio.wait_for(running, timeout=30)
+        assert raised.value is collector_failure
+        await asyncio.wait_for(asyncio.gather(*detached), timeout=5)
         receipt = json.loads((logs / 'reviewer-process.json').read_text())
-        assert receipt['interruption'] == ('host_execution_failed'
-            if interruption.startswith('collector_') else 'host_cancellation')
+        assert receipt['interruption'] == 'host_execution_failed'
         assert receipt['outer_deadline_seconds'] is None
-        if interruption == 'late_child':
-            escaped = json.loads((cli.root / 'escaped.json').read_text())
-            with pytest.raises(ProcessLookupError):
-                os.kill(escaped['pid'], 0)
-            assert receipt['descendant_containment'] == 'linux_subreaper'
-            assert receipt['owned_descendants_cleanup'] == 'joined'
-        assert receipt['cleanup_outcome'] == ('forced_termination' if interruption == 'force' else 'graceful_exit')
+        assert receipt['cleanup_outcome'] == 'graceful_exit'
         host_receipt = json.loads((logs / 'reviewer-host.json').read_text())
-        assert host_receipt['interruption'] == ('host_execution_failed'
-            if interruption.startswith('collector_') else 'host_task_cancelled')
-        if interruption.startswith('collector_'):
-            assert host_receipt['output_collection'] == 'unavailable'
-            assert host_receipt['execution_error'] == type(collector_failure).__name__
-            assert host_receipt['process_completion'] == 'observed'
-            assert 'collector failure secret' not in (logs / 'reviewer-host.json').read_text()
+        assert host_receipt['interruption'] == 'host_execution_failed'
+        assert host_receipt['output_collection'] == 'unavailable'
+        assert host_receipt['execution_error'] == 'ConnectionError'
+        assert host_receipt['process_completion'] == 'observed'
+        assert 'collector failure secret' not in (logs / 'reviewer-host.json').read_text()
         assert host_receipt['cancellation_channels'] == {'shared_marker': 'published'}
-        if interruption == 'force':
-            assert not (evidence / 'execution.json').exists()
-            assert receipt['terminal_evidence_available'] is False
-            assert all(child.returncode is not None for child in local.children)
-            assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-            return
-        assert (evidence / 'execution.json').is_file(), 'outer timeout lost native execution evidence'
         execution = json.loads((evidence / 'execution.json').read_text())
         assert execution['status'] == 'cancelled' and execution['terminal_result'] is None
         root = json.loads((evidence / 'trajectory.json').read_text())
@@ -157,9 +101,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         documents = [json.loads((evidence / row['sibling_trajectory_ref']).read_bytes()) for row in siblings]
         assert all(document['session_id'] == root['session_id'] for document in documents)
         assert (logs / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
-        if interruption == 'finalization_git':
-            assert (cli.root / 'finalization-git-started').is_file()
-            assert (cli.root / 'finalization-git-completed').is_file()
         assert not Path(native_home.read_text()).exists()
         from daydream.benchmark.reviewbench.harbor_auth import reviewer_credentials
 
@@ -180,13 +121,6 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
     finally:
         if not running.done():
             running.cancel()
-        escaped_file = cli.root / 'escaped.json'
-        if escaped_file.exists():
-            escaped = json.loads(escaped_file.read_text())
-            try:
-                os.killpg(escaped['pid'], signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         for row in cli.observations():
             try:
                 os.killpg(row['pid'], signal.SIGKILL)
@@ -197,10 +131,91 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('receipt_conflict', [True])
-async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(
-    tmp_path: Path, receipt_conflict: bool,
-) -> None:
+async def test_host_cancellation_redacts_admitted_pi_auth_from_interrupted_bundle(tmp_path: Path) -> None:
+    """Harbor cancelling the agent (its trial timeout) records host cancellation and exports a redacted bundle.
+
+    An admitted credential echoed through real native tool output never reaches retained
+    evidence or collected output, while public payload fields survive.
+    """
+    from daydream.benchmark.reviewbench.harbor_auth import validate_pi_reviewer_home
+
+    environment = public_input(tmp_path)
+    pi_home = tmp_path / 'synthetic-pi-auth'
+    pi_home.mkdir(mode=0o700)
+    secret = 'opaque-reviewbench-pi-auth-secret-canary'
+    credential = pi_home / 'auth.json'
+    auth = {'nous': {'type': 'api_key', 'key': secret}}
+    original_auth = json.dumps(auth).encode()
+    credential.write_bytes(original_auth)
+    validate_pi_reviewer_home(pi_home, 'nous')
+    # Format combinations belong to test_redaction; this case proves the real
+    # native tool -> interrupted trajectory -> exported bundle wiring.
+    tool_input = tmp_path / 'quoted-tool-output.json'
+    tool_input.write_text(json.dumps('Read ' + json.dumps('data: ' + json.dumps(auth))))
+    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence',
+        empty_reviews=True, tool_output_path=tool_input)
+    local = LocalReviewerEnvironment({**os.environ, **environment,
+        'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
+        Path(environment['DAYDREAM_RB_REPOSITORY']))
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    running = asyncio.create_task(DaydreamPublicReviewAgent(logs_dir=evidence.parent).run(
+        'frozen synthetic task', local, SimpleNamespace()))
+    try:
+        # Cold reviewer imports and snapshot setup are outside the cancellation
+        # contract below; allow parallel full-suite startup before timing it.
+        deadline = asyncio.get_running_loop().time() + 60
+        while not any(row['mode'] == 'preterminal_silence' for row in cli.observations()):
+            if running.done():
+                await running
+            assert asyncio.get_running_loop().time() < deadline, 'native tool process did not reach readiness'
+            await asyncio.sleep(0.01)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=35)
+        receipt = json.loads((evidence.parent / 'reviewer-process.json').read_text())
+        assert receipt['interruption'] == 'host_cancellation' and receipt['cleanup_outcome'] == 'graceful_exit'
+        host_receipt = json.loads((evidence.parent / 'reviewer-host.json').read_text())
+        assert host_receipt['interruption'] == 'host_task_cancelled'
+        assert host_receipt['cancellation_channels'] == {'shared_marker': 'published'}
+        execution = json.loads((evidence / 'execution.json').read_text())
+        assert execution['status'] == 'cancelled' and execution['candidate'] is None
+        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+        root = json.loads((evidence / 'trajectory.json').read_text())
+        siblings = [row['sibling_trajectory_ref'] for row in root['extra']['subtrajectories']
+                    if 'sibling_trajectory_ref' in row]
+        assert siblings and all((evidence / reference).is_file() for reference in siblings)
+        documents = [json.loads((evidence / reference).read_bytes()) for reference in siblings]
+        tool_payloads = [json.loads(result['content'])
+                         for document in documents for step in document['steps']
+                         for result in step.get('observation', {}).get('results', [])
+                         if result['source_call_id'] == 'fixture-input']
+        assert tool_payloads
+        for payload in tool_payloads:
+            assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
+            assert payload['usage'] == {'input': 0, 'output': None}
+            data = payload['data']
+            assert isinstance(data, str) and data.startswith('Read ')
+            data = json.loads(data.removeprefix('Read '))
+            assert isinstance(data, str) and data.startswith('data: ')
+            data = json.loads(data.removeprefix('data: '))
+            assert data['nous']['type'] == 'api_key'
+        retained = {path: path.read_bytes() for path in evidence.parent.rglob('*') if path.is_file()}
+        assert any(b'ordinary-public-key' in body for body in retained.values())
+        assert not [str(path.relative_to(evidence.parent))
+                    for path, body in retained.items() if secret.encode() in body]
+        collected = ''.join((result.stdout or '') + (result.stderr or '') for result in local.results)
+        assert secret not in collected
+        assert credential.read_bytes() == original_auth
+    finally:
+        if not running.done():
+            running.cancel()
+        await local.close()
+        await asyncio.gather(running, return_exceptions=True)
+        await local.close()
+
+
+async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(tmp_path: Path) -> None:
+    """Cancellation before launch publishes the stop marker, starts no native CLI, keeps a competing receipt."""
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='preterminal_silence')
     child_environment = {**os.environ, **environment,
@@ -215,9 +230,8 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
 
     local = DelayedEnvironment(child_environment, Path(environment['DAYDREAM_RB_REPOSITORY']))
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
-    if receipt_conflict:
-        logs.mkdir(parents=True)
-        (logs / 'reviewer-host.json').write_text('prior competing host receipt')
+    logs.mkdir(parents=True)
+    (logs / 'reviewer-host.json').write_text('prior competing host receipt')
     agent = DaydreamPublicReviewAgent(logs_dir=logs)
     running = asyncio.create_task(agent.run('frozen public task', local, SimpleNamespace()))
     try:
@@ -233,8 +247,7 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         receipt = json.loads((logs / 'reviewer-process.json').read_text())
         assert receipt['cleanup_outcome'] == 'cancelled_before_start'
         assert not cli.observations()
-        if receipt_conflict:
-            assert (logs / 'reviewer-host.json').read_text() == 'prior competing host receipt'
+        assert (logs / 'reviewer-host.json').read_text() == 'prior competing host receipt'
         assert not Path(environment['DAYDREAM_RB_EVIDENCE']).exists()
         assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
     finally:
@@ -245,21 +258,22 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('diagnostic_failure,foreign_stderr,entrypoint_payload,declared_timeout,transport_timeout', [
-    pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n', 900, 932,
-                 id='oversized_credential'),
-])
-async def test_completed_process_review_keeps_native_result_despite_diagnostic_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], diagnostic_failure: str,
-    foreign_stderr: bytes, entrypoint_payload: bytes, declared_timeout: float | None, transport_timeout: int | None,
+async def test_completed_review_bounds_oversized_entrypoint_output_and_keeps_native_result(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str],
 ) -> None:
+    """A completed review keeps its result while an oversized credential-bearing stdout line is discarded.
+
+    The declared trial timeout becomes the outer deadline plus the collection allowance.
+    """
+    from daydream.benchmark.reviewbench.harbor_process import OUTPUT_LIMIT_BYTES
+
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
-    if declared_timeout is not None:
-        declared_task = tmp_path / 'declared-task'
-        declared_task.mkdir()
-        (declared_task / 'task.toml').write_text(f'[agent]\ntimeout_sec = {declared_timeout}\n')
-        (tmp_path / 'config.json').write_text(json.dumps({'task': {'path': str(declared_task)}, 'agent': {}}))
+    declared_task = tmp_path / 'declared-task'
+    declared_task.mkdir()
+    (declared_task / 'task.toml').write_text('[agent]\ntimeout_sec = 900\n')
+    (tmp_path / 'config.json').write_text(json.dumps({'task': {'path': str(declared_task)}, 'agent': {}}))
+    payload = b'Authorization: Bearer ' + b'A' * OUTPUT_LIMIT_BYTES + b'BOUNDARY_SECRET_CANARY\n'
     received_timeouts: list[int | None] = []
 
     class DeadlineEnvironment(LocalReviewerEnvironment):
@@ -270,76 +284,34 @@ async def test_completed_process_review_keeps_native_result_despite_diagnostic_f
     local = DeadlineEnvironment({**os.environ, **environment,
         'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
         Path(environment['DAYDREAM_RB_REPOSITORY']),
-        publication_fault={'supervisor_enospc': 'reviewer-process.json',
-                           'log_enospc': 'reviewer-entrypoint.log'}.get(diagnostic_failure),
-        foreign_stderr=foreign_stderr,
         entrypoint_bootstrap=('import asyncio,os\n'
-            f'os.write(1,{entrypoint_payload!r})\n'
+            f'os.write(1,{payload!r})\n'
             'os.dup2(2,1)\n'  # Keep stdout purely JSON; retain ordinary runner output on captured stderr.
             'from daydream.benchmark.reviewbench.harbor_entrypoint import _executable_main\n'
-            'raise SystemExit(asyncio.run(_executable_main()))\n') if entrypoint_payload else None)
+            'raise SystemExit(asyncio.run(_executable_main()))\n'))
     logs = Path(environment['DAYDREAM_RB_EVIDENCE']).parent
-    protected: Path | None = None
-    destination: Path | None = None
-    if diagnostic_failure.endswith(('conflict', 'symlink')):
-        logs.mkdir(parents=True)
-        protected = tmp_path / 'competing-diagnostic'
-        protected.write_text('prior competing diagnostic bytes')
-        destination = logs / ('reviewer-entrypoint.log' if diagnostic_failure.startswith('log')
-                              else 'reviewer-process.json')
-        if diagnostic_failure.endswith('symlink'):
-            destination.symlink_to(protected)
-        else:
-            destination.write_bytes(protected.read_bytes())
     try:
         await asyncio.wait_for(DaydreamPublicReviewAgent(logs_dir=logs).run(
             'frozen public task', local, SimpleNamespace()), timeout=30)
         record = json.loads((Path(environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json').read_text())
         assert record['status'] == 'completed_empty'
-        assert received_timeouts == [transport_timeout]
+        assert received_timeouts == [932]
         assert json.loads(Path(environment['DAYDREAM_RB_OUTPUT']).read_text())['findings'] == []
         assert all(child.returncode == 0 for child in local.children)
         assert not list(logs.rglob('*checkpoint*')), 'fresh completed run created interruption checkpoints'
-        if diagnostic_failure == 'none':
-            receipt = json.loads((logs / 'reviewer-process.json').read_text())
-            assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
-            assert receipt['outer_deadline_seconds'] == declared_timeout
-            assert receipt['outer_deadline_availability'] == (
-                'declared trial config' if declared_timeout is not None else 'unavailable')
-            assert receipt['terminal_evidence_available'] is True
-        if protected is not None and destination is not None:
-            assert protected.read_text() == 'prior competing diagnostic bytes'
-            assert destination.read_text() == 'prior competing diagnostic bytes'
+        receipt = json.loads((logs / 'reviewer-process.json').read_text())
+        assert receipt['cleanup_outcome'] == 'not_requested' and receipt['child_returncode'] == 0
+        assert receipt['outer_deadline_seconds'] == 900
+        assert receipt['outer_deadline_availability'] == 'declared trial config'
+        assert receipt['terminal_evidence_available'] is True
+        assert receipt['stdout_capture']['discarded'] and receipt['output_truncated']
         captured = capfd.readouterr()
         all_output = captured.out + captured.err + ''.join(
             (result.stdout or '') + (result.stderr or '') for result in local.results)
-        diagnostics = [line for line in all_output.splitlines() if line.startswith('ReviewBench ')]
-        if diagnostic_failure != 'none':
-            surface, error, code = {
-                'supervisor_enospc': ('process', 'OSError', errno.ENOSPC),
-                'log_enospc': ('process', 'OSError', errno.ENOSPC),
-            }.get(diagnostic_failure, ('process', 'FileExistsError', errno.EEXIST))
-            assert diagnostics == [f'ReviewBench {surface} diagnostics unavailable ({error}; errno={code}).']
-            assert sum(len(line.encode()) + 1 for line in diagnostics) < 1024
-        else:
-            assert diagnostics == []
-        if foreign_stderr:
-            assert foreign_stderr.decode() in all_output
-        if entrypoint_payload:
-            from daydream.benchmark.reviewbench.harbor_process import OUTPUT_LIMIT_BYTES
-
-            retained = (logs / 'reviewer-entrypoint.log').read_bytes()
-            assert len(retained) <= 2 * OUTPUT_LIMIT_BYTES
-            if b'ud800' in entrypoint_payload:
-                assert json.loads(retained.decode().splitlines()[0]) == {'message': '\ud800'}
-            if b'INCOMPLETE_LINE_CANARY' in entrypoint_payload:
-                assert receipt['stdout_capture']['incomplete_line_discarded']
-            elif len(entrypoint_payload) > OUTPUT_LIMIT_BYTES:
-                assert receipt['stdout_capture']['discarded'] and receipt['output_truncated']
-            else:
-                assert b'REDACTED' in retained
-            assert b'CANARY' not in retained
-            assert 'CANARY' not in all_output
+        assert not [line for line in all_output.splitlines() if line.startswith('ReviewBench ')]
+        retained = (logs / 'reviewer-entrypoint.log').read_bytes()
+        assert len(retained) <= 2 * OUTPUT_LIMIT_BYTES
+        assert b'CANARY' not in retained and 'CANARY' not in all_output
         for canary in ('publication-secret-canary', 'private-refresh-canary', 'private-id-canary',
                        'forbidden-api-canary', 'forbidden-github-canary'):
             assert canary not in all_output
@@ -460,7 +432,10 @@ raise SystemExit(asyncio.run(drive()))
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
-async def test_forced_reviewer_exit_reaps_late_descendant_holding_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize('process_table_failure', [False, True])
+async def test_forced_reviewer_exit_reaps_late_descendant_holding_output(
+    tmp_path: Path, process_table_failure: bool,
+) -> None:
     """A fork after the final ownership snapshot must not block reap, even when the process table read fails."""
     entrypoint = '''import os,signal,time
 from pathlib import Path
@@ -509,7 +484,7 @@ async def drive():
      if time.monotonic()>=deadline: raise RuntimeError('late fork never became ready')
      time.sleep(0.001)
     original_kill()
-    fail_listing=True
+    fail_listing={process_table_failure!r}
    else: original_kill()
   child.kill=kill
   return child
@@ -547,7 +522,7 @@ asyncio.run(drive())
         assert child.returncode == 0, stderr.decode()
         assert json.loads(stdout)['orphan_alive'] is False
         receipt = json.loads((tmp_path / 'logs/reviewer-process.json').read_text())
-        assert receipt['cleanup_outcome'] == 'supervisor_failed'
+        assert receipt['cleanup_outcome'] == ('supervisor_failed' if process_table_failure else 'forced_termination')
         assert receipt['owned_descendants_cleanup'] == 'joined'
         assert receipt['child_returncode'] == -signal.SIGKILL
         assert receipt['terminal_evidence_available'] is False

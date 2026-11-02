@@ -239,20 +239,10 @@ def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> N
     assert row["wall_clock_seconds"] == 42.5
 
 
-@pytest.mark.parametrize(
-    ("resolver", "artifact", "payload"),
-    [
-        pytest.param(
-            DeepArtifact.RECOMMENDED_CAPTURE.at,
-            "recommended-capture.json",
-            {"session_id": "sess-42", "capture_point": "post_test"},
-            id="recommended-capture",
-        ),
-    ],
-)
-def test_session_bound_artifact_requires_matching_session(
-    tmp_path: Path, resolver: Callable[[Path], Path], artifact: str, payload: dict[str, Any]
-) -> None:
+def test_session_bound_artifact_requires_matching_session(tmp_path: Path) -> None:
+    resolver = DeepArtifact.RECOMMENDED_CAPTURE.at
+    artifact = "recommended-capture.json"
+    payload = {"session_id": "sess-42", "capture_point": "post_test"}
     p = tmp_path / ".daydream" / "deep" / artifact
     p.parent.mkdir(parents=True)
     p.write_text(json.dumps(payload))
@@ -766,12 +756,8 @@ def test_test_failed_from_verdict(tmp_path: Path) -> None:
     assert state["pipeline_status"] == "partial"
 
 
-@pytest.mark.parametrize("payload",
-    [
-        ["malformed"],
-    ],
-)
-def test_stale_or_malformed_stabilization_failure_is_neutral(tmp_path: Path, payload: Any) -> None:
+def test_stale_or_malformed_stabilization_failure_is_neutral(tmp_path: Path) -> None:
+    payload = ["malformed"]
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_deep(tmp_path, "stabilization-failed.json", payload)
     states = pipeline.derive_phase_states(tmp_path, phase_events=[], session_id="current")
@@ -854,15 +840,18 @@ def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
             return evaluation
 
         monkeypatch.setattr("daydream.eval.analyzer.analyze_session", fail_evaluation)
-        with pytest.raises(ArchiveFinalizationError, match="evaluation"):
-            finalize_archive_run(**arguments)
+        try:
+            with pytest.raises(ArchiveFinalizationError, match="evaluation"):
+                finalize_archive_run(**arguments)
+        except BaseException as error:
+            error.add_note(f"evaluation failure case: {failure!r}")
+            raise
         assert not (get_archive_dir() / "runs" / session_id).exists(), failure
         assert not (get_archive_dir() / "index.db").exists(), failure
 
 
-@pytest.mark.parametrize("source_state", ["replacement", ])
 def test_strict_archive_reattests_live_workspace_before_quality(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, source_state: str,
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A source changed during a real frozen-artifact read cannot evade the initial Git check."""
     with ExitStack() as held:
@@ -885,34 +874,23 @@ def test_strict_archive_reattests_live_workspace_before_quality(
             content = original_read(path, *args, **kwargs)
             if path == receipt and not moved.exists():
                 source.rename(moved)
-                if source_state == "replacement":
-                    replacement.rename(source)
-                elif source_state == "symlink":
-                    source.symlink_to(replacement, target_is_directory=True)
+                replacement.rename(source)
             return content
 
         monkeypatch.setattr(Path, "read_text", read_then_change)
         archived = archive_dir / "runs" / session_id
-        if source_state == "missing":
+        with pytest.raises(ArchiveFinalizationError, match="evaluation"):
             finalize_archive_run(**arguments)
-            evaluation = json.loads((archived / "evaluation.json").read_bytes())
-            assert evaluation["findings"]["total"] == 1
-            assert evaluation["quality"]["unavailable"] is True
-            assert not source.exists()
-        else:
-            with pytest.raises(ArchiveFinalizationError, match="evaluation"):
-                finalize_archive_run(**arguments)
-            assert not archived.exists()
-            assert not (archive_dir / "index.db").exists()
+        assert not archived.exists()
+        assert not (archive_dir / "index.db").exists()
         assert moved.is_dir()
-        retained_marker = source / marker.name if source_state == "replacement" else marker
+        retained_marker = source / marker.name
         assert retained_marker.read_bytes() == b"VALUE = 'replacement code'\n"
         assert receipt.read_bytes() == b'{"items": [{"confidence": "HIGH"}]}'
 
 
-@pytest.mark.parametrize("mutate", [True])
 def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A code-running consumer cannot make archive bytes and manifest disagree."""
     session_id = "strict-mutated-evidence"
@@ -927,26 +905,17 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
 
     def mutate_frozen_receipt(*args: Any, **kwargs: Any) -> dict[str, Any]:
         evaluation = analyze_session(*args, **kwargs)
-        if mutate:
-            receipt.write_text(json.dumps({"session_id": session_id, "passed": False}), encoding="utf-8",)
+        receipt.write_text(json.dumps({"session_id": session_id, "passed": False}), encoding="utf-8",)
         return evaluation
 
     monkeypatch.setattr("daydream.eval.analyzer.analyze_session", mutate_frozen_receipt,)
 
-    if mutate:
-        with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
-            finalize_archive_run(**arguments)
-    else:
+    with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
         finalize_archive_run(**arguments)
 
     archive_dir = get_archive_dir()
-    if mutate:
-        assert not (archive_dir / "runs" / session_id).exists()
-        assert not (archive_dir / "index.db").exists()
-    else:
-        assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
-        with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-            assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
+    assert not (archive_dir / "runs" / session_id).exists()
+    assert not (archive_dir / "index.db").exists()
 
 
 def test_strict_archive_refuses_frozen_tree_mutated_before_publication(

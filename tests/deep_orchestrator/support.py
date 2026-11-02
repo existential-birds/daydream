@@ -148,21 +148,18 @@ def _prime_source_uid_merge_resume(target: Path, *, structure: list[dict[str, An
 
 
 def _provenance_item(item_id: int, description: str, *, file: str = "api.py", line: int = 1, source_uids: Any = None,
-    evidence: str | None = None, severity: str = "medium", rationale: str = "rationale", omit_source_uids: bool = False,
+    evidence: str | None = None, severity: str = "medium", rationale: str = "rationale",
 ) -> dict[str, Any]:
     """Build one merge-agent item with an explicitly chosen provenance claim.
 
     ``_merge_item`` cannot serve here: these tests are about the ``source_uids``
-    value itself, including the shapes a real model gets wrong (a null, a bare
-    string, an omitted key), so every one of them has to be settable.
+    value itself, including the shapes a real model gets wrong (a null or a bare
+    string), so each has to be settable.
     """
-    item: dict[str, Any] = {"id": item_id, "lens": "per-stack", "file": file, "line": line, "severity": severity,
+    return {"id": item_id, "lens": "per-stack", "file": file, "line": line, "severity": severity,
         "description": description, "confidence": "MEDIUM", "rationale": rationale,
-        "evidence": f"{file}:{line}" if evidence is None else evidence,
+        "evidence": f"{file}:{line}" if evidence is None else evidence, "source_uids": source_uids,
     }
-    if not omit_source_uids:
-        item["source_uids"] = source_uids
-    return item
 
 
 def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",

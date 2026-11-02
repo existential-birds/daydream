@@ -4,6 +4,7 @@ from typing import Any
 
 from daydream.improve.prioritize import (
     aggregate_cross_service,
+    order_by_leverage,
 )
 
 
@@ -19,6 +20,21 @@ def _f(**overrides: Any) -> dict[str, Any]:
     if "evidence" not in overrides:
         finding["evidence"] = [f"{finding['path']}:{finding['line']}"]
     return finding
+
+def test_leverage_orders_impact_over_effort_discounted() -> None:
+    findings = [
+        _f(title="low", impact="HIGH", effort="L", confidence="LOW", risk="HIGH"),
+        _f(title="additive", change_shape="additive"), _f(title="first"),
+        _f(title="consolidate", change_shape="consolidate"), _f(title="second"),
+        _f(title="reuse", change_shape="reuse"), _f(title="delete", change_shape="delete"),
+        _f(title="security", category="security"), _f(title="high", impact="HIGH", effort="S"),
+    ]
+    ordered = order_by_leverage(findings)
+    assert [finding["title"] for finding in ordered] == [
+        "high", "security", "delete", "reuse", "consolidate", "first", "second", "additive", "low",
+    ]
+    assert [finding["leverage"] for finding in ordered] == [3.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.24]
+
 
 def test_canonical_reuse_target_is_a_strong_cross_category_grouping_key() -> None:
     findings = [

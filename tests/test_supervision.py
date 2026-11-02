@@ -13,7 +13,6 @@ from daydream import review_profile
 from daydream.backends import ResultEvent
 from daydream.deep.artifacts import DeepArtifact, deep_dir, persist_review_coverage
 from daydream.deep.merge_steps import _step_supervise
-from daydream.deep.prompts import build_supervise_prompt
 from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 from daydream.flows.engine import FlowContext
@@ -24,11 +23,8 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import review_coverage
 
 
-@pytest.mark.parametrize("contract", [
-    pytest.param("nonempty", id="nonempty-host-coverage-completion"),
-])
-async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], contract: str,
+async def test_supervise_nonempty_admits_named_verdict_and_preserves_unrelated_faults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
     """Host completion preserves unrelated faults and admits only the named verdict."""
     registry = Registry()
@@ -48,15 +44,13 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
     alternatives.write_text("[]")
     items = [{"id": 1, "item_uid": "item:1", "lens": "per-stack", "file": "foo.py", "line": 1,
               "description": "finding", "severity": "high", "confidence": "HIGH", "rationale": "rationale",
-              "evidence": "foo.py:1", "related_files": None, "source_uids": None}] if contract == "nonempty" else []
-    if contract == "custom-builder":
-        registry.override_prompt("supervise", lambda **kwargs: build_supervise_prompt(**kwargs))
+              "evidence": "foo.py:1", "related_files": None, "source_uids": None}]
     returned_verdicts = [
         {"id": 1, "action": "edit", "reason": "Reduce severity", "severity": "low",
          "confidence": None, "description": None, "rationale": None, "evidence": None},
         {"id": 99, "action": "drop", "reason": "Stale target", "severity": None,
          "confidence": None, "description": None, "rationale": None, "evidence": None},
-    ] if contract == "nonempty" else []
+    ]
     backend = ScriptedBackend(events=[
         ResultEvent(structured_output={"verdicts": returned_verdicts}, continuation=None),
     ])
@@ -70,13 +64,11 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
               "merged_report": dd / "public-report.md"}, _backend_factory=lambda *_args: backend)
     await _step_supervise(ctx)
     outcome = coverage.phases["supervision"]
-    assert outcome["status"] == ("incomplete" if contract == "nonempty" else "complete")
-    assert outcome["reason_codes"] == ([ReasonCode.EVIDENCE_INCOMPLETE] if contract == "nonempty" else [])
-    assert json.loads(items_file.read_text())["items"] == ([{**items[0], "severity": "low"}] if items else [])
+    assert outcome["status"] == "incomplete"
+    assert outcome["reason_codes"] == [ReasonCode.EVIDENCE_INCOMPLETE]
+    assert json.loads(items_file.read_text())["items"] == [{**items[0], "severity": "low"}]
     assert json.loads((dd / "supervise-input.json").read_text()) == items
-    diagnostics = {"arbiter": "unresolved findings"}
-    if contract == "nonempty":
-        diagnostics["supervision"] = "evidence_incomplete"
+    diagnostics = {"arbiter": "unresolved findings", "supervision": "evidence_incomplete"}
     persisted = json.loads(DeepArtifact.REVIEW_COVERAGE.at(dd).read_text())
     assert coverage.diagnostics["phases"] == persisted["diagnostics"]["phases"] == diagnostics
-    assert backend.call_count == (0 if contract == "packaged" else 1)
+    assert backend.call_count == 1

@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -12,6 +14,15 @@ from daydream import redaction as redaction_mod
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
 from daydream.atif.models.content import ImageSource
 from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value, redactor as redactor_mod
+
+
+def _check_case(check: Callable[..., None], case: tuple[Any, ...]) -> None:
+    """Run one table row, naming it in the failure report."""
+    try:
+        check(*case)
+    except BaseException as error:
+        error.add_note(f"redaction case: {case!r}")
+        raise
 
 
 def _user_step(message: str) -> Step:
@@ -148,7 +159,7 @@ def test_json_key_collisions_preserve_entries_and_reserved_public_keys() -> None
          '[REDACTED_EXISTING]'),
         ('{{"type":"api_key","key":"{}"}}', '[REDACTED_LABEL]', (0, None), 'reserved-public-value'),
     ):
-        _assert_json_key_collisions_preserved(*case)
+        _check_case(_assert_json_key_collisions_preserved, case)
 
 
 def _assert_json_key_collisions_preserved(template: str, safe: str, values: tuple[object, object], existing: str,
@@ -173,6 +184,19 @@ def test_structured_text_boundaries_are_bounded_idempotent_and_identity_on_publi
     start = time.process_time()
     assert redact_structured_text(separators) == separators
     assert time.process_time() - start < 5
+    long_key = 'a' * 200_000 + '=x token=opaque-scan-canary'
+    start = time.process_time()
+    long_result = redact_structured_text(long_key)
+    assert time.process_time() - start < 5
+    assert long_result.startswith('a' * 200_000 + '=x token=') and 'opaque-scan-canary' not in long_result
+    # An internal semicolon cannot expose the residual of a sensitive assignment.
+    for name in ('api_key', 'TOKEN'):
+        residual = redact_structured_text(name + '=opaque-prefix-canary;opaque-tail-canary')
+        assert 'opaque-' not in residual and redact_structured_text(residual) == residual, name
+    assert redact_structured_text('TOKEN=a;API_KEY=b') == 'TOKEN=[REDACTED_ENV_VAR];API_KEY=[REDACTED_ENV_VAR]'
+    # An unterminated secret leaf inside a JSON string keeps the envelope valid and its siblings intact.
+    envelope = json.loads(redact_structured_text(json.dumps({'message': 'refresh_token="leaf-canary', 'count': 0})))
+    assert 'leaf-canary' not in json.dumps(envelope) and envelope['count'] == 0
     redacted = redact_structured_text('refresh_token:[REDACTED]opaque-first-canary&api_key=opaque-second-canary')
     assert redacted == 'refresh_token:[REDACTED]&api_key="[REDACTED_CREDENTIAL]"'
     assert redact_structured_text(redacted) == redacted
@@ -195,7 +219,7 @@ _NATIVE_TAGGED_CASES = (
 
 def test_native_tagged_credentials_use_context_without_masking_public_keys() -> None:
     for case in _NATIVE_TAGGED_CASES:
-        _assert_native_tagged_credential_redacted(*case)
+        _check_case(_assert_native_tagged_credential_redacted, case)
 
 
 def _assert_native_tagged_credential_redacted(kind: str, order: str, form: str, marked: bool) -> None:
@@ -311,8 +335,8 @@ _NATIVE_AUTH_FRAGMENT_CASES = (
 
 
 def test_native_auth_fragments_respect_observed_scope() -> None:
-    for kind, source, private, public in _NATIVE_AUTH_FRAGMENT_CASES:
-        _assert_native_auth_fragment_scope(kind, source, private, public)
+    for case in _NATIVE_AUTH_FRAGMENT_CASES:
+        _check_case(_assert_native_auth_fragment_scope, case)
 
 
 def _assert_native_auth_fragment_scope(kind: str, source: str, private: str, public: tuple[str, ...]) -> None:
@@ -329,49 +353,32 @@ def _assert_native_auth_fragment_scope(kind: str, source: str, private: str, pub
     assert redact_structured_text(result) == result
 
 
-@pytest.mark.parametrize(('kind', 'form'), [
-
-
-    ('oauth', 'quoted-log'),
-])
-def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, form: str) -> None:
-    field = 'key' if kind == 'api_key' else 'access'
+def test_native_only_copy_preserves_ordinary_ui_arguments_and_source() -> None:
+    """A quoted log carrying a native OAuth record redacts only the credential, not UI data or lone surrogates."""
     metadata = 'config: token=ordinary-search-pattern /home/operator/file.py'
-    credential = {'type': kind, field: '[REDACTED_API_KEY]opaque-ui-context-canary', 'metadata': metadata}
+    credential = {'type': 'oauth', 'access': '[REDACTED_API_KEY]opaque-ui-context-canary', 'metadata': metadata}
     public = {'key': 'ordinary-key', 'access': 'ordinary-access', 'refresh': 'ordinary-refresh',
-              'message': 'café 😀' if form == 'mapping' else chr(0xD800), chr(0xDFFF) + 'clé': 'café 😀'}
-    nested = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=form == 'mapping')
+              'message': chr(0xD800), chr(0xDFFF) + 'clé': 'café 😀'}
+    nested = json.dumps({'message': chr(0xD800), 'public': 'café 😀'}, ensure_ascii=False)
     payload = {**credential, 'data': credential, 'public': public, 'nested': nested,
                'usage': {'input': 0, 'output': None}}
-    source: object = payload if form == 'mapping' else json.dumps(payload)
-    if form == 'scalar':
-        source = json.dumps(source)
-    elif form == 'text-list':
-        source = [source, metadata]
-    elif form == 'quoted-log':
-        assert isinstance(source, str)
-        source = 'Read ' + json.dumps('data: ' + source)
+    source = 'Read ' + json.dumps('data: ' + json.dumps(payload))
     original = copy.deepcopy(source)
     result = redaction_mod.redact_native_auth_value(source)
     assert 'opaque-ui-context-canary' not in json.dumps(result)
     assert redaction_mod.redact_native_auth_value(result) == result and source == original
     decoded = result
-    if form == 'text-list':
-        assert isinstance(decoded, list) and decoded[1] == metadata
-        decoded = decoded[0]
-    if isinstance(decoded, str):
-        decoded.encode('utf-8')
-    if form == 'quoted-log':
-        assert isinstance(decoded, str) and decoded.startswith('Read ')
-        decoded = json.loads(decoded.removeprefix('Read '))
-        assert isinstance(decoded, str) and decoded.startswith('data: ')
-        decoded = decoded.removeprefix('data: ')
+    assert isinstance(decoded, str) and decoded.startswith('Read ')
+    decoded.encode('utf-8')
+    decoded = json.loads(decoded.removeprefix('Read '))
+    assert isinstance(decoded, str) and decoded.startswith('data: ')
+    decoded = decoded.removeprefix('data: ')
     while isinstance(decoded, str):
         decoded = json.loads(decoded)
     assert decoded['public'] == public and decoded['nested'] == nested
     assert decoded['usage'] == {'input': 0, 'output': None}
     assert decoded['data']['metadata'] == metadata
-    assert decoded[field] == decoded['data'][field] == '[REDACTED_API_KEY]'
+    assert decoded['access'] == decoded['data']['access'] == '[REDACTED_API_KEY]'
     containers = [{'key': 'ordinary-key'}, ({'key': 'ordinary-tuple-key'},)]
     copied = redaction_mod.redact_native_auth_value(containers)
     assert isinstance(copied, list) and isinstance(copied[1], tuple)
@@ -379,8 +386,8 @@ def test_native_only_copy_preserves_ordinary_ui_arguments_and_source(kind: str, 
     assert containers[0] == {'key': 'ordinary-key'}
 
 
-@pytest.mark.parametrize('nonfinite', ['NaN', ])
-def test_native_only_text_recovery_withholds_unrepresentable_credential_span(nonfinite: str) -> None:
+def test_native_only_text_recovery_withholds_unrepresentable_credential_span() -> None:
+    nonfinite = 'NaN'
     text = ('{"data":{"type":"api_key","key":"opaque-nonfinite-auth-canary","public":' + nonfinite
             + '},"other":{"key":"ordinary-sibling","count":0}} trailing')
     redacted = redaction_mod.redact_native_auth_value(text)
@@ -389,7 +396,6 @@ def test_native_only_text_recovery_withholds_unrepresentable_credential_span(non
     assert redaction_mod.redact_native_auth_value(redacted) == redacted
     ordinary = '{"key":"ordinary-key","public":' + nonfinite + '}'
     assert redaction_mod.redact_native_auth_value(ordinary) == ordinary
-
 
 
 def test_redactor_sanitizes_http_observation_and_preserves_its_layout() -> None:
@@ -422,13 +428,21 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
             message=(
                 f"RSA: {_PKCS1_PEM}\nPKCS8: {_PKCS8_PEM}\nEncrypted: {_ENCRYPTED_PEM}\n"
                 f"SSH: {_OPENSSH_PEM}\nEC: {_EC_PEM}\nDSA: {_DSA_PEM}\nCertificate: {certificate}\n"
-                "path=/Users/ka/github/proj/app.py\npath=/home/alice/foo/bar\npath=C:\\Users\\bob\\repo"
+                "path=/Users/ka/github/proj/app.py\npath=/home/alice/foo/bar\npath=C:\\Users\\bob\\repo\n"
+                f"Streamed: {_OPENSSH_PEM.rsplit('-----END', 1)[0]}"
             ),
             reasoning_content=(
                 f"thought: sk-test-secret123abc\nRSA_PRIVATE_KEY={_PKCS1_PEM}\nPKCS8_PRIVATE_KEY={_PKCS8_PEM}\n"
                 f"ENCRYPTED_PRIVATE_KEY={_ENCRYPTED_PEM}\nSSH_PRIVATE_KEY={_OPENSSH_PEM}\n"
-                f"EC_PRIVATE_KEY={_EC_PEM}\nDSA_PRIVATE_KEY={_DSA_PEM}"
+                f"EC_PRIVATE_KEY={_EC_PEM}\nDSA_PRIVATE_KEY={_DSA_PEM}\n"
+                "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345\n"
+                "installation ghs_abc123DEF456ghi789jkl012; Slack xoxb-test456abcdef\n"
+                "MONKEY_PATCH=enabled\nKEYBOARD_LAYOUT=qwerty\nAUTHOR=alice\nTOKENIZED=yes\nKEYSTORE=/etc/ks"
             ),
+            tool_calls=[ToolCall(tool_call_id="config", function_name="Configure", arguments={
+                "password": "opaque-plain-canary", "auth": {"metadata": "opaque-nested-canary"},
+                "max_tokens": 5, "tokenizer": "bpe", "passwordless": True, "keyStore": "ks",
+            })],
             observation=Observation(
                 results=[
                     ObservationResult(
@@ -468,13 +482,22 @@ def test_credential_rotation_diagnostic_redacts_independent_documents_and_preser
         "RSA: [REDACTED_PEM_KEY]\nPKCS8: [REDACTED_PEM_KEY]\nEncrypted: [REDACTED_PEM_KEY]\n"
         "SSH: [REDACTED_PEM_KEY]\nEC: [REDACTED_PEM_KEY]\nDSA: [REDACTED_PEM_KEY]\n"
         f"Certificate: {certificate}\npath=/Users/[REDACTED_USER]/github/proj/app.py\n"
-        "path=/home/[REDACTED_USER]/foo/bar\npath=C:\\Users\\[REDACTED_USER]\\repo"
+        "path=/home/[REDACTED_USER]/foo/bar\npath=C:\\Users\\[REDACTED_USER]\\repo\n"
+        "Streamed: [REDACTED_PEM_KEY]"
     )
     assert out.reasoning_content == (
         "thought: [REDACTED_API_KEY]\nRSA_PRIVATE_KEY=[REDACTED_ENV_VAR]\nPKCS8_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
         "ENCRYPTED_PRIVATE_KEY=[REDACTED_ENV_VAR]\nSSH_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
-        "EC_PRIVATE_KEY=[REDACTED_ENV_VAR]\nDSA_PRIVATE_KEY=[REDACTED_ENV_VAR]"
+        "EC_PRIVATE_KEY=[REDACTED_ENV_VAR]\nDSA_PRIVATE_KEY=[REDACTED_ENV_VAR]\n"
+        "jwt [REDACTED_JWT]\ninstallation [REDACTED_API_KEY]; Slack [REDACTED_API_KEY]\n"
+        # Lookalike names are ordinary configuration, not credentials.
+        "MONKEY_PATCH=enabled\nKEYBOARD_LAYOUT=qwerty\nAUTHOR=alice\nTOKENIZED=yes\nKEYSTORE=/etc/ks"
     )
+    # Sensitive keys redact plain values (and everything beneath them); lookalike keys keep their data.
+    assert out.tool_calls is not None and out.tool_calls[0].arguments == {
+        "password": "[REDACTED_CREDENTIAL]", "auth": {"metadata": "[REDACTED_CREDENTIAL]"},
+        "max_tokens": 5, "tokenizer": "bpe", "passwordless": True, "keyStore": "ks",
+    }
     assert out.observation is not None
     assert [(result.source_call_id, result.content) for result in out.observation.results] == [
         (

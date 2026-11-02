@@ -129,6 +129,10 @@ def test_ambiguous_create_failure_reconciles_before_returning(monkeypatch: pytes
     result = _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
     assert result.disposition == "reconciled"
     assert result.issue_url.endswith("/19")
+    # With no matching marker after the lost response, the timed-out create remains a failure.
+    monkeypatch.setattr(git_ops, "gh_issue_list_strict", lambda *args, **kwargs: [])
+    with pytest.raises(ImprovePublishError, match="no matching issue"):
+        _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 
 def test_duplicate_package_markers_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> None:
     _stub_existing_issue(monkeypatch, [_issue("reuse-handler", number=2), _issue("reuse-handler", number=3)],

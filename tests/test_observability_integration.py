@@ -83,11 +83,11 @@ def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", destination)
 
-@pytest.mark.parametrize("endpoint_setting", ["UPSTREAM_ENDPOINT"])
 async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malformed_unrelated_url(
-    endpoint_setting: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    endpoint_setting = "UPSTREAM_ENDPOINT"
     credentials = ("operator%2Fname", "operator/name", "opaque%2Fsecret", "opaque/secret")
     exposed_text = "Observed values: " + " then ".join(credentials)
     monkeypatch.setenv(endpoint_setting, "https://operator%2Fname:opaque%2Fsecret@service.test")

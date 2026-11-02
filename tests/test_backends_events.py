@@ -34,8 +34,12 @@ def test_admission_contract_construction_rejects_wrong_types() -> None:
         (OspreyRequestConfig, {"approval_mode": "on-request"}, "approval_mode"),
     ]
     for config_cls, kwargs, field_name in rejected:
-        with pytest.raises(ValueError, match=field_name):
-            config_cls(**kwargs)
+        try:
+            with pytest.raises(ValueError, match=field_name):
+                config_cls(**kwargs)
+        except BaseException as exc:
+            exc.add_note(f"case: {config_cls.__name__}({kwargs!r})")
+            raise
 
 def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
     for safe in ("opus", "claude-opus-4-5-20250901", "nous/deepseek-v4", "openai/gpt-5.2",

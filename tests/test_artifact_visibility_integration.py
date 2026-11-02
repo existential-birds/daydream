@@ -486,12 +486,12 @@ def _assert_archive_runs_empty(archive_dir: Path) -> None:
     runs = archive_dir / "runs"
     assert not runs.exists() or not list(runs.iterdir())
 
-@pytest.mark.parametrize("backend", ["osprey"])
 @pytest.mark.asyncio
 async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_once(
-    backend: str, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
     make_config: MakeConfig, archive_dir: Path,
 ) -> None:
+    backend = "osprey"
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()
@@ -501,8 +501,6 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
         backend, tmp_path / f"{backend} cancel protocol fixture", sanctioned_path, monkeypatch, tmp_path,
         response_mode="block",
     )
-    if backend == "pi":
-        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "1")
 
     explicit_trajectory = tmp_path / f"{backend} cancelled trajectory.json"
     config = _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory)

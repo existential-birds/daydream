@@ -229,11 +229,11 @@ async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
     assert "review completed during outage" in json.dumps(record["trajectories"]["value"])
 
 
-@pytest.mark.parametrize("interruption", ["wall"])
 async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
-    interruption: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    interruption = "wall"
     controls = {"supervisor": "", "tools": "tool_call_budget=0,", "wall": "wall_budget_s=0.5,"}[interruption]
     reason = {"supervisor": "tool_vetoed:Write", "tools": "tool_call_budget_exceeded", "wall": "wall_budget_exceeded"}[
         interruption

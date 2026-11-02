@@ -11,6 +11,7 @@ from claude_agent_sdk import ClaudeAgentOptions, CLINotFoundError, HookMatcher
 
 from daydream.atif import validate
 from daydream.backends import (
+    AuditIsolationError,
     BackendExecutionInput,
     ClaudeRequestConfig,
     ContinuationToken,
@@ -24,6 +25,7 @@ from daydream.backends import (
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
+    create_backend,
 )
 from daydream.backends.claude import (
     ClaudeAgentError,
@@ -366,6 +368,7 @@ async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path)
 
 
 async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: Any, tmp_path: Path) -> None:
+    """Unsafe audit calls fail before any client; a safe one is bound to the snapshot root's Git identity."""
     root = tmp_path / "audit"
     root.mkdir()
     other = tmp_path / "other"
@@ -382,9 +385,26 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: 
             async for _ in backend.execute(cwd, "audit", **kwargs):
                 pass
         assert "options" not in captured
-
-
-# fanout_concurrency
+    # Only Claude has the snapshot-root tool boundary; the factory refuses every other audit backend.
+    for name in ("codex", "pi", "osprey"):
+        with pytest.raises(AuditIsolationError) as refused:
+            create_backend(name, audit_root=root)
+        assert (refused.value.backend_name, refused.value.reason) == (name, "unsupported_backend")
+    with pytest.raises(ValueError, match="Unknown backend"):
+        create_backend("invalid", audit_root=root)
+    # A safe audit pins every Git redirect to the snapshot root instead of ambient or source values.
+    async for _ in backend.execute(root, "audit", read_only=True):
+        pass
+    env = captured["options"].env
+    git_dir = root / ".git"
+    assert {key: env[key] for key in ("PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                                      "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                                      "GIT_CEILING_DIRECTORIES", "GIT_PREFIX")} == {
+        "PWD": str(root), "OLDPWD": str(root), "GIT_DIR": str(git_dir), "GIT_WORK_TREE": str(root),
+        "GIT_INDEX_FILE": str(git_dir / "index"), "GIT_OBJECT_DIRECTORY": str(git_dir / "objects"),
+        "GIT_COMMON_DIR": str(git_dir), "GIT_ALTERNATE_OBJECT_DIRECTORIES": "",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path), "GIT_PREFIX": "",
+    }
 
 
 # --- Session continuation via SDK resume --------------------------------------
@@ -398,12 +418,33 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any) -> None:
     """
     profile_commands = {
         True: [
+            ("git log --grep='fix|bug'", True), ("git log", True), ("git blame -L 10,10 src.py", True),
+            ("git show 648a327 -- src.py", True), ("git diff HEAD~1 HEAD -- --output", True),
+            ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
             ("git ls-files -z --cached --others --exclude-standard -- src", True),
-            ("git commit -m x", False), ("cat foo\rrm x", False), ("cat f | tee g", False),
-            ("git log --output log.txt", False), ("(rm x)", False), ("git log 'unclosed", False),
+            ("cat foo(1).txt", True), ("ls -la", True),
+            ("git commit -m x", False), ("git reset --hard HEAD", False), ("rm -rf build", False),
+            ("ls \nrm -rf /", False), ("cat foo\rrm x", False), ("daydream search-other symbol src", False),
+            ("daydream search symbol src > evidence.json", False), ("git status && rm x", False),
+            ("cat f | tee g", False), ("git log; rm x", False), ("echo $(rm x)", False),
+            ("git log foo# > status.txt", False), ("cat < README.md", False),
+            ("git diff --output=diff.patch", False), ("git log --output log.txt", False), ("(rm x)", False),
+            ("git log\nrm x", False), ("git log 'unclosed", False), ("git logfoo", False), ("", False),
         ],
-        False: [("rm -f -r /", False)],
+        False: [
+            ("find / -name y", False), ("grep -r pattern /", False), ("rm --force --recursive /", False),
+            ("rm -f -r /", False), ("rm -Rf /", False), ("rm -i -r /*", False), ("rm -rf foo /", False),
+            ("rm -rf /home/user/tmp", True), ("grep / file.txt", True),
+            ("find core/osprey-tui -name agent.rs", True),
+        ],
     }
+    # The read-only matcher covers every tool and fails closed on mutating, unknown or malformed calls.
+    read_only_payloads: list[tuple[Any, bool]] = [
+        ({"tool_name": "Read", "tool_input": {"file_path": "x"}}, True),
+        ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, False),
+        ({"tool_name": "FutureMutator", "tool_input": {}}, False), ({"tool_name": "Bash"}, False),
+        ({"tool_name": "Bash", "tool_input": "malformed"}, False), (None, False),
+    ]
     for read_only, commands in profile_commands.items():
         backend, captured = _capturing_backend(patch_sdk)
         async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
@@ -414,12 +455,15 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any) -> None:
         assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
         assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
         matcher = captured["options"].hooks["PreToolUse"][0]
-        for command, allowed in commands:
-            response = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": command}})
-            assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
+        payloads = [({"tool_name": "Bash", "tool_input": {"command": command}}, allowed)
+                    for command, allowed in commands] + (read_only_payloads if read_only else [])
+        for payload, allowed in payloads:
+            response = await _decide(matcher, payload)
+            denied = response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+            assert denied is (not allowed), (read_only, payload)
             if not allowed:
                 reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-                assert ("read-only guard" if read_only else "dangerous command blocked") in reason
+                assert ("read-only guard" if read_only else "dangerous command blocked") in reason, payload
         deny_bg = await _decide(
             matcher, {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}},
         )
@@ -583,6 +627,21 @@ async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(
     document = json.loads(recorder.path.read_text())
     steps = [step for step in document["steps"] if step["source"] == "agent"]
     assert steps[0]["message"] == "Checking" and steps[0]["reasoning_content"] == "Inspect the file"
+
+    # A foreign token starts cold; an unpersisted session mints no continuation; partial terminal
+    # usage keeps unknown output unknown and emits no per-message metrics.
+    patch_claude_sdk(monkeypatch, scripted_client([
+        MockAssistantMessage(content=[MockTextBlock("Partial")], usage={"input_tokens": 100}),
+        MockResultMessage(total_cost_usd=0.001, session_id="sess-9", usage={"input_tokens": 100}),
+    ], captured=captured))
+    foreign = ContinuationToken(backend="codex", data={"thread_id": "th-1", "session_id": "foreign-session"})
+    third = [event async for event in backend.execute(target, "Review", continuation=foreign,
+                                                      persist_session=False)]
+    assert captured["options"].resume is None
+    assert next(event for event in third if isinstance(event, ResultEvent)).continuation is None
+    assert not any(isinstance(event, MetricsEvent) for event in third)
+    cost = next(event for event in third if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens, cost.cost_usd) == (100, None, 0.001)
     assert [(call["tool_call_id"], call["function_name"], call["arguments"]) for call in steps[0]["tool_calls"]] == [
         ("read", "Read", {"file": "source.py"}),
     ]

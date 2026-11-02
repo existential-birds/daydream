@@ -2,7 +2,6 @@
 stdout, wait, returncode, terminate, and kill.
 """
 
-import asyncio
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -22,20 +21,6 @@ async def replay_process(
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process) as spawn:
         events = [event async for event in backend.execute(cwd, prompt, **options)]
     return events, spawn
-
-
-class GapThenBlockingStdout:
-    """A stdout that yields one parser-gap line, then blocks forever."""
-
-    def __init__(self) -> None:
-        self.sent_gap = False
-
-    async def readline(self) -> bytes:
-        if not self.sent_gap:
-            self.sent_gap = True
-            return b'{"type":"future.before.stall"}\n'
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
 
 
 def make_mock_process(lines: list[str], *, writable_stdin: bool) -> MagicMock:

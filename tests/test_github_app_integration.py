@@ -1,8 +1,6 @@
-"""Real-path test for GitHub App identity (01-app-identity).
+"""Posting with GitHub App credentials aborts before minting when owner/repo is undeterminable.
 
-Enters from runner.run() with a real temp git repo, real filesystem, real event
-loop. Uses the fake gh transport and Backend (no real AI), with token minting
-stubbed. Asserts observable banner output and run-owned auth behavior.
+Also hosts the minimal scripted review backend that CLI and workspace tests import.
 """
 from __future__ import annotations
 
@@ -20,11 +18,6 @@ from tests.harness.fake_gh import FakeGh
 from tests.harness.stub_backend import review_stage_result
 
 
-@pytest.fixture(autouse=True)
-def _fake_github(fake_gh: FakeGh, feature_branch_repo: Path) -> None:
-    fake_gh.serve_open_pr(feature_branch_repo)
-
-
 def _minimal_backend() -> ScriptedBackend:
     """Responder-backed fake: structured calls get an empty issue list, else prose."""
 
@@ -40,11 +33,6 @@ def _minimal_backend() -> ScriptedBackend:
     return ScriptedBackend(responder=respond, model="mock")
 
 
-@pytest.fixture(autouse=True)
-def _fake_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
-
-
 def _app_creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY",
@@ -53,7 +41,7 @@ def _app_creds(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_posting_aborts_when_owner_repo_undeterminable(
-    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake_gh: FakeGh,
 ) -> None:
     _app_creds(monkeypatch)
 
@@ -67,3 +55,4 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
     assert exit_code == 1
     assert "Cannot determine owner/repo" in out
     assert not mock_mint.called
+    assert fake_gh.process_calls() == []  # no gh request can fall back to ambient authentication

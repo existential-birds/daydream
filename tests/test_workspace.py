@@ -142,31 +142,17 @@ async def test_unsafe_operational_root_rejects_before_fetch_mutation(tmp_path: P
     assert not any("worktree " in line for line in _git(repo, "worktree", "list", "--porcelain").splitlines()[1:])
 
 
-@pytest.mark.parametrize("namespace_shape", ["ancestor-file", ],
-)
-async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tmp_path: Path, namespace_shape: str,
-) -> None:
+async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tmp_path: Path) -> None:
+    """A file occupying the public ``.daydream`` namespace rejects before any worktree mutation."""
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
     outside = tmp_path / "outside"
     name = "run-outside-reanchor"
-    if namespace_shape.startswith("ancestor"):
-        external = outside / "worktrees" / name
-    else:
-        external = outside / name
+    external = outside / "worktrees" / name
     git_ops.worktree_add(repo, external, "main", detach=True)
     canary = external / "operator.bin"
     canary.write_bytes(b"outside operator bytes\x00")
-    if namespace_shape == "ancestor-symlink":
-        (repo / ".daydream").symlink_to(outside, target_is_directory=True)
-    elif namespace_shape == "terminal-symlink":
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").symlink_to(outside, target_is_directory=True,)
-    elif namespace_shape == "ancestor-file":
-        (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
-    else:
-        (repo / ".daydream").mkdir()
-        (repo / ".daydream" / "worktrees").write_bytes(b"operator namespace bytes\x00")
+    (repo / ".daydream").write_bytes(b"operator namespace bytes\x00")
     before = _git(repo, "worktree", "list", "--porcelain")
 
     with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
@@ -174,11 +160,7 @@ async def test_open_workspace_rejects_linked_public_namespace_before_mutation(tm
             pass
 
     assert canary.read_bytes() == b"outside operator bytes\x00"
-    if namespace_shape.endswith("file"):
-        unsafe_file = repo / ".daydream"
-        if namespace_shape == "terminal-file":
-            unsafe_file /= "worktrees"
-        assert unsafe_file.read_bytes() == b"operator namespace bytes\x00"
+    assert (repo / ".daydream").read_bytes() == b"operator namespace bytes\x00"
     assert _git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational" / name).exists()
 
@@ -207,40 +189,32 @@ def _ignore(repo: Path, *patterns: str, message: str = "ignore env") -> None:
     _commit(repo, message)
 
 
-@pytest.mark.parametrize("root_kind", ["destination"])
-def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    outside_dir = tmp_path / "outside"
-    outside_dir.mkdir()
-    secret = outside_dir / "secret.txt"
-    secret.write_text("KEEP\n")
-    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
-    (repo / "sub").mkdir()
+def test_copy_rejects_resolved_symlink_escape(tmp_path: Path) -> None:
+    """A source- or destination-side symlink escaping its worktree is rejected before any write."""
+    for root_label in ("source", "destination"):
+        repo, _ = _make_repo_with_origin(tmp_path / root_label)
+        outside_dir = tmp_path / root_label / "outside"
+        outside_dir.mkdir()
+        secret = outside_dir / "secret.txt"
+        secret.write_text("KEEP\n")
+        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
+        dest = _dest(tmp_path / root_label)
+        if root_label == "source":
+            # The source-side "sub" is a symlink escaping the checkout.
+            (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
+            (dest / "sub").mkdir()
+        else:
+            # The source has a real nested file; the destination-side "sub" escapes the worktree.
+            (repo / "sub").mkdir()
+            (repo / "sub" / "leak.txt").write_text("real\n")
+            (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
 
-    dest = _dest(tmp_path)
-    (dest / "sub").mkdir()
+        with pytest.raises(WorkspaceCopyPathError, match=f"resolves outside the {root_label} worktree"):
+            copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
 
-    if root_kind == "source":
-        # The SOURCE-side "sub" is a symlink escaping the checkout. Do not
-        # write the real nested file first -- the directory is replaced by the
-        # symlink below.
-        (repo / "sub").rmdir()
-        (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "source"
-    else:
-        # The source has a real nested file (passes source containment); the
-        # DESTINATION-side "sub" is a symlink escaping the worktree.
-        (repo / "sub" / "leak.txt").write_text("real\n")
-        (dest / "sub").rmdir()
-        (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
-        root_label = "destination"
-
-    with pytest.raises(WorkspaceCopyPathError, match=f"resolves outside the {root_label} worktree",):
-        copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
-
-    # Nothing was written into the escaped directory.
-    assert not (outside_dir / "leak.txt").exists()
-    assert secret.read_text() == "KEEP\n"
+        # Nothing was written into the escaped directory.
+        assert not (outside_dir / "leak.txt").exists(), root_label
+        assert secret.read_text() == "KEEP\n"
 
 
 def _audit_source_signature(repo: Path) -> tuple[object, ...]:

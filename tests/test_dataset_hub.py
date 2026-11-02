@@ -250,10 +250,10 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
     assert not (destination / "source.json").exists()
 
 
-@pytest.mark.parametrize("version", ["daydream.hub.v2"])
 def test_supported_publication_refuses_historical_manifests_without_rewriting_history(
-    tmp_path: Path, api: Any, version: str,
+    tmp_path: Path, api: Any,
 ) -> None:
+    version = "daydream.hub.v2"
     from tests.harness.dataset_hub import FakeDatasetHub
 
     hub = FakeDatasetHub()

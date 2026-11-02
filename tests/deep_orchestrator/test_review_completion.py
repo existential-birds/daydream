@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from dataclasses import replace
@@ -24,7 +25,8 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, 
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import bare_remote, git, init_repo
+from tests.test_artifact_visibility import _Entry, _walk_entry
 from tests.test_deep_orchestrator import _pin_findings_pr, _record
 from tests.test_pr_review import _recording_fake_submit
 
@@ -130,9 +132,36 @@ async def test_comment_pins_pr_head_independently_and_excludes_local_edits(
     assert (review.repo / 'untracked.py').read_text() == 'LOCAL_UNTRACKED = True\n'
 
 
-@pytest.mark.parametrize('case', ['dirty-no-diff'])
+@pytest.mark.parametrize('case', ['dirty-no-diff', 'live'])
 async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
-    """A dirty checkout with no committed diff replaces prior reports without reviewing local edits."""
+    """Analysis stays bound to the captured snapshot: dirty edits and a mid-run PR head advance never rebind it.
+
+    'live' is a runner row: only a real review whose PR head moves after capture proves the pinned
+    head is still analyzed and placed, with one lookup.
+    """
+    if case == 'live':
+        live, calls = review.pr, []
+
+        def lookup(*_a: Any, **_k: Any) -> Any:
+            calls.append(live)
+            return live
+
+        def advance(_prompt: str) -> None:
+            nonlocal live
+            live = replace(review.pr, head_sha=review.pr.base_sha)
+
+        review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
+        review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
+                                            review_by_stack={'structure': [record()]}, responder=advance)
+        assert await review.run() == 0
+        data = review.load()
+        result = data['terminal_result']
+        assert result['analysis_state'] == 'complete'
+        assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
+        assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
+        assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
+        assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
+        return
     prior = {'.daydream/deep/history.json': '{"prior": true}\n',
              '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
              '.daydream/recommended.patch': 'prior recommended patch\n',
@@ -146,8 +175,7 @@ async def test_snapshot_boundaries(review: ReviewRun, case: str) -> None:
     review.pr = _pin_findings_pr(review.patch, review.repo)
     (review.repo / 'api.py').write_text('DIRTY = True\n')
     assert await review.run() == 0
-    data = review.load()
-    result = data['terminal_result']
+    result = review.load()['terminal_result']
     assert result['analysis_state'] == 'complete'
     assert review.backend.calls == []
     assert (review.repo / 'api.py').read_text() == 'DIRTY = True\n'
@@ -220,29 +248,44 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str)
                        or 'evaluate the implementation' in c['prompt'].lower() for c in review.backend.calls)
 
 
-async def test_required_phase_faults(review: ReviewRun) -> None:
-    """An empty required intent result fails analysis with a typed reason and publishes no findings."""
+@pytest.mark.parametrize(('phase', 'reason'), [('intent-empty', 'missing_output'), ('malformed', 'malformed_output')])
+async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
+    """Required-phase output faults are typed; only post-admission faults keep admitted findings.
+
+    The supervisor row is a runner row: only real admission followed by a failed required
+    supervision phase proves that admitted findings survive with an incomplete analysis.
+    """
     from tests.harness.review_profile import independent_alternatives_profile
 
     def response(prompt: str) -> Any:
-        if 'present your understanding concisely' in prompt.lower():
+        lower = prompt.lower()
+        if phase == 'intent-empty' and 'present your understanding concisely' in lower:
             return [ResultEvent(structured_output=None, continuation=None)]
+        if phase == 'malformed' and 'supervisor adjudication' in lower:
+            return [ResultEvent(structured_output={'verdicts': [None]}, continuation=None)]
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
                                         review_by_stack={'structure': [record()]}, responder=response)
     review.backend.merge_echo_records = True
-    review.config = replace(review.config, review_profile=independent_alternatives_profile())
+    if phase == 'intent-empty':
+        review.config = replace(review.config, review_profile=independent_alternatives_profile())
     with pytest.raises(ReviewOutputError) as raised:
         await review.run()
-    assert raised.value.reason_code == 'missing_output'
+    assert raised.value.reason_code == reason
     data = review.load()
     result = data['terminal_result']
-    assert (result['pipeline_state'], result['analysis_state']) == ('failed', 'failed')
-    assert 'missing_output' in result['reason_codes']
-    assert data['findings'] == []
+    admitted = phase == 'malformed'
+    assert (result['pipeline_state'], result['analysis_state']) == ('failed', 'incomplete' if admitted else 'failed')
+    assert reason in result['reason_codes']
+    assert [f['title'] for f in data['findings']] == (['Grounded defect'] if admitted else [])
+    if admitted:
+        outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'supervision')
+        assert (outcome['status'], outcome['reason_codes']) == ('failed', [reason])
+        assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
 
 
+# Runner rows: only the real supervision investigation deadline decides whether a late result is admitted.
 @pytest.mark.parametrize(('late_event', 'offset'), [
-    ('native-start', 1)], ids=['after-deadline-native-start'])
+    ('legacy-result', 0), ('native-start', 1)], ids=['at-deadline-legacy-result', 'after-deadline-native-start'])
 async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
     review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
     import re
@@ -310,9 +353,12 @@ async def test_late_supervision_events_cannot_supply_reserved_finalization_or_re
         assert starts.count('expired-native-submit') == 1
 
 
-@pytest.mark.parametrize('fault', ['absent-install', 'staging'])
+@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
 async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
-    assert not review.output.exists()
+    """A failed public install or staging leaves the destination absent or byte-identical to the prior export."""
+    if fault == 'prior-install':
+        assert await review.run() == 0
+    prior = review.output.read_bytes() if review.output.exists() else None
     output_parent = review.output.parent.stat()
     link, stage, allocate = os.link, json_utils._stage_bytes, tempfile.mkstemp
     injected: list[bool] = []
@@ -344,44 +390,66 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
         review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
         review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     assert await review.run() == 1 and injected
-    assert not review.output.exists()
+    assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage'])
+# Source-loss and replacement-checkout rows are runner rows: only the real terminal export after
+# admission can lose its checkout, read retained bytes, and install privately.
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'source-loss-salvage',
+                                   'placement-replacement-worktree'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
-    """Provider failure after admission publishes typed coverage atomically or not at all."""
+    """Provider failure after admission publishes typed coverage atomically, never live or replaced Git."""
+    force_worktree = fault.endswith('-worktree')
+    if force_worktree:
+        git(review.repo, 'remote', 'add', 'origin', str(bare_remote(review.tmp / 'origin.git')))
+        git(review.repo, 'push', 'origin', 'main')
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
-    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    show = git_ops.show
+    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': [], 'export': None}
     staging_coverage = False
-
+    real_run = subprocess.run
+    placement_fault = 'placement' in fault
+    def fault_at_placement(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if (placement_fault and state['failed']
+                and args == ['git', 'diff', '--name-only', '-z', review.pr.base_sha, review.pr.head_sha]):
+            assert not state.get('dispatch_injected')
+            state['dispatch_injected'] = True
+            review.repo.rename(review.tmp / 'removed-source')
+            init_repo(review.repo)
+            (review.repo / 'replacement.bin').write_bytes(b'replacement\x00\xff')
+            state['replacement_git'] = []
+            _walk_entry(review.repo, review.repo / '.git', state['replacement_git'])
+        return real_run(args, **kwargs)
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
         staging_coverage = path.name == 'review-coverage.json'
-        if staging_coverage:
+        if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
+        if b'"terminal_result"' in content:
+            state['export'] = (path, content)
         try:
             return stage(path, content, **kwargs)
         finally:
             staging_coverage = False
-
     def fail_allocation(*args: Any, **kwargs: Any) -> tuple[int, str]:
         if fault == 'coverage' and staging_coverage:
             raise OSError('coverage staging failed')
         return allocate(*args, **kwargs)
-
     def observe_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
         if path.name == 'merged-items.json':
             state['merged'] = path
         return write(path, text, *args, **kwargs)
-
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
         if state['failed'] and fault == 'salvage' and path.name == 'stack-structure-records.json':
             state['rejected'] = True
             return '{"issues": "invalid"}'
         return text
-
+    def retained_source_only(target: Path, *args: Any, **kwargs: Any) -> bytes:
+        if target == review.repo and fault == 'source-loss-salvage' and state['failed']:
+            pytest.fail('terminal export attempted to read live Git after source loss')
+        return show(target, *args, **kwargs)
     def response(prompt: str) -> Any:
         trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue'}.get(
             fault, 'supervisor adjudication')
@@ -390,14 +458,20 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
             if fault == 'salvage':
                 assert json.loads(state['merged'].read_text())['items']
                 state['merged'].unlink()
+            if fault == 'source-loss-salvage':
+                state['admitted'] = json.loads(state['merged'].read_text())['items'][0]
+                state['merged'].unlink()
+                review.repo.rename(review.tmp / 'removed-source')
             return [error]
-
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
     review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     review.patch.setattr(Path, 'write_text', observe_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
-    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
-                                        review_by_stack={'structure': [record()]}, responder=response)
+    review.patch.setattr(git_ops, 'show', retained_source_only)
+    review.patch.setattr('daydream.git_ops.process.subprocess.run', fault_at_placement)
+    stack = 'python' if force_worktree else 'structure'
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False, forbid_merge=stack != 'python',
+                                       review_by_stack={stack: [record()]}, responder=response)
     review.backend.merge_echo_records = True
     if fault == 'fix':
         assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
@@ -409,21 +483,70 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert 'pipeline' not in saved['required_phases']
         return
     with pytest.raises(RuntimeError) as raised:
-        await review.run()
+        await review.run(dataset_capture=fault == 'source-loss-salvage',
+                         dataset_store_path=review.tmp / 'records', force_worktree=force_worktree)
     assert raised.value is error
+    if placement_fault:
+        assert state.get('dispatch_injected')
+    if placement_fault:
+        assert not review.output.exists()
+        assert state['export'] is not None
+        private_path, private_bytes = state['export']
+        assert private_path.read_bytes() == private_bytes
+        retained = json.loads(private_bytes)
+        assert retained['terminal_result']['analysis_state'] == 'incomplete'
+        assert retained['findings'][0]['title'] == 'Grounded defect'
+        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
+        assert any('ArtifactVisibilityError' in note for note in error.__notes__)
+        after: list[_Entry] = []
+        _walk_entry(review.repo, review.repo / '.git', after)
+        assert after == state['replacement_git']
+        assert (review.repo / 'replacement.bin').read_bytes() == b'replacement\x00\xff'
+        return
+    if fault == 'source-loss-salvage':
+        assert not review.repo.exists()
+        assert not review.output.exists()
+        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs
+        assert len(raw) == 1 and raw[0]['outcome'] == 'failed'
+        findings = raw[0]['findings']['value']
+        assert len(findings['items']) == 1
+        assert findings['items'][0]['description'] == 'Grounded defect'
+        assert findings['items'][0]['item_uid'] == state['admitted']['item_uid']
+        assert findings['items'][0]['source_uids'] == state['admitted']['source_uids']
+        coverage = findings['terminal_coverage']
+        assert coverage['run_id'] == raw[0]['run_id']
+        assert coverage['analyzed_revision']['head_sha'] == review.pr.head_sha
+        assert coverage['analyzed_revision']['merge_base_sha'] == review.pr.base_sha
+        assert coverage['analyzed_revision']['diff_key'] == raw[0]['original_task']['value']['diff_sha256']
+        assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
+        assert state['export'] is not None, 'validated terminal findings were not installed privately'
+        export_path, exported_bytes = state['export']
+        assert export_path.read_bytes() == exported_bytes
+        exported = json.loads(exported_bytes)
+        assert len(exported['findings']) == 1 and exported['findings'][0]['title'] == 'Grounded defect'
+        assert (exported['findings'][0]['placement'], exported['findings'][0]['line']) == ('inline', 2)
+        result = exported['terminal_result']
+        assert result['stack_outcomes'] == coverage['stack_outcomes']
+        assert result['run_id'] == coverage['run_id']
+        assert result['analyzed_revision'] == coverage['analyzed_revision']
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'incomplete', True)
+        assert any('secondary base failure' in note for note in error.__notes__)
+        assert 'Terminal review finalization failed' not in collapse_panel_text(capsys)
+        return
     if fault == 'coverage':
         assert state['writes'] and not review.output.exists()
         assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)
         with pytest.raises(FindingsValidationError):
             review.load()
-        return
-    data = review.load()
-    result = data['terminal_result']
-    assert state['rejected'] and data['findings'] == []
-    assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
-        'failed', 'failed', False)
-    assert all(s['status'] == 'complete' for s in scopes(data).values())
-    phases = {p['phase']: p for p in result['phase_outcomes']}
-    assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
-    assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
-        ['backend_failure'], ['malformed_artifact'])
+    else:
+        data = review.load()
+        result = data['terminal_result']
+        assert state['rejected'] and data['findings'] == []
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'failed', False)
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        phases = {p['phase']: p for p in result['phase_outcomes']}
+        assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
+        assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
+            ['backend_failure'], ['malformed_artifact'])

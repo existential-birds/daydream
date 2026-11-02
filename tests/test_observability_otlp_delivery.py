@@ -124,13 +124,11 @@ def test_http_success_ack_is_delivered_once(monkeypatch: pytest.MonkeyPatch) -> 
             assert content_types == [response.headers.get("Content-Type")]
 
 
-@pytest.mark.parametrize(("response", "secret"), [
-    pytest.param(ScriptedResponse(body=b"\x00opaque-garbage-body\x01"), "opaque-garbage", id="undecodable-protobuf"),
-])
 def test_http_terminal_ack_is_unverified_without_logging_body(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    response: ScriptedResponse, secret: str | None,
 ) -> None:
+    response = ScriptedResponse(body=b"\x00opaque-garbage-body\x01")
+    secret = "opaque-garbage"
     with scripted_otlp_collector([response]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -140,8 +138,7 @@ def test_http_terminal_ack_is_unverified_without_logging_body(
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0
         assert snapshot["unverified"] == 1
-        if secret is not None:
-            assert secret not in caplog.text
+        assert secret not in caplog.text
 
 
 def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,15 +165,15 @@ def test_http_partial_success_positive_rejection_is_terminal_no_retry(monkeypatc
         assert snapshot["rejected"] == 3
         assert snapshot["delivered"] == 0
 
-@pytest.mark.parametrize(("status", "retryable"), [(408, False), ])
-def test_http_retry_only_for_429_502_503_504(monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool) -> None:
+def test_http_408_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = 408
     with scripted_otlp_collector([ScriptedResponse(status=status), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
         result = exporter.export(_spans())
-        assert result == (SpanExportResult.SUCCESS if retryable else SpanExportResult.FAILURE), status
+        assert result == SpanExportResult.FAILURE, status
         exporter.shutdown()
-        assert len(receiver.requests) == (2 if retryable else 1), status
+        assert len(receiver.requests) == 1, status
 
 def test_http_retry_after_seconds_and_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
     """One owned retry loop preserves the batch through every admitted response class."""
@@ -287,40 +284,35 @@ def _generic_grpc(
             exporter.shutdown()
 
 
-@pytest.mark.parametrize("persistent", [True], ids=["retry-exhausted"])
 def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(
-    monkeypatch: pytest.MonkeyPatch, persistent: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Valid RetryInfo allows one retry; repeated exhaustion cannot enter SDK backoff."""
     attempts = {"n": 0}
 
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         attempts["n"] += 1
-        if attempts["n"] == 1 or persistent:
-            retry = error_details_pb2.RetryInfo()
-            retry.retry_delay.FromSeconds(0)
-            detail = any_pb2.Any()
-            detail.Pack(retry)
-            context.send_initial_metadata(())
-            context.set_trailing_metadata((("grpc-status-details-bin", detail.SerializeToString()),))
-            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted")
+        retry = error_details_pb2.RetryInfo()
+        retry.retry_delay.FromSeconds(0)
+        detail = any_pb2.Any()
+        detail.Pack(retry)
+        context.send_initial_metadata(())
+        context.set_trailing_metadata((("grpc-status-details-bin", detail.SerializeToString()),))
+        context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted")
         return ExportTraceServiceResponse()
 
     with _generic_grpc(monkeypatch, receive) as exporter:
-        expected = SpanExportResult.FAILURE if persistent else SpanExportResult.SUCCESS
-        assert exporter.export(_spans()) == expected
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
         exporter.shutdown()
         assert attempts["n"] == 2  # one owned retry under valid RetryInfo
         snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == (0 if persistent else 1)
-        assert snapshot["unverified"] == (1 if persistent else 0)
-        assert snapshot["diagnostics"] == (["OTLP_GRPC_RETRY_BUDGET_EXHAUSTED"] if persistent else [])
+        assert snapshot["delivered"] == 0
+        assert snapshot["unverified"] == 1
+        assert snapshot["diagnostics"] == ["OTLP_GRPC_RETRY_BUDGET_EXHAUSTED"]
 
-@pytest.mark.parametrize(
-    ("status", "message"), [(grpc.StatusCode.UNAVAILABLE, "down")],
-)
-def test_grpc_terminal_status_is_not_retried(monkeypatch: pytest.MonkeyPatch, status: grpc.StatusCode, message: str
-) -> None:
+def test_grpc_terminal_status_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    status = grpc.StatusCode.UNAVAILABLE
+    message = "down"
     attempts = {"n": 0}
 
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:

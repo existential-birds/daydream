@@ -46,10 +46,10 @@ async def test_parse_preserves_structural_partition_on_resume(
     assert ctx.data["record_pool"].language == []
 
 
-@pytest.mark.parametrize("start_at", [None, ])
 async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
+    start_at = None
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
     artifacts = [dd / name for name in ("stack-structure-records.json", "stack-structure-review.md",)]
@@ -223,9 +223,8 @@ def test_report_collection_admits_only_valid_author_context(tmp_path: Path) -> N
         assert collected['verification'] == {'status': 'unproduced', 'value': None}
 
 
-@pytest.mark.parametrize('shape', ['padding', ])
 def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identity(
-    tmp_path: Path, shape: str,
+    tmp_path: Path,
 ) -> None:
     """Bound aggregate handoff size while explicitly accounting for omitted existing evidence."""
     from daydream.deep.report_context import collect_report_context
@@ -245,8 +244,7 @@ def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identi
     names = ('test-verdict.json', 'remote-ci-verdict.json', 'fix-outcomes.json', 'fix-failures.json',
              'fix-quality-gate.json', 'recommended-capture.json')
     for name in names:
-        payload = ({'existing_evidence': name, 'padding': 'x' * 60_000} if shape == 'padding' else
-                   {'paths': [['x']] * 10_000})
+        payload = {'existing_evidence': name, 'padding': 'x' * 60_000}
         (tmp_path / name).write_text(json.dumps(payload, separators=(',', ':')))
     captured = collect_report_context(tmp_path, coverage.to_dict())
     assert 0 < len(captured['scopes']) < 32
@@ -255,10 +253,7 @@ def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identi
     verification = captured['verification']
     assert verification['status'] == 'failed' and verification['omitted_artifacts']
     assert set(verification['omitted_artifacts']) | set(verification['value']) >= set(names)
-    if shape == 'padding':
-        assert {'test-verdict.json', 'remote-ci-verdict.json'} <= verification['value'].keys()
-    else:
-        assert set(verification['omitted_artifacts']) >= set(names)
+    assert {'test-verdict.json', 'remote-ci-verdict.json'} <= verification['value'].keys()
     output = tmp_path / 'findings.json'
     write_findings_artifact(output, findings_artifact(
         review_context=captured, terminal_result=coverage.finalize('completed')))

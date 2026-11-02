@@ -33,10 +33,8 @@ def store(tmp_path: Path) -> LocalRecordStore:
     return result
 
 
-@pytest.mark.parametrize("trace_fields", [{"trace_id": "0123456789abcdef0123456789abcdef"}])
-def test_current_records_read_all_history_without_creating_snapshot(
-    store: LocalRecordStore, trace_fields: dict[str, Any],
-) -> None:
+def test_current_records_read_all_history_without_creating_snapshot(store: LocalRecordStore) -> None:
+    trace_fields = {"trace_id": "0123456789abcdef0123456789abcdef"}
     store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z", **trace_fields))
     projected = capture_scoring(SCORING, CONTEXT_REVIEW)
     historic = capture_scoring(replace(SCORING, length=len(CONTEXT_REVIEW)), CONTEXT_REVIEW)
@@ -80,18 +78,12 @@ def test_current_records_read_all_history_without_creating_snapshot(
     assert store.read_snapshot(pinned["snapshot_id"]).runs == current["runs"]
 
 
-@pytest.mark.parametrize("missing", ["run", ])
-def test_current_record_reads_reject_orphaned_observations(store: LocalRecordStore, missing: str) -> None:
+def test_current_record_reads_reject_orphaned_observations(store: LocalRecordStore) -> None:
     store.append_observation(observation())
     current = store.read_records()
     path = next((store.root / "runs").iterdir())
-    if missing == "run":
-        path.unlink()
-    else:
-        raw = json.loads(path.read_bytes())
-        raw["findings"]["value"]["items"] = []
-        path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n")
-    diagnostic = "unknown_run_reference" if missing == "run" else "orphan_finding_reference"
+    path.unlink()
+    diagnostic = "unknown_run_reference"
     with pytest.raises(StoreError, match=diagnostic):
         store.read_records()
     with pytest.raises(StoreError, match=diagnostic):
@@ -257,21 +249,13 @@ def test_run_sections_require_complete_semantic_payload_and_bound_membership() -
         parse_run(raw)
 
 
-@pytest.mark.parametrize("unsafe", ["malformed", ])
 def test_download_source_read_refuses_unsafe_provenance(
-    store: LocalRecordStore, tmp_path: Path, unsafe: str,
+    store: LocalRecordStore, tmp_path: Path,
 ) -> None:
     path = store.root / "source.json"
-    if unsafe == "malformed":
-        path.write_text("[]")
-    else:
-        outside = tmp_path / "outside-source"
-        outside.write_text("operator data")
-        path.symlink_to(outside)
+    path.write_text("[]")
     with pytest.raises(StoreError, match="invalid_download_source|unsafe_storage_path"):
         store.download_source()
-    if unsafe == "symlink":
-        assert outside.read_text() == "operator data"
 
 
 def test_scoring_inputs_without_review_evidence_earn_no_credit(tmp_path: Path) -> None:

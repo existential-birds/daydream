@@ -55,6 +55,13 @@ from tests.harness.trajectory import make_recorder
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
+
+def _case_dir(tmp_path: Path, index: int) -> Path:
+    case = tmp_path / f"case-{index}"
+    case.mkdir()
+    return case
+
+
 def _completed_command(command: str, output: str) -> dict[str, Any]:
     return {
         "type": "command_execution", "command": command, "status": "completed", "exit_code": 0,
@@ -199,7 +206,7 @@ async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list
     return events
 
 
-@pytest.mark.parametrize('staged', [False, ])
+@pytest.mark.parametrize('staged', [False, True])
 async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
     lines = [json.dumps(event) for event in [
@@ -221,7 +228,7 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
 
 
 async def test_repeated_turn_completion_charges_usage_once() -> None:
-    """A repeated public completion for one turn cannot duplicate billing or terminal results."""
+    """Each public turn is charged once: repeated completions and partial usage never invent billing."""
     lines = [json.dumps(event) for event in [
         {"type": "thread.started", "thread_id": "repeated-terminal"}, {"type": "turn.started"},
         {"type": "item.completed", "item": {"type": "agent_message", "text": "first"}},
@@ -234,6 +241,11 @@ async def test_repeated_turn_completion_charges_usage_once() -> None:
     costs = [event for event in events if isinstance(event, CostEvent)]
     assert [(cost.input_tokens, cost.output_tokens) for cost in costs] == [(10, 5)]
     assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
+    # Partial terminal usage keeps its known input and never invents output tokens or per-turn metrics.
+    partial = await _run_fixture(CodexBackend(model="fixture-model"), "p", "turn_completed_partial_usage.jsonl")
+    assert not any(isinstance(event, MetricsEvent) for event in partial)
+    cost = next(event for event in partial if isinstance(event, CostEvent))
+    assert (cost.input_tokens, cost.output_tokens) == (200, None)
 
 
 async def test_nonzero_exit_raises_with_captured_output() -> None:
@@ -260,9 +272,7 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
 
 
-@pytest.mark.parametrize("read_only", [True])
-@pytest.mark.parametrize('local', [True])
-async def test_continuation_token_resumes(tmp_path: Path, read_only: bool, local: bool) -> None:
+async def _continuation_token_resumes_case(tmp_path: Path, read_only: bool, local: bool) -> None:
     """Native output-schema transport must allow working-source identity instead of provenance HEAD."""
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
@@ -321,6 +331,16 @@ async def test_continuation_token_resumes(tmp_path: Path, read_only: bool, local
         assert result.session_id == "th_abc123"
 
 
+async def test_continuation_token_resumes(tmp_path: Path) -> None:
+    for index, (read_only, local) in enumerate([(False, False), (False, True), (True, False), (True, True)]):
+        try:
+            await _continuation_token_resumes_case(tmp_path=_case_dir(tmp_path, index), read_only=read_only,
+                                                   local=local)
+        except BaseException as exc:
+            exc.add_note(f"case: read_only={read_only} local={local}")
+            raise
+
+
 async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Path, Path]) -> None:
     """A disposable clone mirrors HEAD, index, tracked worktree edits, and untracked files; rebind prompts,
     omit origin, and clean up without changing the source.
@@ -354,6 +374,8 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
         captured["branches"] = git_ops.list_local_branches(isolated)
         captured["source_branches"] = git_ops.list_local_branches(source)
         captured["args"] = flat
+        # Ref writes inside the disposable clone never reach the source repository.
+        git_ops.update_refs(isolated, {"refs/heads/clone-only": captured["head"]})
         return mock_proc
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
@@ -409,9 +431,20 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", overlapping_exec):
         await asyncio.gather(audit(), audit())
     assert len(arrived) == 2 and arrived[0] == arrived[1] and not arrived[0].exists()
+    assert "clone-only" not in git_ops.list_local_branches(source)
+    assert git_ops.head_sha(source) == source_head
+
+    # Without read_only, Codex runs at the worktree itself with full access and no isolation.
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec",
+               return_value=make_mock_process_from_fixture("simple_text.jsonl")) as full_access:
+        async for _ in CodexBackend(model="fixture-model").execute(source, "p"):
+            pass
+    flat = list(full_access.call_args.args)
+    assert flat[flat.index("--sandbox") + 1] == "danger-full-access" and "read-only" not in flat
+    assert flat[flat.index("--cd") + 1] == str(source)
 
 
-@pytest.mark.parametrize("operation", ["clone", ])
+@pytest.mark.parametrize("operation", ["clone", "update_refs"])
 async def test_codex_read_only_preparation_failure_is_fail_closed(
     linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, operation: str,
 ) -> None:
@@ -602,7 +635,47 @@ async def test_public_overload_after_completion_cannot_replay_completed_work(tmp
     assert classify_failure(failure.value).retries_allowed is False
 
 
-@pytest.mark.parametrize("error_code", [None, ])
+async def test_public_turn_failure_preserves_metadata_and_normalizes_only_overload(tmp_path: Path) -> None:
+    """Public turn.failed admits capacity retries only; unknown and permanent failures never retry."""
+    capacity = "Selected model is at capacity. Please try a different model."
+    cases: list[tuple[dict[str, Any], FailureClass | None]] = [
+        ({"message": capacity}, FailureClass.SERVER_ERROR),
+        ({"message": "Try again later", "codex_error_info": "server_overloaded"}, FailureClass.SERVER_ERROR),
+        ({"message": "Try again later", "code": "server_overloaded"}, FailureClass.SERVER_ERROR),
+        ({"message": "Invalid API key", "codex_error_info": "server_overloaded"}, None),
+        *[({"message": capacity, "code": code}, None)
+          for code in ("unauthorized", "schema_validation", "tool_policy", "unknown_error")],
+        ({"message": "The model has capacity planning advice."}, None),
+        ({"message": "Try again later", "code": {"server_overloaded": True}}, None),
+        ({"message": "authentication required. Run `codex login` to authenticate."}, FailureClass.AUTH_CONFIG),
+    ]
+    for error, expected_class in cases:
+        try:
+            process = make_mock_process([json.dumps({"type": "turn.failed", "error": error})])
+            backend = CodexBackend(model="fixture-model")
+            with pytest.raises(CodexError) as failure:
+                await replay_process(backend, process, tmp_path, "review")
+            decision = classify_failure(failure.value)
+            assert decision.retries_allowed is (expected_class is FailureClass.SERVER_ERROR)
+            if expected_class is not None:
+                assert decision.failure_class is expected_class
+            assert failure.value.error_metadata == error
+            assert str(failure.value) == error["message"]
+            assert backend._transports == []
+        except BaseException as exc:
+            exc.add_note(f"case: {error!r}")
+            raise
+
+
+def test_codex_authentication_diagnostic_precedes_transient_retry_hints() -> None:
+    decision = classify_failure(CodexError(
+        "authentication required. Run codex login to authenticate", retryable=True,
+        category="SERVER_ERROR", error_metadata={"codex_error_info": "server_overloaded"},
+    ))
+    assert decision.failure_class is FailureClass.AUTH_CONFIG and decision.retries_allowed is False
+
+
+@pytest.mark.parametrize("error_code", [None, "model_error"])
 async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(error_code: str | None) -> None:
     backend = CodexBackend(model="fixture-model")
     class _FailureThenBlockingStdout:

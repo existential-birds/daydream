@@ -120,8 +120,19 @@ def test_render_task_toml_normalizes_hosts_and_fails_closed() -> None:
     doc = tomllib.loads(pkg.render_task_toml(
         "case-abc", reviewer_hosts=["HTTPS://B.Example.com", "a.example.com"], judge_hosts=["openrouter.ai"],
     ).decode())
-    assert doc["agent"]["allowed_hosts"] == ["a.example.com", "b.example.com"]
-    assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
+    assert doc["metadata"] == {"benchmark_case_key": "case-abc", "source_kind": "historic-github-pr"}
+    # Network boundary: offline reviewer image, allowlisted agent, separate allowlisted verifier.
+    assert doc["agent"] == {"timeout_sec": 1800.0, "network_mode": "allowlist",
+                            "allowed_hosts": ["a.example.com", "b.example.com"]}
+    assert doc["environment"] == {
+        "network_mode": "no-network", "build_timeout_sec": 1200.0, "workdir": "/workspace/repo", "cpus": 2,
+        "memory_mb": 4096, "storage_mb": 10240,
+        "env": {"DAYDREAM_REVIEW_CASE_ID": "case-abc", "DAYDREAM_REVIEW_BASE_REF": "base",
+                "DAYDREAM_REVIEW_HEAD_REF": "head"},
+    }
+    assert doc["verifier"] == {"timeout_sec": 900.0, "environment_mode": "separate", "environment": {
+        "network_mode": "allowlist", "allowed_hosts": ["openrouter.ai"], "build_timeout_sec": 1200.0, "cpus": 1,
+        "memory_mb": 2048, "storage_mb": 4096}}
     with pytest.raises(pkg.PackageError):
         pkg.render_task_toml("case-abc", reviewer_hosts=["not-a-host"], judge_hosts=["openrouter.ai"])
     with pytest.raises(pkg.PackageError):

@@ -118,9 +118,8 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
                                            "noop": True, "usable_evidence": False}]
 
 
-@pytest.mark.parametrize('diagnostics', [{'scopes': {}, 'phases': {'extra': 'failure'}},
-                                       ])
-def test_coverage_rejects_malformed_failure_diagnostics(diagnostics: Any) -> None:
+def test_coverage_rejects_malformed_failure_diagnostics() -> None:
+    diagnostics = {'scopes': {}, 'phases': {'extra': 'failure'}}
     payload = review_coverage().to_dict()
     payload['diagnostics'] = diagnostics
     with pytest.raises(ValueError):

@@ -31,53 +31,31 @@ from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_s
 
 
 @pytest.mark.usefixtures('fake_gh')
-@pytest.mark.parametrize('failure', ['accepted-source'])
 async def test_local_capture_failures_refuse_dispatch_without_changing_the_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    failure: str,
 ) -> None:
-    """Preparation and later setup failures need an actionable cause before model dispatch."""
+    """A captured source tampered before setup refuses model dispatch with an actionable cause."""
+    from tests.harness.console import collapse_panel_text
+
     repo = tmp_path / 'unstable_local'
     seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': 'VALUE = 1\n'})
     review = ReviewRun(repo, tmp_path, monkeypatch)
     before = tracked_source_state(repo)
     index = (repo / '.git/index').read_bytes()
     observed: list[Path] = []
-    if failure == 'capture':
-        enumerate_untracked = queries._list_untracked_z
+    setup = orchestrator.run_deep
 
-        def concurrent_write(source: Path) -> list[str]:
-            paths = enumerate_untracked(source)
-            if source == repo:
-                observed.append(source)
-                path = source / 'api.py'
-                # Real writes with unchanged bytes still invalidate observations
-                # accepted before this enumeration/materialization boundary.
-                path.write_bytes(path.read_bytes())
-            return paths
+    async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
+        assert work.captured_source is not None and work.repo != repo
+        observed.append(work.repo)
+        (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
+        return await setup(config, work, *args, **kwargs)
 
-        monkeypatch.setattr(queries, '_list_untracked_z', concurrent_write)
-    else:
-        setup = orchestrator.run_deep
-
-        async def corrupt_before_setup(config: Any, work: Any, *args: Any, **kwargs: Any) -> int:
-            assert work.captured_source is not None and work.repo != repo
-            observed.append(work.repo)
-            (work.repo / 'api.py').write_bytes(b'TAMPER = True\n')
-            return await setup(config, work, *args, **kwargs)
-
-        monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
+    monkeypatch.setattr(orchestrator, 'run_deep', corrupt_before_setup)
     assert await review.run(findings_out=None) == 1
-    from tests.harness.console import collapse_panel_text
-
-    message = ('stop concurrent writers and rerun the review' if failure == 'capture'
-               else 'captured native source integrity failed')
-    assert message in collapse_panel_text(capsys)
+    assert 'captured native source integrity failed' in collapse_panel_text(capsys)
     assert review.backend.calls == []
-    if failure == 'capture':
-        assert len(observed) > 1
-    else:
-        assert len(observed) == 1 and not observed[0].exists()
+    assert len(observed) == 1 and not observed[0].exists()
     assert (repo / '.git/index').read_bytes() == index
     assert tracked_source_state(repo) == before
     assert not review.output.exists()
@@ -123,31 +101,24 @@ async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
     assert (repo / 'modern.py').exists()
 
 
-@pytest.mark.parametrize('change', ['pure-rename'])
-@pytest.mark.parametrize('broken', [True], ids=['consumer-defect'])
 async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, broken: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A pure rename furnishes the removed side privately and binds its metadata-only decision to Git bytes."""
     repo = tmp_path / 'before_source'
-    renamed = change != 'deleted'
-    old_path = 'legacy.py' if renamed else 'retired.py'
-    old = (''.join(f'# Stable API contract context {index:02}\n' for index in range(30)) if renamed else
-           '# Public greeting used by retained consumers.\n') + 'def hello():\n    return "world"\n'
-    base_consumer = 'EXPECTED_GREETING = "world"\n' if renamed else (
-        'from retired import hello\nprint(hello())\n' if broken else 'print("world")\n')
-    consumer = 'EXPECTED_GREETING = "universe"\n' if renamed and broken else base_consumer
-    after = {'consumer.py': consumer + '# Existing public contract retained.\n'}
-    if renamed:
-        after['modern.py'] = old + ('' if change == 'pure-rename' else
-                                    '# Relocated implementation retains the greeting.\n')
+    old_path = 'legacy.py'
+    old = ''.join(f'# Stable API contract context {index:02}\n' for index in range(30)) + (
+        'def hello():\n    return "world"\n')
+    base_consumer = 'EXPECTED_GREETING = "world"\n'
+    after = {'consumer.py': 'EXPECTED_GREETING = "universe"\n# Existing public contract retained.\n',
+             'modern.py': old}
     seed_feature_branch(repo, base={old_path: old, 'consumer.py': base_consumer}, feature=after)
     git(repo, 'rm', old_path)
     git(repo, 'commit', '-m', 'remove old greeting path')
     before = tracked_source_state(repo)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend = NativeStageBackend(repo)
-    title = ('Renamed greeting no longer satisfies the consumer contract' if renamed else
-             'Retained consumer imports a deleted greeting module')
+    title = 'Renamed greeting no longer satisfies the consumer contract'
     submitted: dict[str, list[dict[str, Any]]] = {}
 
     @review.backend.script('python')
@@ -173,47 +144,33 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
                     {'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}
                     for option in options]
                 submitted[target['target_id']] = copy.deepcopy(offered)
-        if broken:
-            finding = dict(record(1), file='consumer.py', description=title,
-                           rationale='The retained consumer disagrees with the removed source contract.',
-                           evidence=('consumer.py:1 expects universe; legacy.py:32 returned world.' if renamed else
-                                     'consumer.py:1 imports retired.hello; the supplied before-context defined it.'))
-            output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
-                                             trigger='Run the retained consumer against the greeting contract',
-                                             consequence=('The greeting contract disagrees' if renamed else
-                                                          'ModuleNotFoundError'),
-                                             grounds=finding['evidence'])]
+        finding = dict(record(1), file='consumer.py', description=title,
+                       rationale='The retained consumer disagrees with the removed source contract.',
+                       evidence='consumer.py:1 expects universe; legacy.py:32 returned world.')
+        output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
+                                         trigger='Run the retained consumer against the greeting contract',
+                                         consequence='The greeting contract disagrees', grounds=finding['evidence'])]
 
-    data = await review.finish('python', findings=(title,) if broken else ())
-    assert submitted, 'the removed/renamed source must produce an assigned source decision'
+    data = await review.finish('python', findings=(title,))
+    assert submitted, 'the renamed source must produce an assigned source decision'
     retained = {decision['target_id']: decision['evidence_refs']
                 for decision in scopes(data)['python']['target_decisions']}
+    # A metadata-only assignment has no source lines to cite. Bind the reference
+    # to independently known Git bytes, rather than echoing the offered selector.
+    metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
+                f'rename from {old_path}\nrename to modern.py\n').encode()
     for target_id, refs in submitted.items():
         assert retained[target_id] == refs
-        if change == 'pure-rename':
-            # A metadata-only assignment has no source lines to cite. Bind the
-            # reference to independently known Git bytes, rather than echoing
-            # the offered selector as proof that generation was correct.
-            metadata = (f'diff --git a/{old_path} b/modern.py\nsimilarity index 100%\n'
-                        f'rename from {old_path}\nrename to modern.py\n').encode()
-            ref, = refs
-            assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
-            assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
-            assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),
-                                       'sha256': hashlib.sha256(metadata).hexdigest()}
-            assert ref['source_range'] is None and ref['role'] == 'assigned'
-            continue
-        assert {(ref['path'], ref['side'], ref['revision']) for ref in refs} == (
-            {(old_path, 'old', review.pr.base_sha), ('modern.py', 'new', review.pr.head_sha)} if renamed else
-            {(old_path, 'old', review.pr.base_sha)})
-        assert [ref['source_range'] for ref in refs] == (
-            [{'start': 30, 'end': 32}, {'start': 30, 'end': 33}] if renamed else [{'start': 1, 'end': 3}])
-        assert all(ref['role'] == 'assigned' and ref['fragment'] is None for ref in refs)
+        ref, = refs
+        assert (ref['path'], ref['side'], ref['revision']) == ('modern.py', 'diff', review.pr.head_sha)
+        assert ref['part_sha256'] == hashlib.sha256(metadata).hexdigest()
+        assert ref['fragment'] == {'offset': 0, 'bytes': len(metadata),
+                                   'sha256': hashlib.sha256(metadata).hexdigest()}
+        assert ref['source_range'] is None and ref['role'] == 'assigned'
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     persisted = next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')
     assert persisted['target_decisions'] == scopes(data)['python']['target_decisions']
-    assert not (repo / old_path).exists()
-    assert (repo / 'modern.py').is_file() is renamed
+    assert not (repo / old_path).exists() and (repo / 'modern.py').is_file()
     assert tracked_source_state(repo) == before
 
 

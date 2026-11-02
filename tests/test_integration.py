@@ -213,55 +213,24 @@ def _two_commit_repo(repo: Path, filename: str, before: str, after: str, branch:
     return repo
 
 
-@pytest.mark.parametrize("pr_number", [7], ids=["explicit"])
-@pytest.mark.parametrize("outcome", ["absence"])
 async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., "RunConfig"], fake_gh: FakeGh,
-    pr_number: int | None, outcome: str,
 ) -> None:
-    """Both lookup modes reject missing/unusable PRs before model dispatch or posting."""
+    """A failed (auth) or empty PR lookup stops comment mode before model dispatch or posting."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
-    if outcome == "malformed_head":
-        fake_gh.serve_pr_view({
-            "number": 7, "title": "Change greeting", "body": "", "state": "OPEN",
-            "headRefName": "feat/test", "baseRefName": "main", "headRefOid": _git(tmp_path, "rev-parse", "HEAD"),
-            "url": "https://github.test/acme/widgets/pull/7",
-            "headRepository": {}, "headRepositoryOwner": {"login": "acme"},
-        })
-    elif pr_number is None and outcome == "absence":
-        fake_gh.set_response("pr-list", value=[])
-    else:
-        diagnostic = (
-            "authentication required"
-            if outcome == "auth_failure"
-            else 'Unknown JSON field: "futureCompatibilityFloor"'
-        )
-        if outcome == "absence":
-            diagnostic = (
-                "GraphQL: Could not resolve to a PullRequest with the number of 7. "
-                "(repository.pullRequest)"
-            )
-        fake_gh.set_response("pr-view", value={"__error__": diagnostic})
-        if pr_number is None:
-            fake_gh.set_response("pr-list", value={"__error__": diagnostic})
     _silence(monkeypatch)
     backend = _install_stub_backend(monkeypatch, tmp_path)
     errors: list[str] = []
     monkeypatch.setattr("daydream.runner.print_error", lambda _console, _title, message: errors.append(message))
-    exit_code = await run(make_config(tmp_path, output_mode="comment", pr_number=pr_number))
-    assert exit_code == 1
+    absent = "GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)"
+    for outcome, expected in (("auth_failure", "authentication required"), ("absence", "No target PR found")):
+        errors.clear()
+        fake_gh.set_response("pr-view", value={"__error__": expected if outcome == "auth_failure" else absent})
+        assert await run(make_config(tmp_path, output_mode="comment", pr_number=7)) == 1, outcome
+        assert any(expected in message for message in errors), (outcome, errors)
+        assert outcome == "absence" or all("No target PR found" not in message for message in errors), outcome
     assert not backend.calls
     assert fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews") == []
-    if outcome != "absence":
-        expected = (
-            "authentication required"
-            if outcome == "auth_failure"
-            else "invalid PR row" if outcome == "malformed_head" else "futureCompatibilityFloor"
-        )
-        assert any(expected in message for message in errors)
-        assert all("No target PR found" not in message for message in errors)
-    else:
-        assert any("No target PR found" in message for message in errors)
 
 async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""

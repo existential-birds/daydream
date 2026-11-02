@@ -5,6 +5,7 @@ subprocess transport and the model Backend are fake.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass, field
@@ -16,10 +17,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from daydream import cli, github_app
+from daydream import cli
+from daydream.backends import ResultEvent, TextEvent
+from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import git
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.rsa import generate_rsa_pem
+from tests.harness.stub_backend import review_stage_result
 from tests.test_github_app_integration import _minimal_backend
 
 _TOKEN = "ghs_scoped_installation_test_token"
@@ -31,7 +35,6 @@ class _Transport:
     gh: FakeGh
     requests: list[tuple[Path, list[str], dict[str, str]]] = field(default_factory=list, repr=False)
     require_app: bool = True
-    resolved_session: github_app.ResolvedGitHubSession | None = field(default=None, repr=False)
 
 
 @pytest.fixture
@@ -64,12 +67,6 @@ def transport(fake_gh: FakeGh, feature_branch_repo: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("GITHUB_TOKEN", "ambient-alternate-token")
     monkeypatch.setenv("DAYDREAM_APP_ID", "42")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", generate_rsa_pem())
-    resolve_session = github_app.resolve_run_identity
-    def observe_session(*args: Any, **kwargs: Any) -> github_app.ResolvedGitHubSession:
-        session = resolve_session(*args, **kwargs)
-        boundary.resolved_session = session
-        return session
-    monkeypatch.setattr(github_app, "resolve_run_identity", observe_session)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: _minimal_backend())
     return boundary
 
@@ -134,3 +131,94 @@ def test_cli_invalid_app_key_aborts_without_exposing_secret(
     assert secret not in captured.out + captured.err
     assert transport.requests == []
     assert not (feature_branch_repo / ".review-output.md").exists()
+
+
+def test_cli_no_app_uses_gh_selected_repository(
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport,
+) -> None:
+    """CLI artifacts must follow gh's upstream selection even when origin is a fork.
+
+    Alias-only coverage misses recognizable github.com origins winning over gh.
+    """
+    transport.require_app = False
+    monkeypatch.delenv("DAYDREAM_APP_ID")
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY")
+    git(feature_branch_repo, "remote", "add", "origin", "https://github.com/contributor/widgets.git")
+    output = tmp_path / "trajectory.json"
+
+    assert _run(feature_branch_repo, output, "--review", "--base", "main") == 0
+
+    assert json.loads(output.read_text())["extra"]["pr_repo"] == "acme/widgets"
+    assert (feature_branch_repo / ".review-output.md").is_file()
+    assert not transport.gh.calls("POST", "app/installations/71/access_tokens")
+    assert all(env["GH_TOKEN"] == _AMBIENT for _cwd, _argv, env in transport.requests)
+
+
+def test_cli_requested_branch_ignores_current_checkout_pr(
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    transport: _Transport,
+) -> None:
+    """CLI branch selection must bind capture and publication before detached review.
+
+    Direct runner tests omit CLI provenance discovery, which can otherwise turn
+    the current checkout's different PR into an explicit target for this run.
+    """
+    repo = feature_branch_repo
+    current_head = git(repo, "rev-parse", "HEAD")
+    base = git(repo, "rev-parse", "main")
+    git(repo, "checkout", "-b", "requested", "main")
+    (repo / "main.py").write_text("def hello():\n    return 'galaxy'\n")
+    git(repo, "add", "main.py")
+    git(repo, "commit", "-m", "requested branch change")
+    requested_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "checkout", "feature")
+    remote = bare_remote(tmp_path / "origin.git")
+    git(repo, "remote", "add", "origin", str(remote))
+    git(repo, "push", "origin", "main", "feature", "requested")
+    monkeypatch.setenv("GH_REPO", "acme/widgets")
+    requested_pr = {
+        "number": 73, "headRefOid": requested_head, "headRefName": "requested", "baseRefName": "main",
+        "url": "https://github.com/acme/widgets/pull/73", "headRepository": {"name": "widgets"},
+        "headRepositoryOwner": {"login": "acme"},
+    }
+    current_pr = {**requested_pr, "number": 7, "headRefOid": current_head, "headRefName": "feature",
+                  "url": "https://github.com/acme/widgets/pull/7"}
+    transport.gh.set_response("GET", "repos/acme/widgets/pulls/73", {
+        "head": {"sha": requested_head}, "base": {"sha": base},
+    })
+    request = subprocess.run
+
+    def route_pr_lookup(args: Any, *positional: Any, **kwargs: Any) -> Any:
+        if isinstance(args, (list, tuple)) and args[:3] == ["gh", "pr", "view"]:
+            transport.gh.serve_pr_view(requested_pr if args[3] == "73" else current_pr)
+        elif isinstance(args, (list, tuple)) and args[:3] == ["gh", "pr", "list"]:
+            branch = args[args.index("--head") + 1]
+            transport.gh.set_response("pr-list", value=[
+                pr for pr in (requested_pr, current_pr) if pr["headRefName"] == branch
+            ])
+        return request(args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", route_pr_lookup)
+    model_heads: list[str] = []
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        model_heads.append(git(Path(cwd), "rev-parse", "HEAD"))
+        return [TextEvent(text="Review complete."), ResultEvent(
+            structured_output=review_stage_result(prompt, []) if output_schema else None, continuation=None,
+        )]
+
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: ScriptedBackend(responder=respond))
+    output = tmp_path / "trajectory.json"
+    assert _run(repo, output, "--comment", "--branch", "requested", "--base", "main", "--approve-on-clean") == 0
+
+    assert json.loads(output.read_text())["extra"]["pr_number"] == 73
+    assert model_heads and set(model_heads) == {requested_head}
+    reviews = transport.gh.calls("POST", "repos/acme/widgets/pulls/73/reviews")
+    assert len(reviews) == 1 and reviews[0].payload["commit_id"] == requested_head
+    assert not transport.gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
+    _assert_app_requests(transport)
+    # Branch PR discovery runs on the original checkout with the session's minted authentication.
+    lookups = [(cwd, env) for cwd, argv, env in transport.requests if argv[:3] == ["gh", "pr", "list"]]
+    assert lookups and all(cwd == repo and env["GH_TOKEN"] == _TOKEN for cwd, env in lookups)
+    assert git(repo, "branch", "--show-current") == "feature"
+    assert git(repo, "rev-parse", "HEAD") == current_head

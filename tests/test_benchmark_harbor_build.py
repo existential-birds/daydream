@@ -249,7 +249,7 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
         assert emitted[0]["title"] == "Cache race"
         assert emitted[0]["body"] == edited_body
 
-def test_leakage_scan_covers_task_toml_and_job_configs() -> None:
+def test_leakage_scan_rules_cover_every_compiled_file_and_permit_task_spec_prose() -> None:
     cases = {"case-abcdef123456/task.toml": (
             'schema_version = "1.4"\n# leak: ghp_abcdefghijklmnopqrstuv\n'
         ),
@@ -259,6 +259,24 @@ def test_leakage_scan_covers_task_toml_and_job_configs() -> None:
         build.leakage_scan(cases, repository_slug="o/r")
     assert "case-abcdef123456/task.toml" in str(rejected.value)
     assert "harbor-job.yaml" in str(rejected.value)
+    # Each identifying or curation token is rejected on its own and named with its file.
+    for text, token in (("see https://github.com/o/r/pull/101", "pull/101"),
+                        ("sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12", "1a2b3c4d5e6f7890abcdef1234567890abcdef12"),
+                        ("gold_status", "gold_status"), ("provenance", "provenance"),
+                        ("source github:review:42", "github:review:42"), ("repo o/r", "o/r"),
+                        ("clean_attested", "clean_attested")):
+        with pytest.raises(CompileError, match="case-x/README.md") as leaked:
+            build.leakage_scan({"README.md": "A benchmark of historical code reviews.\n",
+                                "case-x/README.md": text + "\n"}, repository_slug="o/r")
+        assert token in str(leaked.value), text
+    # Task.md may describe the curation contract but never identify the source PR.
+    prose = ("## Purpose\nreview the change\n## Scoring contract\n"
+             "The gold_status and clean_attested markers and the curation flow "
+             "and any evidence exclusions are described here, with provenance notes.\n")
+    build.leakage_scan({"case-x/Task.md": prose}, repository_slug="o/r")
+    for identifier in ("https://github.com/o/r/pull/101", "1a2b3c4d5e6f7890abcdef1234567890abcdef12"):
+        with pytest.raises(CompileError, match="Task.md"):
+            build.leakage_scan({"case-x/Task.md": prose + identifier + "\n"}, repository_slug="o/r")
 
 def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)

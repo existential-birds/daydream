@@ -27,7 +27,7 @@ from daydream.test_execution import (
     recipe_to_payload,
     resolve_test_recipe,
 )
-from tests.deep_orchestrator.support import _only_archived_run, _scan_phase_events, _scan_trajectory_extra
+from tests.deep_orchestrator.support import _scan_phase_events, _scan_trajectory_extra
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit, git, work_context
 from tests.harness.stub_backend import StubBackend
@@ -54,23 +54,18 @@ def _state(target: Path) -> tuple[str, str, dict[str, bytes]]:
     }
 
 
-@pytest.mark.parametrize(("command", "file_value", "reason", "source", "journeys"), [
-    pytest.param(None, '\'""\'', "empty-argv", "config", 1, id="empty-argv-file"),
-])
 async def test_runner_rejects_missing_canonical_before_fix_or_test(
-    linked_worktree: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, archive_dir: Path, command: object, file_value: str | None,
-    reason: str, source: str, journeys: int,
+    linked_worktree: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Runner resolves anew each journey; actual artifacts prove first-run persistence.
+    """An empty-argv file command enters the real TOML loader and stops before any fix or suite.
 
-    File rows enter the real TOML loader before runner.run; the missing row runs
-    twice on the same linked worktree. Loaded phase recipes have separate proof.
+    The rejection is persisted as a no-execution verdict and recipe; the manifest
+    candidate is never executed. Command-miss reasons have owner-level proof.
     """
+    reason, source = "empty-argv", "config"
     _, target = linked_worktree
     backend = _arrange(target, monkeypatch)
-    if file_value is not None:
-        (target / ".daydream.toml").write_text(f"test_command = {file_value}\n")
+    (target / ".daydream.toml").write_text('test_command = \'""\'\n')
     (target / "base.txt").write_text("owner dirty bytes\n")
     (target / "owner-untracked.txt").write_text("owner untracked bytes\n")
     before = _state(target)
@@ -79,79 +74,50 @@ async def test_runner_rejects_missing_canonical_before_fix_or_test(
     candidate.write_text(f"#!/bin/sh\nprintf ran >> '{counter}'\nexit 0\n")
     candidate.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
-    config = make_config(target, stack="python", assume="yes", test_command=command,
-                         file_config=load_file_config(target), archive=journeys == 2)
-    for journey in range(journeys):
-        trajectory = tmp_path / f"trajectory-{journey}.json"
-        config.trajectory_path = trajectory
-        rc = await run(config)
-        assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
-        assert _state(target) == before, "configuration rejection changed owner source/index/HEAD"
-        assert not counter.exists(), "the manifest candidate was executed without admission"
-        assert backend.test_suite_calls == 0
-        assert not _fix_prompts(backend)
-        assert not any(call["prompt"].startswith("The tests failed") for call in backend.calls)
-        phases = _scan_trajectory_extra(target / ".daydream", trajectory, "daydream_phase")
-        assert not {"test", "fix"}.intersection(phases)
-        starts = _scan_phase_events(target / ".daydream", trajectory, "phase_start")
-        assert not {"test", "test-execution", "fix"}.intersection(event["phase"] for event in starts)
-        deep = target / ".daydream" / "deep"
-        verdict = json.loads((deep / "test-verdict.json").read_text())
-        assert verdict["status"] == "no-execution"
-        assert verdict["passed"] is False and verdict["retries"] == 0 and verdict["ignored"] is False
-        diagnostic: dict[str, Any] = verdict["diagnostic"]
-        assert diagnostic["reason_code"] == reason and diagnostic["source"] == source
-        assert "--test-command" in diagnostic["message"]
-        assert "[tool.daydream]" in diagnostic["message"]
-        assert "private-token" not in json.dumps(verdict)
-        assert verdict["repairs"] == []
-        assert verdict["attempts"][0]["kind"] == "no-execution"
-        loaded = load_test_recipe(deep)
-        assert loaded is not None and not loaded.command.resolved
-        assert loaded.command.diagnostic is not None
-        assert loaded.command.diagnostic.reason_code == reason
-        assert loaded.command.diagnostic.source == source
-        assert loaded.candidate is not None and loaded.candidate.argv == ("pytest",)
-        assert not (deep / "repair-job.json").exists()
-        assert not (deep / "repair-checkpoint.json").exists()
-        if journeys == 2 and journey == 0:
-            archived = json.loads((_only_archived_run(archive_dir) / "manifest.json").read_text())
-            test_state = archived["phase_states"]["test"]
-            assert test_state["ran"] is False and test_state["status"] == "failed"
-            assert test_state["diagnostic"] == diagnostic
+    trajectory = tmp_path / "trajectory.json"
+    config = make_config(target, stack="python", assume="yes", test_command=None, file_config=load_file_config(target),
+                         trajectory_path=trajectory)
+    rc = await run(config)
+    assert rc != 0, "unconfigured validation cannot authorize a successful fix flow"
+    assert _state(target) == before, "configuration rejection changed owner source/index/HEAD"
+    assert not counter.exists(), "the manifest candidate was executed without admission"
+    assert backend.test_suite_calls == 0
+    assert not _fix_prompts(backend)
+    assert not any(call["prompt"].startswith("The tests failed") for call in backend.calls)
+    phases = _scan_trajectory_extra(target / ".daydream", trajectory, "daydream_phase")
+    assert not {"test", "fix"}.intersection(phases)
+    starts = _scan_phase_events(target / ".daydream", trajectory, "phase_start")
+    assert not {"test", "test-execution", "fix"}.intersection(event["phase"] for event in starts)
+    deep = target / ".daydream" / "deep"
+    verdict = json.loads((deep / "test-verdict.json").read_text())
+    assert verdict["status"] == "no-execution"
+    assert verdict["passed"] is False and verdict["retries"] == 0 and verdict["ignored"] is False
+    diagnostic: dict[str, Any] = verdict["diagnostic"]
+    assert diagnostic["reason_code"] == reason and diagnostic["source"] == source
+    assert "--test-command" in diagnostic["message"]
+    assert "[tool.daydream]" in diagnostic["message"]
+    assert verdict["repairs"] == []
+    assert verdict["attempts"][0]["kind"] == "no-execution"
+    loaded = load_test_recipe(deep)
+    assert loaded is not None and not loaded.command.resolved
+    assert loaded.command.diagnostic is not None
+    assert loaded.command.diagnostic.reason_code == reason
+    assert loaded.command.diagnostic.source == source
+    assert loaded.candidate is not None and loaded.candidate.argv == ("pytest",)
+    assert not (deep / "repair-job.json").exists()
+    assert not (deep / "repair-checkpoint.json").exists()
 
 
-@pytest.mark.parametrize(("recipe_state", "reason", "source"), [
-
-    ("derived", "unresolved", "derived"),
-])
 async def test_public_test_phase_returns_no_execution_without_repair(
     linked_worktree: tuple[Path, Path], tmp_path: Path, make_config: MakeConfig,
-    recipe_state: str, reason: str, source: str,
 ) -> None:
-    """Public phase covers direct config and loaded current/legacy/derived recipes.
+    """Public phase covers direct config and loaded current/legacy/derived/stale recipes.
 
-    Legacy/stale rows model actual untrusted historical bytes at the loader;
-    these supplement the genuine producer runner journeys above.
+    Legacy/stale cases model actual untrusted historical bytes at the loader;
+    these supplement the genuine producer runner journey above.
     """
     _, target = linked_worktree
     config = make_config(target, assume="yes", test_command="python 'private-token")
-    recipe = None
-    if recipe_state != "direct":
-        resolved = resolve_test_recipe(config.file_config, config, repo_root=target)
-        path = persist_test_recipe(tmp_path / "persisted", resolved)
-        if recipe_state == "derived":
-            persist_test_recipe(tmp_path / "persisted", replace(
-                resolved, command=ResolvedFact(("true",), "derived"),
-            ))
-        elif recipe_state in {"legacy", "stale"}:
-            payload = recipe_to_payload(resolved)
-            payload["format_version"] = 2 if recipe_state == "legacy" else 999
-            payload["command"] = {"source": "unresolved", "value": None}
-            path.write_text(json.dumps(payload))
-        recipe = load_test_recipe(tmp_path / "persisted")
-        assert (recipe is None) is (recipe_state == "stale")
-    backend, fixer = ScriptedBackend(), ScriptedBackend()
     before = git(target, "rev-parse", "HEAD"), git(target, "diff", "--binary"), git(target, "diff", "--cached")
 
     def capture() -> str:
@@ -159,22 +125,40 @@ async def test_public_test_phase_returns_no_execution_without_repair(
             target, "HEAD", preexisting_untracked={}, preexisting_gitlinks=(),
         ))
 
-    result = await phase_test_and_heal(
-        backend, work_context(target, run_id="configuration-no-execution"), config=config,
-        session_id="configuration-no-execution", capture_tree_key=capture,
-        footprint=AuthorizedFixFootprint(frozenset({"services/taste/parser.go"}), 1),
-        repair_backend=fixer, recipe=recipe, allow_standalone=True,
-        run_context=RunContext(InteractionPolicy(assume="yes", interactive=False)),
-    )
-    assert not result.passed and not result.proceed and not result.ignored
-    assert result.retries == 0 and result.repairs == ()
-    assert result.diagnostic is not None
-    assert result.diagnostic.reason_code == reason and result.diagnostic.source == source
-    assert "private-token" not in result.diagnostic.message
-    assert len(result.attempts) == 1 and result.attempts[0].kind == "no-execution"
-    assert result.attempts[0].identity is None
-    assert result.attempts[0].input_tree_key == result.attempts[0].output_tree_key
-    assert backend.call_count == fixer.call_count == 0
+    for recipe_state, reason, source in (("direct", "malformed", "cli"), ("loaded", "malformed", "cli"),
+                                         ("legacy", "unresolved", "unresolved"),
+                                         ("derived", "unresolved", "derived"), ("stale", "malformed", "cli")):
+        recipe = None
+        if recipe_state != "direct":
+            persisted = tmp_path / recipe_state
+            resolved = resolve_test_recipe(config.file_config, config, repo_root=target)
+            path = persist_test_recipe(persisted, resolved)
+            if recipe_state == "derived":
+                persist_test_recipe(persisted, replace(resolved, command=ResolvedFact(("true",), "derived")))
+            elif recipe_state in {"legacy", "stale"}:
+                payload = recipe_to_payload(resolved)
+                payload["format_version"] = 2 if recipe_state == "legacy" else 999
+                payload["command"] = {"source": "unresolved", "value": None}
+                path.write_text(json.dumps(payload))
+            recipe = load_test_recipe(persisted)
+            assert (recipe is None) is (recipe_state == "stale"), recipe_state
+        backend, fixer = ScriptedBackend(), ScriptedBackend()
+        result = await phase_test_and_heal(
+            backend, work_context(target, run_id="configuration-no-execution"), config=config,
+            session_id="configuration-no-execution", capture_tree_key=capture,
+            footprint=AuthorizedFixFootprint(frozenset({"services/taste/parser.go"}), 1),
+            repair_backend=fixer, recipe=recipe, allow_standalone=True,
+            run_context=RunContext(InteractionPolicy(assume="yes", interactive=False)),
+        )
+        assert not result.passed and not result.proceed and not result.ignored, recipe_state
+        assert result.retries == 0 and result.repairs == (), recipe_state
+        assert result.diagnostic is not None, recipe_state
+        assert (result.diagnostic.reason_code, result.diagnostic.source) == (reason, source), recipe_state
+        assert "private-token" not in result.diagnostic.message
+        assert len(result.attempts) == 1 and result.attempts[0].kind == "no-execution"
+        assert result.attempts[0].identity is None
+        assert result.attempts[0].input_tree_key == result.attempts[0].output_tree_key
+        assert backend.call_count == fixer.call_count == 0
     assert before == (
         git(target, "rev-parse", "HEAD"), git(target, "diff", "--binary"), git(target, "diff", "--cached"),
     )

@@ -22,7 +22,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.backends.codex import CodexBackend
 from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -406,57 +405,40 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
     assert all('PRIVATE_OUTSIDE_SOURCE' not in call['prompt'] for call in review.backend.calls)
 
 
-@pytest.mark.parametrize('stop', ['pipeline', ])
 async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused later batch cannot relabel attempted failed work as unattempted coverage."""
+    """A pipeline-budget stop after a failed batch cannot relabel that attempted work as unattempted."""
     review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
     review.backend.fanout_concurrency = 1
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
     monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
     monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
-    monkeypatch.setattr('daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD', 1)
     timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
     patch_retry_sleep(monkeypatch, timer)
     attempts = 0
 
-    class TemporaryFailure(RuntimeError):
-        retryable = True
-
     @review.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         nonlocal attempts
         attempts += 1
-        if stop in {'wall', 'pipeline'}:
-            timer.advance(481 if stop == 'wall' else 61)
-        if stop == 'outage-circuit':
-            raise TemporaryFailure('PRIVATE_PROVIDER_DETAIL')
-        if attempts == 1:
-            raise RuntimeError('PRIVATE_PROVIDER_DETAIL')
-        assert stop == 'tools' and attempts == 2
-        for index in range(50):
-            yield from read_events(review.repo, 'api.py', event_id=f'exhaust-{index}')
+        timer.advance(61)
+        raise RuntimeError('PRIVATE_PROVIDER_DETAIL')
 
     assert await review.run(review_profile=_profile_with_pipeline(
-        reviewer_investigation_budget_s=480,
-        review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
+        reviewer_investigation_budget_s=480, review_wall_budget_s=60)) == 0
     data = review.load()
-    assert attempts == (2 if stop in {'outage-circuit', 'tools'} else 1)
+    assert attempts == 1
     scope = scopes(data)['python']
     assert scope['status'] == 'failed' and scope['partial_evidence'] is False
-    expected_reasons = ['backend_failure']
-    if stop != 'outage-circuit':
-        expected_reasons.append(f"host_{'tool' if stop == 'tools' else stop}_budget_exhaustion")
-    assert scope['reason_codes'] == expected_reasons
+    assert scope['reason_codes'] == ['backend_failure', 'host_pipeline_budget_exhaustion']
     assert data['findings'] == []
     assert all(event['metadata']['admitted'] is False for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize(('sandbox', 'long_grounds'), [(False, True)],
-                         ids=['clipped-closed-conclusion'])
 async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool, long_grounds: bool) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir) -> None:
+    """Custom builders keep exact-path transport, and a long closed conclusion is clipped in later handoffs."""
     ext_dir.write_module(
         "import json\n"
         "from daydream.deep.prompts import build_per_stack_prompt, build_structural_prompt\n"
@@ -472,14 +454,6 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
     )
     review = many_file_review(tmp_path, monkeypatch, count=9,
                              feature_message='fix: SETTLED_UNRELATED_HISTORY\n\nDaydream-Run: previous-fixture')
-    review.backend.sandbox = sandbox
-    if sandbox:
-        review.backend.merge_echo_records = False
-        review.backend.merge_items = [dict(record(), lens='per-stack', source_uids=['python:1'])]
-        native = CodexBackend(model=review.backend.model)
-        monkeypatch.setattr(native, 'execute', review.backend.execute)
-        monkeypatch.setattr(native, 'supports_review_instructions', True, raising=False)
-        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
     later_assignments: list[dict[str, Any]] = []
 
     @review.backend.script('python')
@@ -514,23 +488,17 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         if stage['stage'] == 'first_pass':
             assert 'SETTLED_UNRELATED_HISTORY' in prose
             assert len(stage['assigned_files']) <= 4
-            assert stage['context_transport'] == ('inline' if sandbox else 'exact_paths')
-            if sandbox:
-                assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
-                assert str(review.repo / '.daydream') not in call['prompt']
-                assert 'Sanctioned phase inputs (captured verbatim):' in call['prompt']
-            else:
-                pointers = _sanctioned_inputs(call['prompt'])
-                assert set(pointers) == set(stage['context_inputs'])
-                for label in ('diff', 'hunk-index'):
-                    assert pointers[label].is_file() and pointers[label].read_text()
+            assert stage['context_transport'] == 'exact_paths'
+            pointers = _sanctioned_inputs(call['prompt'])
+            assert set(pointers) == set(stage['context_inputs'])
+            for label in ('diff', 'hunk-index'):
+                assert pointers[label].is_file() and pointers[label].read_text()
             assigned_line = next(line for line in prose.splitlines() if 'Assigned files:' in line)
             assert assigned_line.split('Assigned files:', 1)[1].strip() == ', '.join(stage['assigned_files'])
             assert stage['candidates'] == []
             if 'api.py' in stage['assigned_files']:
                 confirmed = candidate(disposition='confirmed', finding=record())
-                if long_grounds:
-                    confirmed['grounds'] += ' Additional explanation: ' + 'é' * 400
+                confirmed['grounds'] += ' Additional explanation: ' + 'é' * 400
                 rejected = candidate(disposition='rejected',
                                      grounds='The greeting is allowed by the updated consumer contract.')
                 output['candidates'] = [confirmed, rejected] + [candidate() for _ in range(9)]
@@ -542,7 +510,7 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
                                                       ('python:candidate:2', 'api.py', 2, 'rejected')]
                 assert decisions[0]['conclusion'].startswith('Grounded defect: ' + candidate()['grounds'])
                 assert len(decisions[0]['conclusion'].encode()) <= 512
-                assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
+                assert decisions[0]['conclusion'].endswith('[conclusion clipped]')
                 assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
                 assert all('evidence_references' not in decision for decision in decisions)
                 assert all(decision['judgment_origin'] == 'reviewer' for decision in decisions)
@@ -579,9 +547,8 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
                and stage['scope_id'] in {'python', 'structure'})
 
 
-@pytest.mark.parametrize('caller_bound', ['wall', ])
 async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, caller_bound: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
 ) -> None:
     """An extension's preparation time spends the same invocation cap as dispatched investigation."""
     review = many_file_review(tmp_path, monkeypatch, count=5)
@@ -596,8 +563,7 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
 
     async def explicitly_bounded(self: ReviewInvestigation, *args: Any, **kwargs: Any) -> Any:
         kwargs.pop('wall_budget_s', None)
-        kwargs['wall_budget_s' if caller_bound == 'wall' else 'deadline'] = (
-            3600 if caller_bound == 'wall' else clock.monotonic() + 3600)
+        kwargs['wall_budget_s'] = 3600
         return await real_run(self, *args, **kwargs)
 
     monkeypatch.setattr(ReviewInvestigation, 'run', explicitly_bounded)
@@ -628,22 +594,21 @@ async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     for event in events:
         assert event['metadata']['investigation_effective_allowance_s'] == pytest.approx(3600, rel=0, abs=0.01)
-        assert event['metadata']['investigation_limit'] == (
-            'invocation_wall_budget' if caller_bound == 'wall' else 'caller_deadline')
+        assert event['metadata']['investigation_limit'] == 'invocation_wall_budget'
     assert events[-1]['metadata']['retained_findings'] == 1
     assert scopes(data)['python']['partial_evidence'] is True
     saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
     assert 'wall_budget_exceeded' in saved['diagnostics']['scopes']['python']
 
 
-@pytest.mark.parametrize('automatic_shards', [False, ], ids=['whole-stack', ])
 async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_shards: bool) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling a whole-stack review closes its provider stream and admits no aborted checkpoint."""
     review = many_file_review(tmp_path, monkeypatch, count=10, docs_count=0)
     checkpoint_emitted = asyncio.Event()
     blocked_scopes: set[str] = set()
     closed_scopes: set[str] = set()
-    expected = {'python#0', 'python#1'} if automatic_shards else {'python'}
+    expected = {'python'}
 
     class CancellationBackend(StagedBackend):
         cancel_done = False
@@ -687,7 +652,7 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
                                          grounds=finding['evidence'], finding=finding)]
 
     backend.stage_response = response
-    task = asyncio.create_task(review.run(deep_shard_enabled=None if automatic_shards else False,
+    task = asyncio.create_task(review.run(deep_shard_enabled=False,
                                           review_cache_enabled=True))
     try:
         await asyncio.wait_for(checkpoint_emitted.wait(), timeout=60)

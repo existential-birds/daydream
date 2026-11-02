@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from daydream.commands.search import handle_search_command, search_repository
+from daydream.repository_paths import is_test_path
 from tests.harness.git_helpers import git
 
 
@@ -60,7 +61,7 @@ def test_search_preserves_git_membership_and_requires_named_ignored_expansion(
         search_repository(repo, "needle", roots, expand=["deps/package"], reason=" ")
 
 
-@pytest.mark.parametrize("limit", ["output", "bytes", ])
+@pytest.mark.parametrize("limit", ["matches", "output", "bytes", "files"])
 def test_search_reports_bounded_scope_instead_of_clean_absence(git_repo: Path, limit: str) -> None:
     # Public caps are tested with real inputs, not altered constants/clocks.
     root = git_repo / "src"
@@ -122,19 +123,20 @@ def test_search_cli_bounds_excerpts_and_rejects_escaping_or_incomplete_requests(
         result = json.loads(capsys.readouterr().out)
         assert len(result["matches"]) == 1
         hit = result["matches"][0]
-        assert (hit["path"], hit["line"]) == ("deps/pkg/generated.js", 1)
+        case = (len(prefix), needle[:3], len(needle), len(suffix))
+        assert (hit["path"], hit["line"]) == ("deps/pkg/generated.js", 1), case
         text = hit["text"]
         if len(needle.encode()) <= 240 - 3 * sum(omissions):
-            assert needle in text
+            assert needle in text, case
         else:
-            assert needle.startswith(text[3:-3]) and text[3:-3]
-        assert len(text.encode("utf-8")) <= 240
-        assert (text.startswith("..."), text.endswith("...")) == omissions
+            assert needle.startswith(text[3:-3]) and text[3:-3], case
+        assert len(text.encode("utf-8")) <= 240, case
+        assert (text.startswith("..."), text.endswith("...")) == omissions, case
         if omissions == (True, True) and len(needle.encode()) < 234:
             before, after = text.split(needle)
-            assert len(before) > 3 and len(after) > 3
+            assert len(before) > 3 and len(after) > 3, case
         if not any(omissions):
-            assert text == needle
+            assert text == needle, case
 
     sibling = git_repo.parent / "sibling"
     sibling.mkdir()
@@ -142,8 +144,9 @@ def test_search_cli_bounds_excerpts_and_rejects_escaping_or_incomplete_requests(
     (git_repo / "outward").symlink_to(sibling, target_is_directory=True)
     for escape in ("../sibling", ".git", "outward"):
         for args in ([escape], [".", "--expand", escape, "--reason", "trace caller"]):
-            assert handle_search_command(["needle", *args]) == 2
-            assert "outside the working tree or names Git metadata" in json.loads(capsys.readouterr().out)["error"]
+            assert handle_search_command(["needle", *args]) == 2, args
+            error = json.loads(capsys.readouterr().out)["error"]
+            assert "outside the working tree or names Git metadata" in error, args
     for args, error in [
         (["--expand", "deps/pkg", "--reason", "trace caller"], "the following arguments are required: roots"),
         (["deps/pkg", "--expand", "deps/pkg"], "--expand requires a concrete --reason"),
@@ -154,6 +157,15 @@ def test_search_cli_bounds_excerpts_and_rejects_escaping_or_incomplete_requests(
             code = handle_search_command(["needle", *args])
         except SystemExit as exit_:
             code = exit_.code
-        assert code == 2
+        assert code == 2, args
         captured = capsys.readouterr()
-        assert error in captured.err + captured.out
+        assert error in captured.err + captured.out, args
+
+
+def test_test_path_classification_uses_names_and_directories() -> None:
+    """Test files are recognized by parent directories (case-folded) or case-sensitive name conventions."""
+    assert is_test_path("app/spec/user.py") is True  # a parent directory named spec
+    assert is_test_path("app/specs.py") is False  # a file stem is not a directory convention
+    assert is_test_path("src/WidgetTest.java") is True
+    assert is_test_path("src/widgettest.java") is False
+    assert is_test_path("SRC/Tests/widget.java") is True

@@ -246,14 +246,12 @@ def _fake_pi_script(tmp_path: Path, *, marker: bool = True, fixture_path: Path |
     return script
 
 
-
 def _run_replay(repo: Path, fake_pi: Path, receipt_path: Path, *, fixture_path: Path = REPLAY_FIXTURE,) -> int:
     """Invoke the replay tool with the canonical fixture manifest."""
     return cast(int, _replay.run_replay(
         manifest_path=FIXTURES / "replay-manifest.json", fixture_path=fixture_path, repo_path=repo, fake_pi=fake_pi,
         receipt_path=receipt_path,
     ))
-
 
 
 def test_replay_gate_fixture_hash_mismatch_fails_before_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
