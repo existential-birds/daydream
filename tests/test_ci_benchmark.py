@@ -1,4 +1,4 @@
-"""Benchmark report CLI contracts, with only the external gh API substituted.
+"""Benchmark report CLI contracts, with only the external gh boundary substituted.
 
 Planner/shard tests cannot detect dispatch substitution, misleading medians or treatment
 identity drift. These cases protect the persisted evidence used for acceptance.
@@ -7,17 +7,16 @@ identity drift. These cases protect the persisted evidence used for acceptance.
 from __future__ import annotations
 
 import json
-import os
-import subprocess
+import runpy
 import sys
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
-
-from tests.harness.fake_gh import FakeGh
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts/ci_benchmark.py"
 _REPO = "acme/widgets"
@@ -61,31 +60,71 @@ def _sample(
     return run, jobs
 
 
+
+class _Gh:
+    """Serve gh calls in-process: API reads, paginated job pages and workflow dispatch."""
+
+    def __init__(self) -> None:
+        self.responses: dict[str, Any] = {}
+        self.dispatches: list[list[str]] = []
+        self.on_runs: Callable[[], dict[str, Any]] | None = None
+
+    def __call__(self, *args: str) -> str:
+        if args[:2] == ("workflow", "run"):
+            self.dispatches.append(list(args))
+            return ""
+        assert args[0] == "api", args
+        endpoint = args[-1]
+        if "/actions/workflows/ci.yml/runs?" in endpoint and self.on_runs is not None:
+            return json.dumps(self.on_runs())
+        return json.dumps(self.responses[endpoint.split("?", 1)[0] if "--paginate" not in args else endpoint])
+
+
+@pytest.fixture
+def bench(monkeypatch: pytest.MonkeyPatch) -> tuple[_Gh, Callable[..., None]]:
+    namespace = runpy.run_path(str(_SCRIPT))
+    gh = _Gh()
+    globals_ = namespace["main"].__globals__
+    monkeypatch.setitem(globals_, "gh", gh)
+    # Discovery polling must not spend wall time in tests.
+    monkeypatch.setitem(globals_, "time", type("Clock", (), {
+        "monotonic": staticmethod(time.monotonic), "sleep": staticmethod(lambda seconds: None)}))
+
+    def invoke(*args: str) -> None:
+        monkeypatch.setattr(sys, "argv", [str(_SCRIPT), *args])
+        namespace["main"]()
+
+    return gh, invoke
+
+
 def _report(
-    tmp_path: Path, fake_gh: FakeGh, samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]],
-    *, dispatch_id: str | None = None,
-) -> tuple[subprocess.CompletedProcess[str], Path]:
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
+    samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]], *, dispatch_id: str | None = None,
+) -> Path:
+    gh, invoke = bench
     entries = []
     for count, run, jobs in samples:
         run_id = run["id"]
         endpoint = f"repos/{_REPO}/actions/runs/{run_id}"
-        fake_gh.set_response("GET", endpoint, run)
+        gh.responses[endpoint] = run
         # Two pages exercise the report's actual flattening of --paginate --slurp.
-        fake_gh.set_response("GET", endpoint + "/jobs", [{"jobs": jobs[:2]}, {"jobs": jobs[2:]}])
+        gh.responses[endpoint + "/jobs?per_page=100"] = [{"jobs": jobs[:2]}, {"jobs": jobs[2:]}]
         entry: dict[str, Any] = {"id": run_id, "jobs": count, "attempt": 1}
         if dispatch_id is not None:
             entry["dispatch_id"] = dispatch_id
         entries.append(entry)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"schema": 1, "repository": _REPO, "ref": "benchmark", "sha": _SHA,
                                     "runs": entries}))
     output = tmp_path / "report"
-    result = subprocess.run([sys.executable, str(_SCRIPT), "report", "--manifest", str(manifest),
-                             "--output", str(output)], capture_output=True, text=True, check=False)
-    return result, output
+    invoke("report", "--manifest", str(manifest), "--output", str(output))
+    return output
 
 
-def test_report_measures_same_revision_treatments_and_preserves_raw_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
+def test_report_measures_same_revision_treatments_and_preserves_raw_evidence(
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
+) -> None:
     samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
     for count, gates in ((1, [210, 190, 250]), (2, [120, 120, 120]), (4, [100, 100, 100])):
         for gate in gates:
@@ -95,8 +134,7 @@ def test_report_measures_same_revision_treatments_and_preserves_raw_evidence(tmp
         for gate in gates:
             run, jobs = _sample(len(samples) + 1, count, gate, durations=durations)
             samples.append((count, run, jobs))
-    result, output = _report(tmp_path, fake_gh, samples)
-    assert result.returncode == 0, result.stderr
+    output = _report(tmp_path, bench, samples)
     report = (output / "report.md").read_text()
     assert "| 1 / 8 | 3 | 210.0 | 2.4 | 0.0% |" in report
     assert "| 2 / 4 | 3 | 120.0 | 2.8 | 42.9% |" in report
@@ -127,183 +165,126 @@ def test_report_measures_same_revision_treatments_and_preserves_raw_evidence(tmp
 
 
 def test_report_retains_failed_and_active_runs_without_counting_them_as_successes(
-    tmp_path: Path, fake_gh: FakeGh,
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
 ) -> None:
-    samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
-    for run_id, status, conclusion in ((1, "completed", "failure"), (2, "in_progress", None)):
-        run, jobs = _sample(run_id, 4, 100)
-        run.update(status=status, conclusion=conclusion)
-        jobs[1].update(status=status, conclusion=conclusion)
-        samples.append((4, run, jobs))
-    result, output = _report(tmp_path, fake_gh, samples)
-    assert result.returncode == 0, result.stderr
-    measurements = json.loads((output / "measurements.json").read_text())["measurements"]
-    assert [(item["conclusion"], item["complete"]) for item in measurements] == [("failure", True), (None, False)]
-    assert all("gate_seconds" not in item for item in measurements)
-    report = (output / "report.md").read_text()
-    assert "| 4 / 4 | 0 | pending | pending | pending |" in report
-    assert "4 jobs: failure." in report
-    assert "4 jobs: in progress." in report
-    assert "Timing sample requirement: PENDING" in report
-    assert (output / "run-1.json").is_file() and (output / "run-2.json").is_file()
+    """Failed/active samples cannot make a newly measured group or an original group ready."""
+    for incomplete_count in (4, 20):
+        samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
+        for count in (1, 2, 4, 16, 20):
+            for gate in ([100, 120] if count == incomplete_count else [190, 210, 250]):
+                durations = [40] + [20] * 15 if count == 16 else [30] * 20 if count == 20 else None
+                run, jobs = _sample(len(samples) + 1, count, gate, durations=durations)
+                samples.append((count, run, jobs))
+        for status, conclusion in (("completed", "failure"), ("in_progress", None)):
+            durations = [30] * 20 if incomplete_count == 20 else None
+            run, jobs = _sample(len(samples) + 1, incomplete_count, 120, durations=durations)
+            run.update(status=status, conclusion=conclusion)
+            jobs[2].update(status=status, conclusion=conclusion)
+            samples.append((incomplete_count, run, jobs))
+        output = _report(tmp_path / str(incomplete_count), bench, samples)
+        report = (output / "report.md").read_text()
+        assert "Timing sample requirement: PENDING" in report
+        assert f"{incomplete_count} jobs: failure." in report and f"{incomplete_count} jobs: in progress." in report
+        measurements = json.loads((output / "measurements.json").read_text())["measurements"]
+        assert [(row["conclusion"], row["complete"]) for row in measurements[-2:]] == [
+            ("failure", True), (None, False)]
+        assert all("gate_seconds" not in row for row in measurements[-2:])
+        assert (output / f"run-{len(samples)}.json").is_file()
 
 
-@pytest.mark.parametrize("fault", ["sha", "attempt", "runner"])
-def test_report_rejects_different_revision_attempt_or_runner_class(
-    tmp_path: Path, fake_gh: FakeGh, fault: str,
+def test_report_rejects_foreign_revision_attempt_runner_or_dispatch(
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
 ) -> None:
     run, jobs = _sample(1, 4, 100)
-    if fault == "sha":
-        run["head_sha"] = "b" * 40
-    elif fault == "attempt":
-        run["run_attempt"] = 2
-    else:
-        jobs[1]["labels"] = ["paid-larger-runner"]
-    result, output = _report(tmp_path, fake_gh, [(4, run, jobs)])
-    assert result.returncode != 0
-    expected = "used a different runner class" if fault == "runner" else "does not match the benchmark identity"
-    assert expected in result.stderr
-    assert not (output / "report.md").exists()
+    run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
+    output = _report(tmp_path / "owned", bench, [(4, run, jobs)], dispatch_id=_DISPATCH_ID)
+    assert json.loads((output / "measurements.json").read_text())["measurements"][0]["id"] == 1
+    for fault in ("sha", "attempt", "runner", "foreign", "missing-title", "invalid-uuid"):
+        run, jobs = _sample(1, 4, 100)
+        marker = "invalid" if fault == "invalid-uuid" else _DISPATCH_ID
+        if fault != "missing-title":
+            run["display_title"] = "CI benchmark " + ("foreign" if fault == "foreign" else marker)
+        if fault == "sha":
+            run["head_sha"] = "b" * 40
+        elif fault == "attempt":
+            run["run_attempt"] = 2
+        elif fault == "runner":
+            jobs[1]["labels"] = ["paid-larger-runner"]
+        dispatch = marker if fault in {"foreign", "missing-title", "invalid-uuid"} else None
+        expected = {"runner": "used a different runner class", "sha": "does not match the benchmark identity",
+                    "attempt": "does not match the benchmark identity"}.get(fault, "dispatch")
+        with pytest.raises(ValueError, match=expected):
+            _report(tmp_path / fault, bench, [(4, run, jobs)], dispatch_id=dispatch)
+        # Raw evidence is retained; no report is published for a rejected treatment.
+        assert (tmp_path / fault / "report/run-1.json").exists()
+        assert not (tmp_path / fault / "report/report.md").exists()
 
 
 def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
 ) -> None:
     """Same-SHA, same-size treatments must still belong to this invocation."""
+    gh, invoke = bench
     manifest = tmp_path / "manifest.json"
-    receipt = tmp_path / "dispatch.json"
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    shim = bin_dir / "gh"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import json, pathlib, sys\n"
-        f"manifest = pathlib.Path({str(manifest)!r})\n"
-        f"receipt = pathlib.Path({str(receipt)!r})\n"
-        "args = sys.argv[1:]\n"
-        "if args[:2] == ['workflow', 'run']:\n"
-        "    receipt.write_text(json.dumps({'args': args, 'pending': json.loads(manifest.read_text())['pending']}))\n"
-        "elif args[0] == 'api' and '/commits/' in args[-1]:\n"
-        f"    print(json.dumps({{'sha': {_SHA!r}}}))\n"
-        "elif args[0] == 'api' and '/runs?' in args[-1]:\n"
-        "    items = []\n"
-        "    if receipt.exists():\n"
-        "        sent = json.loads(receipt.read_text())\n"
-        f"        foreign = {{'id': 222, 'head_sha': {_SHA!r}, 'run_attempt': 1,\n"
-        "                   'html_url': 'https://github.test/222',\n"
-        "                   'display_title': 'CI benchmark somebody-else'}\n"
-        "        items = [foreign]\n"
-        "        polls = receipt.with_suffix('.polls')\n"
-        "        if polls.exists():\n"
-        "            fields = [arg.split('=', 1)[1] for arg in sent['args'] if arg.startswith('benchmark_id=')]\n"
-        "            marker = fields[0] if fields else ''\n"
-        "            items.append(dict(foreign, id=111, html_url='https://github.test/111',\n"
-        "                              display_title='CI benchmark ' + marker))\n"
-        "        polls.touch()\n"
-        "    print(json.dumps({'workflow_runs': items}))\n"
-        "else:\n"
-        "    raise SystemExit('unexpected gh call: ' + repr(args))\n"
-    )
-    shim.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
-    result = subprocess.run(
-        [sys.executable, str(_SCRIPT), "launch", "--repo", _REPO, "--ref", "benchmark", "--sha", _SHA,
-         "--jobs", "20", "--manifest", str(manifest)], capture_output=True, text=True, check=False, timeout=15,
-    )
-    assert result.returncode == 0, result.stderr
+    gh.responses[f"repos/{_REPO}/commits/benchmark"] = {"sha": _SHA}
+    foreign = {"id": 222, "head_sha": _SHA, "run_attempt": 1, "html_url": "https://github.test/222",
+               "display_title": "CI benchmark somebody-else"}
+    polls: list[dict[str, Any]] = []
+
+    def runs() -> dict[str, Any]:
+        if not gh.dispatches:
+            return {"workflow_runs": []}
+        items = [foreign]
+        if polls:
+            # The persisted pending marker must already name the dispatched UUID.
+            marker = json.loads(manifest.read_text())["pending"]["dispatch_id"]
+            items.append(dict(foreign, id=111, html_url="https://github.test/111",
+                              display_title="CI benchmark " + marker))
+        polls.append({})
+        return {"workflow_runs": items}
+
+    gh.on_runs = runs
+    invoke("launch", "--repo", _REPO, "--ref", "benchmark", "--sha", _SHA, "--jobs", "20",
+           "--manifest", str(manifest))
     recorded = json.loads(manifest.read_text())
-    assert [entry["id"] for entry in recorded["runs"]] == [111]
-    sent = json.loads(receipt.read_text())
-    marker = sent["pending"]["dispatch_id"]
+    sent, = gh.dispatches
+    marker = recorded["runs"][0]["dispatch_id"]
     assert str(UUID(marker)) == marker and UUID(marker).version == 4
-    assert f"benchmark_id={marker}" in sent["args"]
-    assert "test_jobs=20" in sent["args"]
+    assert f"benchmark_id={marker}" in sent and "test_jobs=20" in sent
     assert recorded["runs"] == [{"id": 111, "jobs": 20, "attempt": 1, "dispatch_id": marker}]
     assert "pending" not in recorded
 
 
-@pytest.mark.parametrize("scenario", ["foreign", "missing-title", "explicit-foreign", "ambiguous", "legacy-pending"])
-def test_resolve_preserves_pending_when_dispatch_identity_is_not_proven(
-    tmp_path: Path, fake_gh: FakeGh, scenario: str,
+def test_resolve_records_only_the_proven_owned_dispatch(
+    tmp_path: Path, bench: tuple[_Gh, Callable[..., None]],
 ) -> None:
-    pending: dict[str, Any] = {"jobs": 4, "before": [], "dispatch_id": _DISPATCH_ID}
-    run, _ = _sample(1, 4, 100)
-    run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
-    if scenario in ("foreign", "explicit-foreign"):
-        run["display_title"] = "CI benchmark cc40ab14-9829-457d-9916-2b858e645c61"
-    elif scenario == "missing-title":
-        del run["display_title"]
-    elif scenario == "legacy-pending":
-        del pending["dispatch_id"]
-    candidates = [run, {**run, "id": 2}] if scenario == "ambiguous" else [run]
-    fake_gh.set_response("GET", f"repos/{_REPO}/actions/workflows/ci.yml/runs", {"workflow_runs": candidates})
-    manifest = tmp_path / "manifest.json"
-    original = json.dumps({"repository": _REPO, "ref": "benchmark", "sha": _SHA, "runs": [], "pending": pending})
-    manifest.write_text(original)
-    command = [sys.executable, str(_SCRIPT), "resolve", "--manifest", str(manifest)]
-    if scenario == "explicit-foreign":
-        command += ["--run-id", "1"]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert result.returncode != 0
-    assert "dispatch" in result.stderr
-    assert manifest.read_text() == original
-
-
-def test_resolve_explicit_run_still_accepts_the_owned_dispatch(tmp_path: Path, fake_gh: FakeGh) -> None:
-    run, _ = _sample(1, 4, 100)
-    run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
-    fake_gh.set_response("GET", f"repos/{_REPO}/actions/workflows/ci.yml/runs", {"workflow_runs": [run]})
-    manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"repository": _REPO, "ref": "benchmark", "sha": _SHA, "runs": [],
-                                    "pending": {"jobs": 4, "before": [], "dispatch_id": _DISPATCH_ID}}))
-    result = subprocess.run([sys.executable, str(_SCRIPT), "resolve", "--manifest", str(manifest), "--run-id", "1"],
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    resolved = json.loads(manifest.read_text())
-    assert resolved["runs"] == [{"id": 1, "jobs": 4, "attempt": 1, "dispatch_id": _DISPATCH_ID}]
-    assert "pending" not in resolved
-
-
-@pytest.mark.parametrize("fault", [None, "foreign", "missing-title", "invalid-uuid"])
-def test_report_requires_recorded_dispatch_identity_for_marked_entries(
-    tmp_path: Path, fake_gh: FakeGh, fault: str | None,
-) -> None:
-    run, jobs = _sample(1, 4, 100)
-    marker = "invalid" if fault == "invalid-uuid" else _DISPATCH_ID
-    if fault != "missing-title":
-        run["display_title"] = "CI benchmark " + ("foreign" if fault == "foreign" else marker)
-    result, output = _report(tmp_path, fake_gh, [(4, run, jobs)], dispatch_id=marker)
-    if fault is None:
-        assert result.returncode == 0, result.stderr
-        assert json.loads((output / "measurements.json").read_text())["measurements"][0]["id"] == 1
-    else:
-        assert result.returncode != 0
-        assert "dispatch" in result.stderr
-        assert (output / "run-1.json").exists()
-        assert not (output / "report.md").exists()
-
-
-@pytest.mark.parametrize("incomplete_count", [4, 20], ids=["original-configuration", "additional-configuration"])
-def test_report_requires_three_successes_for_original_and_additional_configurations(
-    tmp_path: Path, fake_gh: FakeGh, incomplete_count: int,
-) -> None:
-    """Failed/active samples cannot make a newly measured group or an original group ready."""
-    samples: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
-    for count in (1, 2, 4, 16, 20):
-        for gate in ([100, 120] if count == incomplete_count else [190, 210, 250]):
-            durations = [40] + [20] * 15 if count == 16 else [30] * 20 if count == 20 else None
-            run, jobs = _sample(len(samples) + 1, count, gate, durations=durations)
-            samples.append((count, run, jobs))
-    for status, conclusion in (("completed", "failure"), ("in_progress", None)):
-        durations = [30] * 20 if incomplete_count == 20 else None
-        run, jobs = _sample(len(samples) + 1, incomplete_count, 120, durations=durations)
-        run.update(status=status, conclusion=conclusion)
-        jobs[2].update(status=status, conclusion=conclusion)
-        samples.append((incomplete_count, run, jobs))
-    result, output = _report(tmp_path, fake_gh, samples)
-    assert result.returncode == 0, result.stderr
-    report = (output / "report.md").read_text()
-    assert "Timing sample requirement: PENDING" in report
-    measurements = json.loads((output / "measurements.json").read_text())["measurements"]
-    assert [(row["conclusion"], row["complete"]) for row in measurements[-2:]] == [("failure", True), (None, False)]
-    assert all("gate_seconds" not in row for row in measurements[-2:])
+    gh, invoke = bench
+    candidates: list[dict[str, Any]] = []
+    gh.on_runs = lambda: {"workflow_runs": candidates}
+    for scenario in ("foreign", "missing-title", "explicit-foreign", "ambiguous", "legacy-pending", "owned"):
+        pending: dict[str, Any] = {"jobs": 4, "before": [], "dispatch_id": _DISPATCH_ID}
+        run, _ = _sample(1, 4, 100)
+        run["display_title"] = f"CI benchmark {_DISPATCH_ID}"
+        if scenario in ("foreign", "explicit-foreign"):
+            run["display_title"] = "CI benchmark cc40ab14-9829-457d-9916-2b858e645c61"
+        elif scenario == "missing-title":
+            del run["display_title"]
+        elif scenario == "legacy-pending":
+            del pending["dispatch_id"]
+        candidates[:] = [run, {**run, "id": 2}] if scenario == "ambiguous" else [run]
+        manifest = tmp_path / f"{scenario}.json"
+        original = json.dumps({"repository": _REPO, "ref": "benchmark", "sha": _SHA, "runs": [],
+                               "pending": pending})
+        manifest.write_text(original)
+        command = ["resolve", "--manifest", str(manifest)]
+        if scenario in ("explicit-foreign", "owned"):
+            command += ["--run-id", "1"]
+        if scenario == "owned":
+            invoke(*command)
+            resolved = json.loads(manifest.read_text())
+            assert resolved["runs"] == [{"id": 1, "jobs": 4, "attempt": 1, "dispatch_id": _DISPATCH_ID}]
+            assert "pending" not in resolved
+            continue
+        with pytest.raises(ValueError, match="dispatch"):
+            invoke(*command)
+        assert manifest.read_text() == original, scenario

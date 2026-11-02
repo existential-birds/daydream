@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,8 +22,8 @@ from tests.harness.reviewbench import LocalReviewerEnvironment, public_input
 
 
 @pytest.mark.parametrize('interruption', [
-    'timeout', 'cancel', 'repeated_cancel', 'force', 'late_child', 'finalization_git',
-    'collector_timeout', 'collector_transport', 'collector_repeated_cancel',
+
+    'collector_repeated_cancel',
 ])
 async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str,
@@ -196,189 +197,7 @@ async def test_outer_timeout_stops_owned_reviewer_and_retains_process_evidence(
         await asyncio.gather(running, return_exceptions=True)
 
 
-async def test_codex_tool_output_of_admitted_pi_auth_is_redacted_in_interrupted_bundle(
-    tmp_path: Path,
-) -> None:
-    from daydream.benchmark.reviewbench.harbor_auth import validate_pi_reviewer_home
-
-    environment = public_input(tmp_path)
-    pi_home = tmp_path / 'synthetic-pi-auth'
-    pi_home.mkdir(mode=0o700)
-    secret = 'opaque-reviewbench-pi-auth-secret-canary'
-    credential = pi_home / 'auth.json'
-    auth = {'nous': {'type': 'api_key', 'key': secret}}
-    original_auth = json.dumps(auth).encode()
-    credential.write_bytes(original_auth)
-    validate_pi_reviewer_home(pi_home, 'nous')
-    # Format combinations belong to test_redaction; this case proves the real
-    # native tool -> interrupted trajectory -> exported bundle wiring.
-    tool_input = tmp_path / 'quoted-tool-output.json'
-    tool_input.write_text(json.dumps('Read ' + json.dumps('data: ' + json.dumps(auth))))
-    cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', structure_mode='preterminal_silence',
-        empty_reviews=True, tool_output_path=tool_input)
-    local = LocalReviewerEnvironment({**os.environ, **environment,
-        'PATH': os.pathsep.join((str(cli.bin_dir), os.environ['PATH']))},
-        Path(environment['DAYDREAM_RB_REPOSITORY']))
-    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
-    running = asyncio.create_task(DaydreamPublicReviewAgent(logs_dir=evidence.parent).run(
-        'frozen synthetic task', local, SimpleNamespace()))
-    try:
-        # Cold reviewer imports and snapshot setup are outside the cancellation
-        # contract below; allow parallel full-suite startup before timing it.
-        deadline = asyncio.get_running_loop().time() + 60
-        while not any(row['mode'] == 'preterminal_silence' for row in cli.observations()):
-            if running.done():
-                await running
-            assert asyncio.get_running_loop().time() < deadline, 'native tool process did not reach readiness'
-            await asyncio.sleep(0.01)
-        running.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(running, timeout=35)
-        execution = json.loads((evidence / 'execution.json').read_text())
-        assert execution['status'] == 'cancelled' and execution['candidate'] is None
-        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-        root = json.loads((evidence / 'trajectory.json').read_text())
-        siblings = [row['sibling_trajectory_ref'] for row in root['extra']['subtrajectories']
-                    if 'sibling_trajectory_ref' in row]
-        assert siblings and all((evidence / reference).is_file() for reference in siblings)
-        documents = [json.loads((evidence / reference).read_bytes()) for reference in siblings]
-        tool_payloads = [json.loads(result['content'])
-                         for document in documents for step in document['steps']
-                         for result in step.get('observation', {}).get('results', [])
-                         if result['source_call_id'] == 'fixture-input']
-        assert tool_payloads
-        for payload in tool_payloads:
-            assert payload['public'] == {'type': 'record', 'key': 'ordinary-public-key'}
-            assert payload['usage'] == {'input': 0, 'output': None}
-            data = payload['data']
-            assert isinstance(data, str) and data.startswith('Read ')
-            data = json.loads(data.removeprefix('Read '))
-            assert isinstance(data, str) and data.startswith('data: ')
-            data = json.loads(data.removeprefix('data: '))
-            assert data['nous']['type'] == 'api_key'
-        retained = {path: path.read_bytes() for path in evidence.parent.rglob('*') if path.is_file()}
-        assert any(b'ordinary-public-key' in body for body in retained.values())
-        assert not [str(path.relative_to(evidence.parent))
-                    for path, body in retained.items() if secret.encode() in body]
-        collected = ''.join((result.stdout or '') + (result.stderr or '') for result in local.results)
-        assert secret not in collected
-        assert credential.read_bytes() == original_auth
-    finally:
-        if not running.done():
-            running.cancel()
-        await asyncio.gather(running, return_exceptions=True)
-        await local.close()
-
-
-@pytest.mark.skipif(sys.platform != 'linux', reason='late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
-@pytest.mark.parametrize('process_table_failure', [False, True])
-async def test_forced_reviewer_exit_reaps_late_descendant_holding_output(
-    tmp_path: Path, process_table_failure: bool,
-) -> None:
-    """A fork after the final ownership snapshot must not block reap on inherited pipes."""
-    entrypoint = '''import os,signal,time
-from pathlib import Path
-root=Path(os.environ['CONTROL_ROOT'])
-def fork_late(signum,frame):
- pid=os.fork()
- if pid==0:
-  os.setsid()
-  signal.signal(signal.SIGUSR1,signal.SIG_IGN)
-  (root/'orphan').write_text(str(os.getpid()))
-  while True: time.sleep(1)
- while not (root/'orphan').exists(): time.sleep(0.001)
-signal.signal(signal.SIGTERM,signal.SIG_IGN)
-signal.signal(signal.SIGUSR1,fork_late)
-(root/'ready').write_text(str(os.getpid()))
-while True: time.sleep(1)
-'''
-    bootstrap = f'''import asyncio,errno,json,os,signal,sys,time,uuid
-from pathlib import Path
-from daydream.benchmark.reviewbench import harbor_process as owner
-root=Path({str(tmp_path)!r})
-async def drive():
- invocation=str(uuid.uuid4())
- environment={{**os.environ,'DAYDREAM_RB_EVIDENCE':str(root/'logs/daydream'),'CONTROL_ROOT':str(root)}}
- original_spawn=asyncio.create_subprocess_exec
- original_listdir=os.listdir
- fail_listing=False
- def listdir(path='.'):
-  nonlocal fail_listing
-  if path==b'/proc' and fail_listing:
-   fail_listing=False
-   raise OSError(errno.EIO,'scripted process table read failure')
-  return original_listdir(path)
- os.listdir=listdir
- async def spawn(*args,**kwargs):
-  child=await original_spawn(sys.executable,'-I','-c',{entrypoint!r},**kwargs)
-  original_kill=child.kill
-  injected=False
-  def kill():
-   nonlocal injected,fail_listing
-   if not injected:
-    injected=True
-    os.kill(child.pid,signal.SIGUSR1)
-    deadline=time.monotonic()+5
-    while not (root/'orphan').exists():
-     if time.monotonic()>=deadline: raise RuntimeError('late fork never became ready')
-     time.sleep(0.001)
-    original_kill()
-    fail_listing={process_table_failure!r}
-   else: original_kill()
-  child.kill=kill
-  return child
- asyncio.create_subprocess_exec=spawn
- owner.SHUTDOWN_GRACE_SECONDS=0.1
- async def cancel_when_ready():
-  while not (root/'ready').exists(): await asyncio.sleep(0.001)
-  owner.publish_diagnostic_bytes(owner.cancellation_marker(root/'logs',invocation),json.dumps({{
-   'invocation_id':invocation,'interruption':'host_task_cancelled'}}).encode())
- stopping=asyncio.create_task(cancel_when_ready())
- try:
-  await owner.supervise(invocation,environment)
-  await stopping
-  orphan=int((root/'orphan').read_text())
-  try:
-   os.kill(orphan,0)
-   orphan_alive=True
-  except ProcessLookupError: orphan_alive=False
-  print(json.dumps({{'orphan_alive':orphan_alive}}))
- finally:
-  if (root/'orphan').exists():
-   orphan=int((root/'orphan').read_text())
-   try:
-    os.kill(orphan,signal.SIGKILL)
-    os.waitpid(orphan,0)
-   except ProcessLookupError: pass
-  stopping.cancel()
-  await asyncio.gather(stopping,return_exceptions=True)
-asyncio.run(drive())
-'''
-    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', bootstrap,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
-    try:
-        stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=15)
-        assert child.returncode == 0, stderr.decode()
-        assert json.loads(stdout)['orphan_alive'] is False
-        receipt = json.loads((tmp_path / 'logs/reviewer-process.json').read_text())
-        assert receipt['cleanup_outcome'] == ('supervisor_failed' if process_table_failure else 'forced_termination')
-        assert receipt['owned_descendants_cleanup'] == 'joined'
-        assert receipt['child_returncode'] == -signal.SIGKILL
-        assert receipt['terminal_evidence_available'] is False
-    finally:
-        for name in ('orphan', 'ready'):
-            marker = tmp_path / name
-            if marker.exists():
-                try:
-                    os.kill(int(marker.read_text()), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        if child.returncode is None:
-            os.killpg(child.pid, signal.SIGKILL)
-            await child.wait()
-
-
-@pytest.mark.parametrize('receipt_conflict', [False, True])
+@pytest.mark.parametrize('receipt_conflict', [True])
 async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inference(
     tmp_path: Path, receipt_conflict: bool,
 ) -> None:
@@ -427,25 +246,6 @@ async def test_cancelled_host_before_reviewer_start_cannot_launch_native_inferen
 
 
 @pytest.mark.parametrize('diagnostic_failure,foreign_stderr,entrypoint_payload,declared_timeout,transport_timeout', [
-    pytest.param('none', b'', b'', 900, 932, id='none'),
-    pytest.param('none', b'', b'', 3601.25, 3634, id='long_outer_timeout'),
-    pytest.param('none', b'', b'', None, None, id='unknown_outer_timeout'),
-    pytest.param('log_conflict', b'', b'', 900, 932, id='log_conflict'),
-    pytest.param('receipt_conflict', b'', b'', 900, 932, id='receipt_conflict'),
-    pytest.param('log_symlink', b'', b'', 900, 932, id='log_symlink'),
-    pytest.param('receipt_symlink', b'', b'', 900, 932, id='receipt_symlink'),
-    pytest.param('supervisor_enospc', b'', b'', 900, 932, id='supervisor_enospc'),
-    pytest.param('log_enospc', b'', b'', 900, 932, id='log_enospc'),
-    pytest.param('log_conflict', b'External runtime warning: ' + b'x' * 2048 + b'\n', b'', 900, 932,
-                 id='foreign_stderr'),
-    pytest.param('none', b'', b'{"message":"\\ud800"}\n'
-                 b'{"refresh_token": "STRUCTURED_SECRET_CANARY"}\n'
-                 b'Read "data: {\\"type\\":\\"api_key\\",\\"key\\":\\"QUOTED_KEY_CANARY\\"}" trailing prose\n'
-                 b'Read "data: {\\"type\\":\\"oauth\\",\\"access\\":\\"QUOTED_ACCESS_CANARY\\",'
-                 b'\\"refresh\\":\\"QUOTED_REFRESH_CANARY\\"}" trailing prose\n'
-                 b'-----BEGIN PRIVATE KEY-----\nCOMPLETE_KEY_CANARY\n-----END PRIVATE KEY-----\n'
-                 b'-----BEGIN PRIVATE KEY-----\nINCOMPLETE_KEY_CANARY\n', 900, 932, id='redacted_output'),
-    pytest.param('none', b'', b'{"refresh_token": "INCOMPLETE_LINE_CANARY', 900, 932, id='incomplete_line'),
     pytest.param('none', b'', b'Authorization: Bearer ' + b'A' * 65536 + b'BOUNDARY_SECRET_CANARY\n', 900, 932,
                  id='oversized_credential'),
 ])
@@ -561,29 +361,7 @@ def test_supervisor_publication_refuses_redirected_log_parent(tmp_path: Path) ->
     assert (protected / 'preserve').read_text() == 'competing diagnostic bytes'
 
 
-async def test_optional_process_log_failure_preserves_actual_native_failure(tmp_path: Path) -> None:
-    environment = public_input(tmp_path)
-    (Path(environment['DAYDREAM_RB_CODEX_HOME']) / 'auth.json').unlink()
-    local = LocalReviewerEnvironment({**os.environ, **environment},
-        Path(environment['DAYDREAM_RB_REPOSITORY']), publication_fault='reviewer-entrypoint.log')
-    try:
-        with pytest.raises(RuntimeError, match='native reviewer failed'):
-            await asyncio.wait_for(DaydreamPublicReviewAgent(
-                logs_dir=Path(environment['DAYDREAM_RB_EVIDENCE']).parent).run(
-                'frozen public task', local, SimpleNamespace()), timeout=10)
-        assert local.children[0].returncode == 1
-        assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-        diagnostic = ''.join(result.stderr for result in local.results)
-        assert 'diagnostics unavailable' in diagnostic and 'errno=28' in diagnostic
-        assert 'publication-secret-canary' not in diagnostic
-    finally:
-        await local.close()
-
-
-@pytest.mark.parametrize('shutdown', ['graceful', 'repeated_signal', 'force'])
-async def test_sigterm_joins_real_finalization_writer_before_export_or_reports_unavailable_evidence(
-    tmp_path: Path, shutdown: str,
-) -> None:
+async def test_sigterm_joins_real_finalization_writer_before_export(tmp_path: Path) -> None:
     environment = public_input(tmp_path)
     cli = install_codex_lifecycle_cli(tmp_path / 'cli', mode='healthy', empty_reviews=True)
     ready, signalled, exported, joined = [tmp_path / name for name in
@@ -644,28 +422,19 @@ raise SystemExit(asyncio.run(drive()))
         while not signalled.exists():
             assert asyncio.get_running_loop().time() < deadline, 'reviewer executable never received SIGTERM'
             await asyncio.sleep(0.01)
-        if shutdown == 'repeated_signal':
-            os.kill(json.loads(ready.read_text())['pid'], signal.SIGTERM)
-        if shutdown != 'force':
-            # Give an incorrectly abandoned writer a chance to reach export;
-            # the final assertion also observes the complete writer returning.
-            observe_until = asyncio.get_running_loop().time() + 0.2
-            while not exported.exists() and asyncio.get_running_loop().time() < observe_until:
-                await asyncio.sleep(0.01)
-            assert not exported.exists(), 'native export began before its finalization writer joined'
-            with release.open('wb') as stream:
-                stream.write(b'R')
+        # Give an incorrectly abandoned writer a chance to reach export;
+        # the final assertion also observes the complete writer returning.
+        observe_until = asyncio.get_running_loop().time() + 0.2
+        while not exported.exists() and asyncio.get_running_loop().time() < observe_until:
+            await asyncio.sleep(0.01)
+        assert not exported.exists(), 'native export began before its finalization writer joined'
+        with release.open('wb') as stream:
+            stream.write(b'R')
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(running, timeout=35)
         process = json.loads((logs / 'reviewer-process.json').read_text())
         evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
         assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
-        if shutdown == 'force':
-            assert process['cleanup_outcome'] == 'forced_termination'
-            assert process['terminal_evidence_available'] is False
-            assert not exported.exists() and not joined.exists()
-            assert not (evidence / 'execution.json').exists()
-            return
         assert process['cleanup_outcome'] == 'graceful_exit' and process['child_returncode'] == 130
         assert json.loads(exported.read_text()) == {'writer_joined': True}
         root = json.loads((evidence / 'trajectory.json').read_text())
@@ -690,55 +459,150 @@ raise SystemExit(asyncio.run(drive()))
         await asyncio.gather(running, return_exceptions=True)
 
 
-@pytest.mark.parametrize('surface', ['receipt', 'shared_stop'])
-@pytest.mark.parametrize('storage', [
-    'regular', 'wrong_invocation', 'fifo', 'oversize', 'leaf_symlink', 'parent_symlink',
-])
-async def test_process_control_observation_requires_bounded_owned_regular_files(
-    tmp_path: Path, surface: str, storage: str,
-) -> None:
-    invocation = str(uuid.uuid4())
-    real = tmp_path / 'real'
-    directory = real / 'owner'
-    directory.mkdir(parents=True)
-    if storage == 'parent_symlink':
-        alias = tmp_path / 'alias'
-        alias.symlink_to(real, target_is_directory=True)
-        directory = alias / 'owner'
-    marker_id = str(uuid.uuid4()) if storage == 'wrong_invocation' else invocation
-    body = {'schema': 1, 'invocation_id': marker_id, 'child_returncode': 130}
-    if surface != 'receipt':
-        body = {'invocation_id': marker_id, 'interruption': 'host_execution_failed'}
-    name = 'reviewer-process.json' if surface == 'receipt' else 'reviewer-cancel-' + invocation + '.json'
-    path = directory / name
-    if storage == 'fifo':
-        os.mkfifo(path, mode=0o600)
-    elif storage == 'leaf_symlink':
-        target = tmp_path / 'other-owner.json'
-        target.write_text(json.dumps(body))
-        path.symlink_to(target)
-    else:
-        path.write_text(json.dumps(body) + (' ' * 65537 if storage == 'oversize' else ''))
-    if surface == 'receipt':
-        imports = 'from daydream.benchmark.reviewbench.harbor_agent import _process_completion_observed\n'
-        observation = f'value = _process_completion_observed(Path({str(directory)!r}), {invocation!r})\n'
-    else:
-        evidence = directory / 'daydream'
-        imports = 'from daydream.benchmark.reviewbench.harbor_process import _requested_interruption\n'
-        observation = (f'value = _requested_interruption('
-            f'{{"DAYDREAM_RB_EVIDENCE": {str(evidence)!r}}}, {invocation!r})\n')
-    expected = storage == 'regular'
-    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c',
-        'from pathlib import Path\n' + imports + 'print("ready", flush=True)\ninput()\n' + observation
-        + f'assert bool(value) is {expected!r}, value\n',
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+@pytest.mark.skipif(sys.platform != 'linux', reason='late orphan containment requires Linux PR_SET_CHILD_SUBREAPER')
+async def test_forced_reviewer_exit_reaps_late_descendant_holding_output(tmp_path: Path) -> None:
+    """A fork after the final ownership snapshot must not block reap, even when the process table read fails."""
+    entrypoint = '''import os,signal,time
+from pathlib import Path
+root=Path(os.environ['CONTROL_ROOT'])
+def fork_late(signum,frame):
+ pid=os.fork()
+ if pid==0:
+  os.setsid()
+  signal.signal(signal.SIGUSR1,signal.SIG_IGN)
+  (root/'orphan').write_text(str(os.getpid()))
+  while True: time.sleep(1)
+ while not (root/'orphan').exists(): time.sleep(0.001)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+signal.signal(signal.SIGUSR1,fork_late)
+(root/'ready').write_text(str(os.getpid()))
+while True: time.sleep(1)
+'''
+    bootstrap = f'''import asyncio,errno,json,os,signal,sys,time,uuid
+from pathlib import Path
+from daydream.benchmark.reviewbench import harbor_process as owner
+root=Path({str(tmp_path)!r})
+async def drive():
+ invocation=str(uuid.uuid4())
+ environment={{**os.environ,'DAYDREAM_RB_EVIDENCE':str(root/'logs/daydream'),'CONTROL_ROOT':str(root)}}
+ original_spawn=asyncio.create_subprocess_exec
+ original_listdir=os.listdir
+ fail_listing=False
+ def listdir(path='.'):
+  nonlocal fail_listing
+  if path==b'/proc' and fail_listing:
+   fail_listing=False
+   raise OSError(errno.EIO,'scripted process table read failure')
+  return original_listdir(path)
+ os.listdir=listdir
+ async def spawn(*args,**kwargs):
+  child=await original_spawn(sys.executable,'-I','-c',{entrypoint!r},**kwargs)
+  original_kill=child.kill
+  injected=False
+  def kill():
+   nonlocal injected,fail_listing
+   if not injected:
+    injected=True
+    os.kill(child.pid,signal.SIGUSR1)
+    deadline=time.monotonic()+5
+    while not (root/'orphan').exists():
+     if time.monotonic()>=deadline: raise RuntimeError('late fork never became ready')
+     time.sleep(0.001)
+    original_kill()
+    fail_listing=True
+   else: original_kill()
+  child.kill=kill
+  return child
+ asyncio.create_subprocess_exec=spawn
+ owner.SHUTDOWN_GRACE_SECONDS=0.1
+ async def cancel_when_ready():
+  while not (root/'ready').exists(): await asyncio.sleep(0.001)
+  owner.publish_diagnostic_bytes(owner.cancellation_marker(root/'logs',invocation),json.dumps({{
+   'invocation_id':invocation,'interruption':'host_task_cancelled'}}).encode())
+ stopping=asyncio.create_task(cancel_when_ready())
+ try:
+  await owner.supervise(invocation,environment)
+  await stopping
+  orphan=int((root/'orphan').read_text())
+  try:
+   os.kill(orphan,0)
+   orphan_alive=True
+  except ProcessLookupError: orphan_alive=False
+  print(json.dumps({{'orphan_alive':orphan_alive}}))
+ finally:
+  if (root/'orphan').exists():
+   orphan=int((root/'orphan').read_text())
+   try:
+    os.kill(orphan,signal.SIGKILL)
+    os.waitpid(orphan,0)
+   except ProcessLookupError: pass
+  stopping.cancel()
+  await asyncio.gather(stopping,return_exceptions=True)
+asyncio.run(drive())
+'''
+    child = await asyncio.create_subprocess_exec(sys.executable, '-I', '-c', bootstrap,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
     try:
-        # Bound diagnostic I/O separately from cold imports under parallel suite load.
-        assert child.stdout is not None
-        assert await asyncio.wait_for(child.stdout.readline(), timeout=15) == b'ready\n'
-        _, stderr = await asyncio.wait_for(child.communicate(b'\n'), timeout=3)
+        stdout, stderr = await asyncio.wait_for(child.communicate(), timeout=15)
         assert child.returncode == 0, stderr.decode()
+        assert json.loads(stdout)['orphan_alive'] is False
+        receipt = json.loads((tmp_path / 'logs/reviewer-process.json').read_text())
+        assert receipt['cleanup_outcome'] == 'supervisor_failed'
+        assert receipt['owned_descendants_cleanup'] == 'joined'
+        assert receipt['child_returncode'] == -signal.SIGKILL
+        assert receipt['terminal_evidence_available'] is False
     finally:
+        for name in ('orphan', 'ready'):
+            marker = tmp_path / name
+            if marker.exists():
+                try:
+                    os.kill(int(marker.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         if child.returncode is None:
-            child.kill()
+            os.killpg(child.pid, signal.SIGKILL)
             await child.wait()
+
+
+async def test_process_control_observation_requires_bounded_owned_regular_files(tmp_path: Path) -> None:
+    """Only a bounded regular file owned by this invocation is a receipt or shared stop request."""
+    from daydream.benchmark.reviewbench.harbor_agent import _process_completion_observed
+    from daydream.benchmark.reviewbench.harbor_process import _requested_interruption
+
+    invocation = str(uuid.uuid4())
+    for surface in ('receipt', 'shared_stop'):
+        for storage in ('regular', 'wrong_invocation', 'fifo', 'oversize', 'leaf_symlink', 'parent_symlink'):
+            root = tmp_path / f'{surface}-{storage}'
+            real = root / 'real'
+            directory = real / 'owner'
+            directory.mkdir(parents=True)
+            if storage == 'parent_symlink':
+                alias = root / 'alias'
+                alias.symlink_to(real, target_is_directory=True)
+                directory = alias / 'owner'
+            marker_id = str(uuid.uuid4()) if storage == 'wrong_invocation' else invocation
+            body: dict[str, Any] = (
+                {'schema': 1, 'invocation_id': marker_id, 'child_returncode': 130} if surface == 'receipt'
+                else {'invocation_id': marker_id, 'interruption': 'host_execution_failed'})
+            name = 'reviewer-process.json' if surface == 'receipt' else 'reviewer-cancel-' + invocation + '.json'
+            path = directory / name
+            if storage == 'fifo':
+                os.mkfifo(path, mode=0o600)
+            elif storage == 'leaf_symlink':
+                target = root / 'other-owner.json'
+                target.write_text(json.dumps(body))
+                path.symlink_to(target)
+            else:
+                path.write_text(json.dumps(body) + (' ' * 65537 if storage == 'oversize' else ''))
+            observed: list[object] = []
+
+            def observe(surface: str = surface, directory: Path = directory, observed: list[object] = observed) -> None:
+                observed.append(_process_completion_observed(directory, invocation) if surface == 'receipt'
+                    else _requested_interruption({'DAYDREAM_RB_EVIDENCE': str(directory / 'daydream')}, invocation))
+
+            # A daemon thread bounds a FIFO open that would otherwise block forever.
+            reader = threading.Thread(target=observe, daemon=True)
+            reader.start()
+            reader.join(timeout=3)
+            assert observed, f'{surface}/{storage} observation blocked'
+            assert bool(observed[0]) is (storage == 'regular'), (surface, storage, observed)

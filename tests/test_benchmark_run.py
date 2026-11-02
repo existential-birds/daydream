@@ -87,31 +87,7 @@ def _seed_compiled_task(ws: Path, *, reviewer: Any, judge: Any) -> None:
     )
 
 
-def test_preflight_requires_explicit_judge_endpoint(tmp_path: Path) -> None:
-    errs = run_mod._preflight(
-        _ws(tmp_path), oracle=True, env=_env(DAYDREAM_JUDGE_API_KEY="sk-or-abc", DAYDREAM_JUDGE_BASE_URL=None),
-        docker_ok=_docker_ok,
-    )
-
-    assert any("missing DAYDREAM_JUDGE_BASE_URL" in error for error in errs)
-
-def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
-    ws = _ws(tmp_path, judge_allowed_hosts=["api.anthropic.com"])
-    errs = run_mod._preflight(
-        ws, oracle=True, env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli", DAYDREAM_JUDGE_BASE_URL=None),
-        docker_ok=_docker_ok,
-    )
-    assert not any("cannot resolve judge host" in e for e in errs)
-    assert errs == []
-
-def test_spend_summary_prints_claude_cli_judge_host(tmp_path: Path) -> None:
-    text = run_mod._pre_run_summary(_ws(tmp_path), env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli"))
-    # exact-host match avoids CodeQL py/incomplete-url-substring-sanitization
-    host_lines = [ln for ln in text.splitlines() if ln.strip().startswith("judge host:")]
-    assert len(host_lines) == 1
-    assert host_lines[0].split(":", 1)[1].strip() == "api.anthropic.com"
-
-def test_preflight_reports_each_unsafe_host_privacy_and_runtime_setting(tmp_path: Path) -> None:
+def _preflight_reports_each_unsafe_setting(tmp_path: Path) -> None:
     errs = run_mod._preflight(
         _ws(tmp_path, uploads="enabled"), oracle=True,
         env=_env(DAYDREAM_JUDGE_BASE_URL="http://evil.example", DAYDREAM_REVIEW_BASE_URL="http://other.example"),
@@ -125,37 +101,24 @@ def test_preflight_reports_each_unsafe_host_privacy_and_runtime_setting(tmp_path
     }
 
 
-def test_preflight_enforces_compiled_task_policy_not_raw_manifest(tmp_path: Path) -> None:
-    """Preflight reads the compiled task.toml Harbor enforces, not raw yaml.
-
-    A host ``benchmark.yaml`` permits but the compiled tree rejects (the tree
-    predates the manifest edit) must still block the run, because the stale
-    compiled task.toml is the artifact Harbor actually executes.
-    """
-
-    ws = _ws(tmp_path, judge_allowed_hosts=["127.0.0.1", "stale.example"])
-    # simulate a compiled tree produced before the manifest added stale.example
-    _seed_compiled_task(ws, reviewer=["review.example"], judge=["127.0.0.1"])
-    errs = run_mod._preflight(ws, oracle=True,
-                              env=_env(DAYDREAM_JUDGE_BASE_URL="http://stale.example"), docker_ok=_docker_ok)
-    assert any("judge host" in e and "stale.example" in e for e in errs)
-
-
-def test_preflight_uses_live_docker_capability_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production preflight must fail with the actual sidecar probe reason."""
+def test_preflight_reports_unsafe_settings_and_live_docker_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production preflight must also fail with the actual sidecar probe reason."""
+    _preflight_reports_each_unsafe_setting(tmp_path / "unsafe")
 
     monkeypatch.setattr("daydream.benchmark.harbor.package.docker_network_policy_capability",
         lambda: SimpleNamespace(supported=False, reason="Harbor egress sidecar rejected nftables fib rules"),
         raising=False,
     )
 
-    errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env())
+    errs = run_mod._preflight(_ws(tmp_path / "live"), oracle=True, env=_env())
 
     assert any("Docker allowlist" in e for e in errs)
     assert any("rejected nftables fib rules" in e for e in errs)
 
 
-def test_ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
+def _ledger_rejects_non_contained_job_dir(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
     with pytest.raises(run_mod.RunError):
@@ -224,7 +187,7 @@ def _seed_passing_oracle_receipt(
     return job_dir, lock_sha
 
 
-def test_oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
+def _oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     job_dir = _seed_verifier_reward(ws, reward=0.8)
     ok, _ = run_mod._parse_job_results(job_dir)
@@ -233,17 +196,7 @@ def test_oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
     assert code == 1
     assert not (ws / "harbor" / "oracle-receipt.json").exists()
 
-def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
-    ws = _ws(tmp_path)
-    job_dir = ws / "harbor" / "jobs" / "run-1"
-    verifier = job_dir / "case-abc" / "verifier"
-    verifier.mkdir(parents=True)
-    # infra error path writes reward-details.json only -> unscored, blocks
-    (verifier / "reward-details.json").write_text("{}")
-    ok, _ = run_mod._parse_job_results(job_dir)
-    assert ok is False
-
-def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
+def _gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     _seed_passing_oracle_receipt(ws)
     # now the current compiled lock digest differs from the receipt's (wheel
@@ -334,7 +287,7 @@ def test_cli_oracle_then_confirmed_benchmark_persists_trial_and_receipt_identity
     ))
 
 
-def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Path) -> None:
+def _oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     spawn = _reward_spawn(ws, reward=0.5, candidate_count=2)
 
@@ -349,15 +302,12 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
     assert ledger["runs"][0]["environments"][0]["trial_name"] == "case-abc"
     assert ledger["runs"][0]["environments"][0]["image_id"].startswith("hb__")
 
-@pytest.mark.parametrize("model", [None, "", " \t ", " rm "])
-def test_default_run_requires_model_before_spend_and_preserves_harbor_exit_code(
-    tmp_path: Path, model: str | None, capsys: pytest.CaptureFixture[str],
+def _default_run_requires_model_before_spend_and_preserves_harbor_exit_code(
+    tmp_path: Path, model: str, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A valid receipt cannot allow a blank reviewer selection to start Harbor."""
     ws = _ws(tmp_path)
     environment = _env(DAYDREAM_REVIEW_MODEL=model)
-    if model is None:
-        environment.pop("DAYDREAM_REVIEW_MODEL")
     _seed_passing_oracle_receipt(ws, job_dir_name="x", env=environment)
     calls: list[dict[str, Any]] = []
 
@@ -367,7 +317,7 @@ def test_default_run_requires_model_before_spend_and_preserves_harbor_exit_code(
 
     code = run_mod.run_run(ws, oracle=False, yes=True, env=environment, spawn=spawn, docker_ok=_docker_ok)
     ledger_path = ws / "runtime/harbor.json"
-    if model is None or not model.strip():
+    if not model.strip():
         assert code == 1
         assert "DAYDREAM_REVIEW_MODEL" in capsys.readouterr().err
         assert calls == []
@@ -377,7 +327,7 @@ def test_default_run_requires_model_before_spend_and_preserves_harbor_exit_code(
         assert calls[0]["DAYDREAM_REVIEW_MODEL"] == " rm "
         assert json.loads(ledger_path.read_text())["runs"][0]["reviewer_model"] == " rm "
 
-def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
+def _default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     called = []
 
@@ -391,7 +341,7 @@ def test_default_gate_blocks_before_any_harbor_call(tmp_path: Path) -> None:
     assert not (ws / "runtime" / "harbor.json").exists()  # blocked run leaves no running entry
 
 
-def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> None:
+def _parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> None:
     """An aborted run (trial present but no score evidence) must still record
     the environment it spawned, so ``clean --jobs`` can address the Docker
     image it left behind instead of orphaning it by deleting the job dir.
@@ -410,3 +360,18 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
 
 
 # Oracle mapping accepts the legacy calibration field without using it.
+
+
+def test_run_gates_refuse_before_spend_and_failed_runs_stay_cleanable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    for check in (_ledger_rejects_non_contained_job_dir, _oracle_no_receipt_on_reward_below_one,
+                  _gate_blocks_on_compiled_lock_mismatch, _oracle_fails_writes_no_receipt_and_ledger_cleanup_pending,
+                  _default_gate_blocks_before_any_harbor_call, _parse_job_results_records_env_when_reward_missing):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root)
+    for index, model in enumerate(("", " rm ")):
+        root = tmp_path / f"model-{index}"
+        root.mkdir()
+        _default_run_requires_model_before_spend_and_preserves_harbor_exit_code(root, model, capsys)

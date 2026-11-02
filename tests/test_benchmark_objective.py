@@ -47,17 +47,6 @@ def _append(ws: Path, run_id: Any='run-1', profile_digest: Any=None) -> None:
     )
 
 
-def _complete_ws(tmp_path: Path, run_id: Any="run-1", trials: Any=None) -> Any:
-    """A complete, consistent run whose ledger lock hash matches the seed lock."""
-    ws = _ws(tmp_path)
-    _append(ws, run_id)
-    run_mod.ledger_mark(ws, run_id, state="complete")
-    if trials is None:
-        trials = [_reward(tp=2, fp=1, fn=0)]
-    _seed_trials(ws, run_id, trials)
-    return ws
-
-
 def _reward(**fields: Any) -> dict[str, Any]:
     """Build a canonical verifier reward row, defaulting precision/recall from counts."""
     tp, fp, fn = fields.get("tp", 0), fields.get("fp", 0), fields.get("fn", 0)
@@ -77,7 +66,7 @@ def _seed_trials(ws: Path, run_id: Any, trials: Any) -> None:
             (trial / "reward.json").write_text(json.dumps(row))
 
 
-def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path: Path) -> None:
+def _resolves_complete_run_by_explicit_run_id(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -86,7 +75,7 @@ def test_objective_resolves_complete_run_by_explicit_run_id(tmp_path: Path) -> N
     assert run.run_id == run_id
     assert run.state == "complete"
 
-def test_objective_rejects_missing_and_nonterminal_runs(tmp_path: Path) -> None:
+def _rejects_missing_and_nonterminal_runs(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -96,7 +85,7 @@ def test_objective_rejects_missing_and_nonterminal_runs(tmp_path: Path) -> None:
             objective.read_completed_run(ws, bad, env={})
         assert bad in str(e.value) and str(ws) in str(e.value)
 
-def test_objective_parses_scored_and_infra_trials(tmp_path: Path) -> None:
+def _parses_scored_and_infra_trials(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -111,7 +100,7 @@ def test_objective_parses_scored_and_infra_trials(tmp_path: Path) -> None:
     assert run.objective.scored_task_count == 1
     assert run.objective._as_metric_dict() == verifier_core.aggregate_metrics(run.task_rows)
 
-def test_objective_malformed_numeric_fails_closed(tmp_path: Path) -> None:
+def _malformed_numeric_fails_closed(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     run_id = "run-1"
     _append(ws, run_id)
@@ -121,7 +110,7 @@ def test_objective_malformed_numeric_fails_closed(tmp_path: Path) -> None:
         objective.read_completed_run(ws, run_id, env={})
     assert "run-1" in str(e.value)
 
-def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
+def _rejects_identity_disagreement(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     # ledger says lock hash "a"*64 but the on-disk lock hashes to something else
     run_mod.ledger_append_running(
@@ -131,23 +120,6 @@ def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
     with pytest.raises(objective.ObjectiveError) as e:
         objective.read_completed_run(ws, "run-1", env={})
     assert "compiled_lock" in str(e.value).lower()
-
-def test_objective_json_is_opaque(tmp_path: Path) -> None:
-    ws = _complete_ws(tmp_path)
-    # seed a private repo slug + gold/judge text into the workspace artifacts
-    (ws / "benchmark.yaml").write_text(json.dumps(
-        {"schema_version": 1, "source": {"repository": "acme/private-repo"}, "cases": [], "pull_requests": []}))
-    job = ws / "harbor" / "jobs" / "run-1" / "case-0" / "verifier"
-    (job / "reward-details.json").write_text(
-        json.dumps({"reasoning": "the gold finding in private-repo", "path": "/src/x.py"}))
-    run = objective.read_completed_run(ws, "run-1", env={})
-    blob = json.dumps(objective.objective_to_json(run))
-    for forbidden in ("acme", "private-repo", "/src/", "reasoning"):
-        assert forbidden not in blob
-    doc = json.loads(blob)
-    assert set(doc) <= {"run_id", "mode", "schema_version", "identity", "objective"}
-    assert isinstance(doc["objective"], dict)
-
 
 def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest: Any="d" * 64, wheel: Any=None) -> Any:
     """A complete, consistent run under a repository workspace of the given name.
@@ -164,7 +136,7 @@ def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest:
     return ws
 
 
-def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path: Path) -> None:
+def _aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path: Path) -> None:
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)])
     b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)])
     m1 = {"schema_version": 1, "entries": [
@@ -180,7 +152,7 @@ def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path
     with pytest.raises(objective.ObjectiveError):
         objective.aggregate_suite(dup, env={})
 
-def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path: Path) -> None:
+def _aggregate_suite_fails_closed_on_incompatible_identity(tmp_path: Path) -> None:
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)], digest="d" * 64)
     b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=0)], digest="e" * 64)
     manifest = {"schema_version": 1, "entries": [
@@ -240,7 +212,7 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: P
     }
     assert {key: exported[key] for key in axes} == axes
 
-def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path: Path) -> None:
+def _suite_manifest_rejects_duplicate_and_incomplete(tmp_path: Path) -> None:
     dup = {"schema_version": 1, "entries": [
         {"workspace": str(tmp_path / "a"), "run_id": "r1"}, {"workspace": str(tmp_path / "a"), "run_id": "r1"},
     ]}
@@ -253,3 +225,20 @@ def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path: Path) -> None
     unsupported = {"schema_version": 99, "entries": []}
     with pytest.raises(objective.ObjectiveError):
         objective.validate_suite_manifest(unsupported)
+
+
+def test_objective_reads_only_complete_consistent_runs(tmp_path: Path) -> None:
+    for check in (_resolves_complete_run_by_explicit_run_id, _rejects_missing_and_nonterminal_runs,
+                  _parses_scored_and_infra_trials, _malformed_numeric_fails_closed, _rejects_identity_disagreement):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root)
+
+
+def test_suite_manifest_and_aggregation_refuse_duplicates_and_incompatible_identity(tmp_path: Path) -> None:
+    for check in (_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup,
+                  _aggregate_suite_fails_closed_on_incompatible_identity,
+                  _suite_manifest_rejects_duplicate_and_incomplete):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root)

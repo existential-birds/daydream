@@ -4,24 +4,20 @@ Full Python and mixed-stack Harbor runs are tested separately.
 """
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import entrypoint, package as pkg, run as run_mod
 
 
-def test_parse_reviewer_environment_rejects_non_openrouter_endpoint() -> None:
+def test_parse_reviewer_environment_refuses_claude_and_non_openrouter_endpoint() -> None:
+    with pytest.raises(entrypoint.EntrypointError, match="unsupported.*claude"):
+        entrypoint.parse_reviewer_environment({"DAYDREAM_REVIEW_BACKEND": "claude"})
     with pytest.raises(entrypoint.EntrypointError, match="openrouter.ai"):
         entrypoint.parse_reviewer_environment({
             "DAYDREAM_REVIEW_API_KEY": "key", "DAYDREAM_REVIEW_BASE_URL": "https://example.com/api",
             "DAYDREAM_REVIEW_MODEL": "fixture-model",
         })
-
-def test_parse_reviewer_environment_refuses_unsupported_claude_before_credentials() -> None:
-    with pytest.raises(entrypoint.EntrypointError, match="unsupported.*claude"):
-        entrypoint.parse_reviewer_environment({"DAYDREAM_REVIEW_BACKEND": "claude"})
 
 def test_host_reviewer_host_resolution_is_backend_aware() -> None:
     assert run_mod._reviewer_host_from_env({
@@ -63,7 +59,7 @@ def _seed_host_ws(tmp_path: Path, reviewer_hosts: list[str]) -> Path:
 
 
 @pytest.mark.parametrize(("reviewer_hosts", "blocked"),
-    [pytest.param(["claude-proxy.internal"], False, id="allowlisted"),
+    [
         pytest.param(["review.example"], True, id="non-allowlisted"),
     ],
 )
@@ -87,33 +83,3 @@ def test_host_preflight_resolves_claude_proxy_against_reviewer_allowlist(
     else:
         assert not reviewer_errs
     assert not any("missing DAYDREAM_REVIEW_BASE_URL" in e for e in errs)
-
-def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude-proxy.internal/v1")
-
-    captured: dict[str, Any] = {}
-
-    def fake_run_run(ws: Any, *, oracle: Any, yes: Any, env: Any) -> int:
-        captured["env"] = env
-        return 0
-
-    monkeypatch.setattr(run_mod, "run_run", fake_run_run)
-    code = _handle_benchmark_command(["run", str(tmp_path), "--yes"])
-    assert code == 0
-    assert captured["env"]["DAYDREAM_REVIEW_BACKEND"] == "claude"
-    assert captured["env"]["ANTHROPIC_API_KEY"] == "sk-ant"
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "tok"
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://claude-proxy.internal/v1"
-
-def test_entrypoint_env_has_no_skill_dirs() -> None:
-    parsed = entrypoint.parse_reviewer_environment({
-        "DAYDREAM_REVIEW_CASE_ID": "case-noskill", "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
-        "DAYDREAM_REVIEW_MODEL": " output-model ",
-        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api", "DAYDREAM_SKILLS_DIR": "/host/skills",
-    })
-    assert "DAYDREAM_SKILLS_DIR" not in parsed.execution.child_environment()
-    assert parsed.model == " output-model "

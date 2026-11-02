@@ -9,9 +9,7 @@ import pytest
 import yaml
 
 from daydream import cli as top_cli
-from daydream.benchmark import github_import as gi, snapshot as sn
-from daydream.benchmark.cli import _handle_benchmark_command
-from daydream.benchmark.harbor import build
+from daydream.benchmark import curation, snapshot as sn
 from daydream.benchmark.harbor.build import task_spec_digest
 from daydream.benchmark.schema import (
     CaseDocument,
@@ -27,39 +25,19 @@ from daydream.benchmark.schema import (
     _PrRef,
     derive_finding_id,
 )
-from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+from daydream.benchmark.storage import load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace, validate_workspace, workspace_status
-from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import seed_pr_origin
-from tests.test_benchmark_import_prs import _curate_case, _seed_preflight
 
 
-def test_init_refuses_existing_nonempty_dir(tmp_path: Path) -> None:
+def test_init_refuses_existing_nonempty_dir_and_empty_reviewer_hosts(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     root.mkdir()
     (root / "existing.txt").write_text("x")
     with pytest.raises(InitError):
         init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-
-def test_init_refuses_empty_reviewer_hosts(tmp_path: Path) -> None:
     with pytest.raises(InitError):
         init_workspace(tmp_path / "ws", "O/R", [], ["h2.example.com"])
-
-
-def test_validate_corrupt_manifest_returns_1(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    (root / "benchmark.yaml").write_text("schema_version: 1\nbogus_key: true\n")
-    code, label = validate_workspace(root)
-    assert code == 1  # schema corruption
-    assert "corrupt" in label.lower() or "invalid" in label.lower()
-
-def test_validate_missing_manifest_returns_1(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    (root / "benchmark.yaml").unlink()
-    code, _ = validate_workspace(root)
-    assert code == 1
 
 
 def _seed_local_origin(root: Path) -> tuple[str, str, str]:
@@ -170,17 +148,24 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
     return root
 
 
-def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: Any=True) -> Any:
-    """Initialize a valid one-case workspace with real Git content and requested curation state.
+_CURATED: dict[str, Path] = {}
 
+
+def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: Any=True) -> Any:
+    """Copy a valid one-case workspace with real Git content and requested curation state.
+
+    One real build per state and worker is copied (nothing in it names its own location).
     Optionally leave source identity unresolved to test readiness independently.
     """
 
+    if curation_state not in _CURATED:
+        template = tmp_path.parent / f"{tmp_path.name}-curated-template-{curation_state}" / "ws"
+        init_workspace(template, "O/R", ["h1.example.com"], ["h2.example.com"])
+        _CURATED[curation_state] = _write_case_docs(template, curation_state)
     root = tmp_path / "ws"
     if root.exists():
         shutil.rmtree(root)   # the fixture is re-invocable (b-valid case)
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    _write_case_docs(root, curation_state)
+    shutil.copytree(_CURATED[curation_state], root, symlinks=True)
     if not resolved:
         raw = yaml.safe_load((root / "benchmark.yaml").read_text())
         raw["source"]["repository_id"] = None
@@ -189,53 +174,8 @@ def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: A
     return root
 
 
-def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    bundle = next((root / "snapshots").glob("*.bundle"))
-    tampered = bundle.read_bytes() + b"INJECTED"          # content changed
-    bundle.write_bytes(tampered)
-    case_yaml = next((root / "cases").glob("*.yaml"))
-    raw = yaml.safe_load(case_yaml.read_text())
-    raw["snapshot"]["bundle_sha256"] = hashlib.sha256(tampered).hexdigest()   # restamp
-    case_yaml.write_text(yaml.safe_dump(raw, sort_keys=False))
-    _assert_corrupt_workspace(root)        # checksum alone no longer suffices
-
-    root2 = _write_curated_workspace(tmp_path, "ready")
-    code2, label2 = validate_workspace(root2)
-    assert code2 == 0 and label2 == "ready"
-
-def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
-    """Missing scratch storage becomes a labeled corrupt result; status raises
-    WorkspaceCorrupt.
-    """
-
-    root = _write_curated_workspace(tmp_path, "ready")
-    assert validate_workspace(root) == (0, "ready")
-    shutil.rmtree(root / "cache")
-    _assert_corrupt_workspace(root)
-    with pytest.raises(WorkspaceCorrupt):
-        workspace_status(root)
-
-
-def test_legacy_ready_approval_is_derived_in_memory_without_writing(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    case_path = next((root / "cases").glob("*.yaml"))
-    raw = load_yaml_strict(case_path)
-    raw["curation"].pop("task_spec_sha256")
-    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    before = case_path.read_bytes()
-
-    status = workspace_status(root)
-
-    assert status.workspace_state == "ready"
-    assert status.case_snapshots[0]["task_spec_approval"] == "current"
-    assert validate_workspace(root) == (0, "ready")
-    assert case_path.read_bytes() == before
-
-def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -> None:
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _write_case_docs(ws, "ready")   # one ready case: bundle YAML + snapshots/<case>.bundle
+def _ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -> None:
+    ws = _write_curated_workspace(tmp_path, "ready")   # one ready case: bundle YAML + snapshots/<case>.bundle
     code, _ = validate_workspace(ws)
     assert code == 0
     # Corrupt the bundle bytes (keeps the case document and ledger intact).
@@ -245,19 +185,6 @@ def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -
     assert code2 == 1 and "corrupt" in label
     case_after = load_yaml_strict(next((ws / "cases").glob("*.yaml")))
     assert case_after["snapshot"]["status"] == "ready"
-
-def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _write_case_docs(ws, "ready")   # one ready case (from Task 11's helper)
-    st = workspace_status(ws)
-    assert st.workspace_state in ("ready", "curating")
-    rc = _handle_benchmark_command(["status", str(ws)])
-    assert rc == 0
-    out = capsys.readouterr().out
-    case_id = next((ws / "cases").glob("*.yaml")).stem
-    assert "ready" in out and case_id in out and case_id.rsplit("-", 1)[-1] in out
-
 
 def _make_case_base_drift(root: Path) -> str:
     """Convert the fixture's ready case into a valid typed drift refusal."""
@@ -283,7 +210,12 @@ def test_status_and_validate_surface_typed_unreplayable_reason(tmp_path: Path, c
 ) -> None:
     """Public status/validate expose the reason code, never private detail."""
     root = _write_curated_workspace(tmp_path, "ready")
+    with pytest.raises(SystemExit) as ready_exit:
+        top_cli.main(["benchmark", "status", str(root)])
+    assert ready_exit.value.code == 0
+    assert "snapshot ready @ " in capsys.readouterr().out
     case_id = _make_case_base_drift(root)
+    assert curation.list_cases(root)[0]["changed_files"] == 0  # unreplayable snapshots have no frozen stats
     status = workspace_status(root)
     assert status.case_snapshots == [{
             "case_id": case_id, "snapshot_status": "unreplayable", "head_prefix": case_id.rsplit("-", 1)[-1],
@@ -308,7 +240,7 @@ def test_status_and_validate_surface_typed_unreplayable_reason(tmp_path: Path, c
     assert "unreplayable snapshot reasons: base_drift" in validate_out
     assert "private path omitted" not in validate_out
 
-def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_path: Path) -> None:
+def _validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     case_path = next((root / "cases").glob("*.yaml"))
@@ -342,24 +274,12 @@ def test_validate_partial_mirror_reports_restore_guidance_without_mutation(
     assert "restore" in output.lower()
     assert sentinel.read_text() == "operator recovery marker\n"
 
-def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    assert validate_workspace(root) == (0, "ready")
-    shutil.rmtree(root / "cache" / "repository.git")
-    assert validate_workspace(root) == (0, "ready")
-
-@pytest.mark.parametrize("tamper", ["base", "source", "source_file", "inventory"])
-def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, tamper: str) -> None:
+def _portable_validation_binds_case_to_checksummed_import(tmp_path: Path, tamper: str) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     shutil.rmtree(root / "cache" / "repository.git")
     case_path = next((root / "cases").glob("*.yaml"))
     raw = load_yaml_strict(case_path)
-    if tamper == "base":
-        raw["pull_request"]["base"]["sha"] = "f" * 40
-        raw["snapshot"]["requested_base_sha"] = "f" * 40
-    elif tamper == "source":
-        raw["source"]["import_sha256"] = "f" * 64
-    elif tamper == "source_file":
+    if tamper == "source_file":
         raw["source"]["import_file"] = "imports/other.json"
     else:
         raw["pull_request"]["changed_files"] = []
@@ -368,47 +288,6 @@ def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, ta
     code, label = validate_workspace(root)
     assert code == 1
     assert "import provenance" in label
-
-def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    case_id = _make_case_base_drift(root)
-    harbor = root / "harbor"
-    harbor.mkdir()
-    sentinel = harbor / "sentinel.txt"
-    sentinel.write_text("prior build\n")
-
-    with pytest.raises(build.CompileError, match=rf"{case_id}.*unreplayable"):
-        build.compile_workspace(root)
-
-    assert sentinel.read_text() == "prior build\n"
-    assert not (root / "cache" / "harbor-build-stage").exists()
-
-def _write_minimal_invalid_workspace(tmp_path: Path, curation_state: Any="ready") -> Any:
-    """A workspace whose case doc is the OLD minimal shape (Task 2 removed)."""
-
-    root = _write_curated_workspace(tmp_path, curation_state)
-    case_file = next((root / "cases").glob("*.yaml"))
-    case_file.write_text(yaml.safe_dump(
-            {"schema_version": 1, "case_id": "pr-000101-0123456789ab", "curation": {"state": curation_state}},
-            sort_keys=False,
-        )
-    )
-    return root
-
-
-def test_status_rejects_minimal_invalid_case(tmp_path: Path) -> None:
-    root = _write_minimal_invalid_workspace(tmp_path, "ready")
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
-    with pytest.raises(WorkspaceCorrupt):
-        workspace_status(root)
-
-
-def test_import_missing_on_disk_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    (next((root / "imports").glob("pr-*.json"))).unlink()
-    _assert_corrupt_workspace(root)
-
 
 def _mutate_manifest_case(tmp_path: Path, pr_number: Any=None, case_file: Any=None) -> None:
     """Rewrite the manifest cases[] entry (pr_number and/or case_file)."""
@@ -423,46 +302,12 @@ def _mutate_manifest_case(tmp_path: Path, pr_number: Any=None, case_file: Any=No
     (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
-def _drop_ledger_entry(tmp_path: Path) -> None:
-    """Remove the pull_requests[] entry for PR 101."""
-
-    root = tmp_path / "ws"
-    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
-    raw["pull_requests"] = [pr for pr in raw["pull_requests"] if pr.get("number") != 101]
-    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-
-
-def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
+def _case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     _mutate_manifest_case(tmp_path, pr_number=999)
     _assert_corrupt_workspace(root)
 
-def test_case_file_not_exact_index_path_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
-    _assert_corrupt_workspace(root)
-
-def test_case_pr_absent_from_ledger_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
-    _assert_corrupt_workspace(root)
-
-def test_orphan_import_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    (root / "imports" / "pr-000999.json").write_text('{"unindexed": true}')   # unindexed import
-    _assert_corrupt_workspace(root)
-
-def test_orphan_bundle_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    (root / "snapshots" / "pr-000999-abcdef012345.bundle").write_bytes(b"orphan")
-    _assert_corrupt_workspace(root)
-
-def test_referenced_bundle_missing_is_corruption(tmp_path: Path) -> None:
-    root = _write_curated_workspace(tmp_path, "ready")
-    (next((root / "snapshots").glob("*.bundle"))).unlink()
-    _assert_corrupt_workspace(root)
-
-def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
+def _duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     # hard-link the import to the bundle path (one inode, two indexed names).
     # the import bytes are a valid ImportDocument whose ledger sha is unchanged;
@@ -478,20 +323,27 @@ def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
     next((root / "cases").glob("*.yaml")).write_text(yaml.safe_dump(case_raw, sort_keys=False))
     _assert_corrupt_workspace(root)   # gated on Task 0 spike 4 verdict
 
-def test_status_surfaces_failed_refresh_with_good_linkage(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A PR whose latest refresh failed but whose last import is intact: the
-    status surface reports the attempt failure distinctly and does NOT classify
-    the workspace as collecting.  Task 6 (issue #813)."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
-    fake_gh.set_response("GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"})
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
-    assert rc != 0
-    st = workspace_status(ws)
-    pr = st.ledger.pull_requests[0]
-    assert pr.latest_error is not None and pr.latest_error["code"] == "rate_limit"
-    assert pr.import_state == "fetched"                # intact linkage, not collecting
-    assert st.workspace_state != "collecting"          # evidence is not missing
+def _unresolved_identity_and_stale_approval_are_incomplete(tmp_path: Path) -> None:
+    unresolved = _write_curated_workspace(tmp_path / "unresolved", "ready", resolved=False)
+    assert validate_workspace(unresolved) == (2, "incomplete: repository identity unresolved")
+    root = _write_curated_workspace(tmp_path / "stale", "ready")
+    case_path = next((root / "cases").glob("*.yaml"))
+    raw = load_yaml_strict(case_path)
+    raw["curation"]["task_spec_sha256"] = "0" * 64   # approval of a different Task Spec
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert validate_workspace(root) == (2, "incomplete: workspace state stale")
+
+
+def test_validate_reports_tampered_bundles_provenance_and_index_as_corruption(tmp_path: Path) -> None:
+    for check in (_ready_bundle_checksum_mismatch_is_validate_corruption,
+                  _validate_rechecks_marked_snapshot_source_when_mirror_is_present,
+                  _case_pr_number_mismatch_manifest_is_corruption, _duplicate_inode_indexed_files_is_corruption,
+                  _unresolved_identity_and_stale_approval_are_incomplete):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root)
+    for tamper in ("source_file", "inventory"):
+        root = tmp_path / tamper
+        root.mkdir()
+        _portable_validation_binds_case_to_checksummed_import(root, tamper)

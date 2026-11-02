@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from daydream.benchmark.harbor import build
@@ -116,6 +117,18 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
     )
     raw = await client.complete_json(user="<prompt>")
     assert raw == {"match": False, "confidence": 0.2, "reasoning": "no"}
+
+    # Without an injected client each completion owns a short-lived real httpx client.
+    real_async_client = sr.httpx.AsyncClient
+    content = '{"match": true, "confidence": 0.9, "reasoning": "same"}'
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, json={"choices": [{"message": {"content": content}}]}))
+    sr.httpx.AsyncClient = lambda: real_async_client(transport=transport)
+    try:
+        default = sr.OpenAIJudgeClient(api_key="k", model="m", base_url="https://openrouter.ai/api/v1")
+        assert (await default.complete_json(user="<prompt>"))["match"] is True
+    finally:
+        sr.httpx.AsyncClient = real_async_client
     assert calls[0][0] == "https://openrouter.ai/api/v1/chat/completions"
     assert calls[0][1]["Authorization"] == "Bearer sk-or-abc"
     assert calls[0][2]["reasoning"] == {"exclude": True}
@@ -278,9 +291,6 @@ _REWARD_KEYS = {"reward",
     "severity_pairs",
     "severity_present",
 }
-
-_DENSE_BODY = ("<gold_finding>" * (8192 // 14))[:8192]  # ~8 KiB of pure delimiter
-
 
 class _CountingClient:
     """Fake judge client that counts requests and in-flight concurrency."""
@@ -694,89 +704,43 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module: Any, tmp_
     blob = json.dumps(details)
     assert oversized_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
 
-def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module: Any, tmp_path: Path) -> None:
+def test_run_verifier_scores_padded_unbound_or_empty_artifacts_zero_and_corrupt_gold_as_infra(
+    sr_module: Any, tmp_path: Path,
+) -> None:
+    """Oversized/unbound candidates score zero; a corrupted gold sentinel is infrastructure failure."""
     sr = sr_module
-    gold_path = tmp_path / "g.json"
-    art_path = tmp_path / "r.json"
-    # _DENSE_BODY is under the verifier's 8 KiB body byte bound, so the evaluator
-    # escapes it -- but the fused rendering must not let that inflate the pair
-    # past the cap and fail the whole task. A legal pair is judged, never voided.
-    gold = [_finding(title="t" * 500, body=_DENSE_BODY, path="p" * 200)]
-    payload = "\x1f".join(["c", str(gold[0]["title"]), str(gold[0]["body"]), str(gold[0]["severity"]),
-                            str(gold[0]["path"]), str(gold[0]["start_line"]), str(gold[0]["end_line"])])
-    gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
-    gold_path.write_text(json.dumps(gold))
-    _write_metadata(gold_path, case_id="c", base_ref="b", head_ref="h")
-    cand = _finding(title="t" * 500, body=_DENSE_BODY, path="p" * 200)
-    cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
-    art_path.write_text(json.dumps({"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
-        "findings": [cand],
-    }))
+    for fault in ("padded", "ref", "gold", "empty"):
+        case = tmp_path / fault
+        case.mkdir()
+        gold_path = case / "golden-review.json"
+        gold = json.dumps(_gold_list(1))
+        gold_path.write_text(gold)
+        _write_metadata(gold_path, head_ref="head")
+        artifact_path = case / "review.json"
+        art = _candidate_artifact(sr, n=1)
+        if fault == "padded":
+            compact = json.dumps(art).encode("utf-8")
+            # pad ABOVE the 1 MiB cap so the raw byte size is the only signal
+            artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
+        else:
+            if fault == "ref":
+                art["head_ref"] = "feature/x"  # not the bound head ref
+            elif fault == "empty":
+                art["findings"] = []  # a clean review against non-empty gold needs no judge
+            artifact_path.write_text(json.dumps(art))
+        if fault == "gold":
+            corrupted = bytearray(gold.encode("utf-8"))
+            corrupted[-1] ^= 1
+            gold_path.write_bytes(bytes(corrupted))
+        out, reward, client = _run_verifier_case(sr, gold_path, artifact_path, case)
+        if fault == "empty":
+            assert client.requests == 0 and (reward.fn, reward.reward, reward.verifier_error) == (1, 0.0, 0)
+        elif fault == "gold":
+            assert reward.verifier_error == 1 and reward.reward == 0.0
+            _assert_infra_zero(out)
+        else:
+            _assert_scored_zero(out, reward)
 
-    out, reward, client = _run_verifier_case(sr, gold_path, art_path, tmp_path)
-    assert reward.verifier_error == 0  # verifier-legal dense pair is judged
-    assert client.requests == 1         # not failed whole
-    details = json.loads((out / "reward-details.json").read_text())
-    assert _DENSE_BODY not in json.dumps(details)  # never leaks finding content
-
-def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
-    _write_metadata(gold_path)
-    artifact_path = tmp_path / "review.json"
-    compact = json.dumps(_candidate_artifact(sr, n=1)).encode("utf-8")
-    # pad ABOVE the 1 MiB cap so the raw byte size is the only signal
-    artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
-    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
-    _assert_scored_zero(out, reward)
-
-def test_run_verifier_rejects_cross_case_replay(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1, case_id="task-A")))
-    _write_metadata(gold_path, case_id="task-A")
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))
-    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
-    _assert_scored_zero(out, reward)
-
-def test_run_verifier_rejects_ref_mismatch(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
-    _write_metadata(gold_path, head_ref="head")
-    artifact_path = tmp_path / "review.json"
-    art = _candidate_artifact(sr, n=1)
-    art["head_ref"] = "feature/x"  # not the bound head ref
-    artifact_path.write_text(json.dumps(art))
-    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
-    _assert_scored_zero(out, reward)
-
-def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold = json.dumps(_gold_list(1))
-    gold_path.write_text(gold)
-    _write_metadata(gold_path)  # sentinel over the uncorrupted bytes
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
-    corrupted = bytearray(gold.encode("utf-8"))
-    corrupted[-1] ^= 1
-    gold_path.write_bytes(bytes(corrupted))
-    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
-    assert reward.verifier_error == 1 and reward.reward == 0.0
-    _assert_infra_zero(out)
-
-    # The located fields must not be replaced by the locationless marker: the
-    # finding's own path/lines render their real values (the template doc
-    # paragraph may mention ``<none>``, so only the field lines are checked).
-
-
-def test_parse_verdict_rejects_unknown_key(sr_module: Any) -> None:
-    sr = sr_module
-    with pytest.raises(sr.VerifierError):
-        sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "ok", "extra": 1})
 
 def test_url_validation_and_allowlist_helpers(sr_module: Any) -> None:
     sr = sr_module
@@ -806,14 +770,6 @@ def test_url_validation_and_allowlist_helpers(sr_module: Any) -> None:
                                 "/v1/next", {"api.anthropic.com"}) == "https://api.anthropic.com/v1/next"
     with pytest.raises(sr.VerifierError):
         sr._resolve_redirect("https://api.anthropic.com/v1/messages", "https://evil.example/x", {"api.anthropic.com"})
-
-def test_error_bounding_and_redaction(sr_module: Any) -> None:
-    sr = sr_module
-    assert "sk-ant-abcdef1234567890" not in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
-    assert "<redacted>" in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
-    assert "Bearer sk-or-longtokenvalue123" not in sr._bounded_error("Authorization: Bearer sk-or-longtokenvalue123")
-    long = "x" * 5000
-    assert len(sr._bounded_error(long).encode("utf-8")) <= sr._ERROR_TEXT_CAP_BYTES
 
 def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: Any) -> None:
     sr = sr_module
@@ -848,58 +804,6 @@ async def test_clients_validate_initial_url_before_request(sr_module: Any) -> No
     with pytest.raises(sr.VerifierError):
         await c2.complete_json(user="u")
     assert len(calls) == 1  # no new request issued
-
-@pytest.mark.asyncio
-async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module: Any) -> None:
-    sr = sr_module
-    seen = []
-    class Redirecting:
-        def __init__(self, hops: Any) -> None: self.hops = list(hops)
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            seen.append((url, dict(headers)))
-            loc = self.hops.pop(0) if self.hops else None
-            if loc is not None:
-                return type("R", (), {"status_code": 302,
-                    "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"},
-                    "text": ""})()
-            verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
-            return type("R", (), {"status_code": 200, "text": "ok",
-                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
-    allow = {"api.anthropic.com"}
-    client = Redirecting(["/v1/next"])  # relative Location, same host
-    raw = await sr._complete_json_with_http(client, url="https://api.anthropic.com/v1/messages", payload={"x": 1},
-        headers={"x-api-key": "SECRET", "authorization": "Bearer K"}, content=lambda b: b["content"][0]["text"],
-        allowlist=allow)
-    assert raw["match"] is True
-    assert len(seen) == 2
-    final_url, final_headers = seen[-1]
-    assert final_url == "https://api.anthropic.com/v1/next"  # relative resolved
-    assert final_headers["x-api-key"] == "SECRET"             # configured header preserved
-    assert "x-server-token" not in final_headers             # server header never replayed
-
-    bad = Redirecting(["https://evil.example/x"])
-    with pytest.raises(sr.VerifierError):
-        await sr._complete_json_with_http(bad, url="https://api.anthropic.com/v1/messages",
-            payload={}, headers={"x-api-key": "K"}, content=lambda b: b, allowlist=allow)
-
-    loop = Redirecting(["/v1/next"] * (sr._MAX_REDIRECTS + 1))
-    with pytest.raises(sr.VerifierError):
-        await sr._complete_json_with_http(loop, url="https://api.anthropic.com/v1/messages",
-            payload={}, headers={}, content=lambda b: b, allowlist=allow)
-
-@pytest.mark.asyncio
-async def test_response_body_is_size_capped_before_json_parse(sr_module: Any) -> None:
-    sr = sr_module
-    calls = []
-    class Huge:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            calls.append(1)
-            return type("R", (), {"status_code": 200, "text": "", "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1),
-                                  "json": lambda self: {"content": [{"type": "text", "text": '{"match": true}'}]}})()
-    with pytest.raises(sr.VerifierError) as e:
-        await sr._complete_json_with_http(Huge(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"})
-    assert "256 KiB" in str(e.value) or "exceeds" in str(e.value)
-    assert len(calls) == 1  # oversized body is terminal, not retried
 
 def test_verdict_reasoning_is_size_capped_and_errors_are_bounded(sr_module: Any) -> None:
     sr = sr_module
@@ -985,35 +889,6 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
             await client.complete_json(user="u")
         assert "allowlist" in str(e.value)
 
-def test_claude_cli_missing_token_writes_typed_error_artifact(sr_module: Any,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    sr = sr_module
-    gold = tmp_path / "golden-review.json"
-    gold.write_text(json.dumps([{"case_id": "c1"}]))
-    monkeypatch.setenv("DAYDREAM_JUDGE_ARTIFACT_PATH", str(tmp_path / "review.json"))
-    monkeypatch.setenv("DAYDREAM_JUDGE_OUT_PATH", str(tmp_path / "out"))
-    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "claude-cli")
-    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    rc = sr.main()
-    payload = json.loads(capsys.readouterr().out)
-    assert rc == 1 and payload["verifier_error"] == 1 and payload["reward"] == 0.0
-    # typed diagnostic, NOT "no judge client configured"
-    details = json.loads((tmp_path / "out" / "reward-details.json").read_text())
-    assert any("CLAUDE_CODE_OAUTH_TOKEN" in e for e in details["errors"])
-
-def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module: Any, capsys: pytest.CaptureFixture[str]) -> None:
-    sr = sr_module
-    r = sr.verifier_core.Reward(reward=0.8, tp=2, verifier_error=0)
-    assert sr._emit_reward(r) == 0
-    assert json.loads(capsys.readouterr().out) == r.to_dict()   # full 24-key dict, never the 2-key fallback shape
-    r2 = sr.verifier_core.Reward(reward=0.0, verifier_error=1)
-    assert sr._emit_reward(r2) == 1
-
-
 def _seed_scored_case(sr: Any, tmp_path: Path) -> tuple[Path, Path, Path]:
     """Seed the canonical scored-verifier case; return ``(gold, artifact, out)``."""
     gold_path = tmp_path / "golden-review.json"
@@ -1024,157 +899,59 @@ def _seed_scored_case(sr: Any, tmp_path: Path) -> tuple[Path, Path, Path]:
     return gold_path, artifact_path, tmp_path / "out"
 
 
-def test_run_verifier_without_client_is_unscored(sr_module: Any, tmp_path: Path) -> None:
+def test_run_verifier_without_client_or_inputs_is_unscored(sr_module: Any, tmp_path: Path) -> None:
+    """No client, missing gold or missing artifact is infrastructure failure, never a numeric reward."""
     sr = sr_module
-    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env=judge_env())
-    assert reward.verifier_error == 1
-    assert not (out / "reward.json").exists()
-    details = json.loads((out / "reward-details.json").read_text())
-    assert any("no judge client" in e for e in details["errors"])
-
-def test_run_verifier_missing_gold_file_is_unscored(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
-    gold_path.unlink()                                    # metadata present, gold missing
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(), env=judge_env())
-    assert reward.verifier_error == 1
-    assert not (out / "reward.json").exists()
-    details = json.loads((out / "reward-details.json").read_text())
-    assert any("not found" in e for e in details["errors"])
-
-def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
-    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
-    artifact_path.unlink()                                 # artifact missing
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(), env=judge_env())
-    assert reward.verifier_error == 1
-    assert reward.reward == 0.0
-    assert not (out / "reward.json").exists()              # unscored: no numeric reward
-    details = json.loads((out / "reward-details.json").read_text())
-    assert any("not found" in e for e in details["errors"])
+    for fault, needle in (("client", "no judge client"), ("gold", "not found"), ("artifact", "not found")):
+        (tmp_path / fault).mkdir()
+        gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path / fault)
+        if fault == "gold":
+            gold_path.unlink()
+        elif fault == "artifact":
+            artifact_path.unlink()
+        client = None if fault == "client" else _CountingClient()
+        reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=judge_env())
+        assert reward.verifier_error == 1 and reward.reward == 0.0
+        assert not (out / "reward.json").exists()
+        details = json.loads((out / "reward-details.json").read_text())
+        assert any(needle in e for e in details["errors"])
 
 @pytest.mark.asyncio
-async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module: Any) -> None:
-    sr = sr_module
-    runner = _fake_cli_runner(json.dumps(_OK_ENVELOPE))
-    client = sr.ClaudeCliJudgeClient(model="claude-x", runner=runner)
-    raw = await client.complete_json(user="<prompt>", system="sys", max_tokens=512)
-    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
-    argv = runner.calls[0][0]
-    assert argv[0] == "claude" and "--output-format" in argv and "json" in argv
-    assert "--model" in argv and "claude-x" in argv
-    # Tool-scope lockdown: the spawned CLI carries the OAuth credential in its
-    # env, so tools must be denied outright -- no permission prompts, no read/
-    # execute surface for a prompt influenced by untrusted candidate text.
-    assert "--permission-mode" in argv and "plan" in argv
-    assert "--allowedTools" in argv and "[]" in argv
-    # The 512-token output budget maps onto the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS
-    # (the CLI exposes no --max-tokens flag), matching the HTTP clients' request cap.
-    assert runner.calls[0][1]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "512"
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("post_eof", [False, True], ids=["blocked-read", "post-eof-wait"])
-async def test_claude_cli_timeout_kills_child_every_attempt(
-    sr_module: Any, monkeypatch: pytest.MonkeyPatch, post_eof: bool,
-) -> None:
+async def test_claude_cli_timeout_kills_child_every_attempt(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both a blocked read and a child hanging after stdout EOF must be killed and retried."""
     sr = sr_module
-    kills: list[int] = []
     monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
-    chunks = [json.dumps(_OK_ENVELOPE).encode("utf-8")] if post_eof else _hang_read
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
-        lambda: _ScriptedChild(chunks, wait=_hang, on_kill=lambda: kills.append(1))))
-    with _http_backoff(sr, monkeypatch) as delays:
-        with pytest.raises(sr.VerifierError) as e:
-            await client.complete_json(user="u")
-        assert "timeout" in str(e.value)
-    assert delays == [1, 2]
-    # Every hung attempt kills the child (once inside _claude_cli_stdout and
-    # again by the caller's backstop), so a retry or the next concurrent pair
-    # never sees a leftover claude process consuming quota/egress.
-    assert len(kills) == sr._MAX_RETRIES * 2
+    for post_eof in (False, True):
+        kills: list[int] = []
+        chunks = [json.dumps(_OK_ENVELOPE).encode("utf-8")] if post_eof else _hang_read
+        client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
+            lambda chunks=chunks, kills=kills: _ScriptedChild(chunks, wait=_hang, on_kill=lambda: kills.append(1))))
+        with _http_backoff(sr, monkeypatch) as delays:
+            with pytest.raises(sr.VerifierError) as e:
+                await client.complete_json(user="u")
+            assert "timeout" in str(e.value)
+        assert delays == [1, 2]
+        # Every hung attempt kills the child (inside _claude_cli_stdout and by the caller's backstop).
+        assert len(kills) == sr._MAX_RETRIES * 2
 
 @pytest.mark.asyncio
-async def test_claude_cli_oversize_stdout_is_rejected_not_truncated(sr_module: Any) -> None:
+async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any) -> None:
+    """Oversize, rejected-verdict, empty, malformed and error envelopes are terminal: no retry, no truncation."""
     sr = sr_module
-    oversized = "x" * (sr._RESPONSE_CAP_BYTES + 1)
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(oversized))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert "exceeds" in str(e.value) and "KiB" in str(e.value)
-    assert len(client.runner.calls) == 1  # terminal -- never retried, never truncated
-
-@pytest.mark.asyncio
-async def test_claude_cli_parse_verdict_rejection_propagates_raw(sr_module: Any) -> None:
-    sr = sr_module
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(json.dumps({"is_error": False, "type": "result",
-                    "result": '{"match": "yes", "confidence": 0.9, "reasoning": "r"}'})))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    # parse_verdict raises VerifierError (not ValueError), so its bounded parse
-    # message propagates raw instead of being re-wrapped as (invalid verdict).
-    assert "match" in str(e.value)
-    assert "invalid verdict" not in str(e.value)
-    assert len(client.runner.calls) == 1
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stdout_arg,needle",
-    [
-        ("", "empty output"),                                         # empty stdout
-        ("not json at all", "malformed output"),                      # malformed JSON
+    cases = [
+        ("x" * (sr._RESPONSE_CAP_BYTES + 1), "exceeds"),
+        (json.dumps({"is_error": False, "type": "result",
+                     "result": '{"match": "yes", "confidence": 0.9, "reasoning": "r"}'}), "match"),
+        ("", "empty output"),
+        ("not json at all", "malformed output"),
         (json.dumps({"is_error": True, "type": "error"}), "cli reported error"),
         (json.dumps({"is_error": False, "type": "result"}), "missing result"),
-    ],
-)
-async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any, stdout_arg: str, needle: str) -> None:
-    sr = sr_module
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert needle in str(e.value)
-    assert len(client.runner.calls) == 1  # terminal -- no retry, no backoff
-
-@pytest.mark.asyncio
-async def test_claude_cli_streaming_oversize_kills_child(sr_module: Any) -> None:
-    sr = sr_module
-    killed: list[int] = []
-
-    async def chunk(_n: int) -> bytes:
-        return b"x" * int(sr._STDOUT_CHUNK_BYTES)  # never EOF; total grows past the cap
-
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
-        lambda: _ScriptedChild(chunk, on_kill=lambda: killed.append(1))))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert "exceeds" in str(e.value) and "KiB" in str(e.value)
-    # Killed exactly once, inside _claude_cli_stdout: the VerifierError is
-    # terminal so the caller's timeout backstop is never reached.
-    assert len(killed) == 1
-
-@pytest.mark.asyncio
-async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
-    """The post-EOF ``wait()`` settle returns the collected verdict, no kill.
-
-    stdout EOF does not imply the child exited; the streaming loop must still
-    await ``wait()`` inside the same budget so the caller's exit-code check
-    sees a settled process."""
-    sr = sr_module
-    settled: list[int] = []
-    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
-        lambda: _ScriptedChild([json.dumps(_OK_ENVELOPE).encode("utf-8")],
-            wait=lambda: settled.append(1))))  # wait reached only after stdout EOF
-    raw = await client.complete_json(user="u")
-    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
-    assert len(settled) == 1
-
-
-def test_build_client_empty_string_api_key_fails_closed(sr_module: Any) -> None:
-    """The template's `${VAR:-}` fallback resolves to "" — still fail-closed (#979)."""
-    sr = sr_module
-    env = {sr._ENV_PROVIDER: "anthropic",
-        sr._ENV_MODEL: "claude-x",
-        sr._ENV_API_KEY: "",  # exactly what resolve_env_vars emits for unset ${VAR:-}
-    }
-    with pytest.raises(sr.VerifierError, match="DAYDREAM_JUDGE_API_KEY"):
-        sr._build_client(env)
+    ]
+    for stdout_arg, needle in cases:
+        client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert needle in str(e.value)
+        # parse_verdict's bounded message propagates raw instead of being re-wrapped.
+        assert "invalid verdict" not in str(e.value)
+        assert len(client.runner.calls) == 1

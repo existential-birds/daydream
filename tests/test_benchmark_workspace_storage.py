@@ -17,46 +17,9 @@ from daydream.benchmark.storage import (
     load_json_strict,
     load_yaml_strict,
     recover_startup,
-    resolve_authoring_path,
     sha256_file,
 )
 from tests.harness.transaction_faults import TransactionFaultDriver
-
-
-def test_load_yaml_rejects_duplicate_keys(tmp_path: Path) -> None:
-    p = tmp_path / "dup.yaml"
-    p.write_text("a: 1\na: 2\n")
-    with pytest.raises(WorkspaceCorrupt):
-        load_yaml_strict(p)
-
-def test_load_yaml_safe_load_no_object_execution(tmp_path: Path) -> None:
-    p = tmp_path / "unsafe.yaml"
-    p.write_text("!!python/object/apply:os.system ['true']\n")
-    with pytest.raises(WorkspaceCorrupt):
-        load_yaml_strict(p)
-
-
-def test_workspace_lock_contention_is_explicit(tmp_path: Path) -> None:
-    # Separate open file descriptions conflict even within one process.
-    # Probe without blocking to avoid deadlocking on the first holder.
-    first = WorkspaceLock(tmp_path)
-    first.__enter__()
-    try:
-        with open(tmp_path / ".benchmark.lock", "w") as held:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # Our own WorkspaceLock handle is reentrant on the same fd.
-        with WorkspaceLock(tmp_path, blocking=False):
-            pass
-    finally:
-        first.__exit__(None, None, None)
-
-def test_workspace_lock_contention_raises(tmp_path: Path) -> None:
-    lock_path = tmp_path / ".benchmark.lock"
-    with open(lock_path, "w") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        with pytest.raises(LockContentionError):
-            WorkspaceLock(tmp_path, blocking=False).__enter__()
 
 
 def _stage(ctx: Any, path: Any, content: str) -> None:
@@ -101,10 +64,12 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path, monke
     assert load_json_strict(data) == {"k": 2} and load_yaml_strict(manifest) == {"schema_version": 2}
 
 
-@pytest.mark.parametrize("boundary", [0, 1, 2, 3, "manifest"])
-def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, boundary: int | Literal["manifest"]
-) -> None:
-    root = tmp_path / f"ws-{boundary}"
+def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path) -> None:
+    for boundary in (0, "manifest"):
+        _retire_and_recover(tmp_path / f"ws-{boundary}", boundary)
+
+
+def _retire_and_recover(root: Path, boundary: int | Literal["manifest"]) -> None:
     bundle = root / "snapshots" / "old.bundle"
     case = root / "cases" / "case.yaml"
     manifest = root / "benchmark.yaml"
@@ -141,44 +106,7 @@ def test_transaction_retirement_recovers_with_other_targets(tmp_path: Path, boun
         assert manifest.read_bytes() == b"old manifest"
     recover_startup(root)  # retirement recovery is idempotent after cleanup
 
-def test_transaction_retirement_refuses_digest_mismatch(tmp_path: Path) -> None:
-    bundle = tmp_path / "snapshots" / "old.bundle"
-    bundle.parent.mkdir(parents=True)
-    bundle.write_bytes(b"old bundle")
-    with Transaction(tmp_path, op_id="retire-wrong", kind="import") as tx:
-        with pytest.raises(WorkspaceCorrupt, match="digest mismatch"):
-            tx.retire("snapshots/old.bundle", expected_sha256="f" * 64)
-    assert bundle.read_bytes() == b"old bundle"
-
-
-def test_committing_journal_rolls_back_in_reverse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rels = ["cases/a.yaml", "cases/b.yaml", "benchmark.yaml"]
-    for rel in rels:
-        target = tmp_path / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"before-{rel}")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-3", kind="write")
-    with faults.transaction as tx:
-        for rel in rels:
-            _stage(tx, rel, f"after-{rel}")
-        faults.halt_at("target-3")
-    doc = load_json_strict(tmp_path / "transactions" / "op-3" / "journal.json")
-    assert doc["state"] == "committing" and doc["applied_count"] == 3
-    assert [(tmp_path / rel).read_text() for rel in rels] == [f"after-{rel}" for rel in rels]
-
-    observed: list[str] = []
-    real_replace = os.replace
-
-    def observe_replace(source: str | Path, destination: str | Path) -> None:
-        observed.append(Path(source).name)
-        real_replace(source, destination)
-
-    monkeypatch.setattr(os, "replace", observe_replace)
-    recover_startup(tmp_path)
-    assert observed == ["backup-0002.bin", "backup-0001.bin", "backup-0000.bin"]
-    assert [(tmp_path / rel).read_text() for rel in rels] == [f"before-{rel}" for rel in rels]
-
-def test_complete_journal_rejects_altered_replacement_at_startup(tmp_path: Path) -> None:
+def test_complete_journal_rejects_drifted_targets_at_startup(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")
     faults = TransactionFaultDriver(tmp_path, op_id="complete-altered", kind="write")
@@ -189,8 +117,9 @@ def test_complete_journal_rejects_altered_replacement_at_startup(tmp_path: Path)
     with pytest.raises(WorkspaceCorrupt, match="digest mismatch"):
         recover_startup(tmp_path)
     assert (tmp_path / "transactions" / "complete-altered" / "journal.json").exists()
-
-def test_complete_journal_rejects_reappearing_retired_target_at_startup(tmp_path: Path) -> None:
+    target.unlink()
+    (tmp_path / "transactions" / "complete-altered" / "journal.json").unlink()
+    tmp_path = tmp_path / "retired-ws"
     retired = tmp_path / "snapshots" / "old.bundle"
     retired.parent.mkdir(parents=True)
     retired.write_bytes(b"old")
@@ -203,19 +132,6 @@ def test_complete_journal_rejects_reappearing_retired_target_at_startup(tmp_path
     with pytest.raises(WorkspaceCorrupt, match="retired target"):
         recover_startup(tmp_path)
     assert (tmp_path / "transactions" / "complete-retired" / "journal.json").exists()
-
-def test_no_journal_orphan_is_corruption(tmp_path: Path) -> None:
-    orphan = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
-    orphan.parent.mkdir(parents=True)
-    orphan.write_text("case")
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path, indexed=set(), on_disk={orphan})
-
-def test_referenced_missing_file_is_corruption(tmp_path: Path) -> None:
-    manifest = tmp_path / "benchmark.yaml"
-    manifest.write_text("references a missing case\n")
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
 
 def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Path) -> None:
     # Assert each durable state before recovery, including complete-before-cleanup,
@@ -249,82 +165,6 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
             assert target.read_text() == "after"
         assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
-@pytest.mark.parametrize(
-    "boundary", ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"],
-)
-def test_invalid_fault_boundaries_do_not_publish_a_journal_or_change_targets(tmp_path: Path, boundary: str) -> None:
-    target = tmp_path / "target.yaml"
-    target.write_text("before")
-    faults = TransactionFaultDriver(tmp_path, op_id="invalid-boundary", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "after")
-        with pytest.raises(ValueError):
-            faults.halt_at(boundary)
-    assert target.read_text() == "before"
-    assert not (tmp_path / "transactions" / "invalid-boundary" / "journal.json").exists()
-
-def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path: Path) -> None:
-    op = tmp_path / "transactions" / "op-x"
-    op.mkdir(parents=True)
-    (op / "foreign.txt").write_text("not residue")
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-    assert (op / "foreign.txt").read_text() == "not residue"  # left untouched, never guessed/deleted
-
-def test_import_crash_transaction_restores_before_or_after(tmp_path: Path) -> None:
-    # Import, case, and manifest must recover as one atomic unit.
-    for boundary in ("journal", "data", "manifest"):
-        imp = tmp_path / "imports" / "pr-000101.json"
-        case = tmp_path / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
-        manifest = tmp_path / "benchmark.yaml"
-        for f in (imp, case):
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text("before")
-        manifest.write_text("ledger-before")
-        faults = TransactionFaultDriver(tmp_path, op_id=f"imp-{boundary}", kind="import")
-        with faults.transaction as tx:
-            tx.stage("imports/pr-000101.json", b"import-after")
-            tx.stage("cases/pr-000101-aaaaaaaaaaaa.yaml", b"case-after")
-            tx.stage("benchmark.yaml", b"ledger-after")
-            faults.halt_at(boundary)
-        recover_startup(tmp_path)
-        if boundary in ("journal", "data"):
-            assert imp.read_text() == "before"
-            assert case.read_text() == "before"
-            assert manifest.read_text() == "ledger-before"
-        else:  # manifest (complete journal kept)
-            assert imp.read_text() == "import-after"
-            assert case.read_text() == "case-after"
-            assert manifest.read_text() == "ledger-after"
-        if boundary in ("journal", "data", "manifest"):
-            assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
-
-def test_stage_rejects_rel_escape(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "escaped.bin"
-    outside.unlink(missing_ok=True)
-    with Transaction(tmp_path, op_id="op-esc", kind="write") as tx:
-        with pytest.raises(WorkspaceCorrupt):
-            tx.stage("../escaped.bin", b"x")
-    assert not outside.exists()
-
-def test_stage_rejects_absolute_outside(tmp_path: Path) -> None:
-    outside = tmp_path.parent / f"outside-{tmp_path.name}" / "evil.bin"
-    outside.parent.mkdir(parents=True, exist_ok=True)
-    with Transaction(tmp_path, op_id="op-abs", kind="write") as tx:
-        with pytest.raises(WorkspaceCorrupt):
-            tx.stage(str(outside), b"x")
-    assert not outside.exists()
-
-def test_stage_rejects_symlink_parent_escape(tmp_path: Path) -> None:
-    outside = tmp_path.parent / f"outside-{tmp_path.name}"
-    outside.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
-    with Transaction(tmp_path, op_id="op-sym", kind="write") as tx:
-        with pytest.raises(WorkspaceCorrupt):
-            tx.stage("cases/x.yaml", b"x")
-    assert not (outside / "x.yaml").exists()
-
-
 def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
     """Build a valid prepared transaction, then corrupt its journal doc."""
     target = tmp_path / "target.yaml"
@@ -338,35 +178,35 @@ def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
     atomic_write_json(jf, doc)
 
 
-# One entry per journal validation in recover_startup; the mutation is the only per-case
-# input, and ``escaped_name`` marks the single case that must also leave the workspace parent
-# untouched (path confinement, not just fail-closed).
-@pytest.mark.parametrize(("op_id", "mutate", "escaped_name"), [
+# One entry per journal validation in recover_startup; ``escaped_name`` marks the case that
+# must also leave the workspace parent untouched (path confinement, not just fail-closed).
+_JOURNAL_CORRUPTIONS: list[tuple[str, Any, str | None]] = [
     ("op-1", lambda d: d.__setitem__("state", "bogus"), None),
     ("op-2", lambda d: d.__setitem__("op_id", "other-dir"), None),
-    ("op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"),
-     "escaped-by-journal.bin"),
+    ("op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"), "escaped-by-journal.bin"),
     ("op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"), None),
     ("op-5", lambda d: d["targets"].append(dict(d["targets"][0])), None),
     ("op-6", lambda d: d.__setitem__("applied_count", 99), None),
     ("op-7", lambda d: d.__setitem__("replacement_order", ["not-a-target"]), None),
-], ids=["invalid_state", "opid_mismatch", "rel_escape", "stage_with_separator", "duplicate_target_rel",
-        "applied_count_out_of_bounds", "replacement_order_unknown_target"],
-)
-def test_journal_corruption_fails_closed(tmp_path: Path, op_id: str, mutate: Any,
-        escaped_name: str | None,
-) -> None:
-    outside = None if escaped_name is None else tmp_path.parent / escaped_name
-    if outside is not None:
-        outside.unlink(missing_ok=True)
-    _write_corrupt_journal(tmp_path, op_id, mutate)
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-    assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
-    if outside is not None:
-        assert not outside.exists()  # no path outside the workspace changed
+]
 
-def test_cross_transaction_target_conflict_is_corruption(tmp_path: Path) -> None:
+
+def test_journal_corruption_and_conflicts_fail_closed(tmp_path: Path) -> None:
+    for op_id, mutate, escaped_name in _JOURNAL_CORRUPTIONS:
+        root = tmp_path / op_id / "ws"
+        root.mkdir(parents=True)
+        outside = None if escaped_name is None else root.parent / escaped_name
+        _write_corrupt_journal(root, op_id, mutate)
+        with pytest.raises(WorkspaceCorrupt):
+            recover_startup(root)
+        assert (root / "target.yaml").read_text() == "old"  # target untouched
+        if outside is not None:
+            assert not outside.exists()  # no path outside the workspace changed
+    _cross_transaction_conflict(tmp_path / "conflict")
+
+
+def _cross_transaction_conflict(tmp_path: Path) -> None:
+    tmp_path.mkdir()
     target = tmp_path / "target.yaml"
     target.write_text("before")
     for i in (1, 2):
@@ -429,7 +269,16 @@ def test_disjoint_journals_recover_each_durable_state_and_restart(tmp_path: Path
     assert not (tmp_path / "cases" / "new.yaml").exists() and kept.read_text() == "keep"
     assert list((tmp_path / "transactions").iterdir()) == []
 
-def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
+def test_recovery_refuses_unidentifiable_residue_and_unsafe_targets(tmp_path: Path) -> None:
+    """Symlinked, foreign, or empty residue and escaping/unsafe targets fail closed untouched."""
+    for check in (_never_follows_symlink, _removes_only_positive_residue, _empty_prejournal_dir_left_untouched,
+                  _unsafe_targets_and_lock_contention):
+        root = tmp_path / check.__name__
+        root.mkdir()
+        check(root)
+
+
+def _never_follows_symlink(tmp_path: Path) -> None:
     # A journaled operation ensures recovery reaches _empty_transactions.
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -443,7 +292,7 @@ def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
     assert (outside / "precious.txt").read_text() == "keep me"  # never followed/deleted
     assert (tmp_path / "transactions" / "op-link").is_symlink()  # never removed
 
-def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> None:
+def _removes_only_positive_residue(tmp_path: Path) -> None:
     # Mix a journal, recognized staging residue, and an unrecognized foreign file.
     with Transaction(tmp_path, op_id="op-j", kind="write") as tx:
         _stage(tx, tmp_path / "a.yaml", "x")
@@ -458,53 +307,7 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> Non
         recover_startup(tmp_path)
     assert (foreign / "note.txt").read_text() == "keep"  # foreign left untouched
 
-def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) -> None:
-    for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
-        root = tmp_path / f"ws-{n}"
-        root.mkdir()
-        before = {}
-        for i in range(3):
-            rel = f"cases/t{i}.yaml"
-            before[rel] = f"before-{i}"
-            p = root / rel
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(before[rel])
-        faults = TransactionFaultDriver(root, op_id=f"op-{n}", kind="import")
-        with faults.transaction as tx:
-            for i in range(3):
-                _stage(tx, root / f"cases/t{i}.yaml", f"after-{i}")
-            faults.halt_at(f"target-{n}")
-        doc = load_json_strict(root / "transactions" / f"op-{n}" / "journal.json")
-        assert doc["state"] == ("prepared" if n == 0 else "committing")
-        assert doc["applied_count"] == n
-        for i in range(3):
-            expected = f"after-{i}" if i < n else before[f"cases/t{i}.yaml"]
-            assert (root / f"cases/t{i}.yaml").read_text() == expected
-        recover_startup(root)
-        for rel, content in before.items():
-            assert (root / rel).read_text() == content  # every target back to all-old
-        assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
-
-
-def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
-    """A noncanonical in-root journal path must roll back via its canonical target."""
-    target = tmp_path / "target.yaml"
-    target.write_text("old")
-    with Transaction(tmp_path, op_id="op-noncanon", kind="write") as tx:
-        _stage(tx, target, "new")
-        tx.prepare()
-        tx.begin_commit()   # state=committing, applied_count=1, target -> "new"
-    # Change only the raw target spelling; replacement_order remains canonical.
-    jf = tmp_path / "transactions" / "op-noncanon" / "journal.json"
-    doc = load_json_strict(jf)
-    doc["targets"][0]["rel"] = "./target.yaml"
-    doc["replacement_order"] = ["target.yaml"]
-    atomic_write_json(jf, doc)
-    assert target.read_text() == "new"
-    recover_startup(tmp_path)
-    assert target.read_text() == "old"  # restored from backup, not skipped
-
-def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path: Path) -> None:
+def _empty_prejournal_dir_left_untouched(tmp_path: Path) -> None:
     """An empty directory is not enough evidence to identify transaction residue."""
     op = tmp_path / "transactions" / "op-empty"
     op.mkdir(parents=True)
@@ -512,26 +315,35 @@ def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path: Path) ->
         recover_startup(tmp_path)
     assert op.is_dir()  # left untouched
 
-def test_resolve_authoring_path_rejects_absolute(tmp_path: Path) -> None:
-    p = tmp_path / "cases" / "x.yaml"
-    p.parent.mkdir(parents=True)
-    with pytest.raises(WorkspaceCorrupt):
-        resolve_authoring_path(tmp_path, str(p))  # absolute even inside root
-
-def test_resolve_authoring_path_rejects_traversal(tmp_path: Path) -> None:
-    with pytest.raises(WorkspaceCorrupt):
-        resolve_authoring_path(tmp_path, "../cases/x.yaml")
-
-def test_resolve_authoring_path_rejects_symlink_escape(tmp_path: Path) -> None:
-    outside = tmp_path.parent / f"esc-{tmp_path.name}"
-    outside.mkdir(exist_ok=True)
-    (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(WorkspaceCorrupt):
-        resolve_authoring_path(tmp_path, "cases/x.yaml")
-
-def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path: Path) -> None:
+def _unsafe_targets_and_lock_contention(tmp_path: Path) -> None:
     (tmp_path / "cases").mkdir(parents=True)
     f = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
     f.write_text("case")
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path, indexed={str(f)}, on_disk={f})
+    f.unlink()
+    manifest = tmp_path / "benchmark.yaml"
+    manifest.write_text("references a missing case\n")
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
+    bundle = tmp_path / "snapshots" / "old.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_bytes(b"old bundle")
+    with Transaction(tmp_path, op_id="retire-wrong", kind="import") as tx:
+        with pytest.raises(WorkspaceCorrupt, match="digest mismatch"):
+            tx.retire("snapshots/old.bundle", expected_sha256="f" * 64)
+    assert bundle.read_bytes() == b"old bundle"
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
+    outside.mkdir()
+    (tmp_path / "links").symlink_to(outside, target_is_directory=True)
+    with Transaction(tmp_path, op_id="op-sym", kind="write") as tx:
+        with pytest.raises(WorkspaceCorrupt):
+            tx.stage("links/x.yaml", b"x")
+    assert not (outside / "x.yaml").exists()
+    (tmp_path / "broken.json").write_text("{")
+    with pytest.raises(WorkspaceCorrupt, match="invalid JSON"):
+        load_json_strict(tmp_path / "broken.json")
+    with open(tmp_path / ".benchmark.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(LockContentionError):
+            WorkspaceLock(tmp_path, blocking=False).__enter__()

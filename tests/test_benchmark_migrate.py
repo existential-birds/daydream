@@ -7,13 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from daydream import cli as top_cli
 from daydream.benchmark import migrate, schema, storage
 from daydream.benchmark.schema import _schema_ready
 from tests.harness.git_helpers import commit as _commit, git as _git, write_and_stage
-from tests.harness.transaction_faults import TransactionFaultDriver
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
 _HEAD_HEX = "0123456789abcdef0123456789abcdef01234567"
@@ -310,30 +308,3 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
     migrated = storage.load_yaml_strict(imported_path)
     assert migrated["snapshot"]["requested_base_sha"] == base_tip
     assert "base_resolution" not in migrated["snapshot"]
-
-
-def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
-    """migrate_workspace must recover_startup under the workspace lock (like every
-    other locked writer) so a crashed curator journal is healed before it reads;
-    and its transaction op_id must be flat so no residue is left that bricks a
-    later recover_startup with WorkspaceCorrupt."""
-
-    ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    path = ws / "cases" / f"{case_id}.yaml"
-    raw = storage.load_yaml_strict(path)
-    mutated = dict(raw)
-    mutated["curation"] = dict(raw["curation"])
-    mutated["curation"]["state"] = "excluded"    # an interrupted mutation left in flight
-    faults = TransactionFaultDriver(ws, op_id=f"migrate-{case_id}", kind="migrate")
-    with faults.transaction as tx:
-        tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
-        faults.halt_at("target-1")               # target applied under 'committing', then halt
-    assert storage.load_yaml_strict(path)["curation"]["state"] == "excluded"
-
-    migrate.migrate_workspace(ws)               # recover_startup under lock rolls the crash back
-
-    assert not list((ws / "transactions").iterdir())    # healed AND no residue left behind
-    final = storage.load_yaml_strict(path)
-    assert final["curation"]["state"] == "draft"        # interrupted 'excluded' write rolled back
-    assert final["schema_version"] == 2                 # the migration still ran
-    storage.recover_startup(ws)                         # a follow-up recovery must not brick

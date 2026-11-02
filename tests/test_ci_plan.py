@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import runpy
@@ -22,7 +23,7 @@ _RULESET = f"repos/{_REPO}/rulesets/42"
 _RUNS = f"repos/{_REPO}/actions/workflows/ci.yml/runs"
 _ARTIFACTS = f"repos/{_REPO}/actions/runs/101/artifacts"
 _ARCHIVE = f"repos/{_REPO}/actions/artifacts/202/zip"
-_ACTIVE_RULES = [{
+_ACTIVE_RULES: list[dict[str, Any]] = [{
     "type": "merge_queue", "ruleset_id": 42, "ruleset_source": _REPO, "ruleset_source_type": "Repository",
 }, {"type": "required_status_checks", "parameters": {
     "required_status_checks": [{"context": "check", "integration_id": 15368}],
@@ -108,110 +109,90 @@ def _group(base: str, head: str) -> dict[str, Any]:
     }}
 
 
-def test_ci_cli_pr_checks_require_verified_active_queue(
+def test_ci_cli_pr_gate_is_basic_only_under_a_verified_bypass_free_queue(
     git_repo: Path, ci_cli: Callable[..., tuple[str, str]],
 ) -> None:
     base = _git(git_repo, "rev-parse", "HEAD")
-    head = _commit(git_repo, "docs/guide.md")
-    output, _ = ci_cli(_pr(base, head), replies={_RULES: []})
-    assert "mode=full\n" in output
-    assert "full=true\n" in output
-
-
-@pytest.mark.parametrize("fault", [
-    "api", "malformed", "missing-check", "wrong-app", "wrong-repository", "wrong-branch",
-])
-def test_ci_cli_queue_uncertainty_keeps_full_pr_gate(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], fault: str,
-) -> None:
-    sha = _git(git_repo, "rev-parse", "HEAD")
-    event = _pr(sha, sha)
-    rules: Any = json.loads(json.dumps(_ACTIVE_RULES))
-    if fault == "api":
-        rules = subprocess.CalledProcessError(1, "gh")
-    elif fault == "malformed":
-        rules = {"type": "merge_queue"}
-    elif fault == "missing-check":
-        rules = [{"type": "merge_queue"}]
-    elif fault == "wrong-app":
-        rules[1]["parameters"]["required_status_checks"][0]["integration_id"] = 999
-    elif fault == "wrong-repository":
-        event["pull_request"]["base"]["repo"]["full_name"] = "other/repo"
-    else:
-        event["pull_request"]["base"]["ref"] = "release"
-    output, _ = ci_cli(event, replies={_RULES: rules, _RULESET: _QUEUE_RULESET})
-    assert "mode=full\n" in output and "full=true\n" in output
-
-
-@pytest.mark.parametrize("source_type,source", [
-    ("Repository", _REPO), ("Organization", "acme"), ("Enterprise", "acme-enterprise"),
-])
-def test_ci_cli_verifies_queue_ruleset_at_its_origin(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], source_type: str, source: str,
-) -> None:
-    rules = json.loads(json.dumps(_ACTIVE_RULES))
-    rules[0].update(ruleset_source=source, ruleset_source_type=source_type)
-    ruleset = {**_QUEUE_RULESET, "source": source, "source_type": source_type}
-    base = _git(git_repo, "rev-parse", "HEAD")
     head = _commit(git_repo, "tests/test_contract.py")
-    output, _ = ci_cli(_pr(base, head), replies={_RULES: rules, _RULESET: ruleset})
-    assert "mode=basic\n" in output and "full=false\n" in output
+    # A ruleset is verified at its own origin, whichever level declares it.
+    for source_type, source in (("Repository", _REPO), ("Organization", "acme"), ("Enterprise", "acme-enterprise")):
+        verified: list[dict[str, Any]] = copy.deepcopy(_ACTIVE_RULES)
+        verified[0].update(ruleset_source=source, ruleset_source_type=source_type)
+        origin = {**_QUEUE_RULESET, "source": source, "source_type": source_type}
+        output, _ = ci_cli(_pr(base, head), replies={_RULES: verified, _RULESET: origin})
+        assert "mode=basic\n" in output and "full=false\n" in output, source_type
 
+    def rules_fault(fault: str, rules: Any, event: dict[str, Any]) -> Any:
+        if fault == "no-queue":
+            return []
+        if fault == "api":
+            return subprocess.CalledProcessError(1, "gh")
+        if fault == "malformed":
+            return {"type": "merge_queue"}
+        if fault == "missing-check":
+            return [{"type": "merge_queue"}]
+        if fault == "wrong-app":
+            rules[1]["parameters"]["required_status_checks"][0]["integration_id"] = 999
+        elif fault == "wrong-repository":
+            event["pull_request"]["base"]["repo"]["full_name"] = "other/repo"
+        elif fault == "wrong-branch":
+            event["pull_request"]["base"]["ref"] = "release"
+        elif fault == "missing-origin":
+            del rules[0]["ruleset_source"]
+        elif fault == "invalid-id":
+            rules[0]["ruleset_id"] = True
+        return rules
 
-@pytest.mark.parametrize("fault", [
-    "always", "omitted", "null", "inaccessible",
-    "malformed", "wrong-id", "wrong-source", "wrong-source-type", "wrong-target", "inactive",
-    "missing-queue", "missing-origin", "invalid-id", "other-queue-bypass", "float-id",
-    "null-source", "empty-source", "null-source-type", "unknown-source-type",
-])
-def test_ci_cli_queue_bypass_or_unverified_ruleset_keeps_full_pr_gate(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], fault: str,
-) -> None:
-    rules = json.loads(json.dumps(_ACTIVE_RULES))
-    ruleset: Any = json.loads(json.dumps(_QUEUE_RULESET))
-    replies: dict[str, Any] = {_RULES: rules, _RULESET: ruleset}
-    if fault == "always":
-        ruleset["bypass_actors"] = [{"actor_id": 7, "actor_type": "Team", "bypass_mode": fault}]
-    elif fault == "omitted":
-        del ruleset["bypass_actors"]
-    elif fault == "null":
-        ruleset["bypass_actors"] = None
-    elif fault == "inaccessible":
-        replies[_RULESET] = subprocess.CalledProcessError(1, "gh")
-    elif fault == "malformed":
-        replies[_RULESET] = []
-    elif fault == "wrong-id":
-        ruleset["id"] = 99
-    elif fault == "wrong-source":
-        ruleset["source"] = "other/repo"
-    elif fault == "wrong-source-type":
-        ruleset["source_type"] = "Organization"
-    elif fault == "wrong-target":
-        ruleset["target"] = "tag"
-    elif fault == "inactive":
-        ruleset["enforcement"] = "evaluate"
-    elif fault == "missing-queue":
-        ruleset["rules"] = []
-    elif fault == "missing-origin":
-        del rules[0]["ruleset_source"]
-    elif fault == "invalid-id":
-        rules[0]["ruleset_id"] = True
-    elif fault == "float-id":
-        ruleset["id"] = 42.0
-    elif fault in {"null-source", "empty-source"}:
-        rules[0]["ruleset_source"] = ruleset["source"] = None if fault == "null-source" else ""
-    elif fault in {"null-source-type", "unknown-source-type"}:
-        rules[0]["ruleset_source_type"] = ruleset["source_type"] = (
-            None if fault == "null-source-type" else "Unknown"
-        )
-    else:
-        rules.append({**rules[0], "ruleset_id": 99})
-        replies[f"repos/{_REPO}/rulesets/99"] = {
-            **ruleset, "id": 99, "bypass_actors": [{"actor_id": 7, "actor_type": "Team", "bypass_mode": "always"}],
-        }
-    sha = _git(git_repo, "rev-parse", "HEAD")
-    output, _ = ci_cli(_pr(sha, sha), replies=replies)
-    assert "mode=full\n" in output and "full=true\n" in output
+    def ruleset_fault(fault: str, ruleset: dict[str, Any], replies: dict[str, Any]) -> None:
+        if fault == "always":
+            ruleset["bypass_actors"] = [{"actor_id": 7, "actor_type": "Team", "bypass_mode": fault}]
+        elif fault == "omitted":
+            del ruleset["bypass_actors"]
+        elif fault == "null":
+            ruleset["bypass_actors"] = None
+        elif fault == "inaccessible":
+            replies[_RULESET] = subprocess.CalledProcessError(1, "gh")
+        elif fault == "malformed-ruleset":
+            replies[_RULESET] = []
+        elif fault in {"wrong-id", "float-id"}:
+            ruleset["id"] = 99 if fault == "wrong-id" else 42.0
+        elif fault == "wrong-source":
+            ruleset["source"] = "other/repo"
+        elif fault == "wrong-source-type":
+            ruleset["source_type"] = "Organization"
+        elif fault == "wrong-target":
+            ruleset["target"] = "tag"
+        elif fault == "inactive":
+            ruleset["enforcement"] = "evaluate"
+        elif fault == "missing-queue":
+            ruleset["rules"] = []
+
+    # Every unverifiable queue or bypassable ruleset keeps the complete PR gate.
+    for fault in (
+        "no-queue", "api", "malformed", "missing-check", "wrong-app", "wrong-repository", "wrong-branch",
+        "missing-origin", "invalid-id", "always", "omitted", "null", "inaccessible", "malformed-ruleset",
+        "wrong-id", "float-id", "wrong-source", "wrong-source-type", "wrong-target", "inactive", "missing-queue",
+        "null-source", "empty-source", "null-source-type", "unknown-source-type", "other-queue-bypass",
+    ):
+        event = _pr(base, head)
+        rules: list[dict[str, Any]] = copy.deepcopy(_ACTIVE_RULES)
+        ruleset: dict[str, Any] = copy.deepcopy(_QUEUE_RULESET)
+        replies: dict[str, Any] = {_RULESET: ruleset}
+        replies[_RULES] = rules_fault(fault, rules, event)
+        ruleset_fault(fault, ruleset, replies)
+        if fault in {"null-source", "empty-source"}:
+            rules[0]["ruleset_source"] = ruleset["source"] = None if fault == "null-source" else ""
+        elif fault in {"null-source-type", "unknown-source-type"}:
+            rules[0]["ruleset_source_type"] = ruleset["source_type"] = (
+                None if fault == "null-source-type" else "Unknown"
+            )
+        elif fault == "other-queue-bypass":
+            rules.append({**rules[0], "ruleset_id": 99})
+            replies[f"repos/{_REPO}/rulesets/99"] = {
+                **ruleset, "id": 99, "bypass_actors": [{"actor_id": 7, "actor_type": "Team", "bypass_mode": "always"}],
+            }
+        output, _ = ci_cli(event, replies=replies)
+        assert "mode=full\n" in output and "full=true\n" in output, fault
 
 
 def _successful_merge_proof(
@@ -318,105 +299,94 @@ def test_ci_cli_reuses_last_verified_queue_tree_from_run_inventory(
     assert "https://github.com/acme/widgets/actions/runs/118" in summary
 
 
-@pytest.mark.parametrize("fault", ["api-error", "bad-zip", "base-ancestry"])
-def test_ci_cli_unreadable_queue_proof_keeps_full_gate(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path, fault: str,
-) -> None:
-    base, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
-    if fault == "base-ancestry":
-        tested = _git(git_repo, "rev-parse", "HEAD")
-        _git(git_repo, "checkout", "--orphan", "unrelated")
-        proof["base_sha"] = _commit(git_repo, "unrelated.txt")
-        proof["base_tree"] = _git(git_repo, "rev-parse", "HEAD^{tree}")
-        _git(git_repo, "checkout", "main")
-        assert _git(git_repo, "rev-parse", "HEAD") == tested
-    if fault == "api-error":
-        replies[_RUNS] = subprocess.CalledProcessError(1, "gh")
-    replies[_ARCHIVE] = b"invalid" if fault == "bad-zip" else _archive(proof)
-    event = _push(git_repo, base, replies)
-    output, summary = ci_cli(event, event_name="push", replies=replies)
-    assert "mode=full\n" in output and "full=true\n" in output
-    assert ("BadZipFile" if fault == "bad-zip" else "CalledProcessError") in summary
-
-
-@pytest.mark.parametrize("event_name", ["workflow_dispatch", "push"])
-def test_ci_cli_direct_push_queue_and_manual_dispatch_run_full_gate(
-    ci_cli: Callable[..., tuple[str, str]], git_repo: Path, event_name: str,
-) -> None:
-    sha = _git(git_repo, "rev-parse", "HEAD")
-    replies: dict[str, Any] = {f"repos/{_REPO}/commits/{sha}/pulls": []}
-    event = {"ref": "refs/heads/main", "before": sha, "after": sha}
-    output, _ = ci_cli(event, event_name=event_name, replies=replies)
-    assert "mode=full\n" in output and "full=true\n" in output
-
-
-@pytest.mark.parametrize("fault", ["event", "action", "repo", "head", "checkout", "dirty", "base", "ref"])
 def test_ci_cli_record_rejects_non_queue_or_unverified_checkouts(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path, fault: str,
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path,
 ) -> None:
     base, proof, _ = _successful_merge_proof(git_repo, ci_cli, tmp_path)
-    event = _group(base, proof["commit"])
-    name = "merge_group"
-    github_sha = proof["commit"]
-    if fault == "event":
-        name = "pull_request"
-    elif fault == "action":
-        event["action"] = "destroyed"
-    elif fault == "repo":
-        event["repository"]["full_name"] = "other/repo"
-    elif fault == "head":
-        event["merge_group"]["head_sha"] = "f" * 40
-    elif fault == "checkout":
-        github_sha = "f" * 40
-    elif fault == "dirty":
-        (git_repo / "daydream/app.py").write_text("unverified edit\n")
-    elif fault == "base":
-        event["merge_group"]["base_sha"] = proof["commit"]
-    elif fault == "ref":
-        event["merge_group"]["head_ref"] = "refs/heads/feature"
-    dest = tmp_path / "rejected-proof"
-    with pytest.raises((ValueError, subprocess.CalledProcessError)):
-        ci_cli(event, event_name=name, github_sha=github_sha, record=dest)
-    assert not (dest / "proof.json").exists()
+    # "dirty" mutates the checkout, so it runs last.
+    for fault in ("event", "action", "repo", "head", "checkout", "base", "ref", "dirty"):
+        event = _group(base, proof["commit"])
+        name = "merge_group"
+        github_sha = proof["commit"]
+        if fault == "event":
+            name = "pull_request"
+        elif fault == "action":
+            event["action"] = "destroyed"
+        elif fault == "repo":
+            event["repository"]["full_name"] = "other/repo"
+        elif fault == "head":
+            event["merge_group"]["head_sha"] = "f" * 40
+        elif fault == "checkout":
+            github_sha = "f" * 40
+        elif fault == "dirty":
+            (git_repo / "daydream/app.py").write_text("unverified edit\n")
+        elif fault == "base":
+            event["merge_group"]["base_sha"] = proof["commit"]
+        else:
+            event["merge_group"]["head_ref"] = "refs/heads/feature"
+        dest = tmp_path / f"rejected-{fault}"
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            ci_cli(event, event_name=name, github_sha=github_sha, record=dest)
+        assert not (dest / "proof.json").exists(), fault
 
 
-@pytest.mark.parametrize("fault", [
-    "unmerged", "merge-sha", "base-repository", "base-branch", "push-after", "checkout",
-    "unrelated-before", "unresolvable-before",
-])
-def test_ci_cli_push_authority_and_old_tip_cannot_borrow_valid_queue_proof(
-    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path, fault: str,
+def test_ci_cli_push_without_proven_authority_or_readable_proof_runs_full_gate(
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path,
 ) -> None:
-    base, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
-    replies[_ARCHIVE] = _archive(proof)
-    event = _push(git_repo, base, replies)
-    sha = event["after"]
-    github_sha = sha
-    associated = replies[f"repos/{_REPO}/commits/{sha}/pulls"][0]
-    if fault == "unmerged":
-        associated["merged_at"] = None
-    elif fault == "merge-sha":
-        associated["merge_commit_sha"] = "f" * 40
-    elif fault == "base-repository":
-        associated["base"]["repo"]["full_name"] = "other/repo"
-    elif fault == "base-branch":
-        associated["base"]["ref"] = "master"
-    elif fault == "push-after":
-        event["after"] = "f" * 40
-    elif fault == "checkout":
-        github_sha = event["after"] = "f" * 40
-        # Every downstream API/proof guard remains satisfiable if HEAD identity
-        # verification is removed. Missing API fixtures must not mask it.
-        associated["merge_commit_sha"] = github_sha
-        replies[f"repos/{_REPO}/commits/{github_sha}/pulls"] = [associated]
-    elif fault == "unrelated-before":
-        _git(git_repo, "checkout", "--orphan", "unrelated-before")
-        event["before"] = _commit(git_repo, "unrelated.txt")
-        _git(git_repo, "checkout", "main")
-        assert _git(git_repo, "rev-parse", "HEAD") == proof["commit"]
-    else:
-        event["before"] = "f" * 40
-    output, summary = ci_cli(event, event_name="push", github_sha=github_sha, replies=replies)
-    assert "mode=full\n" in output and "full=true\n" in output
-    if fault in {"unrelated-before", "unresolvable-before"}:
-        assert "CalledProcessError" in summary
+    sha = _git(git_repo, "rev-parse", "HEAD")
+    # Direct pushes and manual dispatches have no queue authority at all.
+    for event_name in ("workflow_dispatch", "push"):
+        output, _ = ci_cli({"ref": "refs/heads/main", "before": sha, "after": sha}, event_name=event_name,
+                           replies={f"repos/{_REPO}/commits/{sha}/pulls": []})
+        assert "mode=full\n" in output and "full=true\n" in output, event_name
+
+    base, proof, template = _successful_merge_proof(git_repo, ci_cli, tmp_path)
+    template[_ARCHIVE] = _archive(proof)
+    tip = _git(git_repo, "rev-parse", "HEAD")
+    for fault in (
+        "api-error", "bad-zip", "base-ancestry", "unmerged", "merge-sha", "base-repository", "base-branch",
+        "push-after", "checkout", "unrelated-before", "unresolvable-before",
+    ):
+        replies = copy.deepcopy(template)
+        event = _push(git_repo, base, replies)
+        github_sha = event["after"]
+        associated = replies[f"repos/{_REPO}/commits/{github_sha}/pulls"][0]
+        if fault == "api-error":
+            replies[_RUNS] = subprocess.CalledProcessError(1, "gh")
+        elif fault == "bad-zip":
+            replies[_ARCHIVE] = b"invalid"
+        elif fault == "base-ancestry":
+            _git(git_repo, "checkout", "--orphan", "unrelated")
+            foreign = {**proof, "base_sha": _commit(git_repo, "unrelated.txt"),
+                       "base_tree": _git(git_repo, "rev-parse", "HEAD^{tree}")}
+            _git(git_repo, "checkout", "main")
+            replies[_ARCHIVE] = _archive(foreign)
+        elif fault == "unmerged":
+            associated["merged_at"] = None
+        elif fault == "merge-sha":
+            associated["merge_commit_sha"] = "f" * 40
+        elif fault == "base-repository":
+            associated["base"]["repo"]["full_name"] = "other/repo"
+        elif fault == "base-branch":
+            associated["base"]["ref"] = "master"
+        elif fault == "push-after":
+            event["after"] = "f" * 40
+        elif fault == "checkout":
+            github_sha = event["after"] = "f" * 40
+            # Every downstream API/proof guard remains satisfiable if HEAD identity
+            # verification is removed. Missing API fixtures must not mask it.
+            associated["merge_commit_sha"] = github_sha
+            replies[f"repos/{_REPO}/commits/{github_sha}/pulls"] = [associated]
+        elif fault == "unrelated-before":
+            _git(git_repo, "checkout", "--orphan", "unrelated-before")
+            event["before"] = _commit(git_repo, "unrelated.txt")
+            _git(git_repo, "checkout", "main")
+        else:
+            event["before"] = "f" * 40
+        assert _git(git_repo, "rev-parse", "HEAD") == tip
+        output, summary = ci_cli(event, event_name="push", github_sha=github_sha, replies=replies)
+        assert "mode=full\n" in output and "full=true\n" in output, fault
+        if fault == "bad-zip":
+            assert "BadZipFile" in summary
+        elif fault in {"api-error", "base-ancestry", "unrelated-before", "unresolvable-before"}:
+            assert "CalledProcessError" in summary, fault

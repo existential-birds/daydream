@@ -689,12 +689,8 @@ def _run_action(
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"
-    if action == "d":
-        print(f"case {case_id} deferred \u2014 nothing persisted")
-        return "done"
-    print(f"action [{action}]: not yet wired")
-    return "continue"
-
+    print(f"case {case_id} deferred \u2014 nothing persisted")  # "d": every other action is dispatched
+    return "done"
 
 
 def _launch_pager(text: str) -> None:

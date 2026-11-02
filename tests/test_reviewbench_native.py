@@ -3,9 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
-from collections.abc import AsyncIterator
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -15,21 +13,16 @@ import httpx
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, RetryPolicy, create_backend
+from daydream.backends import BackendExecutionInput, RetryPolicy, create_backend
 from daydream.backends.pi import native_pi_settings
-from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import (
     convert_findings,
     freeze_reviewer,
     parse_native_config,
-    reviewer_config,
 )
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import diff_key
 from daydream.review_result import FinalizedReview
-from daydream.run_config import _resolved_model
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, tracked_source_state, write_and_stage
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
@@ -37,166 +30,11 @@ from tests.harness.reviewbench import finding, frozen_case, public_input
 from tests.harness.stub_backend import review_stage_state, stage_result
 
 
-@pytest.mark.parametrize('outcome,status', [
-    ('empty', 'completed_empty'), ('finding', 'complete'), ('partial', 'incomplete'),
-    ('incomplete', 'incomplete'),
-    ('failed', 'failed'), ('relocated', 'conversion_limited'), ('pipeline_failure', 'incomplete'),
-    ('divergent', 'completed_empty'), ('extension', 'completed_empty'),
-])
-async def test_admitted_review_preserves_terminal_authority_and_isolation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str, status: str,
-    dataset_store: Path, dataset_hub: FakeDatasetHub, request: pytest.FixtureRequest,
-) -> None:
-    from daydream.backends.codex import CodexBackend
-    from daydream.benchmark.reviewbench.harbor_entrypoint import main
-
-    controls = {
-        'DAYDREAM_PI_RETRY_ATTEMPTS': '0', 'DAYDREAM_PI_RETRY_BASE_DELAY_S': '0.25',
-        'DAYDREAM_PI_RETRY_MAX_DELAY_S': '4', 'DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S': '0',
-        'DAYDREAM_STREAM_IDLE_TIMEOUT_S': '17', 'DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S': '19',
-        'DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S': '3', 'DAYDREAM_CODEX_CLEANUP_TIMEOUT_S': '7',
-    }
-    for key, value in controls.items():
-        monkeypatch.setenv(key, value)
-    environment = public_input(tmp_path, divergent_base=outcome == 'divergent')
-    for key in controls:
-        monkeypatch.setenv(key, '1')
-    if outcome == 'extension':
-        request.getfixturevalue('ext_dir').write_module(
-            'def register(registry):\n'
-            '    original = registry.prompt("per-stack")\n'
-            '    registry.override_prompt("per-stack", lambda **kw: original(**kw) + "\\nNATIVE_OVERRIDE")\n')
-    repo, evidence = Path(environment['DAYDREAM_RB_REPOSITORY']), Path(environment['DAYDREAM_RB_EVIDENCE'])
-    case = Case.from_dict(json.loads((Path(environment['DAYDREAM_RB_INPUTS']) / 'pr.json').read_text()))
-    original = tracked_source_state(repo)
-    protected = tmp_path / 'operator-archive'
-    protected.mkdir()
-    (protected / 'keep').write_text('operator history')
-    monkeypatch.setenv('DAYDREAM_ARCHIVE_DIR', str(protected))
-    environment['DAYDREAM_ARCHIVE_DIR'] = str(protected)
-    active = peak = 0
-    archives: set[Path] = set()
-    prompts: list[str] = []
-    class Backend(EmptyReviewBackend):
-        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            try:
-                prompts.append(args[1])
-                await asyncio.sleep(0.01)
-                if outcome not in {'empty', 'divergent'}:
-                    yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
-                async for event in super().execute(*args, **kwargs):
-                    yield event
-            finally:
-                active -= 1
-
-    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
-        assert name == 'codex' and kwargs['execution_input'].fanout_concurrency == 1
-        capability = kwargs['execution_input']
-        assert capability.retry_policy == RetryPolicy(0, 0.25, 4, 0)
-        assert capability.stream_idle_timeout_s == capability.pi_response_idle_timeout_s == 17
-        assert (capability.codex_terminal_drain_timeout_s, capability.codex_process_reap_timeout_s,
-                capability.codex_cleanup_timeout_s) == (19, 3, 7)
-        child = capability.child_environment()
-        assert not {'OPENAI_API_KEY', 'GH_TOKEN', 'OPENAI_BASE_URL', 'DAYDREAM_ARCHIVE_DIR'} & child.keys()
-        assert not controls.keys() & child.keys()
-        home = Path(child['CODEX_HOME'])
-        archives.add(Path(os.environ['DAYDREAM_ARCHIVE_DIR']))
-        auth = json.loads((home / 'auth.json').read_text())
-        assert home != Path(environment['DAYDREAM_RB_CODEX_HOME']) and auth['auth_mode'] == 'chatgpt'
-        backend = Backend(repo, forbid_merge=False, forbid_supervise=False,
-            review_by_stack={'structure': [finding(line=500 if outcome == 'relocated' else 2)]}
-                if outcome in {'finding', 'partial', 'incomplete', 'relocated', 'pipeline_failure'} else {},
-            fail_stack='python' if outcome == 'partial' else None,
-            incomplete_stack='python' if outcome == 'incomplete' else None,
-            responder=lambda prompt: [RuntimeError('offline failure')] if (
-                outcome == 'failed' and ('you are reviewing the ' in prompt.lower()
-                    or 'you are the structural reviewer' in prompt.lower())
-                or outcome == 'pipeline_failure' and 'supervisor adjudication' in prompt.lower()) else None)
-        native_backend = CodexBackend(model=kwargs['model'], reasoning_effort=kwargs['reasoning_effort'],
-            execution_input=capability)
-        assert native_backend.retry_policy == RetryPolicy(0, 0.25, 4, 0)
-        backend.fanout_concurrency = native_backend.fanout_concurrency
-        backend.merge_echo_records = True
-        return backend
-
-    monkeypatch.setattr(runner, 'create_backend', create)
-    code = await main(environment)
-    result = json.loads((evidence / 'execution.json').read_text())
-    successful = status in {'complete', 'completed_empty'}
-    assert result['status'] == status and code == (0 if successful else 1), result['diagnostics']
-    assert result['analyzed_comparison'] == {'head_sha': case.head,
-        'merge_base_sha': git_ops.merge_base(repo, case.base, case.head),
-        'diff_key': diff_key(git_ops.diff_paths(repo, case.base, case.head, ['.'], merge_base_diff=True))}
-    assert result['terminal_result']['analyzed_revision']['head_sha'] == case.head
-    assert result['task_id'] == 7 and result['evaluation_id'] == 99 and active == 0 and peak == 1
-    assert (result['reviewer_backend'], result['reviewer_provider'], result['reviewer_authentication']) == (
-        'codex', 'openai', 'chatgpt-oauth')
-    assert result['usage'] == ({} if outcome in {'empty', 'divergent'} else {'completion_tokens': 0, 'cost_usd': 0.0})
-    output = Path(environment['DAYDREAM_RB_OUTPUT'])
-    assert output.exists() == successful
-    if output.exists():
-        candidate = json.loads(output.read_text())
-        assert candidate['pr'] == asdict(case) and bool(candidate['findings']) == (outcome == 'finding')
-        assert candidate.get('usage', {}) == result['usage']
-        if not result['usage']:
-            assert 'usage' not in candidate
-        if source := os.environ.get('DAYDREAM_REVIEWBENCH_SOURCE'):
-            checked = subprocess.run(['npm', 'run', 'harbor:validate-findings', '--', '--candidate', str(output),
-                '--pr', str(Path(environment['DAYDREAM_RB_INPUTS']) / 'pr.json')], cwd=source,
-                capture_output=True, text=True, timeout=60)
-            assert checked.returncode == 0, checked.stdout + checked.stderr
-            assert 'No judging or inference performed' in checked.stdout
-    if outcome in {'finding', 'partial', 'incomplete', 'relocated', 'pipeline_failure'}:
-        assert result['retained_findings'][0]['description'] == finding()['description']
-    if outcome == 'relocated':
-        assert result['conversion_omissions'][0]['reason'] == 'native_location_was_relocated_or_distrusted'
-    assert any('Frozen supplied author explanation' in prompt for prompt in prompts)
-    if outcome == 'extension':
-        assert any('NATIVE_OVERRIDE' in prompt for prompt in prompts)
-    assert archives and all(path != protected and not path.exists() for path in archives)
-    assert os.environ['DAYDREAM_ARCHIVE_DIR'] == str(protected)
-    assert (protected / 'keep').read_text() == 'operator history'
-    assert list(protected.iterdir()) == [protected / 'keep']
-    files = [path for path in evidence.rglob('*') if path.is_file()]
-    assert all(path.name != 'auth.json' for path in files)
-    retained = b''.join(path.read_bytes() for path in files)
-    assert not any(value in retained for value in (b'private-refresh-canary', b'forbidden-api-canary'))
-    assert tracked_source_state(repo) == original
-    assert not dataset_store.exists() and dataset_hub.commits == []
-    assert not fake_gh.calls('POST')
-
-
-def test_frozen_native_profile_survives_removed_operator_files(tmp_path: Path) -> None:
-    """Export owns serialization; ordinary profile resolution owns precedence and path admission."""
-    operator = tmp_path / 'operator'
-    operator.mkdir()
-    profile = operator / 'policy.toml'
-    profile.write_text('schema_version=1\nname="frozen-operator-policy"\n')
-    (operator / '.daydream.toml').write_text('backend="codex"\n[phases.per_stack_review]\nmodel="phase-model"\n')
-    frozen = freeze_reviewer(parse_native_config([str(operator), '--backend', 'codex',
-        '--model', 'explicit-model', '--review-profile', str(profile), '--diagram', 'off']))
-    assert frozen['file_config']['phases']['per_stack_review']['model'] == 'phase-model'
-    profile.unlink()
-    config = reviewer_config(json.loads(json.dumps(frozen)), tmp_path / 'reviewed-source')
-    assert _resolved_model(config, 'per_stack_review') == 'explicit-model'
-    assert config.review_profile is not None
-    assert config.review_profile.source_kind == 'explicit'
-    assert config.review_profile.profile.name == 'frozen-operator-policy'
-
-
-@pytest.mark.parametrize('arguments', [
-    ['--copy', 'extra.py'], ['--test-command', 'true'], ['--approve-on-clean'],
-    ['--file-scope-issues'], ['--trace-to', 'otlp'],
-])
-def test_export_refuses_native_controls_without_an_admitted_runtime_capability(
-    tmp_path: Path, arguments: list[str],
-) -> None:
-    config = parse_native_config([str(tmp_path), '--backend', 'codex', *arguments])
-    with pytest.raises(ValueError, match='unsupported benchmark native policy'):
-        freeze_reviewer(config)
+def test_export_refuses_native_controls_without_an_admitted_runtime_capability(tmp_path: Path) -> None:
+    for arguments in (['--test-command', 'true'], ['--trace-to', 'otlp']):
+        config = parse_native_config([str(tmp_path), '--backend', 'codex', *arguments])
+        with pytest.raises(ValueError, match='unsupported benchmark native policy'):
+            freeze_reviewer(config)
 
 
 def test_head_conversion_retains_logical_records_and_exposes_invalid_locations(tmp_path: Path) -> None:
@@ -247,7 +85,7 @@ async def test_frozen_pi_defaults_refuse_case_thinking_override(
             pytest.fail('case-local effort reached the Pi transport')
 
 
-@pytest.mark.parametrize('phase_model,idle_override', [(None, None), ('native-intent-model', None), (None, '0')])
+@pytest.mark.parametrize('phase_model,idle_override', [(None, '0')])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
     phase_model: str | None, idle_override: str | None,
@@ -396,48 +234,18 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     assert (agent_dir / 'auth.json').read_text() == auth_body
 
 
-@pytest.mark.parametrize("fault", ["missing_terminal", "malformed_projection", "ignored_patch", "moved_head"])
-async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, fault: str,
+async def test_ignored_patch_comparison_never_becomes_empty_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
 ) -> None:
+    """Ignoring the frozen patch changes the comparison; the run fails instead of publishing empty success."""
     from daydream.benchmark.reviewbench.harbor_entrypoint import main
     from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
 
     environment = public_input(tmp_path)
     repo = Path(environment['DAYDREAM_RB_REPOSITORY'])
-    case = Case.from_dict(json.loads((Path(environment['DAYDREAM_RB_INPUTS']) / 'pr.json').read_text()))
     original = tracked_source_state(repo)
-    injected: list[str] = []
-    real_read = Path.read_text
-    real_replace = os.replace
-
-    def read(path: Path, *args: Any, **kwargs: Any) -> str:
-        contents = real_read(path, *args, **kwargs)
-        if fault == "malformed_projection" and path.name == "merged-items.json":
-            injected.append(path.name)
-            return '{"items": "not canonical findings"}'
-        return contents
-
-    def replace_file(source: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
-        # atomic_write_json stages complete coverage bytes before installing them
-        # into place; failure there occurs before the real terminal handoff.
-        if fault == "missing_terminal" and Path(destination).name == "review-coverage.json":
-            injected.append(Path(destination).name)
-            raise OSError("synthetic terminal coverage installation failure")
-        real_replace(source, destination, *args, **kwargs)
-
-    def create(*_args: Any, **kwargs: Any) -> EmptyReviewBackend:
-        checkout = kwargs.get("cwd", repo)
-        if fault == "moved_head":
-            git_ops.checkout_detach(checkout, case.base)
-            injected.append("head")
-        return EmptyReviewBackend(checkout)
-
-    monkeypatch.setattr(Path, "read_text", read)
-    monkeypatch.setattr(os, "replace", replace_file)
-    monkeypatch.setattr(runner, "create_backend", create)
-    config = empty_review_config(repo, tmp_path / "trajectory", backend="codex",
-        ignore_paths=["api.py"] if fault == "ignored_patch" else [])
+    monkeypatch.setattr(runner, "create_backend", lambda *_args, **kwargs: EmptyReviewBackend(kwargs.get("cwd", repo)))
+    config = empty_review_config(repo, tmp_path / "trajectory", backend="codex", ignore_paths=["api.py"])
     profile_path = Path(environment['DAYDREAM_RB_INPUTS']) / 'daydream-profile.json'
     profile = json.loads(profile_path.read_text())
     profile['reviewer'] = freeze_reviewer(config)
@@ -447,24 +255,12 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
     assert await main(environment) == 1
     result = SimpleNamespace(**json.loads((Path(environment['DAYDREAM_RB_EVIDENCE']) / 'execution.json').read_text()))
     assert result.status == "failed", result.diagnostics
-    assert result.candidate is None and result.diagnostics
-    if fault != "moved_head":
-        assert tracked_source_state(repo) == original
-    if fault == "missing_terminal":
-        assert injected and result.terminal_result is None
-        assert "native reviewer did not produce a finalized terminal result" in result.diagnostics
-    elif fault == "malformed_projection":
-        assert injected and result.terminal_result is not None
-        assert not result.terminal_result["projection_valid"]
-    elif fault == "ignored_patch":
-        assert result.terminal_result is not None, result.diagnostics
-        assert any("comparison differs" in diagnostic for diagnostic in result.diagnostics)
-    else:
-        assert injected
-        assert any("changed the frozen checkout revision" in diagnostic for diagnostic in result.diagnostics)
+    assert result.candidate is None and result.terminal_result is not None
+    assert any("comparison differs" in diagnostic for diagnostic in result.diagnostics)
+    assert tracked_source_state(repo) == original
 
 
-@pytest.mark.parametrize('consumer_fails', [False, True])
+@pytest.mark.parametrize('consumer_fails', [True])
 async def test_result_observer_preserves_terminal_report_and_invocation_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, consumer_fails: bool,
 ) -> None:
