@@ -1143,7 +1143,6 @@
     "tests/test_benchmark_harbor_build.py::test_validate_bundle_inventory_accepts_valid_base_head_bundle": 0.116987,
     "tests/test_benchmark_harbor_build.py::test_validate_bundle_inventory_rejects_extra_ref": 0.126452,
     "tests/test_benchmark_harbor_execution_isolation.py::test_concurrent_harbor_reviews_keep_execution_and_artifacts_private": 5.227937,
-    "tests/test_benchmark_harbor_package.py::test_audit_execution_proofs_harbor_gated": 105.835404,
     "tests/test_benchmark_harbor_package.py::test_build_harbor_refuses_without_ready_workspace": 0.395118,
     "tests/test_benchmark_harbor_package.py::test_compile_with_wheel_emits_full_packaged_tree": 0.62545,
     "tests/test_benchmark_harbor_package.py::test_validate_compiled_instantiates_harbor_tasks_and_job_configs": 0.888377,
