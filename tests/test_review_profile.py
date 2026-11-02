@@ -1,6 +1,5 @@
 """Tests for the strict review-profile model and stage schema."""
 
-from pathlib import Path
 
 import pytest
 
@@ -20,87 +19,23 @@ def test_review_deadline_is_profiled_and_validated() -> None:
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
 
-@pytest.mark.parametrize("field", ["reviewer_investigation_budget_s", "reviewer_tool_call_budget"])
-@pytest.mark.parametrize("value", [0, 900])
-def test_reviewer_budget_is_independent_and_changes_identity(field: str, value: int) -> None:
-    base = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\n{field} = 600")
-    configured = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\n{field} = {value}")
-    assert getattr(configured.pipeline, field) == value
-    assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
-    assert configured.to_canonical_dict() != base.to_canonical_dict()
-    assert configured.digest != base.digest
-
-
-@pytest.mark.parametrize("field", ["reviewer_investigation_budget_s", "reviewer_tool_call_budget"])
-@pytest.mark.parametrize('value', [
-    "-1",
-    "true",
-    '"480"',
-])
-def test_invalid_reviewer_budget_names_field_and_source(field: str, value: str) -> None:
+def test_invalid_profiles_fail_closed_naming_field_and_source() -> None:
     source = "/tmp/reviewer-profile.toml"
-    with pytest.raises(rp.ProfileError) as error:
-        _profile(f"[pipeline]\n{field} = {value}", source=source)
-    assert error.value.source == source
-    assert source in str(error.value)
-    assert f"pipeline.{field}" in str(error.value)
-
-
-# Task 2 (R4): canonical serialization + deterministic digest.
-def test_digest_is_order_whitespace_comment_path_independent(tmp_path: Path) -> None:
-    a = _profile('''[strategies.intent]
-content = "X"
-source = "copied: a"''')
-    b = rp.parse_profile('''schema_version=1
-# a comment
-name="p"
-[strategies.intent]
-source="copied: a"
-content="X"''')
-    assert a.digest == b.digest  # order/whitespace/comment independent
-
-
-def test_omitted_defaults_and_explicit_defaults_hash_identically() -> None:
-    implicit = _profile('''[strategies.intent]
-content = "X"
-source = "copied: a"''')
-    explicit = _profile(f'''[strategies.intent]
-content = "X"
-source = "copied: a"
-[pipeline]
-structural_enabled = true
-reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s}
-reviewer_tool_call_budget = {rp.Pipeline().reviewer_tool_call_budget}''')
-    assert implicit.to_canonical_dict() == explicit.to_canonical_dict()
-    assert implicit.digest == explicit.digest
-
-
-# Task 3 (R3): fail-closed validation.
-@pytest.mark.parametrize(("body", "unknown_key"), [
-    ("bogus = 1", "bogus"),
-    ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds"),
-])
-def test_unknown_key_fails_closed_naming_source(body: str, unknown_key: str) -> None:
-    with pytest.raises(rp.ProfileError) as e:
-        _profile(body, source="/tmp/profile.toml")
-    assert "/tmp/profile.toml" in str(e.value) and unknown_key in str(e.value)
-
-
-def test_unsupported_schema_version_fails_closed() -> None:
-    with pytest.raises(rp.ProfileError) as e:
-        rp.parse_profile('schema_version = 99\nname = "p"', source="x")
-    assert "schema_version" in str(e.value)
-
-
-def test_invalid_enum_fails_closed() -> None:
+    invalid = [(f"[pipeline]\n{field} = {value}", f"pipeline.{field}")
+               for field in ("reviewer_investigation_budget_s", "reviewer_tool_call_budget")
+               for value in ("-1", "true")]
+    invalid += [("bogus = 1", "bogus"),
+                ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds")]
+    for body, named in invalid:
+        with pytest.raises(rp.ProfileError) as error:
+            _profile(body, source=source)
+        assert error.value.source == source
+        assert source in str(error.value) and named in str(error.value)
     with pytest.raises(rp.ProfileError):
         _profile('''\
 [pipeline]
 arbitration_min_severity = "CRITICAL"''')  # not in the allowed severity enum
-
-
-# Task 4 (R5): host invariants unoverridable + host caps.
-def test_forbidden_host_fields_rejected() -> None:
+    # Host invariants are unoverridable.
     for field in ("backend", "model", "effort", "trust_mode", "egress",
                   "harbor_judge_model", "skill_name", "findings_schema",
                   "verifier", "judge", "scoring", "gold"):

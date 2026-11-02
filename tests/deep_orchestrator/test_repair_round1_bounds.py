@@ -31,7 +31,6 @@ from daydream.extensions.api import Stop
 from daydream.phases.fix import (
     SCOPE_REQUEST_BEGIN,
     SCOPE_REQUEST_END,
-    _build_fix_scope_clause,
     parse_fix_scope_request,
 )
 from daydream.phases.testing import _repair_turn_wall_budget_s
@@ -59,7 +58,7 @@ def _scope_request_block(*paths: str) -> str:
 # --- the scope-widening contract is reachable ----------------------------------------
 
 
-def test_scope_request_block_is_parsed_into_the_structured_request() -> None:
+def test_scope_request_block_is_parsed_or_grants_nothing() -> None:
     """The only wire shape the prompt documents is the one the host parses."""
     parsed = parse_fix_scope_request(_scope_request_block("daydream/other.py"))
     assert parsed is not None
@@ -67,69 +66,14 @@ def test_scope_request_block_is_parsed_into_the_structured_request() -> None:
     assert parsed["evidence"] == {"daydream/other.py": "api.py:1 -- requires it"}
     # ``evidence_source`` is host-assigned: a turn cannot assert its own authority.
     assert parsed["evidence_source"] == "repair_turn"
-
-
-@pytest.mark.parametrize(
-    "output",
-    [
-        pytest.param("", id="empty"),
-        pytest.param("I need daydream/other.py edited, api.py:1 requires it.", id="prose_only"),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\n{{\"paths\": [\"a.py\"]}}\n", id="unterminated"
-        ),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\nnot json\n{SCOPE_REQUEST_END}\n", id="not_json"
-        ),
-        pytest.param(
-            f"{SCOPE_REQUEST_BEGIN}\n[\"a.py\"]\n{SCOPE_REQUEST_END}\n", id="not_an_object"
-        ),
-    ],
-)
-def test_unusable_scope_request_is_never_a_half_parsed_grant(output: str) -> None:
-    """Fail closed in both directions: no block, or an unusable one, grants nothing."""
-    assert parse_fix_scope_request(output) is None
-
-
-def test_scope_clause_documents_the_exact_block_the_host_parses() -> None:
-    """The prompt must not ask for prose the parser cannot read (finding 1)."""
-    clause = _build_fix_scope_clause(frozenset({"a.py"}), frozenset({"a.py"}))
-    assert SCOPE_REQUEST_BEGIN in clause
-    assert SCOPE_REQUEST_END in clause
-    assert "Name the path in your final message" not in clause
+    # Fail closed: an unterminated or unusable block grants nothing.
+    for output in (f"{SCOPE_REQUEST_BEGIN}\n{{\"paths\": [\"a.py\"]}}\n",
+                   f"{SCOPE_REQUEST_BEGIN}\nnot json\n{SCOPE_REQUEST_END}\n",
+                   f"{SCOPE_REQUEST_BEGIN}\n[\"a.py\"]\n{SCOPE_REQUEST_END}\n"):
+        assert parse_fix_scope_request(output) is None, output
 
 
 # --- the stored bounds are live bounds ------------------------------------------------
-
-
-def test_repair_turn_wall_budget_is_the_configured_ceiling_before_a_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The first execution of a job is bounded by ``repair_execution_wall_s``.
-
-    The phase's own wall budget is a second, independent ceiling and the tighter
-    of the two wins, so neither bound can be widened past the other.
-    """
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 1800.0)
-    repo = _base_repo(tmp_path, "budget-first")
-    deep = repo / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    config = SimpleNamespace(file_config=None, repair_execution_wall_s=300.0)
-    assert _repair_turn_wall_budget_s(
-        config,
-        repo=repo,
-        job_id=repair_job_id("s1"),
-        artifact_session=None,
-        allow_standalone=True,
-    ) == 300.0
-    # A repair bound ABOVE the phase budget does not escape the phase budget.
-    generous = SimpleNamespace(file_config=None, repair_execution_wall_s=99_000.0)
-    assert _repair_turn_wall_budget_s(
-        generous,
-        repo=repo,
-        job_id=repair_job_id("s1"),
-        artifact_session=None,
-        allow_standalone=True,
-    ) == 1800.0
 
 
 def test_repair_turn_wall_budget_follows_the_jobs_own_allowance(
@@ -159,33 +103,6 @@ def test_repair_turn_wall_budget_follows_the_jobs_own_allowance(
         artifact_session=None,
         allow_standalone=True,
     ) == allowance
-
-
-def test_repair_turn_wall_budget_ignores_a_foreign_jobs_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A record belonging to another job is not this job's budget."""
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 1800.0)
-    repo = _base_repo(tmp_path, "budget-foreign")
-    deep = repo / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    write_repair_job_record(
-        deep,
-        RepairJobRecord(
-            job_id=repair_job_id("other"),
-            state=RepairJobState.PAUSED,
-            policy=RepairJobPolicy(execution_s=30.0, job_total_s=1000.0, reserve_s=60.0),
-            consumed_s=500.0,
-        ),
-    )
-    config = SimpleNamespace(file_config=None, repair_execution_wall_s=300.0)
-    assert _repair_turn_wall_budget_s(
-        config,
-        repo=repo,
-        job_id=repair_job_id("s1"),
-        artifact_session=None,
-        allow_standalone=True,
-    ) == 300.0
 
 
 # --- a job that cannot report green cannot report green -------------------------------
@@ -245,53 +162,94 @@ async def test_step_test_refuses_green_next_to_a_non_completed_job(
     assert verdict["passed"] is False, "the persisted verdict must not report green"
 
 
-async def test_step_test_keeps_green_for_a_completed_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The gate is the job's state, not a blanket refusal of every continuation."""
-    from daydream.deep.fix_steps import _step_test
-    from daydream.deep.repair_coordinator import RepairContinuationResult
-    from daydream.deep.repair_job import write_repair_job_record as _write
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
-
-    repo = _base_repo(tmp_path, "fail-closed-completed")
-    items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]
-    ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
-    state = _direct_fix_state(ctx, items, {"a.py"})
-    (repo / "a.py").write_text("A = 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "fix")
-    _write(
-        ctx.data["dd"],
-        RepairJobRecord(job_id=repair_job_id(state.session_id), state=RepairJobState.COMPLETED),
-    )
-
-    attempt = TestAttemptEvidence(
-        session_id=state.session_id, kind="host", command=("pytest",), passed=True,
-        input_tree_key="k", output_tree_key="k",
-    )
-    green = TestAndHealResult(True, 0, True, False, (attempt,))
-
-    async def _green(*_a: Any, **_k: Any) -> TestAndHealResult:
-        return green
-
-    async def _completed(**_k: Any) -> RepairContinuationResult:
-        return RepairContinuationResult(
-            continued=False,
-            result=green,
-            job=RepairJobRecord(
-                job_id=repair_job_id(state.session_id), state=RepairJobState.COMPLETED,
-            ),
-            reason="completed",
-        )
-
-    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _green)
-    monkeypatch.setattr("daydream.deep.fix_steps.continue_repair_job", _completed)
-
-    await _step_test(ctx)
-
-    verdict = json.loads((ctx.data["dd"] / "test-verdict.json").read_text())
-    assert verdict["passed"] is True, "a completed job must not be barred from green"
-
-
 # --- one identity, one definition ------------------------------------------------------
+
+
+async def test_fix_steps_stop_closed_on_fix_scope_verify_and_configuration_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every fix-cycle step failure is a confinement or configuration stop, never a silent pass.
+
+    Runner journeys reach these steps only through slow full pipelines; here each
+    real step runs against real Git with the external phase call replaced.
+    """
+    from dataclasses import replace
+
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep import fix_state
+    from daydream.deep.fix_steps import _round_dispatch_items, _step_fix, _step_fix_verify, _step_test
+    from daydream.extensions.api import BreakLoop
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
+    from daydream.test_execution import TestCommandDiagnostic
+
+    items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]
+
+    def fresh(name: str) -> tuple[Any, Any]:
+        ctx = _direct_fix_context(_base_repo(tmp_path, name), items, changed_files={"a.py"})
+        ctx.config = replace(ctx.config, file_config=DaydreamFileConfig(quality_gate_enabled=False))
+        ctx.data["intent_path"] = ctx.data["dd"] / "intent.md"
+        return ctx, _direct_fix_state(ctx, items, {"a.py"})
+
+    async def failed_fix(*_a: Any, **_k: Any) -> dict[str, str]:
+        raise RuntimeError("fix fan-out failed")
+
+    ctx, _state = fresh("fix-raises")
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", failed_fix)
+    assert await _step_fix(ctx) == Stop(1)
+
+    async def no_failures(*_a: Any, **_k: Any) -> dict[str, str]:
+        return {}
+
+    def scope_failure(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("scope enforcement failed")
+
+    ctx, _state = fresh("scope-raises")
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", no_failures)
+    with monkeypatch.context() as patch:
+        patch.setattr(fix_state, "_strict_scope_and_scrub", scope_failure)
+        assert await _step_fix(ctx) == Stop(1)
+
+    async def failed_verify(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise RuntimeError("verifier failed")
+
+    ctx, _state = fresh("verify-raises")
+    monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", failed_verify)
+    assert await _step_fix_verify(ctx) == Stop(1)
+
+    async def unresolved(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"item:a": {"issue_id": 1, "verdict": "unresolved", "reason": "still broken"}}
+
+    async def regressed(*_a: Any, **_k: Any) -> dict[str, Any]:
+        return {"item:a": {"issue_id": 1, "verdict": "regressed", "reason": "make lint fails",
+                           "check_evidence": {"status": "failed"}}}
+
+    # A substantiated regression blocks commit and push, persisting the verdict it acted on.
+    ctx, _state = fresh("verify-regressed")
+    ctx.data["iteration"] = 3
+    monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", regressed)
+    assert await _step_fix_verify(ctx) == Stop(1)
+    persisted = json.loads((ctx.data["dd"] / "fix-outcomes.json").read_text())["outcomes"]
+    assert persisted["item:a"]["verdict"] == "regressed"
+
+    ctx, _state = fresh("verify-exhausted")
+    ctx.data["iteration"] = 3
+    monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", unresolved)
+    assert isinstance(await _step_fix_verify(ctx), BreakLoop)
+    # A later round carries the unresolved verdict and its reason into the next dispatch.
+    ctx.data["iteration"] = 2
+    assert [(item["fix_verify_verdict"], item["fix_verify_reason"]) for item in _round_dispatch_items(ctx, items)
+            ] == [("unresolved", "still broken")]
+
+    ctx, state = fresh("test-no-execution")
+    diagnostic = TestCommandDiagnostic("unavailable", "cli")
+    no_execution = TestAttemptEvidence(session_id=state.session_id, kind="no-execution", command=None, passed=False,
+                                       input_tree_key="", output_tree_key="", diagnostic=diagnostic)
+
+    async def unavailable(*_a: Any, **_k: Any) -> TestAndHealResult:
+        return TestAndHealResult(False, 0, False, False, (no_execution,), (), diagnostic)
+
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", unavailable)
+    assert await _step_test(ctx) == Stop(1)
+    verdict = json.loads((ctx.data["dd"] / "test-verdict.json").read_text())
+    assert verdict["status"] == "no-execution" and verdict["attempts"][0]["kind"] == "no-execution"
+    assert state.latest_test_evidence is None and state.latest_retained is None

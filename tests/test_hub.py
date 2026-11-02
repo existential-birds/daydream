@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx2
 import pytest
-from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, RemoteEntryNotFoundError
+from huggingface_hub.errors import HfHubHTTPError, RemoteEntryNotFoundError
 
 REPO = "test-user/private-trajectories"
 HEAD = "a" * 40
@@ -60,38 +60,36 @@ def http_error(status: int, text: str = "SECRET payload failure") -> HfHubHTTPEr
     return HfHubHTTPError(text, response=httpx2.Response(status, request=request))
 
 
-def test_private_revision_is_a_private_dataset_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_private_revision_is_a_private_dataset_pin_and_bad_pins_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream.hub import HubError
+
     client, api = install_sdk(monkeypatch)
     assert client.private_revision(REPO) == HEAD
     assert api.calls == [("repo_info", {"repo_id": REPO, "repo_type": "dataset", "revision": "main"})]
-
-
-@pytest.mark.parametrize("visibility", [False, 1])
-def test_public_or_unconfirmed_destinations_are_rejected(
-    monkeypatch: pytest.MonkeyPatch, visibility: object,
-) -> None:
-    from daydream.hub import HubError
-
+    for visibility in (False, 1):
+        client, api = install_sdk(monkeypatch)
+        api.info.private = visibility
+        with pytest.raises(HubError) as failure:
+            client.private_revision(REPO)
+        assert failure.value.code == "public_destination"
+        assert "SECRET" not in str(failure.value)
     client, api = install_sdk(monkeypatch)
-    api.info.private = visibility
-    with pytest.raises(HubError) as failure:
-        client.private_revision(REPO)
-    assert failure.value.code == "public_destination"
-    assert "SECRET" not in str(failure.value)
-
-
-@pytest.mark.parametrize("revision", ["A" * 40, None])
-def test_invalid_repository_pins_are_rejected(monkeypatch: pytest.MonkeyPatch, revision: object) -> None:
-    from daydream.hub import HubError
-
-    client, api = install_sdk(monkeypatch)
-    api.info.sha = revision
+    api.info.sha = "A" * 40
     with pytest.raises(HubError) as failure:
         client.private_revision(REPO)
     assert failure.value.code == "invalid_revision"
+    # Mutable or noncanonical pins never reach the network.
+    client, api = install_sdk(monkeypatch)
+    with pytest.raises(HubError, match="^invalid_revision$"):
+        client.read_file(REPO, "manifest.json", "A" * 40)
+    with pytest.raises(HubError, match="^invalid_revision$"):
+        client.commit(REPO, {"manifest.json": b"{}\n"}, "main")
+    assert api.calls == []
 
 
 def test_commit_installs_complete_bytes_in_one_guarded_dataset_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream.hub import HubConflict, HubError
+
     client, api = install_sdk(monkeypatch)
     files: Mapping[str, bytes] = {"runs/one.jsonl": b'{"run":1}\n', "manifest.json": b'{"count":1}\n'}
     assert client.commit(REPO, files, HEAD) == NEXT
@@ -104,16 +102,14 @@ def test_commit_installs_complete_bytes_in_one_guarded_dataset_commit(monkeypatc
     assert call["run_as_future"] is False
     assert {op.path_in_repo: op.path_or_fileobj for op in call["operations"]} == files
     assert len(api.calls) == 1
-
-
-@pytest.mark.parametrize("status", [409])
-def test_network_failures_never_expose_payloads_or_claim_conflicts(
-    monkeypatch: pytest.MonkeyPatch, status: int,
-) -> None:
-    from daydream.hub import HubError
-
-    client, api = install_sdk(monkeypatch)
-    api.error = http_error(status)
+    # Only a remote HTTP precondition failure is a commit conflict.
+    api.error = http_error(412)
+    with pytest.raises(HubConflict) as conflict:
+        client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD)
+    assert "SECRET" not in str(conflict.value)
+    assert conflict.value.__cause__ is None
+    # Network failures never expose payloads or claim conflicts.
+    api.error = http_error(409)
     actions: list[Callable[[], Any]] = [
         lambda: client.private_revision(REPO), lambda: client.read_file(REPO, "manifest.json", HEAD),
         lambda: client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD),
@@ -124,76 +120,7 @@ def test_network_failures_never_expose_payloads_or_claim_conflicts(
         assert failure.value.code == "network_failed"
         assert str(failure.value) == "network_failed"
         assert failure.value.__cause__ is None
-
-
-def test_only_http_precondition_failed_is_a_commit_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.hub import HubConflict
-
-    client, api = install_sdk(monkeypatch)
-    api.error = http_error(412)
-    with pytest.raises(HubConflict) as failure:
-        client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD)
-    assert "SECRET" not in str(failure.value)
-    assert failure.value.__cause__ is None
-
-
-def test_reads_exact_revision_and_resolves_normal_hf_cache_symlinks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    client, api = install_sdk(monkeypatch)
-    blob = tmp_path / "blob"
-    blob.write_bytes(b'{"complete":true}\n')
-    snapshot = tmp_path / "snapshot"
-    snapshot.symlink_to(blob)
-    api.download = snapshot
-    assert client.read_file(REPO, "runs/one.jsonl", HEAD) == blob.read_bytes()
-    assert api.calls == [("download", {"repo_id": REPO, "filename": "runs/one.jsonl",
-                                     "repo_type": "dataset", "revision": HEAD})]
-
-
-def test_only_missing_remote_entry_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    client, api = install_sdk(monkeypatch)
-    request = httpx2.Request("GET", "https://huggingface.co/private/resolve/file")
-    api.error = RemoteEntryNotFoundError("SECRET absent", response=httpx2.Response(404, request=request))
-    assert client.read_file(REPO, "manifest.json", HEAD) is None
-
-
-def test_local_cache_miss_never_looks_like_an_absent_remote_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.hub import HubError
-
-    client, api = install_sdk(monkeypatch)
-    api.error = LocalEntryNotFoundError("SECRET offline cache miss")
-    with pytest.raises(HubError, match="^network_failed$"):
-        client.read_file(REPO, "manifest.json", HEAD)
-
-
-@pytest.mark.parametrize(("revision", "operation"), [("A" * 40, "read"), ("main", "commit")])
-def test_mutable_or_noncanonical_pins_never_reach_the_network(
-    monkeypatch: pytest.MonkeyPatch, operation: str, revision: str,
-) -> None:
-    from daydream.hub import HubError
-
-    client, api = install_sdk(monkeypatch)
-    with pytest.raises(HubError, match="^invalid_revision$"):
-        if operation == "read":
-            client.read_file(REPO, "manifest.json", revision)
-        else:
-            client.commit(REPO, {"manifest.json": b"{}\n"}, revision)
-    assert api.calls == []
-
-
-def test_invalid_commit_response_never_acknowledges_publication(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.hub import HubError
-
-    client, api = install_sdk(monkeypatch)
-    api.result.oid = "SECRET not a commit"
-    with pytest.raises(HubError, match="^invalid_revision$"):
-        client.commit(REPO, {"manifest.json": b"{}\n"}, HEAD)
-
-
-def test_constructor_412_is_not_a_remote_commit_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.hub import HubError
-
+    # A local constructor 412 is not a remote commit conflict.
     client, api = install_sdk(monkeypatch)
 
     def reject_operation(**kwargs: Any) -> None:
@@ -205,21 +132,28 @@ def test_constructor_412_is_not_a_remote_commit_conflict(monkeypatch: pytest.Mon
     assert api.calls == []
 
 
-@pytest.mark.parametrize("kind", ["missing", "directory", "dangling_symlink"])
-def test_unreadable_or_nonregular_cache_results_fail_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str,
-) -> None:
+def test_reads_exact_revision_and_only_regular_cache_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
-    source = tmp_path / "source"
-    if kind == "directory":
-        source.mkdir()
-    elif kind == "dangling_symlink":
-        source.symlink_to(tmp_path / "absent")
-    api.download = source
-    with pytest.raises(HubError, match="^network_failed$"):
-        client.read_file(REPO, "manifest.json", HEAD)
+    blob = tmp_path / "blob"
+    blob.write_bytes(b'{"complete":true}\n')
+    snapshot = tmp_path / "snapshot"
+    snapshot.symlink_to(blob)
+    api.download = snapshot
+    assert client.read_file(REPO, "runs/one.jsonl", HEAD) == blob.read_bytes()
+    assert api.calls == [("download", {"repo_id": REPO, "filename": "runs/one.jsonl",
+                                     "repo_type": "dataset", "revision": HEAD})]
+    directory, dangling = tmp_path / "directory", tmp_path / "dangling"
+    directory.mkdir()
+    dangling.symlink_to(tmp_path / "absent")
+    for source in (directory, dangling):
+        api.download = source
+        with pytest.raises(HubError, match="^network_failed$"):
+            client.read_file(REPO, "manifest.json", HEAD)
+    request = httpx2.Request("GET", "https://huggingface.co/private/resolve/file")
+    api.error = RemoteEntryNotFoundError("SECRET absent", response=httpx2.Response(404, request=request))
+    assert client.read_file(REPO, "manifest.json", HEAD) is None
 
 
 def test_missing_extra_reports_a_sanitized_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:

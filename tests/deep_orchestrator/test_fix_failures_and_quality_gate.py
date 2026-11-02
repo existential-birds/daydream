@@ -1,4 +1,4 @@
-"""Fix Failures And Quality Gate."""
+"""Fail-open, session-bound quality gate evidence at its owner."""
 
 from __future__ import annotations
 
@@ -8,435 +8,102 @@ from typing import Any
 
 import pytest
 
-from daydream.config_file import DaydreamFileConfig
+from daydream.deep.artifacts import DeepArtifact
+from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate
 from daydream.eval import analyzer as analyzer_mod
-from daydream.runner import run
-from tests.deep_orchestrator.support import (
-    _capture_warnings,
-    _merged_items,
-    _only_archived_run,
-)
-from tests.harness.git_helpers import git as _git
-from tests.test_deep_orchestrator import (
-    _FIX_EDIT_ERODED,
-    _FIX_EDIT_VERBOSE,
-    _PARTIAL_FIX_MARKER,
-    MakeConfig,
-    Mute,
-    _add_to_reviewed_diff,
-    _build_gate_target,
-    _build_gate_target_no_functions,
-    _build_gate_target_with_helper,
-    _build_scope_creep_target,
-    _ExtraEditBackend,
-    _force_interactive,
-    _install_stub_backend,
-    _merge_item,
-    _prime_merge_resume,
-    _read_quality_gate,
-    _run_quality_gate_fixture,
-    _silence,
-)
+from tests.deep_orchestrator.support import _capture_warnings
 
 
-def _arrange(
-    monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute, *, commit: bool = True,
+async def test_quality_gate_records_fail_open_session_bound_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Quiet output, force the interactive fix gate, and mute backend side effects."""
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects(commit=commit)
+    """Every unavailable stage, prior-artifact defect, and flag rule persists auditable evidence.
 
-
-async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Footprint preflight blocks unsafe paths before fixing and records why."""
-
-    _arrange(monkeypatch, mute_side_effects, commit=False)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # Symlink-escape finding: src/handler.py is a repo-local path whose real
-    # file lives outside the repo (same shape as _unconfined_finding_file's
-    # "symlink" kind). Commit it into the reviewed diff so the fix gate keeps it.
-    src = multi_stack_target / "src"
-    src.mkdir(exist_ok=True)
-    outside = multi_stack_target.parent / f"{multi_stack_target.name}-outside.py"
-    outside.write_text("def outside():\n    pass\n")
-    (src / "handler.py").symlink_to(outside)
-    _add_to_reviewed_diff(multi_stack_target, ["src/handler.py"])
-
-    stub.merge_items = [_merge_item(1, "src/handler.py", "high")]
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
-    exit_code = await run(
-        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
+    Runner fix tests reach the gate but cannot cheaply vary analyzer failures,
+    foreign-session artifacts, or each per-file flag rule; a regression that reads
+    an undefined metric or a broken file as a clean pass would only show here.
+    """
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
+    dd = tmp_path / "deep"
+    dd.mkdir()
+    gate = DeepArtifact.FIX_QUALITY_GATE.at(dd)
+    thresholds = QualityGateThresholds(
+        erosion_delta=0.1, verbosity_delta=0.1, erosion_absolute=1.0, verbosity_absolute=1.0,
     )
-    assert exit_code == 1  # handled failure => Stop(1), not a raise
+    after: list[Any] = []
 
-    # The admitted evidence session records the blocked findings in archive.
-    run_dir = _only_archived_run(archive_dir)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "partial"
-    items = _merged_items(multi_stack_target / ".daydream" / "deep")
-    assert set(manifest["fix_failures"]) == {item["item_uid"] for item in items}
-    assert set(manifest["fix_failures"].values()) == {"fix_preflight_rejected: fix cycle did not start"}
-    assert manifest["pipeline_status"] == "partial"
-    assert manifest["phase_states"]["test"] == {"ran": False, "status": "absent"}
-
-    # (b) no dangling pre-fix stash / tree restored: the symlink finding's
-    #     group never got a fix applied (preflight aborts before dispatch).
-    assert not (multi_stack_target / ".fixed-src_handler_py").exists()
-
-    # Unsafe path values are not reflected into diagnostics.
-    assert not any("src/handler.py" in warning for warning in warnings)
-
-async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archive(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Real runner confines a failed fixer and archives its restore audit."""
-
-    _arrange(monkeypatch, mute_side_effects)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fix_partial_then_maxturns = "App.tsx"
-    stub.fix_orphan_file = "store/uuid.go"
-    stub.fix_edit_line = "# retained successful fix\n"
-    app_before = (multi_stack_target / "App.tsx").read_bytes()
-    scratch = multi_stack_target / "owner-scratch.bin"
-    scratch.write_bytes(b"\x00owner-original")
-    stub.fix_damage_protected_file = "owner-scratch.bin"
-    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high")]
-    exit_code = await run(
-        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
-    )
-    assert exit_code == 1
-
-    # The successful group remains while the failed group's outside-run write
-    # is removed and the user's protected untracked file is restored exactly.
-    assert "# retained successful fix" in (multi_stack_target / "api.py").read_text()
-    assert not (multi_stack_target / "store" / "uuid.go").exists()
-    assert scratch.read_bytes() == b"\x00owner-original"
-    assert (multi_stack_target / "App.tsx").read_bytes() == app_before
-    assert _PARTIAL_FIX_MARKER not in (multi_stack_target / "App.tsx").read_text()
-    assert not (multi_stack_target / ".fixed-api_py").exists()
-    assert list((multi_stack_target / ".daydream" / "partial-fixes").glob("*.patch")) == []
-
-    run_dir = _only_archived_run(archive_dir)
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    # The archive is partial, but there is no surviving leftover.  The durable
-    # policy audit records both confinement operations.
-    assert manifest["status"] == "partial"
-    assert manifest["fix_failures"]
-    assert any("App.tsx" in key for key in manifest["fix_failures"])
-    assert manifest["fix_leftover_untracked"] is None
-    run_audit = json.loads((run_dir / "deep" / "fix-footprint.json").read_text())
-    restored = {event["path"] for event in run_audit["events"] if event["action"] in {"remove", "restore"}}
-    assert {"store/uuid.go", "owner-scratch.bin"} <= restored
-
-@pytest.mark.parametrize("threshold,flagged", [
-    pytest.param(100.0, False, id="tolerant"), pytest.param(0.0, True, id="strict"),
-])
-async def test_fix_quality_gate_threshold_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    threshold: float, flagged: bool,
-) -> None:
-    """The same edit is flagged according to the configured delta thresholds."""
-    target = _build_gate_target(tmp_path, "gate_threshold")
-    assert await _run_quality_gate_fixture(
-        target, monkeypatch, make_config, mute_side_effects,
-        file_config=DaydreamFileConfig(quality_gate_erosion_delta=threshold, quality_gate_verbosity_delta=threshold),
-    ) == 0
-    entry = _read_quality_gate(target)["rounds"][0]["per_file"]["api.py"]
-    assert entry["verbosity_after"] > entry["verbosity_before"]
-    assert entry["flagged"] is flagged
-
-async def test_fix_quality_gate_fail_open(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Real-path (#315/#329): an analyzer failure degrades to an auditable unavailable round."""
-
-    real_analyze = analyzer_mod.analyze_quality
-
-    def _boom(daydream_dir: Path, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
-        if candidate_paths is not None:
+    def analyze(_daydream_dir: Path, _candidates: set[str] | None, **_kwargs: Any) -> Any:
+        if not after:
             raise RuntimeError("analyzer down")
-        return real_analyze(daydream_dir, candidate_paths, **kwargs)
+        return after[0]
 
+    monkeypatch.setattr(analyzer_mod, "analyze_quality", analyze)
 
-    monkeypatch.setattr(analyzer_mod, "analyze_quality", _boom)
-    exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects,
-        file_config=DaydreamFileConfig(quality_gate_erosion_absolute=1.25, quality_gate_verbosity_absolute=2.5,),
+    async def evaluate(**overrides: Any) -> dict[str, Any]:
+        await _evaluate_quality_gate(**{
+            "enabled": True, "thresholds": thresholds, "daydream_dir": tmp_path, "code_workspace": tmp_path,
+            "dd": dd, "candidates": {"a.py"}, "before": {"per_file": {}}, "before_unavailable_reason": None,
+            "iteration": None, **overrides,
+        })
+        payload: dict[str, Any] = json.loads(gate.read_text())
+        return payload
+
+    assert await evaluate(enabled=False) == {"enabled": False, "session_id": None}
+
+    gate.write_text(json.dumps({"session_id": "prior-run", "rounds": [{"round": 1}]}))
+    persisted = await evaluate(candidates=None)
+    assert persisted["rounds"] == [{"round": 1, "unavailable": {
+        "stage": "candidates",
+        "reason": "could not enumerate files changed by the fix pass against the pre-fix snapshot"}}]
+    assert persisted["erosion_absolute_threshold"] == 1.0
+    assert any("another run's session" in warning for warning in warnings)
+
+    gate.write_text("{malformed")
+    persisted = await evaluate(before=None, before_unavailable_reason="snapshot failed", iteration=3)
+    assert persisted["rounds"] == [{"round": 3, "unavailable": {"stage": "before", "reason": "snapshot failed"}}]
+
+    gate.write_text(json.dumps({"session_id": None, "rounds": "invalid"}))
+    persisted = await evaluate()
+    assert persisted["rounds"][0]["unavailable"] == {"stage": "after", "reason": "RuntimeError: analyzer down"}
+
+    gate.write_text(json.dumps({"session_id": None, "rounds": [{"round": 1, "per_file": {}}, "invalid"]}))
+    after.append({"per_file": {
+        "delta.py": {"erosion": 1.5, "verbosity": 0.2}, "verbose.py": {"erosion": 0.5, "verbosity": 0.8},
+        "new-baseline.py": {"erosion": 0.1, "verbosity": 0.1}, "absolute.py": {"erosion": 2.0, "verbosity": 0.5},
+        "absolute-verbosity.py": {"erosion": 0.1, "verbosity": 2.0}, "clean.py": {"erosion": 0.5, "verbosity": 0.5},
+    }})
+    persisted = await evaluate(
+        candidates={"delta.py", "verbose.py", "broken.py", "new-baseline.py", "absolute.py",
+                    "absolute-verbosity.py", "clean.py", "absent.py"},
+        before={"per_file": {
+            "delta.py": {"erosion": 1.0, "verbosity": 0.2}, "verbose.py": {"erosion": 0.5, "verbosity": 0.5},
+            "broken.py": {"erosion": 0.1, "verbosity": 0.1}, "absolute.py": {"erosion": None, "verbosity": 0.5},
+            "absolute-verbosity.py": {"erosion": 0.1, "verbosity": None},
+            "clean.py": {"erosion": 0.5, "verbosity": 0.5},
+        }},
     )
-    assert exit_code == 0
+    assert [row["round"] for row in persisted["rounds"]] == [1, 2]
+    per_file = persisted["rounds"][1]["per_file"]
+    assert "absent.py" not in per_file
+    assert {name: entry["flagged"] for name, entry in per_file.items()} == {
+        "absolute-verbosity.py": True, "absolute.py": True, "broken.py": True, "clean.py": False,
+        "delta.py": True, "new-baseline.py": True, "verbose.py": True,
+    }
+    assert per_file["broken.py"]["unparseable"] is True and per_file["delta.py"]["erosion_delta"] == 0.5
+    assert "missing pre-fix baseline" in per_file["new-baseline.py"]["reason"]
+    assert any("dropping them" in warning for warning in warnings)
+    assert any("flagged 6 file(s)" in warning and "erosion 1.0 -> 1.5" in warning for warning in warnings)
 
-    gate = _read_quality_gate(multi_stack_target)
-    assert gate["enabled"] is True
-    assert gate["erosion_absolute_threshold"] == 1.25
-    assert gate["verbosity_absolute_threshold"] == 2.5
-    unavailable = gate["rounds"][0]["unavailable"]
-    assert unavailable["stage"] == "before"
-    assert "analyzer down" in unavailable["reason"]
+    after[0] = ["not a quality payload"]
+    persisted = await evaluate(iteration=4)
+    assert persisted["rounds"][-1]["unavailable"]["stage"] == "persist"
 
-@pytest.mark.parametrize("file_config,thresholds,flagged", [
-    pytest.param(None, (0.05, 0.05, 0.05, 0.05), True, id="default-absolute"),
-    pytest.param(DaydreamFileConfig(quality_gate_erosion_absolute=100.0,
-                 quality_gate_verbosity_absolute=100.0, quality_gate_verbosity_delta=100.0),
-                 (100.0, 100.0, 0.05, 100.0), False, id="tolerant-absolute"),
-])
-async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    file_config: DaydreamFileConfig | None, thresholds: tuple[float, ...], flagged: bool,
-) -> None:
-    """An existing file without functions uses the absolute threshold, never its undefined delta."""
-    target = _build_gate_target_no_functions(tmp_path, "gate_undefined_baseline")
-    assert await _run_quality_gate_fixture(
-        target, monkeypatch, make_config, mute_side_effects, fix_edit_line=_FIX_EDIT_ERODED,
-        file_config=file_config,
-    ) == 0
-    gate = _read_quality_gate(target)
-    assert gate["enabled"] is True
-    assert tuple(gate[f"{metric}_{kind}_threshold"] for kind in ("absolute", "delta")
-                 for metric in ("erosion", "verbosity")) == thresholds
-    entry = gate["rounds"][0]["per_file"]["api.py"]
-    assert entry["erosion_before"] is None
-    assert entry["erosion_after"] is not None and entry["erosion_after"] > 0.05
-    assert entry["erosion_delta"] is None
-    assert entry["flagged"] is flagged
-
-async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Real-path (#329): an empty file uses the verbosity absolute fallback."""
-
-    target = _build_gate_target_no_functions(tmp_path, "gate_undefined_verbosity")
-    (target / "api.py").write_text("\n")
-    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_absolute=100.0, quality_gate_erosion_delta=100.0, quality_gate_verbosity_delta=100.0,
-            quality_gate_verbosity_absolute=0.0,
-        ),
+    gate.unlink()
+    gate.mkdir()
+    await _evaluate_quality_gate(
+        enabled=True, thresholds=thresholds, daydream_dir=tmp_path, code_workspace=tmp_path, dd=dd,
+        candidates=None, before=None, before_unavailable_reason=None, iteration=None,
     )
-    assert exit_code == 0
-
-    entry = _read_quality_gate(target)["rounds"][0]["per_file"]["api.py"]
-    assert entry["verbosity_before"] is None
-    assert entry["verbosity_after"] is not None
-    assert entry["verbosity_after"] > 0.0
-    assert entry["verbosity_delta"] is None
-    assert entry["flagged"] is True
-
-
-async def test_fix_quality_gate_artifact_bound_to_current_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, archive_dir: Path,
-    mute_side_effects: Mute,
-) -> None:
-    alpha = _build_gate_target(tmp_path, "gate_alpha")
-    exit_code = await _run_quality_gate_fixture(alpha, monkeypatch, make_config, mute_side_effects)
-    assert exit_code == 0
-    alpha_gate = _read_quality_gate(alpha)
-    assert alpha_gate["session_id"]
-    assert "def choose(x):" in (alpha / "api.py").read_text()
-    assert alpha_gate["enabled"] is True
-    entry = alpha_gate["rounds"][0]["per_file"]["api.py"]
-    assert entry["verbosity_after"] > entry["verbosity_before"]
-    assert entry["flagged"] is True
-
-    beta = _build_gate_target(tmp_path, "gate_beta")
-    exit_code = await _run_quality_gate_fixture(beta, monkeypatch, make_config, mute_side_effects)
-    assert exit_code == 0
-    beta_gate = _read_quality_gate(beta)
-    assert beta_gate["session_id"]
-    assert beta_gate["session_id"] != alpha_gate["session_id"]
-
-    manifests = [json.loads((d / "manifest.json").read_text(encoding="utf-8")) for d in (archive_dir / "runs").iterdir()
-    ]
-    # Per-manifest correspondence: the manifest that carries session A's
-    # verdict must BE session A's manifest, and vice versa. manifest["session_id"]
-    # comes from the recorder; manifest["fix_quality_gate"]["session_id"] comes
-    # from the gate artifact, so a swapped verdict would fail this binding.
-    by_session = {m["session_id"]: m for m in manifests}
-    assert alpha_gate["session_id"] in by_session
-    assert beta_gate["session_id"] in by_session
-    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"] == alpha_gate
-    assert by_session[beta_gate["session_id"]]["fix_quality_gate"] == beta_gate
-    # The two verdicts are distinct artifacts: alpha's manifest never carries beta's verdict.
-    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] != beta_gate["session_id"]
-
-async def test_fix_quality_gate_flags_unparseable_post_fix_file(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Real-path (#329/Finding 5): a file missing from post-fix analyzer output is flagged."""
-
-    real_analyze = analyzer_mod.analyze_quality
-
-    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
-        result = real_analyze(daydream_dir, candidate_paths, **kwargs)
-        if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
-            result["per_file"] = {rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"}
-        return result
-
-    monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
-    exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
-    assert exit_code == 0
-
-    gate = _read_quality_gate(multi_stack_target)
-    assert gate["enabled"] is True
-    entry = gate["rounds"][0]["per_file"]["api.py"]
-    assert entry["unparseable"] is True
-    assert entry["flagged"] is True
-    assert "post-fix analyzer output" in entry["reason"]
-    assert any("api.py" in w for w in warnings), "the unparseable file must be named in a warning"
-
-async def test_fix_quality_gate_malformed_resume_artifact_repairs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Real-path (#329/Finding 6): a malformed resume artifact can't silently disable the gate."""
-
-    target = _build_gate_target(tmp_path, "gate_malformed_resume")
-    deep = _prime_merge_resume(target, python=[], structure=[])
-    (deep / "merged-items.json").write_text(json.dumps({
-        "items": [{**_merge_item(1, "api.py", "high"), "item_uid": "item:1"}],
-    }))
-    from daydream.deep.artifacts import (
-        DeepArtifact,
-        persist_review_coverage,
-    )
-    from daydream.review_result import ReviewCoverage
-
-    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
-    coverage.record_phase("merge", "complete", noop=True)
-    persist_review_coverage(deep, coverage)
-    gate_p = deep / "fix-quality-gate.json"
-    gate_p.write_text("[]")
-
-    _arrange(monkeypatch, mute_side_effects)
-    _install_stub_backend(monkeypatch, target)
-
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
-    exit_code = await run(make_config(target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False))
-    assert exit_code == 0
-    assert any("fix-quality-gate.json" in w and "malformed" in w for w in warnings), (
-        "a malformed artifact must surface a warning, never fail silently"
-    )
-    gate = json.loads(gate_p.read_text(encoding="utf-8"))
-    assert gate["enabled"] is True
-    assert gate["session_id"]
-    assert len(gate["rounds"]) == 1
-
-async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-
-    target = _build_gate_target(tmp_path, "gate_session_resume")
-    _arrange(monkeypatch, mute_side_effects)
-    stub = _install_stub_backend(monkeypatch, target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    stub.fix_edit_line = _FIX_EDIT_VERBOSE
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
-    first = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False))
-    assert first == 0
-    first_gate = _read_quality_gate(target)
-    assert first_gate["session_id"]
-    assert len(first_gate["rounds"]) == 1
-
-    # Restore the tree to the clean pre-fix state (run 1's fix was not
-    # committed) so the resume's worktree-clean + diff-key gates pass; the
-    # daydream artifacts -- including run 1's gate artifact -- survive.
-    _git(target, "reset", "--hard", "HEAD")
-    for sentinel in target.glob(".fixed-*"):
-        sentinel.unlink()
-    (target / ".daydream-fix-applied").unlink(missing_ok=True)
-
-    second = await run(make_config(target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False))
-    assert second == 0
-    second_gate = _read_quality_gate(target)
-    assert second_gate["session_id"] != first_gate["session_id"]
-    assert len(second_gate["rounds"]) == 1, (
-        "a new session must not inherit a prior session's rounds; run 1's round must be discarded"
-    )
-    assert any("another run's session" in w for w in warnings), (
-        "a session-mismatched artifact must surface a warning, never silently merge rounds"
-    )
-
-async def test_fix_quality_gate_covers_authorized_secondary_edit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-
-    target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
-    _arrange(monkeypatch, mute_side_effects)
-    stub = _ExtraEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
-    # Related-file authority belongs to the synthesis contract, rather than
-    # the reviewer's stricter per-stack record envelope.
-    stub.parse_by_stack = {"python": {"severity": "high", "confidence": "MEDIUM"}}
-    stub.merge_items = [{**_merge_item(1, "api.py", "high"), "related_files": ["helper.py"]}]
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False,
-                                     shallow_fanout_threshold=0))
-    assert exit_code == 0
-
-    gate = _read_quality_gate(target)
-    assert gate["enabled"] is True
-    per_file = gate["rounds"][0]["per_file"]
-    assert "helper.py" in per_file, "an authorized secondary file must still pass the quality gate"
-    helper = per_file["helper.py"]
-    assert helper["verbosity_delta"] is not None, "the secondary file's delta must be computed"
-    assert helper["verbosity_after"] > helper["verbosity_before"]
-    assert helper["flagged"] is True, "a secondary-file regression must be flagged"
-    assert "api.py" in per_file, "a finding target must stay covered even when unchanged on disk"
-    assert per_file["api.py"]["flagged"] is False
-
-async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-
-    target = _build_scope_creep_target(tmp_path, "gate_scoped")
-    real_analyze = analyzer_mod.analyze_quality
-    calls: list[set[str] | None] = []
-
-    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
-        calls.append(candidate_paths)
-        return real_analyze(daydream_dir, candidate_paths, **kwargs)
-
-    monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
-
-    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects)
-    assert exit_code == 0
-    # The two GATE captures come first; the archive step's ``analyze_session``
-    # adds a trailing argument-free ``analyze_quality`` call (a pinned
-    # invariant — standalone evaluation stays whole-workspace), so pin only
-    # the first two calls.
-    assert len(calls) >= 2, f"expected pre-fix + post-fix captures, got {calls}"
-    assert calls[0] == {"api.py"}, f"pre-fix capture must be scoped to reviewed .py, got {calls[0]}"
-    assert calls[1] == {"api.py"}, f"post-fix capture must be scoped to reviewed .py, got {calls[1]}"
-
-async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """An out-of-diff module created by the fixer is scrubbed before the quality gate records candidates."""
-
-    target = _build_scope_creep_target(tmp_path, "gate_missing_baseline")
-    _arrange(monkeypatch, mute_side_effects)
-    stub = _ExtraEditBackend(target, target / "new_module.py", "def extra():\n    return 1\n", append=False)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
-
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False,
-            file_config=DaydreamFileConfig(quality_gate_erosion_absolute=100.0, quality_gate_verbosity_absolute=100.0,
-            ),
-        )
-    )
-    assert exit_code == 0
-
-    gate = _read_quality_gate(target)
-    assert gate["enabled"] is True
-    per_file = gate["rounds"][0]["per_file"]
-    assert "new_module.py" not in per_file
-    assert not (target / "new_module.py").exists()
-    # The reviewed file stays covered and clean.
-    assert per_file["api.py"]["flagged"] is False
+    assert "could not persist unavailable verdict" in warnings[-1]
+    assert any("rounds list" in warning for warning in warnings)
+    assert any("malformed" in warning for warning in warnings)

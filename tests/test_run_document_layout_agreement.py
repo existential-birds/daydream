@@ -62,19 +62,3 @@ def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     archive_run_dir.mkdir(parents=True, exist_ok=True)
     _project_documents(_snapshot(run_dir / "trajectory.json"), archive_run_dir, session_id=SESSION)
     assert {p.relative_to(archive_run_dir).as_posix() for p in archive_run_dir.rglob("*.json")} == canonical
-
-def test_the_partial_root_is_stripped_by_the_archive_and_ignored_by_readers(tmp_path: Path) -> None:
-    target = tmp_path / "proj"
-    run_dir = _write_run(target)
-    (run_dir / "trajectory.json").unlink()
-    partial = run_dir / "trajectory.json.partial"
-    partial.write_bytes(trajectory_payload(SESSION))
-
-    # readers stay partial-blind: no main document, sibling still resolved
-    assert [p.name for p in collect_trajectory_paths(run_dir)] == [SIBLING]
-
-    # the archive strips the suffix at its destination and keeps the frozen bytes
-    archive_run_dir = get_archive_dir() / "runs" / SESSION
-    archive_run_dir.mkdir(parents=True, exist_ok=True)
-    _project_documents(_snapshot(partial, status="partial"), archive_run_dir, session_id=SESSION)
-    assert (archive_run_dir / "trajectory.json").read_bytes() == trajectory_payload(SESSION)

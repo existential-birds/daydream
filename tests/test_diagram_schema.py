@@ -51,37 +51,51 @@ def test_empty_specs_are_the_pinned_shapes() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(EMPTY_FLOWCHART_SPEC, FLOWCHART_SPEC_SCHEMA)
 
-def test_empty_specs_are_fresh_objects_per_call() -> None:
-    first = coerce_sequence_spec(7)
-    second = coerce_sequence_spec(7)
-    first["messages"].append(_message())
-    assert second == EMPTY_SEQUENCE_SPEC
-    first_flow = coerce_flowchart_spec(7)
-    coerce_flowchart_spec(7)["nodes"].append(_node())
-    assert first_flow == EMPTY_FLOWCHART_SPEC
+def test_coercion_drops_each_malformed_entry_and_remaps_block_indices() -> None:
+    """Every malformed entry drops on its own; block indices follow surviving messages.
 
-def test_coerce_flowchart_nulls_an_unusable_root() -> None:
-    """A root missing its line is None, which the diagram step treats as unusable."""
-    coerced = coerce_flowchart_spec({"root": {"file": "a.py", "name": "f"}, "nodes": [_node()], "edges": []})
-    assert coerced["root"] is None
-    assert len(coerced["nodes"]) == 1
-
-
-def test_coerce_sequence_remaps_branch_indices_over_a_dropped_message() -> None:
-    coerced = coerce_sequence_spec({"participants": [],
-            "messages": [_message(label="first"), _message(label="dropped", kind="broadcast"), _message(label="third"),
-            ], "blocks": [{"kind": "alt",
-                    "branches": [{"condition": "a", "evidence": {"file": "a.py", "line": 1}, "messages": [0, 2, 2, 9]},
-                        {"condition": "b", "evidence": {"file": "a.py", "line": 5}, "messages": [1]},
-                    ],
-                }
-            ],
-        }
-    )
-    assert [m["label"] for m in coerced["messages"]] == ["first", "third"]
-    branches = coerced["blocks"][0]["branches"]
-    # 0 -> 0, 2 -> 1, the duplicate and the out-of-range index are dropped, and
-    # the branch that pointed only at the dropped message keeps no indices.
-    assert branches[0]["messages"] == [0, 1]
-    assert branches[1]["messages"] == []
-    jsonschema.validate(coerced, SEQUENCE_SPEC_SCHEMA)
+    Owner-level replacement for the runner-level coercion fixture: grounding and
+    repair must never see an entry coercion should have dropped.
+    """
+    evidence = {"file": "proxy/handler.py", "line": 41, "symbol": "resolve_identity"}
+    good, digit = _message(), _message(evidence={**evidence, "line": "6"})
+    sequence = coerce_sequence_spec({
+        "participants": [
+            {"name": "Handler", "kind": "internal", "files": ["a.py", "a.py", "a$b.py", "../x.py", 3]},
+            "not a participant", {"name": "", "kind": "internal"}, {"name": "Ghost", "kind": "daemon"},
+            {"name": "Handler", "kind": "external"},
+            {"name": "Resolver", "kind": "external", "files": "nope", "service": "svc"}],
+        "messages": ["not a message", good, digit, _message(kind="broadcast"),
+                     *(_message(evidence={**evidence, **bad}) for bad in (
+                         {"line": True}, {"line": 0}, {"file": "a$b.py"}, {"symbol": None})),
+                     _message(evidence="nowhere")],
+        "blocks": ["x", {"kind": "loop", "branches": []}, {"kind": "weird", "branches": []},
+                   {"kind": "opt", "branches": [
+                       "x", {"condition": "c", "evidence": {"file": "a.py", "line": 3},
+                             "messages": [2, 1, 1, 99, True, "x"]},
+                       {"condition": "", "evidence": {"file": "a.py", "line": 3}, "messages": [1]}]}],
+    })
+    assert sequence == {
+        "participants": [{"name": "Handler", "kind": "internal", "files": ["a.py"], "service": None},
+                         {"name": "Resolver", "kind": "external", "files": [], "service": "svc"}],
+        "messages": [good, {**digit, "evidence": {**evidence, "line": 6}}],
+        "blocks": [{"kind": "opt", "branches": [
+            {"condition": "c", "evidence": {"file": "a.py", "line": 3}, "messages": [1, 0]}]}],
+    }
+    jsonschema.validate(sequence, SEQUENCE_SPEC_SCHEMA)
+    second = _node(id="n2", kind="process", evidence={"file": "proxy/auth.py", "line": 28})
+    flowchart = coerce_flowchart_spec({
+        "root": {"file": "proxy/auth.py", "name": "run", "line": "1"},
+        "nodes": [_node(), _node(label="duplicate id"), _node(id="k", kind="gateway"), _node(id="e", label=""),
+                  "not a node", second],
+        "edges": [{"from": "n1", "to": "n2", "label": "  yes  "}, {"from": "n1"}, "not an edge",
+                  {"from": "n1", "to": "missing"}],
+    })
+    assert flowchart == {
+        "root": {"file": "proxy/auth.py", "name": "run", "line": 1},
+        "nodes": [_node(), {**second, "evidence": {"file": "proxy/auth.py", "line": 28, "symbol": None}}],
+        "edges": [{"from": "n1", "to": "n2", "label": "yes"}, {"from": "n1", "to": "missing", "label": None}],
+    }
+    unusable = coerce_flowchart_spec({"root": {"file": "a.py", "name": "f"}, "nodes": [_node()], "edges": []})
+    assert unusable["root"] is None and len(unusable["nodes"]) == 1
+    assert coerce_flowchart_spec({"root": "run", "nodes": "n1", "edges": {}}) == EMPTY_FLOWCHART_SPEC

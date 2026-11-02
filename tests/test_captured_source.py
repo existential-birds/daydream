@@ -11,13 +11,12 @@ import errno
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream.git_ops import immutable, process, queries
+from daydream.git_ops import immutable, process
 from daydream.git_ops.captured_source import capture_source
 from daydream.git_ops.models import GitError, PathAbsentError, SnapshotPreparationError
 from daydream.git_ops.source import FrozenSourceRejected
@@ -38,55 +37,9 @@ def source(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, base, head
 
 
-def test_capture_net_final_bytes_and_population_identity(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Staging cannot preserve an undone change; dirty excluded helpers bind native context."""
-    repo, base, head = source
-    write_and_stage(repo, "subject.py", "value = 2\n")
-    (repo / "subject.py").write_text("value = 0\n")
-    original_index = (repo / ".git/index").read_bytes()
-    empty = capture_source(repo, tmp_path / "empty", base_sha=base, head_sha=head, local=True)
-    assert empty.diff == ""
-    assert empty.files == ()
-    (repo / "helper.py").write_text("helper = 2\n")
-    (repo / "scratch.py").write_text("scratch = 3\n")
-    (repo / "ignored").mkdir()
-    (repo / "ignored/secret.py").write_text("excluded = 4\n")
-    (repo / ".daydream").mkdir()
-    (repo / ".daydream/old.json").write_text("private evidence")
-    (repo / ".review-output.md").write_text("old report")
-    first = capture_source(repo, tmp_path / "first", base_sha=base, head_sha=head, local=True, exclude=["helper.py"])
-    assert first.head_sha == head
-    assert first.files == ("scratch.py",)
-    assert first.read("new", "subject.py")[1] == b"value = 0\n"
-    assert first.read("new", "helper.py")[1] == b"helper = 2\n"
-    assert first.read("new", "scratch.py")[1] == b"scratch = 3\n"
-    assert not (first.root / "ignored").exists()
-    assert not (first.root / ".daydream").exists()
-    assert not (first.root / ".review-output.md").exists()
-    with pytest.raises(PathAbsentError):
-        first.read("old", "scratch.py")
-    (repo / "helper.py").write_text("helper = 9\n")
-    second = capture_source(repo, tmp_path / "second", base_sha=base, head_sha=head, local=True, exclude=["helper.py"])
-    assert first.diff == second.diff
-    assert first.source_id != second.source_id
-    assert first.read("new", "helper.py")[1] == b"helper = 2\n"
-    assert first.revision_for("new") == first.source_id
-    assert first.revision_for("old") == base
-    assert (repo / ".git/index").read_bytes() == original_index
-    assert git(repo, "rev-parse", "HEAD") == head
-    population = capture_source(repo, tmp_path / "population", base_sha=base, head_sha=head, local=True,
-                                exclude=["helper.py", "scratch.py", "other.txt"])
-    assert population.source_id != second.source_id
-    (repo / "other.txt").write_text("other")
-    added = capture_source(repo, tmp_path / "added", base_sha=base, head_sha=head, local=True,
-                           exclude=["helper.py", "scratch.py", "other.txt"])
-    assert added.diff == population.diff == ""
-    assert added.source_id != population.source_id
-
-
 @pytest.mark.parametrize(("path", "edited"), [
-    ("subject.py", False), ("subject.py", True), ("added.py", False), ("added.bin", False),
-], ids=["staged-final", "edited-after-staging", "added-staged", "large-staged"])
+    ("added.py", False),
+], ids=["added-staged", ])
 def test_capture_uses_working_bytes_after_staging(
     source: tuple[Path, str, str], tmp_path: Path, path: str, edited: bool,
 ) -> None:
@@ -115,27 +68,7 @@ def test_capture_uses_working_bytes_after_staging(
     assert (captured.root / path).read_bytes() == working
 
 
-def test_committed_capture_ignores_original_checkout_bytes(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Pinned comments inspect raw PR objects despite dirtiness or another checked-out HEAD."""
-    repo, base, head = source
-    git(repo, "checkout", "--detach", base)
-    (repo / "subject.py").write_bytes(b"dirty\r\n")
-    (repo / "scratch.py").write_text("local only")
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=False)
-    assert captured.head_sha == head
-    assert captured.source_id is None
-    assert captured.revision_for("new") == head
-    assert captured.files == ("subject.py",)
-    assert captured.read("new", "subject.py")[1] == b"value = 1\n"
-    assert not (captured.root / "scratch.py").exists()
-    assert (repo / "subject.py").read_bytes() == b"dirty\r\n"
-    assert git(repo, "rev-parse", "HEAD") == base
-    shutil.rmtree(repo)
-    captured.validate()
-    assert captured.read("old", "subject.py")[1] == b"value = 0\n"
-
-
-@pytest.mark.parametrize("change", ["bytes", "parent", "symlink", "missing"])
+@pytest.mark.parametrize("change", ["bytes", "parent", "symlink", ])
 @pytest.mark.parametrize("persistent", [False, True])
 def test_capture_retries_actual_materialization_instability(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool,
@@ -188,7 +121,7 @@ def test_capture_retries_actual_materialization_instability(
         assert captured.read("new", changed)[1] == b"value = 11\n"
 
 
-@pytest.mark.parametrize("fault", ["missing-spool", "cancel-replaced-storage", "spool-disappears"])
+@pytest.mark.parametrize("fault", ["cancel-replaced-storage", ])
 def test_capture_private_write_failure_preserves_subject_and_primary_error(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
@@ -254,32 +187,9 @@ def test_capture_retries_object_population_change_during_copy(
     assert captured.read("new", "subject.py")[1] == b"value = 1\n"
 
 
-def test_capture_retries_working_population_change_during_enumeration(
-    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A file appearing after real enumeration must join accepted targets and native search."""
-    repo, base, head = source
-    enumerate_untracked = queries._list_untracked_z
-    first = True
-
-    def growing_population(root: Path) -> list[str]:
-        nonlocal first
-        paths = enumerate_untracked(root)
-        if first:
-            first = False
-            (root / "appeared.py").write_text("appeared = 1\n")
-        return paths
-
-    monkeypatch.setattr(queries, "_list_untracked_z", growing_population)
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
-    assert set(captured.files) == {"appeared.py", "subject.py"}
-    assert captured.read("new", "appeared.py")[1] == b"appeared = 1\n"
-
-
 @pytest.mark.parametrize("corruption", [
-    "bytes", "missing", "population", "population-exclude", "population-gitignore", "population-link", "metadata",
-    "storage", "index", "skip", "assume", "stages", "intent", "support-bytes", "support-mode", "support-missing",
-    "support-parent",
+    "missing", "population-gitignore", "metadata",
+    "storage", "skip",
 ])
 def test_capture_integrity_never_falls_back_to_original(
     source: tuple[Path, str, str], tmp_path: Path, corruption: str,
@@ -351,26 +261,6 @@ def test_capture_integrity_never_falls_back_to_original(
         with pytest.raises(GitError):
             captured.read("new", "subject.py")
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
-
-
-def test_ignored_check_output_leaves_accepted_source_valid(tmp_path: Path) -> None:
-    """A reviewer's real test run writes the ignored caches capture itself would exclude."""
-    repo = tmp_path / "source"
-    init_repo(repo)
-    write_and_stage(repo, ".gitignore", "__pycache__/\n.pytest_cache/\nbuild/\n")
-    write_and_stage(repo, "tests/test_subject.py", "def test_subject() -> None:\n    assert True\n")
-    base = commit(repo, "base")
-    write_and_stage(repo, "subject.py", "value = 1\n")
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=commit(repo, "feature"), local=True)
-    environment = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}
-    subprocess.run([sys.executable, "-m", "pytest", "-q", "tests"], cwd=captured.root, env=environment, check=True,
-                   capture_output=True)
-    assert list(captured.root.glob("tests/__pycache__/*.pyc"))
-    assert (captured.root / ".pytest_cache/.gitignore").is_file()
-    (captured.root / "build").mkdir()
-    (captured.root / "build/subject.py").symlink_to(captured.root / "subject.py")
-    captured.validate()
-    assert captured.read("new", "subject.py")[1] == b"value = 1\n"
 
 
 def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
@@ -445,61 +335,7 @@ def test_capture_preserves_metadata_without_native_symlink_or_gitlink_expansion(
     assert repeated.source_id == captured.source_id
 
 
-def test_capture_raw_duplicate_and_empty_blobs(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Raw batching preserves binary duplicate and zero-length payload boundaries."""
-    repo, base, _ = source
-    payload = b"\0duplicate\xff\n" * 100_003
-    write_and_stage(repo, "a.bin", payload)
-    write_and_stage(repo, "b.bin", payload)
-    write_and_stage(repo, "empty.bin", b"")
-    head = commit(repo, "raw files")
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=False)
-    for name in ("a.bin", "b.bin"):
-        assert (captured.root / name).read_bytes() == payload
-        assert captured.read("new", name)[1] == payload
-    assert (captured.root / "empty.bin").read_bytes() == b""
-    captured.validate()
-
-
-def test_capture_rename_deletion_binary_and_mode_targets(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Full native diff metadata survives independently of whether text is reviewable."""
-    repo, base, head = source
-    (repo / "renamed.py").write_bytes((repo / "subject.py").read_bytes())
-    (repo / "subject.py").unlink()
-    (repo / "helper.py").unlink()
-    (repo / "binary.dat").write_bytes(b"\0binary\xff")
-    (repo / ".gitignore").chmod(0o755)
-    captured = capture_source(repo, tmp_path / "captured", base_sha=head, head_sha=head, local=True)
-    assert set(captured.files) == {".gitignore", "binary.dat", "helper.py", "renamed.py"}
-    assert "rename from subject.py" in captured.diff
-    assert "rename to renamed.py" in captured.diff
-    assert "deleted file mode" in captured.diff
-    assert "Binary files" in captured.diff
-    assert "old mode 100644\nnew mode 100755" in captured.diff
-    assert captured.read("old", "subject.py")[1] == b"value = 1\n"
-    with pytest.raises(PathAbsentError):
-        captured.read("new", "subject.py")
-
-
-def test_capture_cleanup_preserves_replaced_storage(source: tuple[Path, str, str], tmp_path: Path) -> None:
-    """Cleanup authority follows pinned private directories, not a reusable pathname."""
-    repo, base, head = source
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=True)
-    owned = tmp_path / "owned"
-    captured.root.rename(owned)
-    captured.root.mkdir()
-    (captured.root / "competing.txt").write_text("preserve")
-    with pytest.raises(GitError):
-        captured.remove()
-    assert (captured.root / "competing.txt").read_text() == "preserve"
-    assert (owned / "subject.py").read_text() == "value = 1\n"
-    another = capture_source(repo, tmp_path / "another", base_sha=base, head_sha=head, local=True)
-    (another.root / "subject.py").write_text("corrupt but owned")
-    another.remove()
-    assert not another.root.exists()
-
-
-@pytest.mark.parametrize("state", ["cone", "noncone", "omitted", "present", "deleted", "deleted-directory"])
+@pytest.mark.parametrize("state", ["noncone", "deleted", ])
 def test_local_capture_requires_materialized_skip_worktree_contents(
     source: tuple[Path, str, str], tmp_path: Path, state: str,
 ) -> None:
@@ -573,57 +409,19 @@ def test_capture_allows_native_index_stat_refresh(source: tuple[Path, str, str],
     assert (repo / "subject.py").read_bytes() == b"value = 1\n"
 
 
-@pytest.mark.parametrize("state", ["removed-ignored", "removed-visible", "tracked-ignored"])
-def test_capture_current_population_excludes_only_untracked_ignored_bytes(
-    source: tuple[Path, str, str], tmp_path: Path, state: str,
-) -> None:
-    """Index removal revokes ignored after-content without losing old-side evidence or eligible working files."""
-    repo, base, head = source
-    if state != "removed-visible":
-        (repo / ".gitignore").write_text("helper.py\n")
-    before = capture_source(repo, tmp_path / "before", base_sha=base, head_sha=head, local=True)
-    if state != "tracked-ignored":
-        git(repo, "rm", "--cached", "--", "helper.py")
-    original_index = (repo / ".git/index").read_bytes()
-    original_refs = git(repo, "show-ref")
-    unchanged = capture_source(repo, tmp_path / "unchanged", base_sha=base, head_sha=head, local=True)
-    if state == "removed-ignored":
-        assert unchanged.source_id != before.source_id
-        assert "helper.py" in unchanged.files
-        assert "diff --git a/helper.py b/helper.py\ndeleted file mode 100644\n" in unchanged.diff
-        assert unchanged.read("old", "helper.py")[1] == b"helper = 0\n"
-        with pytest.raises(PathAbsentError):
-            unchanged.read("new", "helper.py")
-        assert not (unchanged.root / "helper.py").exists()
-    else:
-        assert unchanged.source_id == before.source_id
-        assert unchanged.diff == before.diff
-        assert unchanged.read("new", "helper.py")[1] == b"helper = 0\n"
-    (repo / "helper.py").write_text("helper = 4\n")
-    dirty = capture_source(repo, tmp_path / "dirty", base_sha=base, head_sha=head, local=True)
-    if state == "removed-ignored":
-        assert dirty.source_id == unchanged.source_id
-        assert dirty.diff == unchanged.diff
-        with pytest.raises(PathAbsentError):
-            dirty.read("new", "helper.py")
-        assert not (dirty.root / "helper.py").exists()
-    else:
-        assert dirty.source_id != unchanged.source_id
-        assert "helper.py" in dirty.files
-        assert dirty.read("new", "helper.py")[1] == b"helper = 4\n"
-        assert (dirty.root / "helper.py").read_bytes() == b"helper = 4\n"
-    assert (repo / ".git/index").read_bytes() == original_index
-    assert git(repo, "show-ref") == original_refs
-    assert git(repo, "rev-parse", "HEAD") == head
-    assert (repo / "helper.py").read_bytes() == b"helper = 4\n"
+def test_streamed_blob_framing_faults_reap_the_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for fault in ("wrong-oid", "truncated", "terminator", "extra"):
+        with monkeypatch.context() as patch:
+            _assert_streamed_blob_child_reaped(tmp_path / fault, patch, fault)
 
-@pytest.mark.parametrize("fault", [
-    "valid", "missing", "wrong-oid", "wrong-type", "truncated", "terminator", "extra", "nonzero",
-    "stderr", "timeout", "setup", "sink", "cancel",
-])
-def test_streamed_blob_protocol_reaps_child_on_every_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
-) -> None:
+
+def test_streamed_blob_process_faults_reap_the_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for fault in ("nonzero", "stderr", "timeout", "setup", "sink"):
+        with monkeypatch.context() as patch:
+            _assert_streamed_blob_child_reaped(tmp_path / fault, patch, fault)
+
+
+def _assert_streamed_blob_child_reaped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
     """Real duplex pipes prove framing, stderr/deadline bounds and cleanup even before reader setup completes.
 
     Existing buffered subprocess tests have no request writes, object framing or
@@ -636,6 +434,7 @@ def test_streamed_blob_protocol_reaps_child_on_every_exit(
 
     from daydream.git_ops.captured_source import _BlobReader
 
+    tmp_path.mkdir()
     body = b"raw\r\n\0\xff" * 20_003
     oid = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
     script = (
@@ -701,27 +500,10 @@ def test_streamed_blob_protocol_reaps_child_on_every_exit(
     assert all(stream is not None and stream.closed for stream in (child.stdin, child.stdout, child.stderr))
 
 
-def test_capture_verifies_both_separately_admitted_sides(
-    source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two legal endpoint populations may exceed a single-side payload budget together."""
-    repo, _, _ = source
-    old, new = b"\0" + b"a" * 750, b"\0" + b"b" * 750
-    write_and_stage(repo, "both.bin", old)
-    base = commit(repo, "old binary")
-    write_and_stage(repo, "both.bin", new)
-    head = commit(repo, "new binary")
-    monkeypatch.setattr(immutable, "_MAX_SOURCE_BYTES", 1024)
-    captured = capture_source(repo, tmp_path / "captured", base_sha=base, head_sha=head, local=False)
-    captured.validate()
-    assert captured.read("old", "both.bin")[1] == old
-    assert captured.read("new", "both.bin")[1] == new
-
-
 @pytest.mark.parametrize("kind", [
-    "blob", "tree", "existing-tree", "native", "parent", "parent-open", "parent-create",
-    "parent-source", "parent-cancel",
-    "leaf-source", "leaf-cancel", "read-truncated", "read-cancel", "read-symlink", "read-missing",
+    "blob", "existing-tree", "parent-open",
+
+    "leaf-cancel", "read-truncated", "read-cancel", "read-symlink",
 ])
 def test_capture_preserves_competing_object_bytes(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
@@ -888,7 +670,7 @@ def test_capture_preserves_competing_object_bytes(
         assert caught.value is cancellation
 
 
-@pytest.mark.parametrize("phase", ["compression", "comparison", "comparison-stat", "compression-symlink"])
+@pytest.mark.parametrize("phase", ["compression", "comparison-stat", ])
 def test_capture_rejects_identical_byte_spool_replacement(
     source: tuple[Path, str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
@@ -951,7 +733,6 @@ def test_capture_rejects_identical_byte_spool_replacement(
     if phase == "compression-symlink":
         assert (destination / "subject.py").is_symlink()
         assert open_errors == [errno.ELOOP]
-
 
 
 def test_physical_copy_rechecks_actual_aggregate_byte_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

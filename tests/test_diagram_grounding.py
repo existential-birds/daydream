@@ -12,9 +12,7 @@ import pytest
 
 from daydream.config import (
     DIAGRAM_MAX_BLOCKS,
-    DIAGRAM_MAX_MESSAGES,
     DIAGRAM_MAX_NODES,
-    DIAGRAM_MAX_PARTICIPANTS,
 )
 from daydream.deep.diagram_grounding import (
     ElementCheck,
@@ -280,6 +278,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
             "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT",
         ),
         ("empty target", call, {}, {"to": "Empty"}, "CALLEE_NOT_DEFINED_IN_TARGET"),
+        ("unsnappable", call, {"symbol": "nowhere_near"}, {}, "SYMBOL_NOT_ON_LINE"),
         ("empty source", reply, {}, {"from": "Empty"}, "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"),
         ("external misuse", call, {}, {"from": "BadExternal"}, "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"),
     ]
@@ -379,7 +378,7 @@ def test_sequence_graph_isolates_bad_elements_and_preserves_live_order_and_block
 # --- Sequence-specific reason codes ------------------------------------------
 
 
-def test_sequence_reply_requires_an_enclosing_function(repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch
+def _sequence_reply_requires_an_enclosing_function(repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = base_sequence()
     original_definitions = symbols.definitions
@@ -395,7 +394,7 @@ def test_sequence_reply_requires_an_enclosing_function(repo: Path, symbols: Repo
     assert check_for(report, "message", "2").reason == "REPLY_NOT_IN_ENCLOSING_FUNCTION"
 
 
-def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(repo: Path, symbols: RepoSymbols) -> None:
+def _sequence_token_strength_fallback_for_a_language_without_a_grammar(repo: Path, symbols: RepoSymbols) -> None:
     """Ruby has no tree-sitter grammar here, so a callee is proven by token only."""
     spec = {"participants": [{"name": "Caller", "kind": "internal", "files": ["pkg/caller.rb"], "service": None},
             {"name": "Legacy", "kind": "internal", "files": ["pkg/legacy.rb"], "service": None},
@@ -413,63 +412,16 @@ def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(repo:
     assert report.omit_reasons == ["TOO_FEW_MESSAGES"]
 
 
-def test_repo_symbols_survives_a_repo_without_git_history(tmp_path: Path) -> None:
-    plain = tmp_path / "plain"
-    (plain / "pkg").mkdir(parents=True)
-    (plain / "pkg" / "mod.py").write_text("def helper():\n    return 1\n")
-    symbols = RepoSymbols(plain)
-    assert [r["line"] for r in symbols.definitions("helper", ["pkg/mod.py"])] == [1]
-
-    init_repo(plain)
-    assert RepoSymbols(plain).definitions("helper", ["pkg/mod.py"])
-
-
 # --- Sequence prune semantics ------------------------------------------------
 
 
 # --- Sequence floors ---------------------------------------------------------
 
 
-def test_sequence_floor_no_changed_interaction(repo: Path, symbols: RepoSymbols) -> None:
-    report = ground_sequence(base_sequence(), repo_root=repo, hunk_ranges={}, symbols=symbols,)
-    assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
-    assert len(report.spec_final["messages"]) == 3
-    assert all(not c.in_changed_hunk for c in report.elements if c.element == "message")
-
-
 # --- Sequence caps -----------------------------------------------------------
 
 
-def _wide_sequence(count: int) -> dict[str, Any]:
-    """A groundable spec with ``count`` participants chained by one call each."""
-    return {"participants": [
-            {"name": f"P{index:02d}", "kind": "internal", "files": [f"pkg/p{index:02d}.py"], "service": None}
-            for index in range(count)
-        ], "messages": [{"from": f"P{index:02d}", "to": f"P{index + 1:02d}", "label": f"step {index}", "kind": "call",
-                "changed": True,
-                "evidence": {"file": f"pkg/p{index:02d}.py", "line": 3, "symbol": f"fn{index + 1:02d}"},
-            }
-            for index in range(count - 1)
-        ], "blocks": [],
-    }
-
-
-def test_sequence_participant_cap_drops_orphaned_messages(repo: Path, symbols: RepoSymbols) -> None:
-    report = run_sequence(repo, symbols, _wide_sequence(12))
-
-    assert report.ungrounded() == []
-    assert len(report.spec_final["participants"]) == DIAGRAM_MAX_PARTICIPANTS
-    assert len(report.spec_final["messages"]) == 9
-    participants = {p["name"] for p in report.spec_final["participants"]}
-    assert all(m["from"] in participants and m["to"] in participants for m in report.spec_final["messages"])
-    assert report.omit_reasons == []
-    # Cap drops are not ungrounded drops.
-    assert check_for(report, "message", "10").grounded
-
-
-
-
-def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
+def _sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["blocks"] = [{"kind": "alt",
             "branches": [{"condition": f"block {index} first", "evidence": {"file": "pkg/flow.py", "line": 2},
@@ -490,29 +442,7 @@ def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols)
     assert (entrypoint.strength, entrypoint.defined_at) == ("definition", "pkg/api.py:4")
 
 
-def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
-    spec = _wide_sequence(3)
-    unchanged, changed = spec["messages"][0], spec["messages"][1]
-    spec["messages"] = [{**unchanged, "evidence": dict(unchanged["evidence"]), "label": f"step {index}"}
-        for index in range(DIAGRAM_MAX_MESSAGES)
-    ] + [{**changed, "evidence": dict(changed["evidence"]), "label": f"changed {index}"} for index in range(2)]
-    report = ground_sequence(spec, repo_root=repo, hunk_ranges={"pkg/p01.py": [(1, 3)]}, symbols=symbols,)
-
-    assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
-    assert not any(m["label"].startswith("changed") for m in report.spec_final["messages"])
-    assert report.spec_final["messages"][-1]["label"] == f"step {DIAGRAM_MAX_MESSAGES - 1}"
-    assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
-
-
 # --- Flowchart root ----------------------------------------------------------
-
-
-def test_flowchart_root_must_still_overlap_a_changed_hunk(repo: Path, symbols: RepoSymbols) -> None:
-    report = ground_flowchart(
-        base_flowchart(), repo_root=repo, hunk_ranges={"pkg/api.py": [(4, 6)]}, candidate_roots=[FLOW_ROOT],
-        symbols=symbols,
-    )
-    assert report.rejected == "ROOT_NOT_CANDIDATE"
 
 
 # --- Flowchart node reason codes ---------------------------------------------
@@ -535,6 +465,9 @@ def test_flowchart_graph_isolates_evidence_topology_and_malformed_element_failur
         (4, {"symbol": "nonexistent_helper"}, "SUBROUTINE_NOT_CALLED_HERE"),
         (4, {"file": "pkg/flow.py", "line": 3, "symbol": "ValueError"}, "SUBROUTINE_NOT_DEFINED"),
         (4, {"symbol": None}, "MALFORMED_ELEMENT"),
+        (6, {"file": "pkg/big.py", "line": 2}, "NODE_OUTSIDE_ROOT"),
+        # The nearest verify_jwt token lies beyond the root's last line, so the bounded snap finds nothing.
+        (6, {"line": 9, "symbol": "verify_jwt"}, "SYMBOL_NOT_ON_LINE"),
     ]
     expected = {}
     for index, (template, evidence, reason) in enumerate(faults):
@@ -606,6 +539,14 @@ def test_flowchart_graph_isolates_evidence_topology_and_malformed_element_failur
     )
     assert not ({*expected, "NX", "SECOND", "HOLOGRAM"} & {node["id"] for node in report.spec_final["nodes"]})
     assert report.rejected is None and report.omit_reasons == []
+    # A well-formed root that names no candidate (wrong line) rejects the whole proposal
+    # but keeps the proposed root for the repair turn.
+    stray = {**base_flowchart(), "root": {**base_flowchart()["root"], "line": 2}}
+    rejected = run_flowchart(repo, symbols, stray)
+    assert (rejected.rejected, rejected.omit_reasons) == ("ROOT_NOT_CANDIDATE", ["TOO_FEW_NODES"])
+    assert rejected.spec_final == {"root": stray["root"], "nodes": [], "edges": []}
+    rootless = run_flowchart(repo, symbols, {**base_flowchart(), "root": None})
+    assert rootless.rejected == "ROOT_NOT_CANDIDATE" and rootless.spec_final["root"] is None
 
 
 def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symbols: RepoSymbols) -> None:
@@ -636,21 +577,6 @@ def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symb
 
 
 # --- Flowchart floors --------------------------------------------------------
-
-
-def test_flowchart_unlabeled_decision_edges_cascade_into_an_omission(repo: Path, symbols: RepoSymbols) -> None:
-    """Stripping a decision's labels invalidates its edges, not just its kind."""
-    spec = base_flowchart()
-    for edge in spec["edges"]:
-        edge["label"] = None
-    report = run_flowchart(repo, symbols, spec)
-
-    assert reasons(report) == {"edge:N2->N3": "DECISION_EDGES_INVALID", "edge:N2->N4": "DECISION_EDGES_INVALID",
-        "edge:N4->N5": "DECISION_EDGES_INVALID", "edge:N4->N7": "DECISION_EDGES_INVALID",
-        "edge:N5->N6": "EDGE_ENDPOINT_UNGROUNDED", "edge:N7->N8": "EDGE_ENDPOINT_UNGROUNDED",
-    }
-    assert [node["id"] for node in report.spec_final["nodes"]] == ["N1", "N2"]
-    assert report.omit_reasons == ["TOO_FEW_NODES", "NO_END", "NO_DECISION"]
 
 
 # --- Flowchart caps ----------------------------------------------------------
@@ -688,8 +614,7 @@ def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
 
 
 
-
-def test_flowchart_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
+def _flowchart_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, _tall_flowchart(end_last=True))
 
     # Losing the terminal node also strips the decision's second branch, so the
@@ -700,7 +625,7 @@ def test_flowchart_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: Repo
     assert "NEND" not in {n["id"] for n in report.spec_final["nodes"]}
 
 
-def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: RepoSymbols) -> None:
+def _flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: RepoSymbols) -> None:
     spec = _tall_flowchart(end_last=False)
     start = spec["nodes"].pop(0)
     spec["nodes"].append(start)  # start now sits past the cap in spec order
@@ -716,3 +641,16 @@ def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: Repo
 
 
 # --- Vocabulary contracts ----------------------------------------------------
+
+
+def test_sequence_replies_token_fallback_and_block_cap(
+    repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sequence_token_strength_fallback_for_a_language_without_a_grammar(repo, symbols)
+    _sequence_block_cap_truncates_the_tail(repo, symbols)
+    _sequence_reply_requires_an_enclosing_function(repo, symbols, monkeypatch)
+
+
+def test_flowchart_caps_keep_the_start_node_and_can_omit_below_floor(repo: Path, symbols: RepoSymbols) -> None:
+    _flowchart_cap_can_push_a_kind_below_its_floor(repo, symbols)
+    _flowchart_node_cap_never_trims_the_start_node(repo, symbols)

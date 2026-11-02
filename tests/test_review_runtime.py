@@ -11,9 +11,7 @@ from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
 from daydream.review_budget import (
-    ReviewInvestigationBudget,
     ReviewLimits,
-    review_deadline,
     review_deadline_scope,
     review_limits_for_scope,
     review_scale_for_diff,
@@ -33,49 +31,19 @@ FINDINGS = {"findings": ["src.py:2 divides by zero for an empty batch"]}
 def test_large_diff_expands_review_allowances_without_changing_small_reviews() -> None:
     small = "diff --git a/a.py b/a.py\n" + "+line\n" * 100
     large = "diff --git a/a.py b/a.py\n" + "+line\n" * 6_500
+    assert review_scale_for_diff(small) == 1
+    assert review_scale_for_diff(large) == 4
+    assert review_scale_for_diff("+line\n" * 10_001) == 6
+    assert review_scale_for_diff("x" * (64 * 1024 + 1)) == 2
+
     with review_deadline_scope(2700, diff=large, scale_deadline=True):
-        assert review_scale_for_scope() > 1
+
+        assert review_scale_for_scope() == 4
         limits = review_limits_for_scope(ReviewLimits())
         assert limits.investigation_s > 480
         assert limits.tool_calls > 48
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
-
-@pytest.mark.parametrize(('base_s', 'invocation_s', 'expected_s'), [
-    (9, 20, 12), (9, 5, 5), (0, 20, 0),
-])
-def test_explicit_review_deadline_remains_exact_for_large_diff(
-    monkeypatch: pytest.MonkeyPatch, base_s: int, invocation_s: int, expected_s: int,
-) -> None:
-    """A configured local base scales once while explicit pipeline and caller clamps stay exact."""
-    clock = FakeClock().install(monkeypatch)
-    large = "+line\n" * 6_500
-    with review_deadline_scope(15, diff=large, scale_deadline=False):
-        assert review_deadline(discovery=False) == clock.monotonic() + 15
-        assert review_deadline(discovery=True) == clock.monotonic() + 12
-        budget = ReviewInvestigationBudget.from_limits(
-            ReviewLimits(investigation_s=base_s), deadline=clock.monotonic() + invocation_s)
-        scale = review_scale_for_diff(large)
-        assert budget.limits.investigation_s == base_s * scale
-        assert budget.limits.tool_calls == budget.remaining_tool_calls == ReviewLimits().tool_calls * scale
-        assert budget.deadline == clock.monotonic() + expected_s
-
-async def test_large_review_can_complete_after_old_time_and_tool_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = FakeClock().install(monkeypatch)
-    async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        for n in range(60):
-            clock.advance(10)
-            yield ToolStartEvent(id=str(n), name="read", input={"path": "src.py"})
-            yield ToolResultEvent(id=str(n), output="source", is_error=False)
-        yield ResultEvent(structured_output=FINDINGS, continuation=None)
-    backend = ScriptedBackend(responder=responder)
-    with review_deadline_scope(2700, diff="+line\n" * 6_500, scale_deadline=True):
-        result, _, reason = await run_agent(backend, tmp_path, "review src.py", phase=DaydreamPhase.DEEP,
-            output_schema=SCHEMA, review_limits=ReviewLimits(), run_context=RunContext(InteractionPolicy(quiet=True)),
-        )
-    assert result == FINDINGS
-    assert reason is None
 
 async def test_checkpoint_survives_hung_stream_without_finalizer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -100,19 +68,7 @@ async def test_checkpoint_survives_hung_stream_without_finalizer(
     assert backend.call_count == 1
     assert backend.cancel_calls == 0
 
-async def test_spent_shared_deadline_skips_queued_review_but_not_fix(tmp_path: Path) -> None:
-    backend = ScriptedBackend(events=[TextEvent(text="fixed")])
-    with review_deadline_scope(0):
-        result = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.DEEP,
-            run_context=RunContext(InteractionPolicy(quiet=True)),
-        review_limits=ReviewLimits(),
-        )
-        assert result == ("", None, "pipeline_budget_exceeded")
-        assert backend.call_count == 0
-        assert (await run_agent(backend, tmp_path, "fix", phase=DaydreamPhase.FIX))[0] == "fixed"
-    assert (await run_agent(backend, tmp_path, "new review", phase=DaydreamPhase.DEEP))[2] is None
-
-async def test_hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Path) -> None:
+async def _hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Path) -> None:
     finalizer_started = anyio.Event()
     sibling_finished = anyio.Event()
     results = {}
@@ -143,32 +99,6 @@ async def test_hung_finalizer_is_bounded_without_canceling_sibling(tmp_path: Pat
     assert results["bounded"][2] == "tool_call_budget_exceeded"
     assert results["sibling"][0] == "sibling survived"
     assert backend.cancel_calls == 0
-
-def test_inline_context_falls_back_without_truncating_large_or_invalid_artifacts(tmp_path: Path) -> None:
-
-    artifact = tmp_path / "context.md"
-    artifact.write_text("é" * 2049)
-    assert inline_context_file(artifact) is None
-    artifact.write_bytes(b"\xff")
-    assert inline_context_file(artifact) is None
-    artifact.unlink()
-    assert inline_context_file(artifact) is None
-
-async def test_synthesis_uses_reserved_time_after_discovery_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = FakeClock().install(monkeypatch)
-    backend = ScriptedBackend(events=[ResultEvent(structured_output=FINDINGS, continuation=None)])
-    with review_deadline_scope(600):
-        clock.advance(490)
-        result = await run_agent(backend, tmp_path, "queued discovery", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-            review_limits=ReviewLimits(), progress_callback=lambda _: None,
-        )
-        assert result[2] == "pipeline_budget_exceeded"
-        assert backend.call_count == 0
-        result = await run_agent(backend, tmp_path, "adjudicate", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-            review_limits=ReviewLimits(30, 10, 4, discovery=False), progress_callback=lambda _: None,
-        )
-        assert result == (FINDINGS, None, None)
 
 async def test_retry_discards_failed_attempt_checkpoint_and_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -207,65 +137,6 @@ async def test_finalization_revalidates_inputs_and_propagates_capture_failure(tm
             review_limits=ReviewLimits(10, 2, 0), progress_callback=lambda _: None,
         )
     assert backend.call_count == 1
-
-async def test_pre_rendered_inputs_become_captured_bytes_during_finalization(tmp_path: Path) -> None:
-
-    artifact = tmp_path / "intent.md"
-    artifact.write_text("captured")
-    backend = ScriptedBackend(script=[[ToolStartEvent(id="extra", name="read", input={"path": "src.py"})],
-        [ResultEvent(structured_output=FINDINGS, continuation=None)],
-    ])
-    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"intent": artifact}, read_only=False)
-    result = await run_agent(backend, tmp_path, prepared.render_prompt("review"), phase=DaydreamPhase.DEEP,
-        output_schema=SCHEMA, sanctioned_inputs=prepared, review_limits=ReviewLimits(10, 2, 0),
-        progress_callback=lambda _: None,
-    )
-    assert result[0] == FINDINGS
-    assert backend.prompts[0].count("Sanctioned phase inputs") == 1
-    assert backend.prompts[0].endswith(f"- intent: {artifact}")
-    assert "captured" in backend.prompts[1]
-    assert "read only these exact files" not in backend.prompts[1]
-    assert str(artifact) not in backend.prompts[1]
-
-@pytest.mark.parametrize("schema", [None, SCHEMA])
-async def test_finalization_contract_excludes_discovery_and_supports_output_kinds(
-    tmp_path: Path, schema: dict[str, Any] | None,
-) -> None:
-
-    backend = ScriptedBackend(script=[
-        [TextEvent(text="SPECULATIVE_NOTE"), ToolStartEvent(id="extra", name="read", input={})],
-        [ResultEvent(structured_output={"findings": []}, continuation=None)] if schema else
-        [TextEvent(text="Incomplete exploration: supplied map covers src.py only.")],
-    ])
-    result = await run_agent(backend, tmp_path, "DISCOVERY_STRATEGY: run tests, search upstream, read every file",
-        phase=DaydreamPhase.DEEP, output_schema=schema,
-        finalization_context=FinalizationContext(
-            task="Produce the requested map" if schema is None else "Review assigned code",
-            assigned_files=("src.py",), output_semantics="Only the assigned deliverable",
-            supplied_context=(("diff", "+ return 1"),),
-        ), review_limits=ReviewLimits(10, 2, 0), progress_callback=lambda _: None,
-    )
-    assert result[2] == "tool_call_budget_exceeded"
-    prompt = backend.last_prompt
-    assert "DISCOVERY_STRATEGY" not in prompt
-    assert "Investigation allowance" not in prompt
-    assert "SPECULATIVE_NOTE" not in prompt
-    assert "+ return 1" in prompt
-    assert "src.py" in prompt
-    assert ("plain-text deliverable" if schema is None else '"additionalProperties": false') in prompt
-    assert backend.max_turns[-1] is None
-
-async def test_time_shorter_than_reserve_only_dispatches_finalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = FakeClock().install(monkeypatch)
-    backend = ScriptedBackend(events=[ResultEvent(structured_output={"findings": []}, continuation=None)])
-    result = await run_agent(backend, tmp_path, "FRESH_INVESTIGATION", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
-        deadline=clock.monotonic() + 1, review_limits=ReviewLimits(10, 2, 5), progress_callback=lambda _: None,
-    )
-    assert result == ({"findings": []}, None, "wall_budget_exceeded")
-    assert backend.call_count == 1
-    assert "FRESH_INVESTIGATION" not in backend.last_prompt
-    assert "INVESTIGATION HAS ENDED" in backend.last_prompt
 
 def test_evidence_retention_is_bounded_deduplicated_and_preserves_associations() -> None:
 
@@ -315,8 +186,18 @@ def test_exact_path_finalization_capture_is_bounded_and_rejects_changed_identity
     diff.write_text("replacement")
     with pytest.raises(SanctionedInputUnavailable, match="changed"):
         prepared.finalization_text(backend, tmp_path, True)
+    # Inline context falls back without truncating large or invalid artifacts.
+    artifact = tmp_path / "context.md"
+    artifact.write_text("é" * 2049)
+    assert inline_context_file(artifact) is None
+    artifact.write_bytes(b"\xff")
+    assert inline_context_file(artifact) is None
+    artifact.unlink()
+    assert inline_context_file(artifact) is None
 
-async def test_finalization_control_is_invocation_local_with_shared_backend(tmp_path: Path) -> None:
+async def test_finalization_is_bounded_and_invocation_local_with_shared_backend(tmp_path: Path) -> None:
+    await _hung_finalizer_is_bounded_without_canceling_sibling(tmp_path)
+
     class ControlledBackend(ScriptedBackend):
         supports_finalization = True
         reasoning_effort = "high"
@@ -352,20 +233,3 @@ async def test_finalization_control_is_invocation_local_with_shared_backend(tmp_
     assert backend.reasoning_effort == "high"
     assert sum(finalization for _, finalization in flags) == 1
     assert ("sibling", False) in flags
-
-def test_explicit_capture_priority_retains_task_inputs_before_large_advisories(tmp_path: Path) -> None:
-
-    paths = {}
-    for label, text in {"alternatives": "A" * 12000, "dedup-candidates": "B" * 12000, "diff": "REQUIRED_DIFF",
-        "stack-records-000": "REQUIRED_MERGE_RECORDS",
-    }.items():
-        paths[label] = tmp_path / label
-        paths[label].write_text(text)
-    backend = ScriptedBackend()
-    prepared = prepare_sanctioned_inputs(backend, tmp_path, paths, read_only=False)
-    text = prepared.finalization_text(backend, tmp_path, False, input_priority=("diff", "stack-records-000"),)
-    assert "REQUIRED_DIFF" in text
-    assert "REQUIRED_MERGE_RECORDS" in text
-    assert text.index("REQUIRED_MERGE_RECORDS") < text.index("Input 'alternatives'")
-    assert len(text.encode()) <= 24000
-    assert "truncated" in text

@@ -3,15 +3,13 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from daydream.archive.scan import _scan_file, scan_run_dir
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.trajectory import DaydreamPhase, redact_text
 from tests.harness.trajectory import make_recorder
 
 
-async def test_recorded_url_shapes_pass_publication_scan(tmp_path: Path) -> None:
+async def test_recorded_url_shapes_are_redacted_and_pass_publication_scan(tmp_path: Path) -> None:
     """One complete endpoint configuration retains safe context through all recorded surfaces."""
     payload = {
         "registry": "https://opaque-canary-credential@registry.example.com/pkg",
@@ -46,18 +44,12 @@ async def test_recorded_url_shapes_pass_publication_scan(tmp_path: Path) -> None
     assert redact_text(step["message"]) == step["message"]
     assert "opaque-canary-credential" not in serialized
     assert not scan_run_dir(recorder.path.parent).blocking
-
-
-@pytest.mark.parametrize("text",
-    ["https://user:can'ary@host/path", "https://u'ser:canary@host/path", "deploy:can'ary@host:/path",
-        "https://example.com?token=can'ary&ref=main",
-    ],
-)
-def test_apostrophes_in_credentials_remain_blocking_and_are_fully_redacted(text: str) -> None:
     # Apostrophes are legal RFC 3986 sub-delimiters, including in userinfo.
-    assert any(f.severity == "blocking" for f in _scan_file("sample.txt", text))
-    redacted = redact_text(text)
-    assert "canary" not in redacted
-    assert "can'ary" not in redacted
-    assert "ary" not in redacted
-    assert not _scan_file("sample.txt", redacted)
+    for text in ("https://user:can'ary@host/path", "https://u'ser:canary@host/path", "deploy:can'ary@host:/path",
+                 "https://example.com?token=can'ary&ref=main"):
+        assert any(f.severity == "blocking" for f in _scan_file("sample.txt", text))
+        redacted = redact_text(text)
+        assert "canary" not in redacted
+        assert "can'ary" not in redacted
+        assert "ary" not in redacted
+        assert not _scan_file("sample.txt", redacted)

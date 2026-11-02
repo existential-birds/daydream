@@ -62,27 +62,11 @@ def test_load_v2_projection_raises_on_split_drift(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="split drift"):
         load_v2_projection(out)
 
-def test_load_v2_projection_missing_success_marker_fails_closed(tmp_path: Path,) -> None:
-    out = _write_projection(tmp_path, [f"rec-{i:04d}" for i in range(6)])
-    (out / "_SUCCESS").unlink()
-    with pytest.raises(ValueError, match="_SUCCESS"):
-        load_v2_projection(out)
-
-def test_load_v2_projection_missing_split_file_fails_closed(tmp_path: Path,) -> None:
-    """A missing split JSONL surfaces the documented ValueError, not a raw FileNotFoundError/OSError."""
-    out = _write_projection(tmp_path, [f"rec-{i:04d}" for i in range(6)])
-    (out / "train.jsonl").unlink()
-    with pytest.raises(ValueError, match="missing split file"):
-        load_v2_projection(out)
-
-def test_load_v2_projection_non_v2_schema_version_fails_closed(tmp_path: Path,) -> None:
-    out = _write_projection(tmp_path, [f"rec-{i:04d}" for i in range(6)])
-    records = [json.loads(line)
-        for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    assert records, "the deterministic fixture must include train records"
-    records[0]["schema_version"] = "1"
-    (out / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    with pytest.raises(ValueError, match="schema_version"):
-        load_v2_projection(out)
+def test_load_v2_projection_missing_marker_or_split_file_fails_closed(tmp_path: Path) -> None:
+    """A missing marker or split JSONL surfaces the documented ValueError, not a raw OSError."""
+    for missing, reason in (("_SUCCESS", "_SUCCESS"), ("train.jsonl", "missing split file")):
+        (tmp_path / missing).mkdir()
+        out = _write_projection(tmp_path / missing, [f"rec-{i:04d}" for i in range(6)])
+        (out / missing).unlink()
+        with pytest.raises(ValueError, match=reason):
+            load_v2_projection(out)

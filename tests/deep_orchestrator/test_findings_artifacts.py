@@ -3,34 +3,22 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep.diff import bound_deep_diff
-from daydream.deep.orchestrator import STEPS
-from daydream.extensions.api import EXTENSION_API_VERSION
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.runner import run
-from tests.deep_orchestrator.support import (
-    _eroded_main_repo,
-    _silence_gate_noise,
-)
 from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
     _add_bare_remote,
     _force_interactive,
     _install_stub_backend,
-    _pin_findings_pr,
     _run_deep,
     _silence,
 )
@@ -50,103 +38,7 @@ def _coverage_metadata_keys(value: object) -> set[str]:
     return keys
 
 
-async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
-    raise AssertionError("--findings-out must not post to the PR")
-
-
-def _matching_prompt(calls: list[dict[str, Any]], fragment: str) -> str:
-    return cast(str, next(call["prompt"] for call in calls if fragment in call["prompt"].lower()))
-
-
-def _spy_bound_deep_diff(
-    monkeypatch: pytest.MonkeyPatch, bounded_results: list[str], called_with: list[str] | None = None,
-) -> None:
-    """Patch ``orch_mod.bound_deep_diff`` to record each bounded result."""
-    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
-        if called_with is not None:
-            called_with.append(diff)
-        result = bound_deep_diff(diff, budget)
-        bounded_results.append(result[0])
-        return result
-    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
-
-@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'retained-judgments-refused'])
-async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path, resume: bool,
-) -> None:
-    """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings artifact from the canonical
-    merged items and STOPS -- no PR post, no fix."""
-
-    _silence_gate_noise(monkeypatch)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    backend = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
-
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    out = tmp_path / "findings.json"
-    reviewed_sources = ("api.py", "App.tsx", "README.md")
-    source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
-    config = make_config(multi_stack_target, pr_number=7, findings_out=str(out))
-    rc = await run(config)
-    if resume:
-        assert rc == 0
-        review_calls = sum(review_stage_state(call['prompt']) is not None for call in backend.calls)
-        assert review_calls > 0
-        initial = json.loads(out.read_text())
-        deep = multi_stack_target / '.daydream/deep'
-        (deep / 'review-author-context.json').write_text('[]')
-        config.start_at = 'merge'
-        rc = await run(config)
-        assert sum(review_stage_state(call['prompt']) is not None for call in backend.calls) == review_calls
-        assert rc == 1 and json.loads(out.read_text()) == initial
-        assert (deep / 'review-author-context.json').read_text() == '[]'
-        return
-
-    # (b) exit 0
-    assert rc == 0
-    # (a) artifact written + PR-pinned
-    data = json.loads(out.read_text())
-    assert data["pr_number"] == 7
-    assert data["head_sha"] == pr.head_sha
-    assert data["repo"] == "o/r"
-    assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
-    # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
-    # exists. This is the real "no fix ran" signal: it ignores daydream's own gitignored
-    # artifacts (.daydream/, .review-output.md), which the deep pipeline always writes and
-    # which are not fixes. (An earlier git-status tree-diff conflated those artifacts with
-    # fixes and only passed where a global gitignore happened to mask them.)
-    for name in reviewed_sources:
-        assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
-    assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
-    assert not (multi_stack_target / ".daydream-fix-applied").exists()
-
-async def test_cleanup_keeps_report_on_findings_out_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-
-    _silence_gate_noise(monkeypatch)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-
-    out = multi_stack_target / "findings.json"
-    report = multi_stack_target / REVIEW_OUTPUT_FILE
-    rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), cleanup=True))
-
-    assert rc == 0
-    assert out.exists(), "--findings-out must still write the findings artifact"
-    assert report.exists(), ("--findings-out --cleanup must keep .review-output.md: the run exits 0 but "
-        "was asked to emit the report, so cleanup must not delete it"
-    )
-
 @pytest.mark.parametrize("passed,ignored,exit_code,retries", [
-    pytest.param(True, False, 0, 0, id="passing-suite"),
-    pytest.param(False, False, 1, 1, id="permanently-red-bounded-retry"),
     pytest.param(False, True, 0, 0, id="operator-ignore-records-failure"),
 ])
 async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
@@ -198,81 +90,6 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
         assert stub.test_suite_calls == 0
 
 
-async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    assert await _run_deep(tiny_diff_target, review_profile=independent_alternatives_profile()) == 0
-    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
-    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
-    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
-        assert "diff --git" in prompt, f"{name} prompt did not inline the diff"
-        assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
-    assert "Read the diff file at" not in intent_prompt
-
-@pytest.mark.parametrize("big_name,extra_lines,small_file,alternatives,oversize", [
-    pytest.param("0big.py", 0, None, True, True, id="leading-oversize-block-retained"),
-    pytest.param("zzz.py", 0, "aaa.py", True, False, id="trailing-block-dropped"),
-    pytest.param("big.py", 50, None, False, False, id="bounded-memory-full-disk"),
-])
-async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, big_name: str, extra_lines: int,
-    small_file: str | None, alternatives: bool, oversize: bool,
-) -> None:
-    """Whole-block bounding never lets a prompt silently inline only part of its required files."""
-    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10 + extra_lines))
-    (multi_stack_target / big_name).write_text(big + "\n")
-    files = [big_name]
-    if small_file is not None:
-        (multi_stack_target / small_file).write_text("SMALL_RETAINED_MARKER = 1\n")
-        files.append(small_file)
-    _git(multi_stack_target, "add", *files)
-    _git(multi_stack_target, "commit", "-m", "add over-budget diff")
-    bounded_results: list[str] = []
-    called_with: list[str] = []
-    _spy_bound_deep_diff(monkeypatch, bounded_results, called_with)
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    profile = independent_alternatives_profile() if alternatives else None
-    assert await _run_deep(multi_stack_target, review_profile=profile) == 0
-    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
-    assert called_with == [patch] and len(bounded_results) == 1
-    bounded = bounded_results[0]
-    assert "line 50 of filler content" in patch
-    assert ("line 50 of filler content" in bounded) is oversize
-    assert ("line 500 of filler content" in bounded) is oversize
-    assert (len(bounded.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES) is oversize
-    if oversize:
-        assert patch.startswith("diff --git a/0big.py b/0big.py")
-    else:
-        assert "# daydream: deep diff truncated:" in bounded
-    if alternatives:
-        intent = _matching_prompt(stub.calls, "understand the intent of these changes")
-        wonder = _matching_prompt(stub.calls, "evaluate the implementation")
-        assert "Read the diff file at" in intent and "in the diff at " in wonder and "diff.patch" in wonder
-        for prompt in (intent, wonder):
-            assert "line 500 of filler content" not in prompt and "SMALL_RETAINED_MARKER" not in prompt
-    python_calls = [(call["prompt"], stage) for call in stub.calls
-                    if (stage := review_stage_state(call["prompt"])) is not None
-                    and stage["scope_id"].split("#", 1)[0] == "python" and stage["stage"] == "first_pass"]
-    assert python_calls
-    assert {path for _, stage in python_calls for path in stage["assigned_files"]} == set(files) | {"api.py"}
-    for python_prompt, stage in python_calls:
-        assert "review-assignment" in stage["context_inputs"]
-        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
-        supporting = supporting_contents(python_prompt)
-        scoped_diff = supporting["diff"]
-        scoped_index = json.loads(supporting["hunk-index"])
-        assert set(scoped_index) == set(stage['assigned_files'])
-        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
-        assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
-        assert 'Read the supporting_bundle once' in python_prompt
-        assert "diff --git" not in python_prompt
-    if not oversize:
-        react = _matching_prompt(stub.calls, "you are reviewing the react stack")
-        assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']
-
-
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _silence(monkeypatch)
@@ -285,74 +102,48 @@ async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path,
     # The wonder half never ran, so its artifact is legitimately absent.
     assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
-async def test_folded_tiny_review_preserves_intent_and_empty_alternatives(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
+
+def test_coverage_persistence_keeps_the_primary_failure_and_resume_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The collapsed default review retains intent and the folded alternatives artifact."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, tiny_diff_target)
-    assert await _run_deep(tiny_diff_target) == 0
-    deep = tiny_diff_target / ".daydream" / "deep"
-    assert (deep / "intent.md").read_text().strip()
-    assert json.loads((deep / "alternatives.json").read_text()) == []
+    """A secondary evidence-write error annotates the original failure; foreign evidence never resumes.
+
+    Runner resume tests only delete the coverage file; these owner checks bind the revision and
+    target-decision gates and the primary-error rule without a review run.
+    """
+    from daydream.deep import artifacts
+    from tests.harness.review_result import review_coverage
+
+    stored = review_coverage(scope_ids=('python',))
+    stored.record_scope('python', 'complete')
+
+    def fail_write(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError('coverage disk full')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifacts, 'atomic_write_json', fail_write)
+        primary = RuntimeError('original stage failure')
+        artifacts.persist_review_coverage(tmp_path, stored, error=primary)
+        assert primary.__notes__ == ['Review coverage persistence failed: OSError']
+        with pytest.raises(OSError, match='coverage disk full'):
+            artifacts.persist_review_coverage(tmp_path, stored)
+    artifacts.persist_review_coverage(tmp_path, stored)
+    restore = cast(Any, artifacts.restore_review_coverage)
+    for current, message in ((review_coverage(scope_ids=('python',), head_sha='f' * 40), 'revision'),
+                             (review_coverage(scope_ids=('python',)), 'target decisions are unavailable')):
+        with pytest.raises(ValueError, match=message):
+            restore(tmp_path, current, backend=None, work=None, stacks=[], registry=None,
+                    artifact_session=None, allow_standalone=True)
 
 
-def test_extension_api_version_and_alternatives_step_removal() -> None:
-    assert EXTENSION_API_VERSION == 8
-    names = [s.name for s in STEPS]
-    assert "alternatives" not in names
-    assert "per-stack-reviews" in names
+def test_alternatives_prompt_points_at_the_diff_file_when_no_bounded_copy_is_inlined() -> None:
+    """An over-budget diff is read from disk; the prompt never claims an inline copy it lacks.
 
-@pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
-async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, change: str,
-) -> None:
-    """A resume stops before backend calls when its diff identity cannot be trusted."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
+    The runner journeys inline bounded diffs, so the file-pointer branch is otherwise unreached.
+    """
+    from daydream.phases.review_prompts import build_alternative_review_prompt
 
-    key_file = multi_stack_target / ".daydream" / "deep" / "diff-key"
-    original_key = key_file.read_text().strip()
-    assert original_key
-    if change == "missing-key":
-        key_file.unlink()
-    else:
-        (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-        if change == "committed":
-            _git(multi_stack_target, "add", "api.py")
-            _git(multi_stack_target, "commit", "-m", "change again")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target, start_at="merge") == 1
-    assert stub.calls == []
-    if change != "missing-key":
-        assert key_file.read_text().strip() == original_key
-
-@pytest.mark.parametrize(("stack", "description", "lens"),
-    [pytest.param(
-            "python", "extract the repeated --flag branch pairs into a focused callable", "per-stack", id="python",
-        ),
-        pytest.param(
-            "structure", "structural: the --flag branch pairs grow main() past the extraction threshold", "structural",
-            id="structure",
-        ),
-    ],
-)
-async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stack: str, description: str, lens: str,
-) -> None:
-    _silence(monkeypatch)
-    project = _eroded_main_repo(tmp_path)
-    stub = _install_stub_backend(monkeypatch, project)
-    stub.parse_by_stack = {stack: {
-            "severity": "medium", "confidence": "MEDIUM", "file": "main.py", "line": 3, "description": description,
-        }
-    }
-
-    assert await _run_deep(project) == 0
-    items = json.loads((project / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
-    matching = [item for item in items if item.get("description") == description]
-    assert len(matching) == 1, items
-    assert matching[0]["severity"] == "medium"
-    assert matching[0]["lens"] == lens
+    strategy = 'Intent: {intent_summary}\nRead the diff file at {diff_path} and evaluate it.'
+    prompt = build_alternative_review_prompt(strategy=strategy, intent_summary='Fix greeting', diff_path='d.patch')
+    assert 'Intent: Fix greeting\nRead the diff file at d.patch and evaluate it.' in prompt
+    assert 'inlined below' not in prompt and 'do NOT re-Read' not in prompt

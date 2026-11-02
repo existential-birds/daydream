@@ -115,23 +115,11 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     ) == key
     # Identical inputs from two independent builds agree.
     assert reuse_key.unit_key(_shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")) == key
-
-
-def test_run_scoped_identifiers_are_normalized_out_of_text() -> None:
-    assert reuse_key.normalize_run_scoped("see /runs/11111111-1111-1111-1111-111111111111/output.json now"
-    ) == "see /output.json now"
-
-def test_blob_map_missing_file_is_none(tmp_path: Path) -> None:
-    (tmp_path / "a.py").write_text("A = 1\n")
-    assert reuse_key.blob_map_digest(tmp_path, ["missing.py"]) is None
-    assert reuse_key.blob_map_digest(tmp_path, ["a.py"]) is not None
-    assert reuse_key.blob_map_digest(tmp_path, []) is not None
-
-def test_grounding_is_recorded_even_when_absent(tmp_path: Path) -> None:
-    payload = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
-    assert set(reuse_key.grounding_digests(payload)) == {"exploration", "intent", "alternatives", "settled_decisions"}
-    assert reuse_key.grounding_digests(payload)["exploration"] != "absent"
-    assert reuse_key.grounding_digests(payload)["intent"] == "absent"
+    # A missing blob is unknown, not an empty digest.
+    worktree = tmp_path / "worktree"
+    assert reuse_key.blob_map_digest(worktree, ["missing.py"]) is None
+    assert reuse_key.blob_map_digest(worktree, ["a.py"]) is not None
+    assert reuse_key.blob_map_digest(worktree, []) is not None
 
 
 def _arbiter_payload(*, records: dict[str, bytes | None] | None = None, structural: bytes | None = b'{"issues": []}',

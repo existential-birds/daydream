@@ -5,22 +5,18 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from daydream import git_ops
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
-from daydream.config_file import load_file_config
-from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.extensions import Registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
 from daydream.run_config import RunConfig
-from daydream.runner import run as _run
 from tests.harness.git_helpers import (
     commit as _commit,
     git as _git,
@@ -28,14 +24,9 @@ from tests.harness.git_helpers import (
     work_context,
 )
 from tests.test_deep_orchestrator import (
-    Mute,
-    _force_interactive,
-    _install_stub_backend,
     _merge_item,
     _prime_merge_resume,
     _record,
-    _record_issues,
-    _run_deep,
     _silence,
     _StubBackend,
 )
@@ -67,23 +58,6 @@ def _only_archived_run(archive_dir: Path) -> Path:
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     return run_dirs[0]
-
-
-def _make_record_issue(issues: list[tuple[Any, ...]]) -> Callable[..., str]:
-    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
-        issues.append((repo, title, body))
-        return "https://github.com/owner/repo/issues/1"
-    return _record_issue
-
-
-def _merged_item_files(target: Path) -> list[str]:
-    """Return the ``file`` of every item in the canonical merged-items.json."""
-    return [cast("str", it.get("file")) for it in _merged_items(target / ".daydream" / "deep")]
-
-
-def _merged_item_descriptions(target: Path) -> list[str]:
-    """Return the ``description`` of every item in the canonical merged-items.json."""
-    return [it.get("description", "") for it in _merged_items(target / ".daydream" / "deep")]
 
 
 def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[dict[str, Any]]) -> None:
@@ -153,26 +127,6 @@ def _scan_phase_events(run_root: Path, traj: Path, event: str) -> list[dict[str,
     return found
 
 
-def _root_phase_events(target: Path, phase: str) -> list[dict[str, Any]]:
-    trajectories = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
-    assert len(trajectories) == 1
-    payload = json.loads(trajectories[0].read_text(encoding="utf-8"))
-    return [event for event in payload["extra"]["phase_events"] if event["phase"] == phase]
-
-
-def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
-    """Return N from the failed batched ``Fix these N issues in <file>`` fix turn.
-
-    The deep pipeline may inject an extra structural finding into a file group, so
-    the group size is derived from the batched prompt rather than hard-coded.
-    """
-    for c in stub.calls:
-        m = re.search(r"^Fix these (\d+) issues in (.+):$", c["prompt"], re.M)
-        if m is not None and Path(m.group(2)).name == file_basename:
-            return int(m.group(1))
-    raise AssertionError(f"no batched fix turn found for {file_basename}")
-
-
 def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict[str, Any]]:
     """Match a fix prompt's primary File line, ignoring sibling paths in Allowed files."""
     out: list[dict[str, Any]] = []
@@ -184,23 +138,6 @@ def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict
         if m is not None and Path(m.group(1).strip()).name == file_basename:
             out.append(c)
     return out
-
-
-def _install_accept_gate_pipeline(monkeypatch: pytest.MonkeyPatch, target: Path, mute: Mute) -> _StubBackend:
-    """Accept the interactive fix gate, silence UI, and stub post/test/commit side effects.
-
-    phase_fix stays real; return the installed backend.
-    """
-    _force_interactive(monkeypatch)
-    _silence(monkeypatch, prompts=False)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    mute()
-    return _install_stub_backend(monkeypatch, target)
-
-
-async def _run_loop(target: Path, make_config: Any) -> int:
-    """Run the deep pipeline in loop output mode with *target*'s file config."""
-    return await _run(make_config(target, assume="yes", output_mode="loop", file_config=load_file_config(target),))
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
@@ -220,144 +157,9 @@ def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
     return n
 
 
-def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
-    """Count cross-stack merge-agent prompts (discriminator: 'cross-stack merge agent')."""
-    return sum(1 for c in calls if "cross-stack merge agent" in c["prompt"].lower())
-
-
-def _eroded_main_repo(tmp_path: Path) -> Path:
-    """Build a repo whose feature branch adds an eroded ``main()``: repeated
-    ``--flag value`` / ``--flag=value`` branch pairs with no helper extracted
-    (the SlopCodeBench B.2 canonical shape the anti-slop rubric targets)."""
-    project = tmp_path / "eroded_main"
-    project.mkdir()
-    init = (
-        "import sys\n"
-        "\n"
-        "\n"
-        "def main(argv):\n"
-        "    return 0\n"
-        "\n"
-        "\n"
-        "if __name__ == '__main__':\n"
-        "    raise SystemExit(main(sys.argv))\n"
-    )
-    (project / "main.py").write_text(init)
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    eroded = (
-        "import sys\n"
-        "\n"
-        "\n"
-        "def main(argv):\n"
-        "    if '--verbose value' in argv:\n"
-        "        log('verbose on')\n"
-        "    if '--verbose=value' in argv:\n"
-        "        log('verbose on')\n"
-        "    if '--debug value' in argv:\n"
-        "        log('debug on')\n"
-        "    if '--debug=value' in argv:\n"
-        "        log('debug on')\n"
-        "    if '--color value' in argv:\n"
-        "        log('color on')\n"
-        "    if '--color=value' in argv:\n"
-        "        log('color on')\n"
-        "    return 0\n"
-        "\n"
-        "\n"
-        "def log(msg):\n"
-        "    print(msg)\n"
-        "\n"
-        "\n"
-        "if __name__ == '__main__':\n"
-        "    raise SystemExit(main(sys.argv))\n"
-    )
-    (project / "main.py").write_text(eroded)
-    _git(project, "add", ".")
-    _commit(project, "change: add flag handling inline")
-    return project
-
-
-def _uid_records(deep: Path, stack: str) -> list[dict[str, Any]]:
-    """Return the issues list on disk for *stack*'s per-stack records file."""
-    return _record_issues(json.loads((deep / f"stack-{stack}-records.json").read_text()))
-
-
-def _uid_list(deep: Path, stack: str) -> list[Any]:
-    """Return the ``uid`` of every record on disk for *stack*, in file order."""
-    return [record.get("uid") for record in _uid_records(deep, stack)]
-
-
-def _high_record(**overrides: Any) -> dict[str, Any]:
-    """Build a primed per-stack record the arbiter's severity branch selects.
-
-    ``high`` severity is what makes ``select_arbiter_targets`` pick a record up,
-    and arbitration is the only thing that rewrites the per-stack records files
-    -- so it is also what makes an in-memory ``uid`` observable on disk.
-    """
-    record = {"severity": "high", "confidence": "HIGH", "rationale": "stub", "evidence": "api.py:1"}
-    record.update(overrides)
-    return _record(**record)
-
-
-def _prime_uid_merge_resume(target: Path, python: list[dict[str, Any]]) -> Path:
-    """Prime a resume with only Python eligible for arbitration.
-
-    The structural record occupies api.py:5 alone so contested-location selection
-    cannot pull it into the pass.
-    """
-    return _prime_merge_resume(
-        target, python=python, react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
-        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
-        structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
-    )
-
-
-class _RejectingArbiterBackend(_StubBackend):
-    """Reject one host UID from arbiter-input.json, even when reviewer IDs repeat."""
-
-    def __init__(self, target: Path, reject_uid: str) -> None:
-        super().__init__(target)
-        self._reject_uid = reject_uid
-
-    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
-        if "you are the arbiter" in prompt.lower():
-            self.calls.append({"prompt": prompt, "model": self.model})
-            match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
-            assert match is not None, "arbiter prompt did not point at its input artifact"
-            entries = json.loads(Path(match.group(1)).read_text())
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output={"findings": [{
-                            "arb_id": entry["arb_id"], "keep": entry["uid"] != self._reject_uid,
-                            "severity": entry.get("severity") or "high",
-                            "confidence": entry.get("confidence") or "HIGH",
-                            "description": f"ARBITRATED: {entry.get('description')}",
-                            "rationale": "arbiter second opinion",
-                            "evidence": entry.get("evidence") or "api.py:1",
-                        }
-                        for entry in entries
-                    ]
-                }, continuation=None,
-            )
-            return
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-
 def _merged_items(deep: Path) -> list[dict[str, Any]]:
     """Return the canonical merged item list written under *deep*."""
     return cast("list[dict[str, Any]]", json.loads((deep / "merged-items.json").read_text())["items"])
-
-
-def _run_uid_pool(deep: Path) -> set[str]:
-    """Read the actual on-disk UID pool used to validate shipped source attribution."""
-    return {uid
-        for path in sorted(deep.glob("stack-*-records.json"))
-        for record in _record_issues(json.loads(path.read_text()))
-        if (uid := record.get("uid"))
-    }
 
 
 def _source_uids_by_description(deep: Path) -> dict[str, Any]:
@@ -404,20 +206,6 @@ def _provenance_item(item_id: int, description: str, *, file: str = "api.py", li
     if not omit_source_uids:
         item["source_uids"] = source_uids
     return item
-
-
-async def _fresh_uid_run(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,) -> Path:
-    """Run the standard multi-stack fixture and return its deep artifact directory."""
-    _silence(monkeypatch)
-    mute_side_effects()
-    _install_stub_backend(monkeypatch, target)
-    assert await _run_deep(target) == 0
-    return deep_dir(target, allow_standalone=True)
-
-
-def _item_uids(deep: Path) -> list[str]:
-    """Return the ``item_uid`` of every shipped item, in canonical file order."""
-    return [str(item.get("item_uid")) for item in _merged_items(deep)]
 
 
 def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",

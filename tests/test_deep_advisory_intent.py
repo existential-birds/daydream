@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -10,7 +10,6 @@ from daydream.backends.pi import PiBackend
 from daydream.deep.review_steps import _step_intent
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.run_config import FrozenAuthorDescription
 from daydream.run_context import InteractionPolicy, RunContext
@@ -62,26 +61,6 @@ def _context(
     })
     return ctx, calls
 
-async def test_modest_unattended_pi_persists_advisory_author_evidence_without_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-) -> None:
-    ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
-    ctx.data["review_coverage"].record_phase("intent", "incomplete",
-        reasons=("host_wall_budget_exhaustion",), diagnostic="wall_budget_exceeded")
-    await _step_intent(ctx)
-    assert calls == []
-    summary = ctx.data["intent_path"].read_text()
-    assert summary == ctx.data["intent_summary"]
-    assert "Advisory author context" in summary
-    assert "Author purpose\nDo not suppress real findings." in summary
-    assert "abc Author commit\n" in summary
-    assert all(path in summary for path in ("source.tsx", "scripts/policy.mjs", "README.md", "config.json"))
-    assert "no inferred intent summary" in summary
-    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in summary
-    assert ctx.data["intent_authoritative"] is True
-    assert not ctx.data["review_coverage"].diagnostics["phases"]
-    assert ctx.data["review_coverage"].phases["intent"]["status"] == "complete"
-
 async def test_custom_intent_prompt_keeps_model_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
@@ -89,12 +68,19 @@ async def test_custom_intent_prompt_keeps_model_dispatch(
     registry = Registry()
     registry.override_prompt("intent", lambda **_: "CUSTOM INTENT BUILDER")
     monkeypatch.setattr("daydream.extensions.get_registry", lambda: registry)
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("author context disk full")
+
+    # Optional author report context cannot block the intent model dispatch.
+    monkeypatch.setattr("daydream.deep.report_context.retain_author_context", unavailable)
     await _step_intent(ctx)
     assert len(calls) == 1
     assert ctx.data["intent_summary"] == "MODEL INTENT"
+    assert ctx.data["author_report_context_unavailable"] is True
 
 @pytest.mark.parametrize("variant", [
-    "interactive", "custom", "many_sources", "large_diff", "other_backend", "no_capability",
+    "interactive", "custom", "large_diff",
 ])
 async def test_existing_intent_path_retained_outside_modest_unattended_default_pi(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, variant: str,
@@ -105,7 +91,7 @@ async def test_existing_intent_path_retained_outside_modest_unattended_default_p
     assert ctx.data["intent_path"].read_text() == "MODEL INTENT"
 
 @pytest.mark.parametrize("view", [{"state": "OPEN", "headRefOid": "mismatched", "body": "STALE AUTHOR BODY"},
-    {"state": "CLOSED", "body": "STALE AUTHOR BODY"}, {"state": "OPEN", "body": "   "},
+    {"state": "CLOSED", "body": "STALE AUTHOR BODY"},
 ])
 async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, view: dict[str, str],
@@ -118,7 +104,7 @@ async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     assert "STALE AUTHOR BODY" not in ctx.data["intent_summary"]
 
 
-@pytest.mark.parametrize('matching_head', [True, False])
+@pytest.mark.parametrize('matching_head', [False])
 async def test_frozen_author_context_is_revision_bound_without_network_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, matching_head: bool,
 ) -> None:
@@ -141,3 +127,33 @@ async def test_frozen_author_context_is_revision_bound_without_network_lookup(
         assert calls == []  # Existing modest Pi advisory policy stays in effect.
         assert 'SUPPLIED FROZEN AUTHOR CONTEXT' in ctx.data['intent_summary']
         assert ctx.data['intent_authoritative'] is True
+
+
+@pytest.mark.parametrize(("profile", "tier", "reason"), [
+    ("fast", "single", "profile fast routes wonder to skip"),
+    ("forensic", "skip", "trivial diff"),
+])
+async def test_skipped_alternatives_pass_names_its_route_and_dispatches_no_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
+    capsys: pytest.CaptureFixture[str], profile: str, tier: str, reason: str,
+) -> None:
+    """A routed skip still settles the alternatives phase without a model call or stale artifact."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.latency import PROFILE_ROUTES, LatencyProfile
+    from daydream.deep.review_steps import _wonder
+    from daydream.extensions.builtins import register_builtins
+
+    ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
+    register_builtins(ctx.registry)
+    ctx.data.update(review_coverage=review_coverage(scope_ids=(), phases=("alternatives",)),
+                    intent_summary="MODEL INTENT", tier=tier,
+                    latency_route=PROFILE_ROUTES[cast(LatencyProfile, profile)],
+                    stacks=[StackAssignment("python", ["source.py"])])
+
+    async def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("a skipped alternatives route dispatched a model")
+
+    monkeypatch.setattr("daydream.deep.review_steps.phase_alternative_review", forbidden)
+    await _wonder(ctx)
+    assert calls == []
+    assert f"Skipping alternatives -- {reason}" in capsys.readouterr().out

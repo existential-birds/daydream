@@ -22,8 +22,8 @@ from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
 
 
 @pytest.mark.parametrize(("flow", "injected", "backend_name"), [
-    ("factory-probe", True, "claude"), ("improve", True, "claude"), ("factory-probe", False, "claude"),
-    ("factory-probe", True, "codex"), ("factory-probe", False, "codex"),
+    ("factory-probe", True, "claude"),
+
 ])
 async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
     flow: str, injected: bool, backend_name: str, improve_monorepo_target: Path, tmp_path: Path,

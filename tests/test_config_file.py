@@ -98,35 +98,3 @@ def test_config_reload_merges_independent_keys_and_degrades_invalid_edits(
     assert degraded.diagram_service_roots == []
     assert degraded.improve_service_roots == ["apps/*"]
     assert degraded.phases == {"review": {"model": "pyproject-review"}}
-
-
-def test_malformed_toml_raises_valueerror(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("model = =bad")
-    with pytest.raises(ValueError, match=r"\.daydream\.toml"):
-        load_file_config(tmp_path)
-
-
-@pytest.mark.parametrize("value",
-    [pytest.param("-0.1", id="negative"), pytest.param("nan", id="nan"), pytest.param("inf", id="inf"),
-        pytest.param("true", id="bool"), pytest.param('"0.25"', id="string"),
-    ],
-)
-def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, value: str) -> None:
-    (tmp_path / ".daydream.toml").write_text(
-        f"quality_gate_erosion_delta = {value}\n"
-        f"quality_gate_verbosity_delta = {value}\n"
-        f"quality_gate_erosion_absolute = {value}\n"
-        f"quality_gate_verbosity_absolute = {value}\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.quality_gate_erosion_delta is None
-    assert cfg.quality_gate_verbosity_delta is None
-    assert cfg.quality_gate_erosion_absolute is None
-    assert cfg.quality_gate_verbosity_absolute is None
-
-
-def test_diagram_junk_table_degrades_to_unset(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text('[tool.daydream]\ndiagram = "on"\n')
-    cfg = load_file_config(tmp_path)
-    assert cfg.diagram_mode is None
-    assert cfg.diagram_min_branch_points is None

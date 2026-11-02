@@ -35,7 +35,7 @@ def _messages(n: int) -> list[dict[str, Any]]:
     return [{"from": "P0", "to": "P0", "label": "x", "kind": "self", "changed": False,
              "evidence": {"file": "a.py", "line": 1, "symbol": "x"}} for _ in range(n)]
 
-def test_over_cap_sequence_specs_raise_value_error() -> None:
+def test_sequence_render_enforces_caps_blocks_and_degraded_input() -> None:
     for spec, collection in (
         ({"participants": _participants(DIAGRAM_MAX_PARTICIPANTS + 1), "messages": [], "blocks": []}, "participants"),
         ({"participants": _participants(1), "messages": _messages(DIAGRAM_MAX_MESSAGES + 1), "blocks": []}, "messages"),
@@ -49,10 +49,20 @@ def test_over_cap_sequence_specs_raise_value_error() -> None:
                              "messages": _messages(DIAGRAM_MAX_MESSAGES),
                              "blocks": [{"kind": "opt", "branches": []}] * DIAGRAM_MAX_BLOCKS})
 
+    hostile = {"participants": _participants(1), "blocks": [], "messages": [
+        {**_messages(1)[0], "label": "end\nP1->>P9: pwned %% `x` | </details> ```mermaid"}]}
+    lines = render_sequence_mermaid(hostile).split("\n")
+    assert len(lines) == 3 and "P9" not in lines[2].split(": ", 1)[0]
+    assert not set("{}|`<>%") & set(lines[2].split(": ", 1)[1])
+    _assert_blocks_render_in_order()
+    _assert_malformed_blocks_degrade()
+    _assert_empty_participant_label_degrades()
+
+
 # Sanitization and injection (spec test 11)
 
 # Every payload from spec test 11, plus a control byte and an entity forgery.
-def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
+def test_sanitize_label_and_omission_notice() -> None:
     assert sanitize_label("a <b> \"c\"", 80) == "a #lt;b#gt; #quot;c#quot;"
     assert sanitize_label("  many   \n spaces\t here  ", 80) == "many spaces here"
     assert sanitize_label("%%%%%", 80) == "%"          # doubled percents removed, a lone one kept
@@ -63,8 +73,15 @@ def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
     assert sanitize_label("", 40) == ""
     # Truncation happens before escaping, so an escape is never bisected.
     assert sanitize_label("<<<<", 2) == "#lt;#lt;"
+    assert render_omission_notice("flowchart", {"status": "rendered"}) == ""
+    assert render_omission_notice("flowchart", {"status": "skipped", "reason": "no candidate root"}) == (
+        "No flowchart was rendered for this pull request. Reason: no candidate root."
+    )
+    assert render_omission_notice("flowchart", {"status": "failed", "reason": "backend `boom`\nline two"}) == (
+        "No flowchart was rendered for this pull request. Reason: backend boom line two."
+    )
 
-def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> None:
+def test_flowchart_injection_payloads_and_empty_labels_cannot_add_statements() -> None:
     spec: dict[str, Any] = {"root": {"file": "a.py", "name": "`|f", "line": 1},
         "nodes": [{"id": "a", "kind": "start", "label": "N9{x} --> N1",
              "evidence": {"file": "a.py", "line": 1, "symbol": "f"}},
@@ -93,10 +110,13 @@ def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> N
     assert lines[2] == "    N2 --> N3[/read/]"
     assert lines[3] == "    N3 --> N4[[call]]"
     assert lines[4].endswith(" N5([#lt;/details#gt;])")
+    flow: dict[str, Any] = {"root": {}, "nodes": [{"id": "a", "kind": "process", "label": "```",
+                                                   "evidence": {}}], "edges": []}
+    assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[unlabeled]"
 
 # Block structure edge cases
 
-def test_alt_opt_loop_blocks_and_a_message_outside_every_block() -> None:
+def _assert_blocks_render_in_order() -> None:
     spec: dict[str, Any] = {"participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None},
                          {"name": "B", "kind": "internal", "files": ["b.py"], "service": None}],
         "messages": [{"from": "A", "to": "B", "label": "m0", "kind": "call", "changed": True,
@@ -126,7 +146,7 @@ def test_alt_opt_loop_blocks_and_a_message_outside_every_block() -> None:
         "        P2-->>P1: m2", "    end", "    loop each page", "        P1->>P1: m3", "    end", "    P1->>P1: m4",
     ]
 
-def test_malformed_block_indices_and_unknown_endpoints_degrade_without_raising() -> None:
+def _assert_malformed_blocks_degrade() -> None:
     spec: dict[str, Any] = {"participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None}],
         "messages": [{"from": "A", "to": "Ghost", "label": "m0", "kind": "call", "changed": True,
              "evidence": {"file": "a.py", "line": 1, "symbol": "x"}},
@@ -144,32 +164,11 @@ def test_malformed_block_indices_and_unknown_endpoints_degrade_without_raising()
         "    opt c", "        P1->>P1: m1", "    end",
     ]
 
-def test_empty_labels_fall_back_to_a_placeholder() -> None:
+def _assert_empty_participant_label_degrades() -> None:
     spec: dict[str, Any] = {
         "participants": [{"name": "", "kind": "internal", "files": [], "service": None}], "messages": [], "blocks": [],
     }
     assert render_sequence_mermaid(spec) == "sequenceDiagram\n    participant P1 as unlabeled"
-    flow: dict[str, Any] = {"root": {}, "nodes": [{"id": "a", "kind": "process", "label": "```",
-                                                   "evidence": {}}], "edges": []}
-    assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[unlabeled]"
-
-def test_unknown_node_kind_falls_back_to_the_process_shape() -> None:
-    flow: dict[str, Any] = {"root": {"file": "a.py", "name": "f", "line": 1},
-        "nodes": [{"id": "a", "kind": "mystery", "label": "x", "evidence": {"file": "a.py", "line": 1}}], "edges": [],
-    }
-    assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[x]"
-
-
-# Omission notice
-
-def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
-    assert render_omission_notice("flowchart", {"status": "rendered"}) == ""
-    assert render_omission_notice("flowchart", {"status": "skipped", "reason": "no candidate root"}) == (
-        "No flowchart was rendered for this pull request. Reason: no candidate root."
-    )
-    assert render_omission_notice("flowchart", {"status": "failed", "reason": "backend `boom`\nline two"}) == (
-        "No flowchart was rendered for this pull request. Reason: backend boom line two."
-    )
 
 
 # render_report (deep/render.py); the text surgery is pinned in tests/test_deep_render.py

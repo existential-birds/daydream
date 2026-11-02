@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import threading
-import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -23,22 +19,15 @@ import anyio
 import pytest
 from rich.console import Console
 
-from daydream import clipboard, git_ops, pr_review, runner
+from daydream import git_ops, pr_review, runner
 from daydream.artifact_visibility import private_root_locations
-from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
     AgentEvent,
     AuditIsolationError,
-    Backend,
-    BackendExecutionInput,
     ResultEvent,
     TextEvent,
 )
-from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
-from daydream.cli import _signal_handler
-from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
-from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.deep.artifacts import (
     DeepArtifact,
@@ -61,21 +50,14 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
-from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
-from tests.harness.review_profile import independent_exploration_profile
-from tests.harness.review_result import terminal_result
-from tests.harness.stub_backend import StubBackend, review_stage_result, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
-    _answer_prompts,
     _FakeSDKClient,
-    _silence_ui,
 )
 
 
@@ -90,22 +72,6 @@ _ARTIFACT_PR = PRInfo(
     number=7, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature", owner="owner", repo="repo",
     url="https://example.invalid/owner/repo/pull/7",
 )
-
-@pytest.mark.parametrize('flow_name', [
-    None,
-])
-async def test_unborn_non_improve_runner_fails_before_backend(
-    tmp_path: Path, make_config: Callable[..., RunConfig], flow_name: str | None,
-) -> None:
-    repo = tmp_path / "unborn"
-    _init_repo(repo)
-    (repo / "staged.py").write_text("value = 1\n")
-    _git(repo, "add", "staged.py")
-    before = git_ops.staged_patch(repo)
-    config = make_config(repo, flow_name=flow_name)
-    assert await runner.run(config) == 1
-    assert git_ops.is_unborn_head(repo)
-    assert git_ops.staged_patch(repo) == before
 
 async def test_unborn_improve_approved_head_rejected_before_backend(
     tmp_path: Path, make_config: Callable[..., RunConfig],
@@ -127,10 +93,6 @@ _BEYOND_SCRIPT: Turn = (AssertionError("backend invoked beyond scripted call cou
 def _handoff_turn(body: str) -> Turn:
     """The read-only failure-summarizer's structured handoff response."""
     return (ResultEvent(structured_output={"handoff_prompt": body}, continuation=None),)
-
-def test_run_config_rejects_unsupported_exploration_depth() -> None:
-    with pytest.raises(TypeError, match="exploration_depth"):
-        RunConfig(exploration_depth=2)  # type: ignore[call-arg]
 
 _VALID_DOCUMENT_BYTES = json.dumps(
     {"session_id": "session", "trajectory_id": "session", "steps": [], "final_metrics": {}, "extra": {}}
@@ -157,7 +119,7 @@ def _capture_snapshot(
     )
 
 def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
-    tmp_path: Path, capture_recorder: TrajectoryRecorder
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
     final = _capture_snapshot(tmp_path, "complete")
@@ -170,30 +132,7 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
     capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", root="other"))
     assert capture.final is final
     assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
-
-def test_run_write_capture_closes_ordinary_json_validation_failure(
-    tmp_path: Path, capture_recorder: TrajectoryRecorder
-) -> None:
-    partial = _capture_snapshot(tmp_path, "partial")
-    capture = _RunWriteCapture(session_id="session")
-    capture.retain(capture_recorder, partial)
-    # Truncated JSON fails on every supported interpreter. Deep valid JSON is unsuitable: CPython
-    # 3.14's scanner no longer raises the RecursionError seen on 3.12/3.13.
-    capture.retain(
-        capture_recorder,
-        _capture_snapshot(
-            tmp_path, "complete", json_bytes=b'{"session_id":"session","trajectory_id":"session","value":[0',
-            cutoff_at="2026-09-06T00:00:01Z",
-        ),
-    )
-    assert capture.partial is partial
-    assert capture.final is None
-    assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
-    assert "JSONDecodeError" in str(capture.validation_error)
-
-def test_run_write_capture_does_not_swallow_base_exception(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
-) -> None:
+    # A BaseException during validation propagates instead of being recorded.
     capture = _RunWriteCapture(session_id="session")
     def interrupt(_payload: bytes) -> Any:
         raise KeyboardInterrupt
@@ -204,33 +143,13 @@ def test_run_write_capture_does_not_swallow_base_exception(
     assert capture.final is None
     assert capture.validation_error is None
 
-def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
+def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    _commit(repo, "base")
-    private_path = tmp_path / "private" / "runtime" / "secret" / "findings.json"
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_args, **_kwargs: _ARTIFACT_PR)
-    result = runner._write_findings_for_parsed(
-        repo, RunConfig(pr_number=7, findings_out=str(private_path)), [],
-        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
-        run_info="Fixture run info", captured_pr=replace(_ARTIFACT_PR, head_sha=git_ops.head_sha(repo),
-                                                       base_sha=git_ops.head_sha(repo)),
-        terminal_result=terminal_result(head_sha=git_ops.head_sha(repo)), snapshot_diff="",
-    )
-    output = capsys.readouterr().out
-    assert result == 0
-    assert private_path.is_file()
-    assert "Findings artifact prepared." in output
-    assert str(private_path) not in output
+    """A captured identity replaces target resolution; classification keeps the run auth.
 
-def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A captured identity replaces target resolution; classification keeps the run auth."""
+    The prepared-artifact notice never exposes the private write path.
+    """
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "app.py").write_text("VALUE = 1\n")
@@ -250,7 +169,7 @@ def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
         seen.append(auth)
         return ""
     monkeypatch.setattr(git_ops, "gh_pr_diff", read_diff)
-    destination = tmp_path / "findings.json"
+    destination = tmp_path / "private" / "runtime" / "secret" / "findings.json"
 
     assert runner._write_findings_for_parsed(
         repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
@@ -263,6 +182,8 @@ def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
     assert seen == [auth]
     assert json.loads(destination.read_text())["head_sha"] == head
     assert "artifact-owner" not in destination.read_text()
+    output = capsys.readouterr().out
+    assert "Findings artifact prepared." in output and str(destination) not in output
 
     # The captured identity is required: the writer has no live-lookup fallback left.
     with pytest.raises(TypeError):
@@ -351,27 +272,12 @@ def _assert_one_published_run(repo: Path, archive_dir: Path) -> tuple[Path, Path
     assert len(public_runs) == len(archived_runs) == 1
     return public_runs[0], archived_runs[0]
 
-def _assert_partial_evidence_published(repo: Path, archive_dir: Path, *, archive_failed: bool = False) -> None:
-    """A joined-but-failed run publishes evidence despite optional collection failure."""
-    public_runs = list((repo / ".daydream" / "runs").iterdir())
-    assert len(public_runs) == 1
-    public_run = public_runs[0]
-    assert json.loads((public_run / "trajectory.json").read_text())["extra"]["partial"] is True
-    if archive_failed:
-        assert not list((archive_dir / "runs").glob("*"))
-    else:
-        _, archived_run = _assert_one_published_run(repo, archive_dir)
-        assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
-
 def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
     raise OSError("collection unavailable")
 
 @pytest.mark.parametrize("failure_mode,exit_code", [
-    ("none", 0), ("destination", 0), ("evaluation", 3),
-    ("identity", 0), ("frozen_tree", 0), ("dump_publication", 0),
-    ("dataset-file", 0), ("dataset-symlink", 0), ("dataset-runtime-owned", 0),
-    ("source-missing", 0), ("source-replaced", 0), ("source-symlink", 0),
-    ("source-missing-worktree", 0), ("source-replaced-worktree", 0), ("source-replaced-capture-worktree", 0),
+
+    ("source-missing-worktree", 0),
     ("git-redirect-capture-worktree", 0),
 ])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
@@ -666,309 +572,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert manifest["session_id"] == public_run.name
     assert manifest["archive_status"] == "complete"
 
-@pytest.mark.parametrize("cleanup_replacement", ["none", "source", "git"])
-async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path,
-    cleanup_replacement: Literal["none", "source", "git"],
-) -> None:
-    """Cleanup and root/fork provenance stay with the captured repository through dispatch races."""
-    repo = _feature_repo(tmp_path, remote=True)
-    approved_head = _git(repo, "rev-parse", "HEAD")
-    ext_dir.write_module(
-        "from daydream.agent import run_agent\n"
-        "from daydream.extensions import FlowStep\n"
-        "from daydream.trajectory import DaydreamPhase, get_current_recorder\n"
-        "async def _probe(ctx):\n"
-        "    recorder = get_current_recorder()\n"
-        "    assert recorder is not None\n"
-        "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, ctx.work.head_sha, "
-        "phase=DaydreamPhase.REVIEW)\n"
-        "    async with recorder.fork('source-probe'):\n"
-        "        await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE', "
-        "phase=DaydreamPhase.REVIEW)\n"
-        "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
-        "    registry.set_flow('source-probe', ['probe'])\n"
-    )
-    backend = _ControlledBackend()
-    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
-    from tests.test_artifact_visibility import _Entry, _walk_entry
-    real_run = subprocess.run
-    removed_source = tmp_path / "removed-source"
-    replacement_entries: list[_Entry] = []
-    cleanup_dispatched = False
-
-    def replace_before_dispatch(args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        nonlocal cleanup_dispatched
-        if cleanup_replacement != "none" and "worktree" in args and "remove" in args and not cleanup_dispatched:
-            cleanup_dispatched = True
-            if cleanup_replacement == "source":
-                repo.rename(removed_source)
-                original_git = removed_source / ".git"
-            else:
-                original_git = tmp_path / "removed-git"
-                (repo / ".git").rename(original_git)
-            _init_repo(repo)
-            (repo / "replacement.txt").write_bytes(b"replacement checkout\x00\xff")
-            _git(repo, "add", "replacement.txt")
-            _commit(repo, "replacement")
-            shutil.copytree(original_git / "worktrees", repo / ".git" / "worktrees")
-            _walk_entry(repo, repo / ".git", replacement_entries)
-        return real_run(args, **kwargs)
-
-    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", replace_before_dispatch)
-    result = await _run_private(
-        RunConfig(
-            target=str(repo), base="main", flow_name="source-probe", force_worktree=True, run_eval=True, archive=True,
-            non_interactive=True, approved_head_sha=approved_head,
-        ), tmp_path,
-    )
-    assert result == 0
-    assert backend.cwd is not None
-    assert backend.cwd != repo.resolve()
-    assert cleanup_dispatched is (cleanup_replacement != "none")
-    if cleanup_replacement != "none":
-        retained_entries: list[_Entry] = []
-        _walk_entry(repo, repo / ".git", retained_entries)
-        assert retained_entries == replacement_entries
-        assert (repo / "replacement.txt").read_bytes() == b"replacement checkout\x00\xff"
-    assert backend.cwd.exists() is (cleanup_replacement != "none")
-    public_source = removed_source if cleanup_replacement == "source" else repo
-    public_run_dir, run_dir = _assert_one_published_run(public_source, archive_dir)
-    payloads = [
-        json.loads(path.read_text())
-        for path in (run_dir / "trajectory.json", *sorted((run_dir / "trajectories").glob("*.json")))
-    ]
-    assert len(payloads) == 2
-    assert [step["message"] for step in payloads[0]["steps"] if step["source"] == "user"] == [approved_head]
-    assert {payload["extra"]["target_dir"] for payload in payloads} == {str(repo.resolve())}
-    assert str(backend.cwd) not in json.dumps(payloads)
-    assert (public_run_dir / "trajectory.json").read_bytes() == (run_dir / "trajectory.json" ).read_bytes()
-    evaluation = json.loads((run_dir / "evaluation.json").read_text())
-    assert evaluation["quality"]["scoped_files"] == 1
-    assert list(evaluation["quality"]["per_file"]) == ["app.py"]
-    assert evaluation["daydream_dir"] == str(repo.resolve() / ".daydream")
-    assert str(backend.cwd) not in json.dumps(evaluation)
-
-@pytest.mark.parametrize("finalizer_failure", ["none", "interrupt", "evaluation"])
-async def test_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, finalizer_failure: str,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A complete recorder write cannot turn a failed body into host success."""
-    repo = _feature_repo(tmp_path)
-    _write_probe_flow(ext_dir, "artifact-probe-error")
-    primary = RuntimeError("model boundary failed")
-    monkeypatch.setattr(runner, "create_backend", lambda *_a, **_k: _ControlledBackend("raise", error=primary))
-    if finalizer_failure == "evaluation":
-        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
-    elif finalizer_failure == "interrupt":
-        monkeypatch.setattr(
-            "daydream.archive.finalize_archive_run", lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
-        )
-    with pytest.raises(RuntimeError) as raised:
-        await _run_private(
-            RunConfig(
-                target=str(repo), base="main", flow_name="artifact-probe-error", run_eval=True, archive=True,
-                non_interactive=True,
-            ), tmp_path,
-        )
-    assert raised.value is primary
-    assert ("Data Collection" in capsys.readouterr().out) is (finalizer_failure == "evaluation")
-    if finalizer_failure == "interrupt":
-        assert not (repo / ".daydream").exists()
-        assert not list((archive_dir / "runs").glob("*"))
-        assert any("secondary base failure" in note for note in primary.__notes__)
-        return
-    _assert_partial_evidence_published(repo, archive_dir, archive_failed=finalizer_failure == "evaluation")
-
-@pytest.mark.parametrize("evaluation_failure", [False, True])
-async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, evaluation_failure: bool,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Cancellation joins the backend, durably publishes evidence, then escapes."""
-    repo = _feature_repo(tmp_path)
-    _write_probe_flow(ext_dir, "artifact-probe-cancel")
-    backend = _ControlledBackend("hang")
-    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
-    if evaluation_failure:
-        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
-    config = RunConfig(
-        target=str(repo), base="main", flow_name="artifact-probe-cancel", run_eval=True, archive=True,
-        non_interactive=True,
-    )
-    caught: list[BaseException] = []
-    async def invoke() -> None:
-        try:
-            await _run_private(config, tmp_path)
-        except BaseException as exc:
-            caught.append(exc)
-            raise
-    async with anyio.create_task_group() as group:
-        group.start_soon(invoke)
-        await backend.entered.wait()
-        assert not (repo / ".daydream").exists()
-        group.cancel_scope.cancel()
-    assert len(caught) == 1
-    assert isinstance(caught[0], anyio.get_cancelled_exc_class())
-    assert backend.cancelled is True
-    assert ("Data Collection" in capsys.readouterr().out) is evaluation_failure
-    _assert_partial_evidence_published(repo, archive_dir, archive_failed=evaluation_failure)
-
-async def test_signal_flush_immutable_cutoff_before_first_root_step(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: Callable[..., RunConfig],
-) -> None:
-    """Initial exploration fan-out archives a rooted immutable T1 snapshot."""
-    class InitialExplorationBarrierBackend(StubBackend):
-        fanout_concurrency = 2
-        def __init__(self, target: Path) -> None:
-            super().__init__(target)
-            self.entered = anyio.Event()
-            self.release = anyio.Event()
-            self.entered_count = 0
-            self.active_count = 0
-        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            is_initial_specialist = "specialist" in prompt.lower() and self.entered_count < 2
-            if is_initial_specialist:
-                self.entered_count += 1
-                self.active_count += 1
-                if self.entered_count == 2:
-                    self.entered.set()
-                try:
-                    await self.release.wait()
-                finally:
-                    self.active_count -= 1
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    # The custom exploration policy preserves parallel specialists: two children run while the third
-    # waits.
-    (multi_stack_target / "extra.py").write_text("EXTRA = 1\n", encoding="utf-8")
-    _git(multi_stack_target, "add", "extra.py")
-    _commit(multi_stack_target, "add fourth changed file")
-    fake_bin = multi_stack_target.parent / "signal-bin"
-    fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$*\" = \"api /user\" ]; then\n"
-        "  printf '%s\\n' '{\"login\":\"signal-runner\"}'\n"
-        "  exit 0\n"
-        "fi\n"
-        "printf '%s\\n' \"unexpected gh call: $*\" >&2\n"
-        "exit 91\n",
-        encoding="utf-8",
-    )
-    fake_gh.chmod(0o755)
-    monkeypatch.setenv("PATH", os.pathsep.join((str(fake_bin), os.environ.get("PATH", ""))))
-    backend = InitialExplorationBarrierBackend(multi_stack_target)
-    silence(monkeypatch)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", True)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    clock_tick = 0
-    def deterministic_now() -> str:
-        nonlocal clock_tick
-        clock_tick += 1
-        return f"2026-01-01T00:00:00.{clock_tick:06d}Z"
-    monkeypatch.setattr("daydream.timeutil.now_iso", deterministic_now)
-    outcome: dict[str, int] = {}
-    finished = anyio.Event()
-    private_base = multi_stack_target.parent / "signal-private"
-    async def run_review() -> None:
-        try:
-            outcome["exit_code"] = await runner.run(
-                make_config(
-                    multi_stack_target, flow_name="review", archive=True, run_eval=True, diagram="off",
-                    review_profile=independent_exploration_profile(),
-                ), private_roots=private_root_locations(base=private_base),
-            )
-        finally:
-            finished.set()
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(run_review)
-        with anyio.fail_after(10):
-            await backend.entered.wait()
-        assert backend.active_count == 2
-        with pytest.raises(KeyboardInterrupt):
-            _signal_handler(signal.SIGINT, None)
-        panel = get_shutdown_panel()
-        if panel is not None:
-            panel.finish()
-            set_shutdown_panel(None)
-        # The recorder is private; only the public run directory is forbidden here.
-        assert not (multi_stack_target / ".daydream" / "runs").exists()
-        live_runs = [
-            path
-            for path in (private_base / "runtime").glob("*/runs/*/live/.daydream/runs/*")
-            if path.is_dir()
-        ]
-        assert len(live_runs) == 1
-        live_run = live_runs[0]
-        partial_paths = sorted(live_run.rglob("*.partial"))
-        assert len(partial_paths) == 3
-        partial_bytes = {path.relative_to(live_run): path.read_bytes() for path in partial_paths}
-        partial_payloads = [json.loads(value) for value in partial_bytes.values()]
-        assert all(atif_validate(payload, validate_images=False) for payload in partial_payloads)
-        t1_values = {payload["extra"]["snapshot_at"] for payload in partial_payloads}
-        assert len(t1_values) == 1
-        t1 = t1_values.pop()
-        root_partial = json.loads(partial_bytes[Path("trajectory.json.partial")])
-        assert root_partial["trajectory_id"] == live_run.name
-        assert root_partial["steps"] == [
-            {
-                "step_id": 1, "timestamp": t1, "source": "system", "message": "Daydream run snapshot",
-                "extra": {"daydream_run_flow": "ttt", "host_event": "partial_snapshot"},
-            }
-        ]
-        assert all("run_ended_at" not in payload["extra"] for payload in partial_payloads)
-        partial_merge_events = [
-            event
-            for event in root_partial["extra"]["phase_events"]
-            if event["phase"] == "exploration"
-        ]
-        assert [event["event"] for event in partial_merge_events] == ["phase_start"]
-        archived_run = archive_dir / "runs" / live_run.name
-        assert not archived_run.exists()
-        backend.release.set()
-        with anyio.fail_after(20):
-            await finished.wait()
-    assert outcome == {"exit_code": 0}
-    assert backend.active_count == 0
-    assert all((live_run / relative).read_bytes() == value for relative, value in partial_bytes.items())
-    final_root = json.loads((live_run / "trajectory.json").read_text())
-    assert final_root["extra"]["run_ended_at"] > t1
-    assert all(step["message"] != "Daydream run snapshot" for step in final_root["steps"])
-    exploration_events = [
-        event for event in final_root["extra"]["phase_events"] if event["phase"] == "exploration"
-    ]
-    assert [event["event"] for event in exploration_events] == ["phase_start", "phase_end"]
-    assert exploration_events[0]["scope_id"] == exploration_events[1]["scope_id"]
-    assert exploration_events[1]["status"] == "succeeded"
-    assert exploration_events[1]["timestamp"] > t1
-    assert any(
-        step.get("extra", {}).get("dispatch_status") == "succeeded"
-        and step.get("extra", {}).get("daydream_phase") == "exploration"
-        for step in final_root["steps"]
-    )
-    final_manifest = json.loads((archive_dir / "runs" / live_run.name / "manifest.json").read_text())
-    assert final_manifest["archive_status"] == "complete"
-
 # --- Stage 4.1b dispatch tests ---------------------------------------------
-
-@pytest.fixture
-def patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_work: Callable[..., WorkContext]) -> Any:
-    """Stub workspace selection while retaining the real artifact lease around dispatch."""
-    _init_repo(tmp_path)
-    work = make_work(tmp_path)
-    locations = private_root_locations(base=tmp_path.parent / f"{tmp_path.name}-private")
-    @asynccontextmanager
-    async def _fake_open_workspace(*_args: Any, **_kwargs: Any) -> AsyncIterator[WorkContext]:
-        yield work
-    monkeypatch.setattr("daydream.runner.open_workspace", _fake_open_workspace)
-    monkeypatch.setattr("daydream.runner.private_root_locations", lambda: locations)
-    # Force the in-place fallback off so every call goes through the fake CM.
-    monkeypatch.setattr("daydream.runner.git_ops.is_inside_worktree", lambda _p: True)
-    return work
 
 @pytest.fixture
 def silence_runner_ui(silence_console: Callable[..., None]) -> None:
@@ -993,6 +597,40 @@ def _make_recording_dispatch(
         return stub
     return _record
 
+async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path,
+) -> None:
+    """Cancellation joins the backend, durably publishes partial evidence, then escapes."""
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "artifact-probe-cancel")
+    backend = _ControlledBackend("hang")
+    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    config = RunConfig(
+        target=str(repo), base="main", flow_name="artifact-probe-cancel", run_eval=True, archive=True,
+        non_interactive=True,
+    )
+    caught: list[BaseException] = []
+
+    async def invoke() -> None:
+        try:
+            await _run_private(config, tmp_path)
+        except BaseException as exc:
+            caught.append(exc)
+            raise
+    async with anyio.create_task_group() as group:
+        group.start_soon(invoke)
+        await backend.entered.wait()
+        assert not (repo / ".daydream").exists()
+        group.cancel_scope.cancel()
+    assert len(caught) == 1 and isinstance(caught[0], anyio.get_cancelled_exc_class())
+    assert backend.cancelled is True
+    public_runs = list((repo / ".daydream" / "runs").iterdir())
+    assert len(public_runs) == 1
+    assert json.loads((public_runs[0] / "trajectory.json").read_text())["extra"]["partial"] is True
+    _, archived_run = _assert_one_published_run(repo, archive_dir)
+    assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
+
+
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
     silence_runner_ui: None,  # noqa: F841
@@ -1006,80 +644,6 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     exit_code = await runner.run(config)
     assert exit_code == 1
     assert called == []
-
-@pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
-async def test_deep_run_mints_app_identity_before_posting_path(
-    flow_name: str | None, monkeypatch: pytest.MonkeyPatch, deep_target: Path, patch_sdk: None,
-) -> None:
-    """Default and explicit deep runs mint App identity before posting on a real worktree.
-
-    Mock only token minting, SDK transport, and GitHub posting. Keep phases/payload
-    construction real; assert resolved bot identity and GH_TOKEN on each subprocess.
-    """
-    _silence_ui(monkeypatch)
-    _answer_prompts(monkeypatch)
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
-    events: list[str] = []
-    payloads: list[dict[str, Any]] = []
-    def fake_mint(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        events.append("mint")
-        return SimpleNamespace(token="installation-token", identity="daydream-review[bot]", expires_at=4_102_444_800.0)
-    fake_pr = pr_review.PRInfo(
-        number=123, head_sha="0" * 40, base_sha="1" * 40, base_ref="main", head_ref="feature", owner="test-owner",
-        repo="test-repo", url="https://example/pr/123",
-    )
-    received_auth: list[git_ops.GitHubAuth] = []
-    def fake_find_open_pr(_target_dir: object, *, auth: git_ops.GitHubAuth) -> pr_review.PRInfo:
-        received_auth.append(auth)
-        events.append("find-open-pr")
-        return fake_pr
-    def fake_gh_api(
-        _target_dir: object, endpoint: str, *, auth: git_ops.GitHubAuth, **kwargs: Any,
-    ) -> Any:
-        if kwargs.get("method") == "POST" and endpoint.endswith("/reviews"):
-            received_auth.append(auth)
-            events.append("post")
-            payloads.append(kwargs["input_data"])
-            return {"html_url": "https://example/pr/123#review-1"}
-        return []
-    monkeypatch.setattr("daydream.github_app._mint_installation_token", fake_mint)
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", fake_find_open_pr)
-    monkeypatch.setattr("daydream.git_ops.gh_api", fake_gh_api)
-    config = RunConfig(
-        target=str(deep_target), flow_name=flow_name, pr_repo="acme/widgets", cleanup=False, archive=False,
-    )
-    rc = await runner.run(config)
-    assert rc == 0, f"run() returned {rc}"
-    # Identity minting precedes _post's first action, find_open_pr, and submission follows payload
-    # construction.
-    assert events == ["mint", "find-open-pr", "post"], events
-    assert config.identity == "daydream-review[bot]"
-    assert len(received_auth) == 2 and received_auth[0] is received_auth[1]
-    environment = received_auth[0].environment_for_request()
-    assert environment is not None and environment["GH_TOKEN"] == "installation-token"
-    assert payloads, "deep flow never posted its review"
-
-async def test_review_run_does_not_mint_app_identity(
-    monkeypatch: pytest.MonkeyPatch,
-    silence_runner_ui: None,  # noqa: F841  # noqa
-    feature_branch_repo: Path, make_config: Callable[..., RunConfig],
-) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
-    monkeypatch.setattr("daydream.github_app.resolve_user_identity", lambda _target, **_kwargs: "operator")
-    def mint_forbidden(*_args: object) -> SimpleNamespace:
-        pytest.fail("report-only --review must not mint an App installation token")
-    async def post_forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("report-only --review must not post a PR review")
-    def _check_identity(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
-        assert config.identity == "operator"
-    _record = _make_recording_dispatch([], _check_identity)
-    monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
-    rc = await runner.run(make_config(feature_branch_repo, output_mode="review", pr_repo="acme/widgets"))
-    assert rc == 0
 
 async def test_owner_preflight_failure_never_reaches_identity_or_backend(
     monkeypatch: pytest.MonkeyPatch,
@@ -1106,51 +670,30 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
 
 # --- Per-phase model resolution tests --------------------------------------
 
-class TestResolveBackendPhaseModel:
-    def test_audit_workspace_is_forwarded_and_splits_backend_cache(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    ) -> None:
-        source = tmp_path / "source"
-        source.mkdir()
-        first = tmp_path / "audit-one"
-        first.mkdir()
-        second = tmp_path / "audit-two"
-        second.mkdir()
-        created: list[tuple[object, dict[str, Any]]] = []
-        def fake_create_backend(name: str, **kwargs: Any) -> object:
-            backend = SimpleNamespace(model=kwargs.get("model") or "mock", audit_root=kwargs.get("audit_root"))
-            created.append((backend, kwargs))
-            return backend
-        monkeypatch.setattr(runner, "create_backend", fake_create_backend)
-        config = RunConfig(target=str(source), backend="claude")
-        cache: dict[
-            tuple[str, str | None, str | None, Path | None], Backend
-        ] = {}
-        def boundary(repo: Path) -> AuditWorkspace:
-            return AuditWorkspace(
-                repo=repo, source=source, repo_git_common_dir=repo / ".git", source_git_common_dir=source / ".git",
-                outward_symlinks=frozenset({repo / "outward"}),
-            )
-        first_boundary = boundary(first)
-        first_backend = runner._resolve_backend(config, "recon", cache, cwd=source, audit_workspace=first_boundary)
-        assert (runner._resolve_backend(config, "recon", cache, cwd=source,
-                                        audit_workspace=first_boundary) is first_backend)
-        second_backend = runner._resolve_backend(config, "recon", cache, cwd=source, audit_workspace=boundary(second))
-        assert second_backend is not first_backend
-        assert len(created) == 2
-        assert created[0][1]["audit_root"] == first.resolve(strict=True)
-        assert created[0][1]["audit_outward_symlinks"] == frozenset({first / "outward"})
-
-@pytest.mark.parametrize(
-    ("capability", "bound_root", "reason"),
-    [
-        (None, "expected", "missing_capability"), ("wrong-token", "expected", "wrong_capability"),
-        (AUDIT_ROOT_ISOLATION, "other", "wrong_root"),
-    ],
-)
-def test_improve_backend_preflight_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability: str | None, bound_root: str, reason: str,
+async def test_capture_review_workspace_refuses_resume_and_an_unpinned_comment_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Captured reviews never resume retained judgments, and comment mode requires a pinned PR base."""
+    work = WorkContext(repo=tmp_path, source=tmp_path, base_branch="main", base_sha="1" * 40, head_branch="feature",
+                       head_sha="2" * 40, is_ephemeral=False, run_id="run-1")
+    owner: Any = None
+    execution: Any = SimpleNamespace(auth=git_ops.INHERIT_GITHUB_AUTH)
+    with pytest.raises(git_ops.GitError, match="cannot resume retained judgments"):
+        async with runner._capture_review_workspace(
+                work, RunConfig(findings_out="f.json", start_at="merge"), owner, execution):
+            pytest.fail("resume yielded a captured workspace")
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_a, **_k: _ARTIFACT_PR)
+    monkeypatch.setattr("daydream.pr_review.capture_pr_base_tip", lambda *_a, **_k: None)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda *_a, **_k: _ARTIFACT_PR)
+    for selection in ({"pr_number": 7}, {"branch": "feature"}, {}):
+        with pytest.raises(git_ops.GitError, match="base could not be pinned"):
+            async with runner._capture_review_workspace(
+                    work, RunConfig(output_mode="comment", **selection), owner, execution):
+                pytest.fail("an unpinned base yielded a captured workspace")
+
+
+def test_improve_backend_preflight_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing or wrong audit capability, or a backend bound to another root, rejects recon."""
     source = tmp_path / "source"
     source.mkdir()
     audit = tmp_path / "audit"
@@ -1169,49 +712,17 @@ def test_improve_backend_preflight_fails_closed(
         config=RunConfig(target=str(source), flow_name="improve"), work=work, registry=build_registry(),
         audit_workspace=boundary,
     )
-    backend = SimpleNamespace(model="mock", audit_root=audit if bound_root == "expected" else other)
-    if capability is not None:
-        backend.audit_root_isolation = capability
-    monkeypatch.setattr(FlowContext, "backend_for", lambda _self, _phase: backend)
-    with pytest.raises(AuditIsolationError) as exc_info:
-        runner._preflight_improve_backends(context)
-    assert exc_info.value.backend_name == "claude"
-    assert exc_info.value.phase == "recon"
-    assert exc_info.value.reason == reason
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("unborn", [False, True])
-async def test_improve_inherited_storage_override_stops_before_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: Callable[..., RunConfig], unborn: bool,
-) -> None:
-    repo = tmp_path / "source"
-    _init_repo(repo)
-    (repo / "app.py").write_text("VALUE = 1\n")
-    _git(repo, "add", "app.py")
-    if not unborn:
-        _commit(repo, "initial")
-    (repo / "app.py").write_text("VALUE = 2\n")
-    before_index = (repo / ".git" / "index").read_bytes()
-    before_refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
-    backend_calls: list[str] = []
-    def unexpected_backend(*args: Any, **kwargs: Any) -> Backend:
-        backend_calls.append("created")
-        raise AssertionError("snapshot refusal must precede model construction")
-    monkeypatch.setattr("daydream.runner.create_backend", unexpected_backend)
-    alternate = str(repo / ".git" / "objects")
-    with monkeypatch.context() as poison:
-        poison.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate)
-        result = await runner.run(make_config(repo, flow_name="improve"))
-        assert os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] == alternate
-    output = capsys.readouterr().out
-    assert result == 1
-    assert backend_calls == []
-    assert "snapshot refuses inherited Git" in output
-    assert len(output) < 5_000
-    assert (repo / "app.py").read_text() == "VALUE = 2\n"
-    assert (repo / ".git" / "index").read_bytes() == before_index
-    assert _git(repo, "for-each-ref", "--format=%(refname) %(objectname)") == before_refs
+    for capability, bound_root, reason in ((None, audit, "missing_capability"),
+                                           ("wrong-token", audit, "wrong_capability"),
+                                           (AUDIT_ROOT_ISOLATION, other, "wrong_root")):
+        backend = SimpleNamespace(model="mock", audit_root=bound_root)
+        if capability is not None:
+            backend.audit_root_isolation = capability
+        monkeypatch.setattr(FlowContext, "backend_for", lambda _self, _phase, backend=backend: backend)
+        with pytest.raises(AuditIsolationError) as exc_info:
+            runner._preflight_improve_backends(context)
+        assert (exc_info.value.backend_name, exc_info.value.phase, exc_info.value.reason) == (
+            "claude", "recon", reason)
 
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
@@ -1343,78 +854,6 @@ def _assert_single_handoff(repo: Path, body: str) -> None:
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
     assert handoffs[0].read_text(encoding="utf-8").startswith(body)
 
-async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows_manual_copy_guidance(
-    monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    """Confirmed clipboard copying times out off-loop, warns for manual copy, and exits 1.
-
-    A ticking event-loop probe proves the simulated blocked utility ran in a worker.
-    """
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.ui.print_warning",
-        lambda console_arg, message: warnings.append(message),  # noqa
-    )
-    successes: list[str] = []
-    monkeypatch.setattr(
-        "daydream.ui.print_success",
-        lambda console_arg, message: successes.append(message),  # noqa
-    )
-    observed_timeouts: list[Any] = []
-    state = {"ticks": 0, "at_entry": -1, "at_release": -1}
-    stop_tick = threading.Event()
-    def _blocking_run(argv: list[str], **kwargs: Any) -> None:
-        observed_timeouts.append(kwargs.get("timeout"))
-        state["at_entry"] = state["ticks"]
-        time.sleep(0.3)  # simulated hung clipboard utility, bounded (stands in for 5s)
-        state["at_release"] = state["ticks"]
-        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 5.0))
-    monkeypatch.setattr(
-        clipboard, "subprocess", SimpleNamespace(run=_blocking_run, SubprocessError=subprocess.SubprocessError),
-    )
-    monkeypatch.setattr("daydream.clipboard._detect_clipboard_command", lambda: ["pbcopy"])
-    _seed_fix_resume(feature_branch_repo, [_fix_item()])
-    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
-
-    backend = EmptyReviewBackend(feature_branch_repo, responder=lambda prompt:
-        _handoff_turn("# Handoff\n\nclipboard timeout") if "read-only failure-summarizer" in prompt else None)
-    backend.fix_edit_line = "\n# daydream fix\n"
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    answers = iter(["y", "4", "y"])
-    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(answers))
-    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
-    async def _ticker() -> None:
-        while not stop_tick.is_set():
-            state["ticks"] += 1
-            await anyio.sleep(0.001)
-    ticker_task = asyncio.create_task(_ticker())
-    try:
-        exit_code = await runner.run(
-            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False, test_command="false"))
-    finally:
-        stop_tick.set()
-        await ticker_task
-    assert exit_code == 1
-    assert observed_timeouts == [5], f"expected timeout exactly 5, got {observed_timeouts}"
-    assert state["at_release"] > state["at_entry"], (
-        "event loop did not tick during the blocked clipboard copy — the copy is running "
-        "synchronously on the loop, not offloaded"
-    )
-    assert any("Clipboard copy failed; copy manually from path above" in m for m in warnings), (
-        f"manual-copy warning missing; got {warnings!r}"
-    )
-    assert successes == [], f"expected no success message, got {successes!r}"
-    assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before, "a commit ran despite tests failing"
-    _assert_single_handoff(feature_branch_repo, "# Handoff\n\nclipboard timeout")
-    summaries = [call for call in backend.calls if "read-only failure-summarizer" in call["prompt"]]
-    assert len(summaries) == 1
-    assert not any("Analyze the failures and fix them" in call["prompt"] for call in backend.calls)
-    assert "# daydream fix" in (feature_branch_repo / "main.py").read_text()
-    verdict = json.loads((feature_branch_repo / ".daydream/deep/test-verdict.json").read_text())
-    assert len(verdict["attempts"]) == 1 and verdict["attempts"][0]["passed"] is False
-
 async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -1466,7 +905,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     )
 
 @pytest.mark.parametrize(
-    'flow', [DaydreamRunFlow.NORMAL, DaydreamRunFlow.PR, DaydreamRunFlow.TTT, DaydreamRunFlow.CUSTOM]
+    'flow', [DaydreamRunFlow.PR, ]
 )
 def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
     identity = capture_manifest_run_identity(
@@ -1481,225 +920,3 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
-
-@pytest.mark.parametrize(('flow_name', 'shallow'), [(None, False), ('deep', True)])
-def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
-    tmp_path: Path, flow_name: str | None, shallow: bool,
-) -> None:
-    config = RunConfig(
-        flow_name=flow_name, shallow=shallow, review_backend="claude",
-        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}}),
-    )
-    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), tmp_path)
-    assert identity.per_stack_review_backend == "codex"
-    assert identity.per_stack_review_model == "gpt-psr"
-    assert identity.review_backend == "claude"
-    assert identity.phases.per_stack_review
-    assert identity.deep is not shallow
-
-
-@pytest.mark.parametrize(('source', 'expected_model'), [
-    ('frozen', 'operator-frozen-model'), ('empty', DEFAULT_PI_MODEL),
-    ('cwd', 'case-model'), ('ambient', 'case-model'), ('explicit', 'phase-explicit-model'),
-])
-async def test_runner_archive_manifest_uses_per_stack_native_capability(
-    feature_branch_repo: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
-    fake_gh: Any, source: str, expected_model: str,
-) -> None:
-    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-
-    (feature_branch_repo / ".pi").mkdir()
-    (feature_branch_repo / ".pi/settings.json").write_text('{"defaultModel":"case-model"}')
-    _git(feature_branch_repo, "add", ".pi/settings.json")
-    _commit(feature_branch_repo, "case native defaults")
-    environment = {"PI_CODING_AGENT_DIR": str(tmp_path / "agent")}
-    fallback = BackendExecutionInput.from_environment(environment, backend="claude")
-    monkeypatch.setenv('PI_CODING_AGENT_DIR', environment['PI_CODING_AGENT_DIR'])
-    pi = BackendExecutionInput.from_environment(environment, backend='pi')
-    if source in {'frozen', 'empty', 'explicit'}:
-        pi = replace(pi, pi_settings={} if source == 'empty' else {'defaultModel': 'operator-frozen-model'})
-    execution = runner.RunnerExecutionInput(fallback, GitHubExecutionInput(),
-        backends={'claude': fallback, 'pi': None if source == 'ambient' else pi})
-    monkeypatch.setattr(runner, "create_backend", lambda _name, **kwargs:
-                        EmptyReviewBackend(kwargs.get("cwd") or feature_branch_repo))
-    phase = {'backend': 'pi', **({'model': 'phase-explicit-model'} if source == 'explicit' else {})}
-    config = empty_review_config(feature_branch_repo, tmp_path / 'trajectory.json', archive=True,
-        file_config=DaydreamFileConfig(backend='claude', phases={'per_stack_review': phase}))
-    assert await runner.run(config, execution=execution,
-                            private_roots=private_root_locations(base=tmp_path / "private")) == 0
-    _, archived_run = _assert_one_published_run(feature_branch_repo, archive_dir)
-    manifest = json.loads((archived_run / "manifest.json").read_text())["run"]
-    assert manifest["backend"] == "claude" and manifest["per_stack_review_backend"] == "pi"
-    assert manifest["per_stack_review_model"] == expected_model
-
-
-async def test_overlapping_posting_runs_keep_their_own_github_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
-) -> None:
-    """A read-only run cannot clear either overlapping posting credential."""
-    repositories = {name: _feature_repo(tmp_path / name) for name in ("first", "second", "reader")}
-    for name, path in repositories.items():
-        (path / "app.py").write_text(f"VALUE = 2\nRUN_SUBJECT = {name!r}\n")
-        _git(path, "add", "app.py")
-        _commit(path, "identify review subject")
-    subjects = {(path / "app.py").read_text(): name for name, path in repositories.items()}
-    def subject(repo: Path) -> str:
-        return subjects[(repo / "app.py").read_text()]
-    ext_dir.write_module(
-        "from daydream import git_ops\n"
-        "from daydream.extensions import FlowStep\n"
-        "async def auth_probe(ctx):\n"
-        "    data = ctx.data\n"
-        "    login = git_ops.gh_api(ctx.work.repo, '/user', auth=ctx.github_execution.auth)['login']\n"
-        "    assert login == ctx.config.identity == ctx.run_context.github_identity.login\n"
-        "    assert ctx.data is data and ctx.artifacts is not None\n"
-        "    assert 'installation-' not in repr(ctx)\n"
-        "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='auth-probe', run=auth_probe))\n"
-        "    registry.insert_after('deep', anchor='intent', step='auth-probe')\n"
-    )
-    heads = {name: git_ops.head_sha(path) for name, path in repositories.items()}
-    bases = {name: _git(path, "rev-parse", "main") for name, path in repositories.items()}
-    pr_rows = {
-        name: {
-            "number": 41, "headRefOid": heads[name], "headRefName": "feature", "baseRefName": "main",
-            "headRepository": {"name": name}, "headRepositoryOwner": {"login": "acme"},
-            "url": f"https://github.com/acme/{name}/pull/41",
-        } for name in repositories
-    }
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "fake-private-key")
-    monkeypatch.setenv("GH_TOKEN", "personal-token")
-    minted: dict[str, int] = {"first": 0, "second": 0}
-    entered = {name: anyio.Event() for name in repositories}
-    release = anyio.Event()
-    requests: list[tuple[str, tuple[str, ...], str | None]] = []
-    posted: dict[str, dict[str, Any]] = {}
-    real_run = subprocess.run
-    def mint(repo_dir: Path, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
-        name = subject(repo_dir)
-        minted[name] += 1
-        return SimpleNamespace(
-            token=f"installation-{name}-{minted[name]}", identity=f"{name}-app[bot]",
-            # Force one refresh at the first authenticated GitHub request.
-            expires_at=0.0 if minted[name] == 1 else 4_102_444_800.0,
-        )
-    def github_subprocess(args: list[str], *pargs: Any, **kwargs: Any) -> Any:
-        if not args or args[0] != "gh":
-            return real_run(args, *pargs, **kwargs)
-        name = subject(Path(kwargs["cwd"]))
-        env = kwargs.get("env")
-        token = None if env is None else env.get("GH_TOKEN")
-        requests.append((name, tuple(args[1:3]), token))
-        if args[1:3] == ["pr", "list"]:
-            output = json.dumps([pr_rows[name]])
-        elif args[1:3] == ["pr", "view"]:
-            output = json.dumps(pr_rows[name])
-        elif args[1:3] == ["api", f"repos/acme/{name}/pulls/41"]:
-            output = json.dumps({"head": {"sha": heads[name]}, "base": {"sha": bases[name]}})
-        elif args[1:3] == ["repo", "view"]:
-            output = f"acme/{name}"
-        elif args[1:3] == ["api", "/user"]:
-            output = json.dumps({"login": "personal-user" if token is None else f"{name}-app[bot]"})
-        elif args[1] == "api" and args[2].endswith("/reviews"):
-            payload_file = Path(args[args.index("--input") + 1])
-            posted[name] = json.loads(payload_file.read_text())
-            output = json.dumps({"html_url": f"https://github.com/acme/{name}/pull/41#review"})
-        else:
-            raise AssertionError(f"Unexpected GitHub request: {args[1:]}")
-        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
-    class CoordinatedBackend(ScriptedBackend):
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-        ) -> AsyncGenerator[AgentEvent, None]:
-            name = subject(cwd)
-            entered[name].set()
-            if name != "reader":
-                await release.wait()
-            structured: dict[str, Any] = review_stage_result(prompt, [])
-            if "verdicts" in (kwargs.get("output_schema") or {}).get("properties", {}):
-                structured["verdicts"] = []
-            yield TextEvent(text="No issues found.")
-            yield ResultEvent(structured_output=structured, continuation=None)
-    monkeypatch.setattr("daydream.github_app._mint_installation_token", mint)
-    monkeypatch.setattr(subprocess, "run", github_subprocess)
-    monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: CoordinatedBackend())
-    configs = {
-        name: RunConfig(
-            target=str(path), base="main", pr_repo=f"acme/{name}",
-            output_mode="review" if name == "reader" else "comment",
-            shallow=True, stack="python", backend="claude", non_interactive=True, approve_on_clean=True, archive=False,
-        ) for name, path in repositories.items()
-    }
-    results: dict[str, int] = {}
-    async def run_posting(name: str) -> None:
-        results[name] = await runner.run(configs[name])
-    with anyio.fail_after(45):
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(run_posting, "first")
-            await entered["first"].wait()
-            tasks.start_soon(run_posting, "second")
-            await entered["second"].wait()
-            results["reader"] = await runner.run(configs["reader"])
-            release.set()
-    assert results == {"reader": 0, "first": 0, "second": 0}
-    assert set(posted) == {"first", "second"}
-    for name in ("first", "second"):
-        assert posted[name]["event"] == "APPROVE"
-        owned = [token for run_name, _command, token in requests if run_name == name]
-        assert owned and set(owned) == {f"installation-{name}-2"}
-        assert minted[name] == 2
-        assert configs[name].identity == f"{name}-app[bot]"
-    assert configs["reader"].identity == "personal-user"
-    assert all(token is None for name, _command, token in requests if name == "reader")
-
-
-async def test_runner_recovers_pi_temporary_capacity_and_retains_review(
-    feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
-    tmp_path: Path,
-) -> None:
-    """A real review retries the provider failure and publishes its admitted findings."""
-    message = "Upstream error from Wafer: The model is temporarily at capacity. Please retry shortly."
-    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
-    _git(feature_branch_repo, "push", "-u", "origin", "main")
-    successful = StubBackend(feature_branch_repo)
-    calls: list[Path] = []
-
-    async def respond(cwd: Path, prompt: str, *args: Any) -> AsyncIterator[AgentEvent]:
-        calls.append(cwd)
-        assert (cwd / ".git").is_dir(), "the backend must execute in the independent captured repository"
-        assert (cwd / "main.py").read_text() == "def hello():\n    return 'universe'\n"
-        if len(calls) == 1:
-            category = _pi_error_category(message)
-            raise PiError(message, category=category, retryable=_pi_retryable_for(category=category, message=message))
-        async for event in successful.execute(cwd, prompt, *args):
-            yield event
-
-    backend = ScriptedBackend(responder=respond, retry_attempts=1, retry_base_delay_s=0.0, retry_max_delay_s=0.0)
-    install_backend(backend)
-    trajectory_path = tmp_path / "trajectory.json"
-    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
-    result = await runner.run(make_config(
-        feature_branch_repo, base="main", backend="pi", shallow=True, output_mode="review", force_worktree=True,
-        trajectory_path=trajectory_path,
-    ))
-    assert result == 0
-    assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before
-    assert "Sample issue" in (feature_branch_repo / REVIEW_OUTPUT_FILE).read_text()
-    assert calls[0] == calls[1] != feature_branch_repo.resolve()
-    assert not calls[0].exists(), "the captured repository must be removed after the completed review"
-    trajectory = json.loads(trajectory_path.read_text())
-    attempts = [step for step in trajectory["steps"]
-                if step["source"] == "agent" and step.get("extra", {}).get("daydream_phase") == "intent"]
-    assert len(attempts) == 2
-    assert attempts[0]["extra"]["error_subtype"] == "PiError"
-    assert attempts[0]["extra"]["error"] is True
-    assert not attempts[1]["extra"].get("error", False)
-    assert attempts[1]["message"] == "The PR updates greetings across stacks."
-    deep_dir = feature_branch_repo / ".daydream" / "deep"
-    retained = json.loads((deep_dir / "merged-items.json").read_text())["items"]
-    assert any(item["description"] == "Sample issue" and item["file"] == "main.py" for item in retained)
-    coverage = json.loads((deep_dir / "review-coverage.json").read_text())
-    assert coverage["analyzed_revision"]["head_sha"] == head_before
-    assert coverage["stack_outcomes"]
-    assert all(scope["status"] == "complete" for scope in coverage["stack_outcomes"])

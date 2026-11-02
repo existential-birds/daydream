@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
+import signal
 from typing import Any
 
 import pytest
 
+from daydream import run_context
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -26,7 +25,6 @@ class _EqualBackend(ScriptedBackend):
 
 
 
-
 def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
     def prompt(_console: Any, message: str, _default: str) -> str:
@@ -40,7 +38,7 @@ def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPa
     assert unattended.choice("free form", default=".", safe_default="safe") == "safe"
     assert prompts == ["free form"]
 
-def test_backend_registration_is_identity_aware_and_reference_counted() -> None:
+def test_backend_registration_is_identity_aware_and_reference_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _EqualBackend()
     sibling = _EqualBackend()
     first = resolve_run_context()
@@ -67,40 +65,24 @@ def test_backend_registration_is_identity_aware_and_reference_counted() -> None:
         assert active_backends()[0] is backend
     assert first.active_backends() == ()
     assert active_backends() == ()
+    # A same-thread signal snapshot must neither deadlock nor leak membership.
+    interrupted = ScriptedBackend()
 
-def test_signal_snapshot_reenters_registration_and_interrupted_enter_cleans_up() -> None:
-    """A same-thread signal snapshot must neither deadlock nor leak membership."""
-    script = textwrap.dedent(
-        """
-        import signal
+    def interrupt(_signum: int, _frame: object) -> None:
+        assert run_context.active_backends() == (interrupted,)
+        raise KeyboardInterrupt
 
-        import daydream.run_context as runtime
+    class InterruptingRegistry(dict[object, Any]):
+        def __setitem__(self, key: object, value: Any) -> None:
+            super().__setitem__(key, value)
+            signal.raise_signal(signal.SIGINT)
 
-        backend = object()
-        context = runtime.RunContext(runtime.InteractionPolicy())
-
-        def interrupt(_signum, _frame):
-            assert runtime.active_backends() == (backend,)
-            raise KeyboardInterrupt
-
-        class InterruptingRegistry(dict):
-            def __setitem__(self, key, value):
-                super().__setitem__(key, value)
-                signal.raise_signal(signal.SIGINT)
-
-        signal.signal(signal.SIGINT, interrupt)
-        runtime._active_registrations = InterruptingRegistry()
-        try:
-            with context.backend_registration(backend):
-                raise AssertionError("registration enter should have been interrupted")
-        except KeyboardInterrupt:
-            pass
-        else:
-            raise AssertionError("signal did not interrupt registration enter")
-
-        assert context.active_backends() == ()
-        assert runtime.active_backends() == ()
-        """
-    )
-
-    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True, timeout=5,)
+    monkeypatch.setattr(run_context, "_active_registrations", InterruptingRegistry())
+    previous = signal.signal(signal.SIGINT, interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt), first.backend_registration(interrupted):
+            raise AssertionError("registration enter should have been interrupted")
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert first.active_backends() == ()
+    assert active_backends() == ()

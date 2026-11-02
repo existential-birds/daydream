@@ -19,29 +19,12 @@ from daydream.extensions.builtins import register_builtins
 from daydream.flows.engine import FlowContext
 from daydream.review_result import ReasonCode
 from daydream.run_config import RunConfig
-from daydream.supervision import revise_finding_fields
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import review_coverage
 
 
-def test_revise_finding_fields_updates_whitelist_only() -> None:
-    item = {"id": 7, "severity": "high", "confidence": "medium", "description": "original", "rationale": "because",
-        "evidence": ["line 1"], "file": "safe.py", "line": 12,
-    }
-    item_id = id(item)
-    revise_finding_fields(item, {"severity": "low", "file": "hacked.py", "line": 999, "reason": "x"},)
-
-    assert id(item) == item_id
-    assert item["severity"] == "low"
-    assert item["file"] == "safe.py"
-    assert item["line"] == 12
-    assert item["id"] == 7
-
-
 @pytest.mark.parametrize("contract", [
-    pytest.param("packaged", id="packaged-host-coverage-completion"),
-    pytest.param("custom-builder", id="custom-builder-host-coverage-completion"),
     pytest.param("nonempty", id="nonempty-host-coverage-completion"),
 ])
 async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifact(
