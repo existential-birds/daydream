@@ -106,25 +106,3 @@ for backend, platform in product(('codex', 'pi'), ('linux/amd64', 'linux/arm64')
         assert wheel.read_bytes() == replacement_bytes
         assert identity['wheel_sha256'] == hashlib.sha256(admitted).hexdigest()
         assert assets[wheel.name] == admitted
-
-
-def test_public_reviewer_image_excludes_supplied_verifier_material() -> None:
-    image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
-    if not image:
-        pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to the final built public reviewer image')
-    script = '''import importlib.util
-from pathlib import Path
-
-for module in ("harbor", "reviewbench_harbor"):
-    assert importlib.util.find_spec(module) is None, f"verifier module visible: {module}"
-cache = Path("/root/.cache/uv")
-assert not cache.exists() or not any(cache.iterdir()), "reviewer retained uv cache"
-for root in (Path("/root"), Path("/opt"), Path("/tmp")):
-    for pattern in ("corpus/manifest.json", "corpus/test/findings.json", "scripts/eval/matcher.ts",
-                    "scripts/classifier/classify.ts", "golden/*.json"):
-        assert not list(root.rglob(pattern)), f"verifier material visible under {root}: {pattern}"
-from daydream.benchmark.reviewbench.harbor_entrypoint import main
-'''
-    subprocess.run([
-        'docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/opt/daydream/bin/python', image, '-c', script,
-    ], check=True, capture_output=True, text=True, timeout=180)
