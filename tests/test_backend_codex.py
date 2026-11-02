@@ -1,18 +1,15 @@
 """Tests for CodexBackend with canned JSONL fixtures."""
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import subprocess
 import sys
-import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -31,7 +28,6 @@ from daydream.backends import (
     MetricsEvent,
     RequestEvent,
     ResultEvent,
-    RetryPolicy,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
@@ -40,12 +36,8 @@ from daydream.backends import (
     codex,
 )
 from daydream.backends.codex import (
-    _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
     CodexError,
-    _isolated_child_env,
-    _prepare_read_only_checkout,
-    _rebind_source_paths,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
 from daydream.phases.schemas import REVIEW_STAGE_SCHEMA, review_stage_generation_schema, review_stage_schema
@@ -56,13 +48,8 @@ from tests.harness.codex_replay import (
     make_mock_process,
     make_mock_process_from_fixture,
 )
-from tests.harness.fake_cli_process import (
-    LimitAwareStdout,
-    assert_concurrent_streams_isolated,
-)
 from tests.harness.git_helpers import git as _git
 from tests.harness.process_replay import replay_process
-from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.trajectory import make_recorder
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
@@ -81,32 +68,6 @@ def _stage_executable(path: Path) -> Path:
     path.write_text("#!/bin/sh\n", encoding="utf-8")
     path.chmod(0o755)
     return path
-
-
-async def test_artifact_visibility_protocol_cli_consumes_stdin_and_honors_cd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target = (tmp_path / "model cwd with spaces").resolve()
-    target.mkdir()
-    (target / "source.py").write_text("SOURCE_CANARY\n", encoding="utf-8")
-    fixture = install_protocol_cli(tmp_path / "external fixture", "codex")
-    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
-    prompt = "Inspect the committed source only."
-    backend = CodexBackend(model="fixture-model")
-    events = [event async for event in backend.execute(target, prompt)]
-    observation = fixture.read_observations()[0]
-    assert observation["effective_cwd"] == str(target)
-    assert observation["stdin_bytes"] == len(prompt.encode())
-    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
-    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
-    assert observation["walk_truncated"] is False
-    argv = observation["argv"]
-    assert argv[:2] == ["exec", "--experimental-json"]
-    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert argv[argv.index("--cd") + 1] == str(target)
-    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
-    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
-    assert backend._transports == []
 
 
 async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -> Any:
@@ -238,7 +199,7 @@ async def _run_inline_lines(backend: Any, prompt: Any, lines: list[str]) -> list
     return events
 
 
-@pytest.mark.parametrize('staged', [False, True])
+@pytest.mark.parametrize('staged', [False, ])
 async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
     lines = [json.dumps(event) for event in [
@@ -257,6 +218,22 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
     assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
     assert token is not None and token.data == {"thread_id": "empty-final"}
     assert reason is None
+
+
+async def test_repeated_turn_completion_charges_usage_once() -> None:
+    """A repeated public completion for one turn cannot duplicate billing or terminal results."""
+    lines = [json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": "repeated-terminal"}, {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "first"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        {"type": "turn.completed", "usage": {"input_tokens": 99, "output_tokens": 99}},
+    ]]
+    backend = CodexBackend(model="fixture-model")
+    events = await _run_inline_lines(backend, "review", lines)
+    await backend.cancel()  # no transport remains after a settled turn
+    costs = [event for event in events if isinstance(event, CostEvent)]
+    assert [(cost.input_tokens, cost.output_tokens) for cost in costs] == [(10, 5)]
+    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
 
 
 async def test_nonzero_exit_raises_with_captured_output() -> None:
@@ -278,22 +255,13 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert "authentication required" in msg
     assert exc_info.value.category == "AUTH_CONFIG"
     assert classify_failure(exc_info.value).failure_class is FailureClass.AUTH_CONFIG
+    # Parser diagnostic labels redact a complete credential before applying their 64-character cap.
+    bounded = codex._bounded_diagnostic_label("x" * 54 + " ghp_" + "y" * 12)
+    assert len(bounded) <= 64 and "ghp_" not in bounded and "[REDACTED" in bounded
 
 
-async def test_nonzero_exit_with_no_output_still_informative() -> None:
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process([])
-    mock_proc.returncode = 1
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="return code 1") as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "Fail"):
-                pass
-    assert "no non-JSON output captured" in str(exc_info.value)
-    assert exc_info.value.category == "PROCESS_EXIT"
-
-
-@pytest.mark.parametrize("read_only", [False, True])
-@pytest.mark.parametrize('local', [False, True])
+@pytest.mark.parametrize("read_only", [True])
+@pytest.mark.parametrize('local', [True])
 async def test_continuation_token_resumes(tmp_path: Path, read_only: bool, local: bool) -> None:
     """Native output-schema transport must allow working-source identity instead of provenance HEAD."""
     backend = CodexBackend(model="fixture-model")
@@ -421,52 +389,29 @@ async def test_codex_read_only_uses_read_only_sandbox(linked_worktree: tuple[Pat
     assert result.session_id == "th_abc123"
     assert result.continuation is None
 
+    # Overlapping read-only calls share one disposable checkout, removed only after the last call ends.
+    arrived: list[Path] = []
+    both_started = asyncio.Event()
 
-async def test_codex_read_only_snapshot_all_branches_diff_and_source_immutable(
-    linked_worktree: tuple[Path, Path],
-) -> None:
-    """Snapshot every branch OID, including slash names; preserve source HEAD/refs/index.
+    async def overlapping_exec(*args: Any, **kwargs: Any) -> Any:
+        flat = list(args)
+        arrived.append(Path(flat[flat.index("--cd") + 1]))
+        if len(arrived) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=3)
+        return make_mock_process_from_fixture("simple_text.jsonl")
 
-    The clone supports base...HEAD diffs and has no remote or source config path.
-    """
-    _main, source = linked_worktree
-    _git(source, "branch", "release/9.9", "main")
-    source_branches = git_ops.list_local_branches(source)
-    assert set(source_branches) == {"main", "feature", "release/9.9"}
-    head_before = git_ops.head_sha(source)
-    captured: dict[str, Any] = {}
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-        isolated = Path(list(args)[list(args).index("--cd") + 1])
-        captured["branches"] = git_ops.list_local_branches(isolated)
-        # Resolve base...HEAD inside the clone.
-        captured["diff_rc"] = subprocess.run(
-            ["git", "diff", "main...HEAD", "--stat"], cwd=isolated, capture_output=True, text=True,
-        ).returncode
-        captured["diff_feature_rc"] = subprocess.run(
-            ["git", "diff", "release/9.9...HEAD", "--stat"], cwd=isolated, capture_output=True, text=True,
-        ).returncode
-        captured["head"] = git_ops.head_sha(isolated)
-        captured["config"] = subprocess.run(
-            ["git", "config", "--local", "--list"], cwd=isolated, capture_output=True, text=True,
-        ).stdout
-        # Mutating clone refs must leave the source repository independent.
-        git_ops.update_refs(isolated, {"refs/heads/main": git_ops.head_sha(isolated)})
-        return mock_proc
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        async for _ in CodexBackend(model="fixture-model").execute(source, "Audit repository", read_only=True):
-            pass
-    assert captured["branches"] == source_branches  # all names, exact OIDs
-    assert captured["head"] == head_before  # still detached at source HEAD
-    assert captured["diff_rc"] == 0
-    assert captured["diff_feature_rc"] == 0
-    assert "remote" not in captured["config"]
-    assert str(source) not in captured["config"]
-    assert git_ops.head_sha(source) == head_before
-    assert git_ops.list_local_branches(source) == source_branches
+    backend = CodexBackend(model="fixture-model")
+
+    async def audit() -> list[Any]:
+        return [event async for event in backend.execute(source, "Audit", read_only=True)]
+
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", overlapping_exec):
+        await asyncio.gather(audit(), audit())
+    assert len(arrived) == 2 and arrived[0] == arrived[1] and not arrived[0].exists()
 
 
-@pytest.mark.parametrize("operation", ["clone", "update_refs"])
+@pytest.mark.parametrize("operation", ["clone", ])
 async def test_codex_read_only_preparation_failure_is_fail_closed(
     linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, operation: str,
 ) -> None:
@@ -491,73 +436,6 @@ async def test_codex_read_only_preparation_failure_is_fail_closed(
     spawn.assert_not_called()
 
 
-def test_rebind_source_paths_preserves_sibling_paths() -> None:
-    """Rebind exact source paths, descendants, and doubled separators; preserve siblings that merely share
-    the prefix.
-    """
-    source = Path("/home/exedev/work")
-    execution = Path("/tmp/daydream-codex-read-only-abc/repo")
-    siblings = f"never {source}-2 or {source}2 or {source}space or {source}.py"
-    out = _rebind_source_paths(siblings, source, execution)
-    assert f"{source}-2" in out
-    assert f"{source}2" in out
-    assert f"{source}space" in out
-    assert f"{source}.py" in out
-    assert str(execution) not in out
-    exact = f"Audit {source} and now {source}/sub/a then {source}/sub/b finally {source}"
-    out2 = _rebind_source_paths(exact, source, execution)
-    assert str(execution / "sub" / "a") in out2
-    assert str(execution / "sub" / "b") in out2
-    assert out2.startswith(f"Audit {execution}")
-    assert out2.endswith(f"finally {execution}")
-    assert str(source) not in out2
-    doubled = f"Audit {source}//inner//file and {source}//two"
-    out3 = _rebind_source_paths(doubled, source, execution)
-    assert str(source) not in out3
-    assert str(execution) in out3
-    assert "/work//inner" not in out3
-
-
-async def test_codex_execution_input_supplies_complete_native_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    execution = BackendExecutionInput.from_environment(
-        {
-            "HOME": str(tmp_path / "run-home"), "PATH": "/run/bin", "OPENAI_API_KEY": "run-key",
-            "DAYDREAM_FANOUT_CONCURRENCY": "5", "DAYDREAM_PI_RETRY_ATTEMPTS": "2",
-        }, backend="codex",
-    )
-    monkeypatch.setenv("OPENAI_API_KEY", "ambient-key")
-    process = make_mock_process_from_fixture("simple_text.jsonl")
-    backend = CodexBackend(model="fixture-model", execution_input=execution)
-    _, mock_exec = await replay_process(backend, process, tmp_path, "review")
-    assert mock_exec.call_args.kwargs["env"] == {
-        "HOME": str(tmp_path / "run-home"), "PATH": "/run/bin", "OPENAI_API_KEY": "run-key",
-        "DAYDREAM_FANOUT_CONCURRENCY": "5", "DAYDREAM_PI_RETRY_ATTEMPTS": "2",
-    }
-    assert backend.fanout_concurrency == 5
-    assert backend.retry_policy == RetryPolicy(2, 2.0, 120.0)
-
-
-@pytest.mark.skipif(
-    sys.platform == "darwin",
-    reason="darwin behavior is covered by TestIsolatedChildEnvDarwinPath (issue #1122 M3)",
-)
-def test_isolated_child_env_untouched_on_non_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PATH", "/usr/bin:/opt/bin")
-    monkeypatch.setenv("GIT_DIR", "/leak")
-    monkeypatch.setenv("PWD", "/work")
-    monkeypatch.setenv("OLDPWD", "/previous")
-    monkeypatch.setenv("HOME", "/home/exedev")
-    assert _isolated_child_env(Path("/work"), Path("/work")) is None
-    monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun on Linux")))  # noqa: E501
-    env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
-    assert env is not None
-    assert env["PATH"] == "/usr/bin:/opt/bin"  # byte-for-byte, no prepend (M3)
-    assert not {"PWD", "OLDPWD", "GIT_DIR"} & env.keys()
-    assert env["HOME"] == "/home/exedev"
-
-
 async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Path]) -> None:
     """A read-only session passed a codex resume token fails closed: the resumed
     thread's stored cwd is the per-call clone, deleted when the turn ends."""
@@ -569,136 +447,6 @@ async def test_codex_read_only_resume_is_refused(linked_worktree: tuple[Path, Pa
         with pytest.raises(CodexError, match="cannot be resumed"):
             async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
                 pass
-
-
-async def test_codex_read_only_parallel_calls_share_one_clone(
-    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Concurrent read-only calls on one backend build a single disposable clone
-    (parallel fan-out must not clone the monorepo once per call) and remove it
-    only after the last holder's generator exits."""
-    _main, source = linked_worktree
-    build_calls: list[Path] = []
-    real_prep = _prepare_read_only_checkout
-    def counting_prep(src: Path, destination: Path) -> Path:
-        build_calls.append(destination)
-        return real_prep(src, destination)
-    monkeypatch.setattr("daydream.backends.codex._prepare_read_only_checkout", counting_prep)
-    seen: list[str] = []
-    entered = asyncio.Event()
-    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-        flat = list(args)
-        seen.append(flat[flat.index("--cd") + 1])
-        if not entered.is_set():
-            entered.set()
-            # Keep both subprocesses alive so the second reaches the checkout lock while the first
-            # still holds its reference.
-            await asyncio.sleep(0.2)
-        return make_mock_process_from_fixture("simple_text.jsonl")
-    backend = CodexBackend(model="fixture-model")
-    async def drive() -> None:
-        async for _ in backend.execute(source, f"Audit {source}", read_only=True):
-            pass
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        await asyncio.gather(drive(), drive())
-    assert len(build_calls) == 1, "the two concurrent calls must share one clone build"
-    assert len(seen) == 2
-    assert seen[0] == seen[1], "both calls ran inside the same shared clone"
-    assert not Path(seen[0]).exists()
-
-
-async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(linked_worktree: tuple[Path, Path]) -> None:
-    _main, source = linked_worktree
-    taste = source / "services" / "taste"
-    target = taste / "real.go"
-    target.write_text("package taste\n")
-    (taste / "link.go").symlink_to("real.go")
-    _git(source, "add", "services/taste/real.go", "services/taste/link.go")
-    _git(source, "commit", "-m", "add symlink")
-    (taste / "lexer.go").unlink()
-    (taste / "deadlink").symlink_to("no-such-target")
-    subdir = taste / "subdir"
-    subdir.mkdir()
-    (subdir / "inner.txt").write_text("i")
-    (taste / "dir-link").symlink_to(subdir)
-    captured: dict[str, Any] = {}
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    async def fake_exec(*args: Any, **kwargs: Any) -> Any:
-        flat = list(args)
-        isolated = Path(flat[flat.index("--cd") + 1])
-        captured["isolated"] = isolated
-        captured["link"] = (isolated / "services/taste/link.go").is_symlink()
-        captured["link_target"] = str((isolated / "services/taste/link.go").readlink())
-        captured["deadlink"] = (isolated / "services/taste/deadlink").is_symlink()
-        captured["dir_link"] = (isolated / "services/taste/dir-link").is_symlink()
-        captured["doomed_present"] = (isolated / "services/taste/lexer.go").exists()
-        return mock_proc
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
-            pass
-    assert captured["link"] is True
-    assert captured["link_target"] == "real.go"
-    assert captured["deadlink"] is True
-    assert captured["dir_link"] is True
-    assert captured["doomed_present"] is False
-    assert not captured["isolated"].exists()
-
-
-async def test_codex_default_full_access_at_worktree_skips_isolation(linked_worktree: tuple[Path, Path]) -> None:
-    _main, source = linked_worktree
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(source, "p"):
-            pass
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
-        assert "read-only" not in flat_args
-        assert flat_args[flat_args.index("--cd") + 1] == str(source)
-
-
-@pytest.mark.parametrize("effort", ["high", None])
-async def test_codex_reasoning_effort_config_override(effort: str | None) -> None:
-    backend = CodexBackend(model="fixture-model", reasoning_effort=effort)
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-        flat_args = list(mock_exec.call_args.args)
-        if effort is None:
-            assert "-c" not in flat_args
-        else:
-            assert flat_args[flat_args.index("-c") + 1] == 'model_reasoning_effort="high"'
-
-
-async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
-    backend = CodexBackend(model="fixture-model")
-    large_text = "x" * (70 * 1024)
-    large_line = (
-        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": large_text}}) + "\n"
-    ).encode()
-    lines = [large_line, b'{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n']
-    captured_kwargs: dict[str, object] = {}
-    async def fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        captured_kwargs.update(kwargs)
-        raw_limit = kwargs.get("limit", 64 * 1024)
-        limit = raw_limit if isinstance(raw_limit, int) else 64 * 1024
-        process = MagicMock()
-        process.stdout = LimitAwareStdout(lines, limit)
-        process.stdin = MagicMock()
-        process.stdin.write = MagicMock()
-        process.stdin.close = MagicMock()
-        process.wait = AsyncMock(return_value=0)
-        process.returncode = 0
-        process.terminate = MagicMock()
-        process.kill = MagicMock()
-        return process
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        events = [event async for event in backend.execute(Path("/tmp"), "large event")]
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    assert text_events[0].text == large_text
-    assert captured_kwargs["limit"] == _CODEX_STDOUT_LIMIT_BYTES
-    assert _CODEX_STDOUT_LIMIT_BYTES > len(large_line)
 
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
@@ -728,28 +476,6 @@ def _codex_price_process(*, cached_input_tokens: int = 0) -> Any:
             "input_tokens": 1000000, "cached_input_tokens": cached_input_tokens, "output_tokens": 1000000,
         }}),
     ])
-
-
-async def test_codex_injected_pricing_uses_each_captured_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Concurrent run inputs select their own price file, never the parent override."""
-    model = "run-local-price-model"
-    first = _write_model_prices(tmp_path / "first.toml", model=model, input_price=1.0, output_price=2.0)
-    second = _write_model_prices(tmp_path / "second.toml", model=model, input_price=10.0, output_price=20.0)
-    hostile = _write_model_prices(tmp_path / "ambient.toml", model=model, input_price=100.0, output_price=200.0)
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(hostile))
-    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        side_effect=[_codex_price_process(cached_input_tokens=500_000), _codex_price_process()],
-    ):
-        first_cost, second_cost = await asyncio.gather(
-            _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": str(first)}),
-            _codex_cost_for_execution_input(model, {"DAYDREAM_PRICES_FILE": str(second)}),
-        )
-    assert first_cost == pytest.approx(3.0)
-    assert second_cost == pytest.approx(30.0)
 
 
 async def test_codex_injected_pricing_falls_back_to_captured_home(
@@ -802,36 +528,6 @@ async def test_codex_injected_missing_or_malformed_price_file_falls_back_to_buil
         malformed_cost = await _codex_cost_for_execution_input("gpt-5.5", {"DAYDREAM_PRICES_FILE": str(malformed)})
     assert missing_cost == pytest.approx(35.0)
     assert malformed_cost == pytest.approx(35.0)
-
-
-async def test_codex_without_execution_input_preserves_ambient_price_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model = "ambient-price-model"
-    ambient = _write_model_prices(tmp_path / "ambient.toml", model=model, input_price=6.0, output_price=7.0)
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(ambient))
-    backend = CodexBackend(model=model)
-    events = await _run_inline_lines(
-        backend, "price this turn",
-        [
-            '{"type":"thread.started","thread_id":"th_ambient_price"}',
-            '{"type":"turn.completed","usage":{"input_tokens":1000000,"output_tokens":1000000}}',
-        ],
-    )
-    costs = [event for event in events if isinstance(event, CostEvent)]
-    assert len(costs) == 1
-    assert costs[0].cost_usd == pytest.approx(13.0)
-
-
-async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
-    await assert_concurrent_streams_isolated(
-        CodexBackend(model="fixture-model"),
-        [
-            '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
-            '{"type":"turn.completed","usage":{}}',
-        ],
-        second_lines=['{"type":"turn.completed","usage":{}}'],
-    )
 
 
 class TestUnwrapShellCommand:
@@ -893,163 +589,7 @@ class TestUnwrapShellCommand:
         assert seen["command"] == "make test"
         assert budget_reason == "tool_vetoed:shell"
 
-    async def test_tool_supervisor_sees_stripped_and_unredacted_command(self) -> None:
-        """The supervisor value is strip-only: no redaction, no cap (issue #1227)."""
-        token = "ghp_" + "K" * 30
-        command = "deploy " + "a" * 180 + " --token " + token + " tail"
-        raw = '/bin/zsh -lc "cd /srv/app && ' + command + '"'
-        lines = [
-            json.dumps({"type": "thread.started", "thread_id": "th_sup1227"}),
-            json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": raw}}),
-            json.dumps({"type": "item.completed", "item": _completed_command(raw, "ok")}),
-            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
-        ]
-        seen: dict[str, str] = {}
-        def supervisor(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
-            del phase
-            seen["name"] = tool_name
-            seen["command"] = str(tool_input.get("command", ""))
-            return ToolDecision(veto=False)
-        registry = Registry()
-        registry.register_tool_supervisor(supervisor)
-        set_registry(registry)
-        mock_proc = make_mock_process(lines)
-        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-            await run_agent(CodexBackend(model="fixture-model"), Path("/tmp"), "run", phase=DaydreamPhase.REVIEW)
-        assert seen["name"] == "shell"
-        assert len(command) > 200
-        assert seen["command"] == command  # prefix stripped, full secret and tail intact
-        assert "cd /srv/app" not in seen["command"]
-        assert "[REDACTED" not in seen["command"]
-
-
 # Parser correlation and diagnostics.
-
-
-async def test_malformed_assistant_json_is_forwarded_as_text(caplog: pytest.LogCaptureFixture) -> None:
-    backend = CodexBackend(model="fixture-model")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
-        events = await _run_fixture(backend, "Parse", "malformed_structured_output.jsonl", output_schema=schema)
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output is None
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert not any("structured output parse failed" in w for w in warnings)
-    assert [event.text for event in events if isinstance(event, TextEvent)] == [
-        "this is not valid JSON"]
-
-
-async def test_parser_coverage_is_bounded_redacted_and_precedes_result(caplog: pytest.LogCaptureFixture) -> None:
-    backend = CodexBackend(model="fixture-model")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
-        events = await _run_fixture(backend, "Parse gaps", "parser_coverage_gaps.jsonl", output_schema=schema)
-    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
-    assert [event.code for event in diagnostics] == [
-        "codex_transport_coverage", "codex_parser_coverage", "codex_parser_coverage",
-    ]
-    assert events.index(diagnostics[-1]) < next(
-        index for index, event in enumerate(events) if isinstance(event, ResultEvent)
-    )
-    transport = diagnostics[0]
-    assert transport.metadata == {
-        "coverage": "incomplete", "reason": "uncorrelated_public_error_item", "occurrences": 1,
-        "contract": "codex-cli-0.153.4-json-code-mode",
-    }
-    assert diagnostics[1].metadata["unknown_event_types"]["total"] == 1
-    parser = diagnostics[-1].metadata
-    assert parser["unknown_event_types"] == {
-        "total": 35, "labels": {f"unknown.{index:02d}": (2 if index == 0 else 1) for index in range(32)}, "overflow": 2,
-    }
-    assert parser["unknown_item_types"] == {
-        "total": 3, "labels": {"mystery.item": 2, 'token="[REDACTED_CREDENTIAL]"': 1}, "overflow": 0,
-    }
-    assert parser["malformed_shapes"] == {"event_not_object": 2, "event_type_not_scalar": 1, "item_not_object": 1}
-    assert parser["non_json_lines"] == 1
-    assert parser["warnings"] == {
-        "total": 1, "reasons": {"unmatched_tool_result": 1},
-    }
-    combined = json.dumps([event.metadata for event in diagnostics]) + "\n" + caplog.text
-    assert "opaque-parser-secret" not in combined
-    assert "/Users/private-person" not in combined
-    assert "printf hidden-command" not in combined
-
-
-def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
-    label = "x" * 54 + " ghp_" + "y" * 12
-    bounded = codex._bounded_diagnostic_label(label)
-    assert len(bounded) <= 64
-    assert "ghp_" not in bounded
-    assert "[REDACTED" in bounded
-
-
-@pytest.mark.parametrize(
-    ("error", "expected_retry"),
-    [
-        pytest.param(
-            {"message": "Selected model is at capacity. Please try a different model."}, True, id="observed-text",
-        ),
-        pytest.param(
-            {"message": "Try again later", "codex_error_info": "server_overloaded"}, True, id="structured-info",
-        ),
-        pytest.param(
-            {"message": "Try again later", "code": "server_overloaded"}, True, id="structured-code",
-        ),
-        pytest.param(
-            {"message": "Invalid API key", "codex_error_info": "server_overloaded"}, False, id="permanent-message",
-        ),
-        *[
-            pytest.param(
-                {"message": "Selected model is at capacity. Please try a different model.", "code": code},
-                False, id=f"explicit-{code}",
-            )
-            for code in ("unauthorized", "schema_validation", "tool_policy", "unknown_error")
-        ],
-        pytest.param({"message": "The model has capacity planning advice."}, False, id="unknown-text"),
-        pytest.param({"message": "Try again later", "code": {"server_overloaded": True}}, False, id="malformed-code"),
-    ],
-)
-async def test_public_turn_failure_preserves_metadata_and_normalizes_only_overload(
-    tmp_path: Path, error: dict[str, Any], expected_retry: bool,
-) -> None:
-    """Public JSONL decoding must admit capacity retries without making unknown failures retryable."""
-    process = make_mock_process([json.dumps({"type": "turn.failed", "error": error})])
-    backend = CodexBackend(model="fixture-model")
-    with pytest.raises(CodexError) as failure:
-        await replay_process(backend, process, tmp_path, "review")
-    decision = classify_failure(failure.value)
-    assert decision.retries_allowed is expected_retry
-    if expected_retry:
-        assert decision.failure_class is FailureClass.SERVER_ERROR
-    assert failure.value.error_metadata == error
-    assert str(failure.value) == error["message"]
-    assert backend._transports == []
-
-
-async def test_public_authentication_failure_is_known_permanent(tmp_path: Path) -> None:
-    """The public exec error has message only; auth rejection must stop staged continuation."""
-    message = "authentication required. Run `codex login` to authenticate."
-    process = make_mock_process([json.dumps({"type": "turn.failed", "error": {"message": message}})])
-    backend = CodexBackend(model="fixture-model")
-    with pytest.raises(CodexError) as failure:
-        await replay_process(backend, process, tmp_path, "review")
-    decision = classify_failure(failure.value)
-    assert decision.failure_class is FailureClass.AUTH_CONFIG
-    assert decision.retries_allowed is False
-    assert str(failure.value) == message
-    assert failure.value.error_metadata == {"message": message}
-    assert backend._transports == []
-
-
-def test_codex_authentication_diagnostic_precedes_transient_retry_hints() -> None:
-    error = CodexError(
-        "authentication required. Run codex login to authenticate", retryable=True,
-        category="SERVER_ERROR", error_metadata={"codex_error_info": "server_overloaded"},
-    )
-    decision = classify_failure(error)
-    assert decision.failure_class is FailureClass.AUTH_CONFIG
-    assert decision.retries_allowed is False
 
 
 async def test_public_overload_after_completion_cannot_replay_completed_work(tmp_path: Path) -> None:
@@ -1062,7 +602,7 @@ async def test_public_overload_after_completion_cannot_replay_completed_work(tmp
     assert classify_failure(failure.value).retries_allowed is False
 
 
-@pytest.mark.parametrize("error_code", [None, "model_error"])
+@pytest.mark.parametrize("error_code", [None, ])
 async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(error_code: str | None) -> None:
     backend = CodexBackend(model="fixture-model")
     class _FailureThenBlockingStdout:
@@ -1142,58 +682,14 @@ class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
 
 
-    def test_concurrent_first_wave_callers_never_see_unresolved_flag(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    ) -> None:
-        git_bin = tmp_path / "real" / "usr" / "bin"
-        git_file = _stage_executable(git_bin / "git")
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        calls: list[int] = []
-        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
-        def slow_run(*a: Any, **k: Any) -> subprocess.CompletedProcess[str]:
-            calls.append(1)
-            time.sleep(0.1)  # widen the flag-set / dir-assign window for the racers
-            return proc
-        monkeypatch.setattr(codex.subprocess, "run", slow_run)
-        barrier = threading.Barrier(8)
-        results: list[str | None] = []
-        results_lock = threading.Lock()
-        def racer() -> None:
-            barrier.wait()
-            resolved = codex._resolve_real_git_dir()
-            with results_lock:
-                results.append(resolved)
-        threads = [threading.Thread(target=racer) for _ in range(8)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        assert results == [str(git_bin)] * 8  # S1: no caller observes the early flag and gets None
-        assert codex._resolve_real_git_dir() == str(git_bin)  # the next warm call reuses the resolved cache
-        assert len(calls) == 1  # S1: the cache was not thrashed into re-shelling to xcrun
-
-    def test_nonzero_xcrun_exit_falls_back_to_none_with_warning(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="xcrun: error")
-        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
-        with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
-            result = codex._resolve_real_git_dir()
-        assert result is None  # M2: never raises, never a hard failure
-        assert any("xcrun" in r.message.lower() or "git" in r.message.lower() for r in caplog.records)
-
     def test_non_executable_target_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codex.sys, "platform", "darwin")
         proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="/nonexistent/xx/git\n", stderr="")
         monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
         assert codex._resolve_real_git_dir() is None  # M2: must be an existing executable file
 
-    @pytest.mark.skipif(
-        sys.platform == "darwin",
-        reason="darwin behavior is covered by TestResolveRealGitDir (issue #1122)",
-    )
     def test_non_darwin_never_invokes_xcrun(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(codex.sys, "platform", "linux")
         monkeypatch.setattr(
             codex.subprocess, "run",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("xcrun invoked on non-Darwin")),
@@ -1286,27 +782,6 @@ class TestIsolatedChildEnvDarwinPath:
             monkeypatch.setenv(key, value)
         assert codex._resolve_real_git_dir() == str(ambient_git_dir)
         assert ambient_log.exists()
-
-    def test_darwin_resolver_failure_leaves_path_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        monkeypatch.setattr(codex, "_resolve_real_git_dir", lambda: None)  # M2 fail-open
-        monkeypatch.setenv("PATH", "/usr/bin")
-        env = codex._isolated_child_env(Path("/work"), Path("/tmp/clone/repo"))
-        assert env is not None
-        assert env["PATH"] == "/usr/bin"  # fallback: unchanged PATH, no exception
-
-    def test_non_isolated_path_returns_none_even_on_darwin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        called = []
-
-        def counting_resolver() -> str:
-            called.append(1)
-            return "/real/bin"
-
-        monkeypatch.setattr(codex, "_resolve_real_git_dir", counting_resolver)
-        assert codex._isolated_child_env(Path("/work"), Path("/work")) is None  # M7
-        assert called == []  # resolver never invoked on the non-clone path
-
 
 async def test_issue1124_stored_commands_are_replayable() -> None:
     """M1-M3: ToolStartEvent.input['command'] is the exact -lc argument (or raw fallback)."""

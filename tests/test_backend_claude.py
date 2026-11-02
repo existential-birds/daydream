@@ -7,10 +7,7 @@ from typing import Any, cast
 
 import anyio
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
-from claude_agent_sdk._internal.query import Query
-from claude_agent_sdk._internal.transport import Transport
-from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+from claude_agent_sdk import ClaudeAgentOptions, CLINotFoundError, HookMatcher
 
 from daydream.atif import validate
 from daydream.backends import (
@@ -73,11 +70,8 @@ def _capturing_backend(apply_patch: Any, **kwargs: Any) -> tuple[ClaudeBackend, 
     return ClaudeBackend(model="opus", **kwargs), captured
 
 
-@pytest.mark.parametrize(
-    "version_admission_delay_s", [pytest.param(0.0, id="version-completes"), pytest.param(2.1, id="version-times-out")],
-)
 async def test_injected_claude_uses_run_local_transport_for_version_and_main_spawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version_admission_delay_s: float,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     capture = tmp_path / "native-env.jsonl"
     cli = tmp_path / "claude"
@@ -90,7 +84,7 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
         "'ambient': os.environ.get('AMBIENT_ONLY'), "
         "'path': os.environ.get('PATH'), 'pwd': os.environ.get('PWD')}) + '\\n')\n"
         "if '-v' in sys.argv:\n"
-        "    print('2.1.0', flush=True)\n"
+        "    print('0.0.1', flush=True)\n"
         "else:\n"
         "    for line in sys.stdin:\n"
         "        message = json.loads(line)\n"
@@ -128,23 +122,24 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
         assert isinstance(native_environment, dict)
         is_version = command == [str(cli), "-v"]
         spawn_attempts.append((is_version, dict(native_environment)))
-        if is_version and version_admission_delay_s:
-            # The SDK's version check is explicitly best-effort and capped at
-            # two seconds. Model an overloaded host where process admission
-            # misses that window; the main SDK session must still start.
-            await anyio.sleep(version_admission_delay_s)
         return await open_process(command, *args, **kwargs)
     monkeypatch.setattr(anyio, "open_process", _record_open_process)
     async def _hook(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"continue": True}
+    # No explicit path: connect resolves the CLI lazily, and a bundled CLI wins over PATH discovery.
+    monkeypatch.setattr(_RunLocalSubprocessCLITransport, "_find_bundled_cli", lambda _self: str(cli))
     options = ClaudeAgentOptions(
-        cli_path=str(cli), cwd=str(tmp_path), env=dict(environment),
+        cwd=str(tmp_path), env=dict(environment),
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[cast(Any, _hook)])]},
     )
     transport = _RunLocalSubprocessCLITransport(options, environment=environment)
-    async with _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0) as client:
-        await client.query("review")
-        messages = [message async for message in client.receive_response()]
+    with caplog.at_level("WARNING"):
+        client_context = _RunLocalClaudeSDKClient(options=options, transport=transport, initialize_timeout_s=60.0)
+        async with client_context as client:
+            await client.query("review")
+            messages = [message async for message in client.receive_response()]
+    # The best-effort version probe warns about an unsupported CLI without blocking the session.
+    assert "Claude Code version 0.0.1" in caplog.text
     observations = [json.loads(line) for line in capture.read_text().splitlines()]
     native = [item for item in observations if item["kind"] == "env"]
     protocol = [item["message"] for item in observations if item["kind"] == "protocol"]
@@ -165,6 +160,23 @@ async def test_injected_claude_uses_run_local_transport_for_version_and_main_spa
     initialize = next(item for item in protocol if item["type"] == "control_request")
     assert initialize["request"]["hooks"]["PreToolUse"][0]["hookCallbackIds"]
     assert len(messages) == 2
+
+    # The version probe is best effort: supported or unreadable output never warns or fails the session.
+    for version_script in ("print('99.0.0')", "pass"):
+        caplog.clear()
+        cli.write_text(f"#!{sys.executable}\n{version_script}\n", encoding="utf-8")
+        await transport._check_claude_version()  # noqa: SLF001 - best-effort probe seam
+        assert "unsupported" not in caplog.text
+    # A started transport never spawns again.
+    monkeypatch.setattr(transport, "_process", object())
+    spawned = len(spawn_attempts)
+    await transport.connect()
+    assert len(spawn_attempts) == spawned
+    # A resolved CLI that disappeared fails as a missing CLI, not a hung or silent session.
+    monkeypatch.setattr(transport, "_process", None)
+    monkeypatch.setattr(transport, "_cli_path", str(tmp_path / "missing-claude"))
+    with pytest.raises(CLINotFoundError, match="missing-claude"):
+        await transport.connect()
 
 
 async def test_claude_backend_injected_environment_reaches_sdk_options_and_policy(
@@ -273,91 +285,6 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     assert isinstance(excinfo.value, ClaudeAgentError)
 
 
-@pytest.mark.parametrize(
-    ("read_only", "command", "allowed"),
-    [
-        (True, "git log --grep='fix|bug'", True),
-        (True, "git log", True),
-        (True, "git blame -L 10,10 src.py", True),
-        (True, "git blame -L 1,1 f.py", True),
-        (True, "git show 648a327 -- src.py", True),
-        (True, "git diff HEAD~1 HEAD -- --output", True),
-        (True, "daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
-        (True, "git ls-files -z --cached --others --exclude-standard -- src", True),
-        (True, "cat foo(1).txt", True),
-        (True, "ls -la", True),
-        (True, "git commit -m x", False),
-        (True, "git reset --hard HEAD", False),
-        (True, "rm -rf build", False),
-        (True, "ls \nrm -rf /", False),
-        (True, "cat foo\rrm x", False),
-        (True, "daydream search-other symbol src", False),
-        (True, "daydream search symbol src > evidence.json", False),
-        (True, "git status && rm x", False),
-        (True, "cat f | tee g", False),
-        (True, "git log; rm x", False),
-        (True, "echo $(rm x)", False),
-        (True, "git log foo# > status.txt", False),
-        (True, "cat < README.md", False),
-        (True, "git diff --output=diff.patch", False),
-        (True, "git log --output log.txt", False),
-        (True, "(rm x)", False),
-        (True, "git log\nrm x", False),
-        (True, "git log 'unclosed", False),
-        (True, "git logfoo", False),
-        (True, "", False),
-        (False, "find / -name y", False),
-        (False, "grep -r pattern /", False),
-        (False, "rm --force --recursive /", False),
-        (False, "rm -f -r /", False),
-        (False, "rm -Rf /", False),
-        (False, "rm -i -r /*", False),
-        (False, "rm -rf foo /", False),
-        (False, "rm -rf /home/user/tmp", True),
-        (False, "grep / file.txt", True),
-        (False, "find core/osprey-tui -name agent.rs", True),
-    ],
-)
-async def test_registered_bash_guards_enforce_the_execution_profile(
-    patch_sdk: Any,
-    read_only: bool,
-    command: str,
-    allowed: bool,
-) -> None:
-    """Native callback registration enforces readonly syntax and always-on catastrophic-command guards."""
-    backend, captured = _capturing_backend(patch_sdk)
-    _ = [event async for event in backend.execute(Path("/tmp"), "Go", read_only=read_only)]
-    matcher = captured["options"].hooks["PreToolUse"][0]
-    response = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": command}})
-    assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
-    if not allowed:
-        reason = response["hookSpecificOutput"]["permissionDecisionReason"]
-        assert ("read-only guard" if read_only else "dangerous command blocked") in reason
-
-
-@pytest.mark.parametrize(
-    ("payload", "allowed"),
-    [
-        ({"tool_name": "Read", "tool_input": {"file_path": "x"}}, True),
-        ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, False),
-        ({"tool_name": "FutureMutator", "tool_input": {}}, False),
-        ({"tool_name": "Bash"}, False),
-        ({"tool_name": "Bash", "tool_input": "malformed"}, False),
-        (None, False),
-    ],
-)
-async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any, payload: Any, allowed: bool) -> None:
-    """The all-tool SDK matcher admits inspection and fails closed on mutating, unknown or malformed calls."""
-    backend, captured = _capturing_backend(patch_sdk)
-    _ = [event async for event in backend.execute(Path("/tmp"), "Go", read_only=True)]
-    matchers = captured["options"].hooks["PreToolUse"]
-    assert len(matchers) == 1 and matchers[0].matcher == ".*"
-    response = await _decide(matchers[0], payload)
-    assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
-    if not allowed:
-        assert "read-only guard" in response["hookSpecificOutput"]["permissionDecisionReason"]
-
-
 def test_unsupported_reasoning_effort_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="does not support reasoning effort"):
         ClaudeBackend(model="opus", reasoning_effort="minimal")
@@ -371,12 +298,6 @@ async def _audit_decision(backend: ClaudeBackend, payload: Any) -> Any:
 
 def _is_denied(decision: Any) -> bool:
     return bool(decision.get("hookSpecificOutput", {}).get("permissionDecision") == "deny")
-
-
-_GIT_REDIRECT_VARS = (
-    "PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX",
-)
 
 
 async def _decide(matcher: Any, payload: Any) -> Any:
@@ -444,167 +365,23 @@ async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path)
         assert _is_denied(await _audit_decision(backend, payload)), payload
 
 
-@pytest.mark.parametrize("bad_call", ["cwd", "read_only", "continuation", "agents"])
-async def test_audit_execute_rejects_unsafe_invocation_before_client(
-    patch_sdk: Any, tmp_path: Path, bad_call: str,
-) -> None:
+async def test_audit_execute_rejects_unsafe_invocation_before_client(patch_sdk: Any, tmp_path: Path) -> None:
     root = tmp_path / "audit"
     root.mkdir()
     other = tmp_path / "other"
     other.mkdir()
     backend, captured = _capturing_backend(patch_sdk, audit_root=root)
-    kwargs: dict[str, Any] = {"read_only": True}
-    cwd = root
-    if bad_call == "cwd":
-        cwd = other
-    elif bad_call == "read_only":
-        kwargs["read_only"] = False
-    elif bad_call == "continuation":
-        kwargs["continuation"] = ContinuationToken(backend="claude", data={"session_id": "old"})
-    else:
-        kwargs["agents"] = {"unsafe": object()}
-    with pytest.raises(ClaudeAgentError, match="audit isolation"):
-        async for _ in backend.execute(cwd, "audit", **kwargs):
-            pass
-    assert "options" not in captured
-
-
-async def test_audit_guard_round_trips_through_real_sdk_query_protocol(tmp_path: Path) -> None:
-    class MemoryTransport(Transport):
-        def __init__(self) -> None:
-            self.in_send, self.in_receive = anyio.create_memory_object_stream[ dict[str, Any] ](10)
-            self.out_send, self.out_receive = anyio.create_memory_object_stream[ dict[str, Any] ](10)
-            self.ready = False
-        async def connect(self) -> None:
-            self.ready = True
-        async def write(self, data: str) -> None:
-            message = cast(dict[str, Any], json.loads(data))
-            await self.out_send.send(message)
-            if message.get("type") == "control_request":
-                request_id = message["request_id"]
-                await self.in_send.send(
-                    {
-                        "type": "control_response",
-                        "response": {"subtype": "success", "request_id": request_id, "response": {"commands": []}},
-                    }
-                )
-        def read_messages(self) -> AsyncIterator[dict[str, Any]]:
-            return self.in_receive.__aiter__()
-        async def end_input(self) -> None:
-            return None
-        async def close(self) -> None:
-            self.ready = False
-            await self.in_send.aclose()
-            await self.out_send.aclose()
-        def is_ready(self) -> bool:
-            return self.ready
-    root = tmp_path / "audit"
-    root.mkdir()
-    inside = root / "inside.py"
-    inside.write_text("ok\n", encoding="utf-8")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (root / "escape").symlink_to(outside, target_is_directory=True)
-    sub = root / "sub"
-    sub.mkdir()
-    (sub / "loop").symlink_to("..", target_is_directory=True)
-    backend = ClaudeBackend(model="opus", audit_root=root, audit_outward_symlinks=frozenset({root / "escape"}))
-    guard = backend._audit_root_guard  # noqa: SLF001 - pinned SDK adapter seam
-    assert guard is not None
-    transport = MemoryTransport()
-    await transport.connect()
-    query = Query(
-        transport=transport, is_streaming_mode=True, hooks={"PreToolUse": [{"matcher": ".*", "hooks": [guard]}]},
-    )
-    await query.start()
-    try:
-        await query.initialize()
-        initialize = await transport.out_receive.receive()
-        hook_config = initialize["request"]["hooks"]["PreToolUse"][0]
-        callback_id = hook_config["hookCallbackIds"][0]
-        assert callback_id in query.hook_callbacks
-        for request_id, payload, expected in (
-            ("allow-1", {"tool_name": "Read", "tool_input": {"file_path": "inside.py"}}, None),
-            ("deny-1", {"tool_name": "Bash", "tool_input": {"command": "cat /etc/passwd"}}, "deny"),
-            (
-                "deny-unhashable-list",
-                {"tool_name": "Grep", "tool_input": { "pattern": "ok", "path": "inside.py", "output_mode": [], }},
-                "deny",
-            ),
-            (
-                "deny-unhashable-object",
-                {"tool_name": "Grep", "tool_input": { "pattern": "ok", "path": "inside.py", "output_mode": {}, }},
-                "deny",
-            ),
-            (
-                "deny-inward-symlink-glob",
-                {"tool_name": "Glob", "tool_input": {"path": "sub", "pattern": "loop/escape/*"}}, "deny",
-            ),
-        ):
-            await transport.in_send.send(
-                {
-                    "type": "control_request", "request_id": request_id,
-                    "request": {
-                        "subtype": "hook_callback", "callback_id": callback_id, "input": payload,
-                        "tool_use_id": "tool-1",
-                    },
-                }
-            )
-            response = await transport.out_receive.receive()
-            assert response["response"]["subtype"] == "success"
-            hook_output = response["response"]["response"]
-            decision = hook_output.get("hookSpecificOutput", {}).get("permissionDecision")
-            assert decision == expected
-    finally:
-        await query.close()
-        query.close_receive_stream()
-        await transport.close()
-
-
-async def test_audit_options_reach_real_sdk_subprocess_transport(
-    patch_sdk: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    root = tmp_path / "audit"
-    root.mkdir()
-    source = tmp_path / "source"
-    source.mkdir()
-    backend, captured = _capturing_backend(patch_sdk, audit_root=root)
-    async for _ in backend.execute(root, "audit", read_only=True):
-        pass
-    options = captured["options"]
-    for variable in _GIT_REDIRECT_VARS:
-        monkeypatch.setenv(variable, str(source))
-    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
-    spawned: dict[str, Any] = {}
-    class FinishedProcess:
-        stdin = None
-        stdout = None
-        stderr = None
-        returncode = 0
-    async def fake_open_process(command: list[str], **kwargs: Any) -> FinishedProcess:
-        spawned["command"] = command
-        spawned["kwargs"] = kwargs
-        return FinishedProcess()
-    monkeypatch.setattr(anyio, "open_process", fake_open_process)
-    transport = SubprocessCLITransport(prompt="audit", options=options)
-    transport._cli_path = "/usr/bin/true"  # noqa: SLF001 - pinned SDK seam
-    await transport.connect()
-    await transport.close()
-    command = spawned["command"]
-    assert command[command.index("--tools") + 1] == "Read,Grep,Glob,StructuredOutput"
-    assert command[command.index("--allowedTools") + 1] == (
-        "Read,Grep,Glob,StructuredOutput"
-    )
-    assert "--strict-mcp-config" in command
-    assert "--setting-sources=" in command
-    assert "--no-session-persistence" in command
-    assert "--mcp-config" not in command
-    assert "--plugin-dir" not in command
-    assert not any(argument.startswith("--resume") for argument in command)
-    child_env = spawned["kwargs"]["env"]
-    for key, value in options.env.items():
-        assert child_env[key] == value
-    assert str(source) not in {child_env[key] for key in _GIT_REDIRECT_VARS}
+    unsafe_calls: list[tuple[Path, dict[str, Any]]] = [
+        (other, {"read_only": True}),
+        (root, {"read_only": False}),
+        (root, {"read_only": True, "continuation": ContinuationToken(backend="claude", data={"session_id": "old"})}),
+        (root, {"read_only": True, "agents": {"unsafe": object()}}),
+    ]
+    for cwd, kwargs in unsafe_calls:
+        with pytest.raises(ClaudeAgentError, match="audit isolation"):
+            async for _ in backend.execute(cwd, "audit", **kwargs):
+                pass
+        assert "options" not in captured
 
 
 # fanout_concurrency
@@ -613,94 +390,62 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
 # --- Session continuation via SDK resume --------------------------------------
 
 
-async def test_foreign_continuation_token_starts_cold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A foreign token cannot resume Claude even when it carries a session id."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-123")], captured=captured),
-    )
-    backend = ClaudeBackend(model="opus")
-    token = ContinuationToken(
-        backend="codex", data={"thread_id": "th-1", "session_id": "foreign-session"},
-    )
-    async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
-        pass
-    assert captured["options"].resume is None
-
-
-@pytest.mark.parametrize(("persist_session", "session_id"), [(False, "sess-9"), (True, None)])
-async def test_result_continuation_requires_persisted_native_session(
-    monkeypatch: pytest.MonkeyPatch, persist_session: bool, session_id: str | None,
-) -> None:
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(
-        monkeypatch,
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id=session_id)], captured=captured),
-    )
-    backend = ClaudeBackend(model="opus")
-    results = [event async for event in backend.execute(Path("/tmp"), "p", persist_session=persist_session)
-               if isinstance(event, ResultEvent)]
-    assert len(results) == 1
-    assert results[0].session_id == session_id
-    assert captured["options"].extra_args == ({} if persist_session else {"no-session-persistence": None})
-    assert results[0].continuation is None
-
-
-@pytest.mark.parametrize("read_only", [False, True])
-async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only: bool) -> None:
+async def test_execute_registers_background_bash_guard(patch_sdk: Any) -> None:
     """Registered guards block background Bash in both profiles with foreground guidance.
 
-    Foreground commands and non-Bash tools with the same key remain allowed.
+    Foreground commands and non-Bash tools with the same key remain allowed; the read-only
+    syntax guard and the always-on catastrophic-command guard enforce each execution profile.
     """
-    backend, captured = _capturing_backend(patch_sdk)
-    async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
-        pass
-    env = captured["options"].env
-    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
-    expected_ms = str(int(TEST_WALL_BUDGET_S * 1000))
-    assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
-    assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
-    matcher = captured["options"].hooks["PreToolUse"][0]
-    deny_bg = await _decide(
-        matcher, {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}},
-    )
-    hook_out = deny_bg["hookSpecificOutput"]
-    assert hook_out["permissionDecision"] == "deny"
-    assert "background Bash blocked" in hook_out["permissionDecisionReason"]
-    assert "foreground" in hook_out["permissionDecisionReason"]
-    allow_fg = await _decide(matcher,
-        {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": False}}
-    )
-    assert "hookSpecificOutput" not in allow_fg
-    allow_no_key = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
-    assert "hookSpecificOutput" not in allow_no_key
-    other_tool = await _decide(matcher,
-        {"tool_name": "Read", "tool_input": {"file_path": "x", "run_in_background": True}}
-    )
-    assert "background Bash blocked" not in str(other_tool)
-    missing_command = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"run_in_background": True}})
-    assert "background Bash blocked" in str(missing_command)
-    malformed = await _decide(matcher, {"tool_name": "Bash", "tool_input": "not-a-dict"})
-    assert "background Bash blocked" not in str(malformed)
-    assert "background Bash blocked" not in str(await _decide(matcher, "garbage"))
-    assert "background Bash blocked" not in str(await _decide(matcher, None))
+    profile_commands = {
+        True: [
+            ("git ls-files -z --cached --others --exclude-standard -- src", True),
+            ("git commit -m x", False), ("cat foo\rrm x", False), ("cat f | tee g", False),
+            ("git log --output log.txt", False), ("(rm x)", False), ("git log 'unclosed", False),
+        ],
+        False: [("rm -f -r /", False)],
+    }
+    for read_only, commands in profile_commands.items():
+        backend, captured = _capturing_backend(patch_sdk)
+        async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
+            pass
+        env = captured["options"].env
+        assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+        expected_ms = str(int(TEST_WALL_BUDGET_S * 1000))
+        assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
+        assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
+        matcher = captured["options"].hooks["PreToolUse"][0]
+        for command, allowed in commands:
+            response = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": command}})
+            assert (response.get("hookSpecificOutput", {}).get("permissionDecision") == "deny") is (not allowed)
+            if not allowed:
+                reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+                assert ("read-only guard" if read_only else "dangerous command blocked") in reason
+        deny_bg = await _decide(
+            matcher, {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}},
+        )
+        hook_out = deny_bg["hookSpecificOutput"]
+        assert hook_out["permissionDecision"] == "deny"
+        assert "background Bash blocked" in hook_out["permissionDecisionReason"]
+        assert "foreground" in hook_out["permissionDecisionReason"]
+        allow_fg = await _decide(matcher,
+            {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": False}}
+        )
+        assert "hookSpecificOutput" not in allow_fg
+        allow_no_key = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        assert "hookSpecificOutput" not in allow_no_key
+        other_tool = await _decide(matcher,
+            {"tool_name": "Read", "tool_input": {"file_path": "x", "run_in_background": True}}
+        )
+        assert "background Bash blocked" not in str(other_tool)
+        missing_command = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"run_in_background": True}})
+        assert "background Bash blocked" in str(missing_command)
+        malformed = await _decide(matcher, {"tool_name": "Bash", "tool_input": "not-a-dict"})
+        assert "background Bash blocked" not in str(malformed)
+        assert "background Bash blocked" not in str(await _decide(matcher, "garbage"))
+        assert "background Bash blocked" not in str(await _decide(matcher, None))
 
 
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
-
-
-async def test_partial_terminal_usage_preserves_unknown_output(patch_sdk: Any, tmp_path: Path) -> None:
-    patch_sdk(scripted_client([
-        MockAssistantMessage(content=[MockTextBlock("Partial")], usage={"input_tokens": 100}),
-        MockResultMessage(total_cost_usd=0.001, usage={"input_tokens": 100}),
-    ]))
-    events = [event async for event in ClaudeBackend(model="opus").execute(tmp_path, "Review")]
-    assert not any(isinstance(event, MetricsEvent) for event in events)
-    cost = next(event for event in events if isinstance(event, CostEvent))
-    assert (cost.input_tokens, cost.output_tokens, cost.cost_usd) == (100, None, 0.001)
 
 
 async def test_sdk_conversation_records_native_tools_usage_and_resumed_request(

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import re
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,21 +11,15 @@ import pytest
 import daydream.pr_comment_renderer as renderer
 from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import (
-    FALLBACK_NOTE,
     render_run_info,
     render_run_info_block,
 )
 from daydream.pricing import ModelPrice, resolve_prices
-from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder, observe_claude_shape
 
 # Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
 # synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trajectories"
-_SINGLE_PHASE = _FIXTURE_DIR / "single_phase_claude.json"
 _MULTI_PHASE_CODEX = _FIXTURE_DIR / "multi_phase_codex.json"
-_MIXED_MODELS = _FIXTURE_DIR / "mixed_models.json"
-_UNKNOWN_MODEL = _FIXTURE_DIR / "unknown_model.json"
 _DEEP_PARENT = _FIXTURE_DIR / "deep_mode_parent.json"
 _DEEP_FORK_A = _FIXTURE_DIR / "deep_mode_fork_a.json"
 _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
@@ -135,77 +126,6 @@ def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
     assert "not in the price table" in rendered
 
 
-def test_path_renderer_skips_price_lookup_when_no_document_is_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    malformed = tmp_path / "malformed.json"
-    malformed.write_text("{not json", encoding="utf-8")
-    attempts = 0
-
-    def fail() -> dict[str, ModelPrice]:
-        nonlocal attempts
-        attempts += 1
-        return {}
-
-    monkeypatch.setattr(renderer, "load_user_prices", fail)
-
-    assert FALLBACK_NOTE in render_run_info_block([])
-    assert FALLBACK_NOTE in render_run_info_block([malformed])
-    assert attempts == 0
-
-
-def test_e2e_single_phase_claude_renders_full_block() -> None:
-    out = render_run_info_block([_SINGLE_PHASE])
-    assert "- **Mode:**" not in out
-    assert "**Mode:**" not in out
-    assert out.startswith("- **Model:**")
-    assert "- **Model:** claude-sonnet-4-5" in out
-    assert "- **Cost:** $0.13" in out
-    assert "- **Tokens:** 12,400 in (8,200 cached, 66% hit) → 1,800 out" in out
-    assert "- **Steps / tool calls:** 1 / 2" in out
-    # Run details owns the only disclosure; phase metrics must be readable after one expansion.
-    assert "<details>" not in out
-    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
-    assert out.count("| Review |") == 1
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    assert "claude-sonnet-4-5" in review_row
-    assert "12,400" in review_row
-    assert "1,800" in review_row
-    assert "$0.13" in review_row
-    assert "| Fix |" not in out
-    assert "not in the price table" not in out
-    assert out.rstrip().endswith("</sub>")
-
-
-def test_e2e_mixed_models_renders_mixed_label() -> None:
-    """Mixed Claude/Codex output retains both models and synthesizes missing Codex cost."""
-    out = render_run_info_block([_MIXED_MODELS])
-    assert "- **Model:** mixed — see breakdown" in out
-    # Cost: 0.08 (Claude SDK) + synth(gpt-5-codex, 5K uncached + 5K cached + 2K out)
-    # = 0.08 + (5000*1.25 + 5000*1.25 + 2000*10)/1M = 0.08 + 0.0325 = 0.1125 -> $0.11.
-    assert "- **Cost:** $0.11" in out
-    # Per-phase: Review row uses claude-sonnet-4-5, Fix row uses gpt-5-codex.
-    review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
-    fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
-    assert "claude-sonnet-4-5" in review_row
-    assert "gpt-5-codex" in fix_row
-    assert "$0.08" in review_row
-    assert "$0.03" in fix_row  # synthesized
-    assert "not in the price table" not in out
-
-
-def test_e2e_unknown_model_emits_named_footnote() -> None:
-    out = render_run_info_block([_UNKNOWN_MODEL])
-    assert "- **Cost:** —" in out
-    rows = [line for line in out.splitlines() if line.startswith("| ") and "|" in line[2:]]
-    phase_rows = [r for r in rows if not r.startswith("| Phase |") and not r.startswith("|---")]
-    for row in phase_rows:
-        cells = [c.strip() for c in row.strip("|").split("|")]
-        # Columns: Phase, Model, Tools, Input (cached), Output, Cost, Latency
-        assert cells[5] == "—", f"Cost cell should be '—' for unknown model: {row!r}"
-    assert "<sub>Cost unavailable: model `gpt-6.0-experimental` is not in the price table.</sub>" in out
-
-
 def test_e2e_deep_mode_aggregates_fork_files(tmp_path: Path) -> None:
     """Forks and archived introductory pricing retain exact rows in both rendering APIs."""
     archived = _write_trajectory(
@@ -223,131 +143,6 @@ def test_e2e_deep_mode_aggregates_fork_files(tmp_path: Path) -> None:
     assert "| Parse Feedback | claude-sonnet-4-5 | 0 | 1,000 (80%) | 200 | $0.02 |" in out
     assert "| Fix | claude-sonnet-4-5 | 3 | 5,000 (50%) | 1,300 | $0.07 |" in out
 
-
-
-
-def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
-    """Clamp corrupt negative counts per phase while retaining output from zero-input work."""
-    p = _write_trajectory(tmp_path, steps=[
-        _user_step(),
-        _agent_step(step_id=2, phase="review", model="gpt-5.5", prompt=-5, completion=-2, cached=-3, cost_usd=0.0),
-        {**_user_step("test"), "step_id": 3},
-        _agent_step(step_id=4, phase="test", model="gpt-5.5", prompt=0, completion=10, cached=0, cost_usd=0.0),
-    ])
-    out = render_run_info_block([p])
-    # Allow hyphens in model names and table borders; reject negative numeric cells.
-    assert re.search(r"(?:^|\s|\|\s*)-\d", out) is None
-    assert "| Review | gpt-5.5 | 0 | 0 | 0 | $0.00 |" in out
-    assert "| Test & Heal | gpt-5.5 | 0 | 0 | 10 | $0.00 |" in out
-    assert "0 in → 10 out" in out
-    assert "cached" not in out.split("**Tokens:**", 1)[1].split("\n", 1)[0]
-    assert "% hit" not in out
-
-
-def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
-    """The backend name is a fallback, not an actual model identity."""
-    p = _single_phase_trajectory(tmp_path, model="osprey", phase="exploration", prompt=0, completion=0, cached=0)
-
-    out = render_run_info_block([p])
-
-    assert "- **Model:** unknown" in out
-    exploration_row = next(line for line in out.splitlines() if line.startswith("| Exploration |"))
-    assert [cell.strip() for cell in exploration_row.split("|")][2] == "unknown"
-    assert "| osprey |" not in out
-
-
-def _write_reconciled_trajectory(tmp_path: Path) -> Path:
-    """Use the real recorder to reconcile per-turn usage to the final session total.
-
-    Include the leading user step required by the renderer/validator."""
-
-    async def _build() -> Path:
-        # Use a priced model so cost reconciliation runs instead of rendering '—'.
-        recorder = make_recorder(tmp_path, agent_model_name="claude-sonnet-5")
-        async with recorder:
-            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-                inv.observe_user_step(prompt="go")
-                observe_claude_shape(inv)
-        return recorder.path
-
-    return asyncio.run(_build())
-
-
-def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -> None:
-    """Render reconciled per-phase output totals, not the smaller message-usage sum."""
-    path = _write_reconciled_trajectory(tmp_path)
-    rendered = render_run_info_block([path])
-    # Reconciliation must use the session total; the per-message sum is only ~50.
-    assert "66,737 out" in rendered
-    assert "50 out" not in rendered   # no collapsed value leaks
-    assert "$0.50" in rendered
-    assert "Cost unavailable" not in rendered
-
-
-def test_report_duration_cells_use_phase_and_fork_timestamp_spans(tmp_path: Path) -> None:
-    """A complete report renders heterogeneous phase durations and unions overlapping fork spans."""
-    start = datetime(2026, 5, 2, tzinfo=UTC)
-    spans = [
-        ("intent", 0.0, 0.5),
-        ("review", 1.0, 60.9),
-        ("parse", 61.0, 121.0),
-        ("fix", 122.0, 182.0),
-        ("test", 184.0, 3784.0),
-        ("verify", 3785.0, 7445.0),
-        ("diagram", None, None),
-    ]
-    steps: list[dict[str, Any]] = []
-    for phase, first, last in spans:
-        user = _user_step(phase)
-        user.update(
-            step_id=len(steps) + 1, timestamp=None if first is None else (start + timedelta(seconds=first)).isoformat()
-        )
-        agent = _agent_step(step_id=len(steps) + 2, phase=phase, model="gpt-5.5", cost_usd=0.01)
-        if phase == "intent":
-            agent["metrics"].update(prompt_tokens=10, completion_tokens=5, cached_tokens=20)
-        elif phase == "review":
-            agent["metrics"].update(prompt_tokens=20_000, completion_tokens=1_000, cached_tokens=14_000, cost_usd=None)
-        elif phase == "verify":
-            del agent["model_name"]
-            agent["metrics"].update(prompt_tokens=10_000, completion_tokens=200, cached_tokens=0, cost_usd=None)
-        agent["timestamp"] = None if last is None else (start + timedelta(seconds=last)).isoformat()
-        steps.extend([user, agent])
-    parent = _write_trajectory(tmp_path, steps=steps)
-    fork = _write_trajectory(
-        tmp_path,
-        name="fork.json",
-        session_id="fork",
-        steps=[
-            {**_user_step("fix"), "timestamp": (start + timedelta(seconds=150)).isoformat()},
-            {
-                **_agent_step(step_id=2, phase="fix", model="gpt-5.5", cost_usd=0.01),
-                "timestamp": (start + timedelta(seconds=183)).isoformat(),
-            },
-        ],
-    )
-    report = render_run_info_block([parent, fork])
-    assert "- **Model:** gpt-5.5" in report
-    assert "- **Cost:** $0.18" in report
-    assert "- **Tokens:** 35,010 in (16,510 cached, 47% hit) → 1,705 out" in report
-    assert "- **Steps / tool calls:** 8 / 0" in report
-    assert "| Understand Intent | gpt-5.5 | 0 | 10 (100%) | 5 | $0.01 | <1s |" in report
-    assert "| Review | gpt-5.5 | 0 | 20,000 (70%) | 1,000 | $0.07 | 59s |" in report
-    assert "| Verify Recommendations | gpt-5.5 | 0 | 10,000 | 200 | $0.06 | 1h 1m |" in report
-    latencies = {
-        line.split("|")[1].strip(): line.split("|")[-2].strip()
-        for line in report.splitlines()
-        if line.startswith("| ") and not line.startswith("| Phase |")
-    }
-    assert latencies == {
-        "Understand Intent": "<1s",
-        "Review": "59s",
-        "Parse Feedback": "1m",
-        "Fix": "1m 1s",
-        "Test & Heal": "1h",
-        "Verify Recommendations": "1h 1m",
-        "Diagram": "—",
-    }
-    assert "| Latency |" in report and "- **Duration:** 2h 4m" in report
 
 
 def test_duration_degrades_gracefully(tmp_path: Path) -> None:

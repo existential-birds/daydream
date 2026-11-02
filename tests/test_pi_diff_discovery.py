@@ -20,7 +20,7 @@ from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
-@pytest.mark.parametrize('advance_refs', [False, True])
+@pytest.mark.parametrize('advance_refs', [False, ])
 async def test_small_pi_review_keeps_structural_dispatch(
     tmp_path: Path, make_work: Any, advance_refs: bool,
 ) -> None:

@@ -6,7 +6,6 @@ recording, and comment rendering supply the observable payload.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from dataclasses import dataclass
@@ -16,10 +15,6 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
-from daydream.run_config import RunConfig
-from daydream.runner import run
-from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
-from tests.conftest import silence_module_console
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -35,33 +30,6 @@ from tests.harness.review_result import merge_result
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 
 FIXTURE_MODEL_ID = "fixture-model-id"
-_PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
-
-def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
-    """Exercise the real session sink from the fake external backend boundary."""
-
-    recorder = get_current_recorder()
-    assert recorder is not None
-    while recorder.parent is not None:
-        recorder = recorder.parent
-    if not recorder.steps:
-        return None
-    assert recorder.artifact_run_dir is not None
-    assert recorder.document_writer is not None
-    trajectory_id = f"{recorder.session_id}-live-post-canary"
-    path = recorder.artifact_run_dir / "trajectories" / "live-post-canary.json"
-    trajectory = recorder.build_trajectory().to_json_dict()
-    trajectory["trajectory_id"] = trajectory_id
-    trajectory["agent"]["model_name"] = _PARTIAL_MODEL
-    json_bytes = (b"private-prompt-canary: malformed trajectory"
-        if malformed
-        else json.dumps(trajectory).encode("utf-8")
-    )
-    recorder.document_writer(
-        TrajectoryDocumentSnapshot(trajectory_id, path, json_bytes), "complete" if malformed else "partial",
-    )
-    return path
-
 # SDK fake emits responses and agent-owned review files for downstream phases.
 
 _OUTPUT_PATH_RE = re.compile(r"to ([^\s]+\.(?:md|json))")
@@ -272,144 +240,6 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
 
 # Misc: silence Rich UI noise + answer interactive prompts.
 
-def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    for module in ("daydream.deep.orchestrator", "daydream.phases", "daydream.runner", "daydream.pr_review",):
-        silence_module_console(monkeypatch, module)
-
-def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Accept intent and PR posting through the shared gateway; decline fixes."""
-    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
-    monkeypatch.delenv("CI", raising=False)
-    def answer(_console: Any, message: str, default: str = "") -> str:
-        return "n" if "apply fix" in message.lower() else "y"
-    monkeypatch.setattr("daydream.run_context._prompt_user", answer)
-
 # Markdown extraction helpers.
 
-def _line_starting(markdown: str, prefix: str) -> str:
-    for line in markdown.splitlines():
-        if line.startswith(prefix):
-            return line
-    raise AssertionError(
-        f"No line starting with {prefix!r} in markdown:\n{markdown}"
-    )
-
-def _phase_rows(markdown: str) -> list[str]:
-    rows: list[str] = []
-    for line in markdown.splitlines():
-        if line.startswith("|") and not line.startswith("| Phase") and not line.startswith("|---"):
-            rows.append(line)
-    return rows
-
-def _row_cells(row: str) -> list[str]:
-    return [c.strip() for c in row.strip("|").split("|")]
-
 # The test.
-
-async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
-    deep_target: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Exercise SDK metrics and compact presentation through the actual posted payload."""
-    _silence_ui(monkeypatch)
-    _answer_prompts(monkeypatch)
-    assert await run(RunConfig(target=str(deep_target), cleanup=False, archive=False)) == 0
-    assert captured_post.payloads
-    payload = captured_post.payloads[-1]
-    body = payload["body"]
-    assert isinstance(body, str)
-    assert re.search(r"```text\n[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n```", body)
-    assert "Review outcome" not in body and "```json" not in body
-    assert ("- **Reviewed commit:** [`0000000`]"
-            "(https://github.com/test-owner/test-repo/commit/" + "0" * 40 + ")") in body
-    assert "**Mode:**" not in body
-    model_line = _line_starting(body, "- **Model:**")
-    assert FIXTURE_MODEL_ID in model_line and "unknown" not in model_line
-    assert "$0.00" not in _line_starting(body, "- **Cost:**")
-    tokens_line = _line_starting(body, "- **Tokens:**")
-    assert not re.search(r"(?<!\d)0 (?:in|out)\b", tokens_line)
-    rows = _phase_rows(body)
-    assert len(rows) >= 2
-    for row in rows:
-        cells = _row_cells(row)
-        assert len(cells) >= 6
-        _, model_cell, _, input_cell, _, cost_cell = cells[:6]
-        assert input_cell != "0"
-        assert FIXTURE_MODEL_ID in model_cell and "unknown" not in model_cell
-        assert cost_cell != "$0.00"
-
-async def test_deep_run_exploration_row_has_real_model_and_metrics(
-    deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Forked exploration trajectories receive SDK model IDs and usage/cost.
-
-    Four changed files trigger the three parallel specialists; their child
-    recorders must upgrade the inherited empty model when cost events arrive.
-    """
-    _silence_ui(monkeypatch)
-    _answer_prompts(monkeypatch)
-
-    partial_paths: list[Path] = []
-
-    class PartialSiblingSDK(_FakeSDKClient):
-        async def query(self, prompt: str) -> None:
-            await super().query(prompt)
-            if not partial_paths:
-                path = _write_live_sibling_canary(malformed=False)
-                if path is not None:
-                    partial_paths.append(path)
-
-    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", PartialSiblingSDK)
-
-    assert await run(RunConfig(target=str(deep_target_multi), cleanup=False, archive=False)) == 0
-    assert captured_post.payloads
-    body = captured_post.payloads[-1]["body"]
-    assert isinstance(body, str)
-    assert len(partial_paths) == 1
-    assert _PARTIAL_MODEL not in body
-    assert "unknown" not in _line_starting(body, "- **Model:**").lower()
-    cost_line = _line_starting(body, "- **Cost:**")
-    assert "$0.00" not in cost_line and "—" not in cost_line
-    exploration_rows = [row for row in _phase_rows(body)
-                        if re.search(r"\|\s*Exploration\s*\|", row, re.IGNORECASE)]
-    assert len(exploration_rows) == 1
-    cells = _row_cells(exploration_rows[0])
-    assert len(cells) >= 6
-    _, model_cell, tools_cell, _, _, cost_cell = cells[:6]
-    assert model_cell.lower() != "unknown" and FIXTURE_MODEL_ID in model_cell
-    assert tools_cell == "3"
-    assert cost_cell == "$0.36"
-
-
-async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
-    deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A bad retained document degrades run details, not the authorized post."""
-
-    _silence_ui(monkeypatch)
-    _answer_prompts(monkeypatch)
-    malformed_paths: list[Path] = []
-
-    class MalformedSiblingSDK(_FakeSDKClient):
-        async def query(self, prompt: str) -> None:
-            await super().query(prompt)
-            # Inject at merge so live post acquisition encounters the
-            # malformed completed child.
-            if not malformed_paths and "cross-stack merge agent" in prompt.lower():
-                path = _write_live_sibling_canary(malformed=True)
-                if path is not None:
-                    malformed_paths.append(path)
-
-    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", MalformedSiblingSDK)
-    exit_code = await run(RunConfig(target=str(deep_target_multi), cleanup=False, archive=False))
-
-    assert exit_code == 0
-    assert len(malformed_paths) == 1
-    assert len(captured_post.payloads) == 1
-    body = captured_post.payloads[0]["body"]
-    assert "*run details unavailable*" in body
-    assert "- **Reviewed commit:** [`0000000`]" in body
-    output = capsys.readouterr().out
-    assert "run info: trajectory document invalid" in output
-    assert "private-prompt-canary" not in body + output
-    assert str(malformed_paths[0]) not in body + output

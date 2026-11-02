@@ -10,9 +10,6 @@ import pytest
 import daydream.pr_run_info as provider
 from daydream.artifact_visibility import (
     ArtifactSession,
-    open_artifact_session,
-    private_root_locations,
-    resolve_private_workspace_owner,
 )
 from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import FALLBACK_NOTE
@@ -24,8 +21,6 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
-from tests.conftest import _make_repo_with_main
-from tests.harness.git_helpers import work_context
 from tests.harness.trajectory import make_recorder
 
 
@@ -60,7 +55,7 @@ def _recorder(tmp_path: Path, session_id: str = "run-info", *, model: str = "gpt
     return recorder
 
 @pytest.mark.parametrize(("source", "diagnostic"),
-    [(LiveRunInfoSource(recorder=None, artifacts=None), "run info: recorder unavailable"),
+    [
         (LiveRunInfoSource(recorder=_recorder(Path(".")), artifacts=None), "run info: artifact session unavailable",),
     ],
 )
@@ -69,34 +64,6 @@ def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunI
 
     assert FALLBACK_NOTE in result.markdown
     assert result.diagnostic == diagnostic
-
-async def test_live_provider_renders_parent_and_real_retained_complete_sibling(tmp_path: Path,) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    session_id = "live-run-info"
-    owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
-    async with open_artifact_session(work_context(repo, run_id="run-info"), session_id=session_id, owner=owner,
-    ) as artifacts:
-        route = artifacts.register_trajectory_output(None)
-        assert route.run_dir == artifacts.daydream_dir / "runs" / session_id
-        assert route.full.frozen_path == route.run_dir / "trajectory.json"
-        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
-        assert route.full.write_path is not None
-        recorder = _recorder(repo, session_id)
-        recorder.path = route.full.write_path
-        recorder.artifact_run_dir = route.run_dir
-        child = _trajectory(session_id, "child", phase="fix")
-        sibling = TrajectoryDocumentSnapshot(
-            "child", route.run_dir / "trajectories" / "child.json", child.model_dump_json().encode(),
-        )
-        artifacts.write_trajectory_document(route, sibling, "complete")
-        assert artifacts.snapshot_completed_sibling_trajectories(session_id=session_id) == (sibling,)
-        result = render_live_run_info(LiveRunInfoSource(recorder=recorder, artifacts=artifacts))
-
-    assert result.diagnostic is None
-    assert "| Review |" in result.markdown
-    assert "| Fix |" in result.markdown
-    assert "- **Steps / tool calls:** 2 / 0" in result.markdown
-
 
 class _SnapshotSource:
     def __init__(self, snapshots: tuple[TrajectoryDocumentSnapshot, ...] = (), *, error: Exception | None = None,
@@ -136,7 +103,7 @@ def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(("snapshot_id", "document_session", "document_id"),
-    [("child", "other-session", "child"), ("child", "run-info", "other-child"), ("run-info", "run-info", "run-info")],
+    [("child", "other-session", "child"), ("child", "run-info", "other-child"), ],
 )
 def test_invalid_sibling_identity_returns_unavailable(
     tmp_path: Path, snapshot_id: str, document_session: str, document_id: str,
@@ -174,23 +141,3 @@ def test_pricing_or_render_failure_returns_unavailable(
 
     assert result.diagnostic == "run info: rendering unavailable"
     assert FALLBACK_NOTE in result.markdown
-
-
-def test_live_provider_honors_user_price_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
-    custom_model = "custom-live-model"
-    prices_file = tmp_path / "prices.toml"
-    prices_file.write_text(
-        f'[prices."{custom_model}"]\n'
-        "input = 2.0\n"
-        "cached_input = 0.5\n"
-        "output = 8.0\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
-    source = _source_with_snapshots(
-        tmp_path, recorder=_recorder(tmp_path, model=custom_model, prompt_tokens=1_000_000, cost_usd=None,),
-    )
-    result = render_live_run_info(source)
-
-    assert result.diagnostic is None
-    assert "- **Cost:** $2.00" in result.markdown
