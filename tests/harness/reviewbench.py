@@ -13,25 +13,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from daydream import git_ops
-from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, REVIEWBENCH_REVISION, Case, verify_source
+from daydream.benchmark.reviewbench.contract import PUBLIC_PROFILE_SCHEMA, REVIEWBENCH_REVISION, Case
 from daydream.benchmark.reviewbench.native import freeze_reviewer
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.harness.git_helpers import commit, git, init_repo, write_and_stage
-
-
-@pytest.fixture
-def supplied_source() -> Path:
-    configured = os.environ.get("DAYDREAM_REVIEWBENCH_SOURCE")
-    if not configured:
-        pytest.skip("set DAYDREAM_REVIEWBENCH_SOURCE to the pinned checkout with npm ci installed")
-    source = Path(configured).resolve()
-    verify_source(source)
-    if not (source / "node_modules" / ".bin" / "tsx").is_file():
-        pytest.fail("Run npm ci in the explicitly selected ReviewBench source checkout")
-    return source
 
 
 def frozen_case(tmp_path: Path, *, additional_sources: int = 0, divergent_base: bool = False) -> tuple[Path, Case]:

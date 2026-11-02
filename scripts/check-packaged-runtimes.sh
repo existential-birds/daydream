@@ -9,12 +9,22 @@ trap 'rm -rf "$work_dir"' EXIT
 uv build --wheel --out-dir "$work_dir" "$repo_root"
 wheel=("$work_dir"/*.whl)
 python="$(uv python find 3.14)"
-"$python" - "${wheel[0]}" "$work_dir" <<'PY'
+"$python" - "${wheel[0]}" "$work_dir" "$repo_root" <<'PY'
 import sys
 from pathlib import Path
 from zipfile import ZipFile
 
 with ZipFile(sys.argv[1]) as archive:
+    shipped = set(archive.namelist())
+    source = Path(sys.argv[3])
+    resources = {path.relative_to(source).as_posix() for path in (source / 'daydream/templates/workflows').rglob('*.yml')}
+    resources |= {f'daydream/backends/{name}' for name in ('pi_structured_output.ts', 'pi_host_tools.ts', 'pi_diagnostics.ts')}
+    if missing := sorted(resources - shipped):
+        sys.exit(f'wheel is missing packaged resources: {missing}')
+    # Reviewer locks and seccomp profiles are generated at export, never shipped.
+    if leaked := sorted(name for name in shipped if name.endswith(
+            ('reviewer-runtime.lock', 'harbor-seccomp.json', 'harbor-seccomp-provenance.json'))):
+        sys.exit(f'wheel ships export-time artifacts: {leaked}')
     for resource, name in (
         ('daydream/benchmark/reviewbench/harbor-runtime.lock', 'host.lock'),
         ('daydream/benchmark/harbor/runtime-requirements.lock', 'reviewer.lock'),

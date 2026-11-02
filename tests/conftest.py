@@ -227,12 +227,6 @@ def improve_branch_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def improve_branch_two_services_target(tmp_path: Path) -> Path:
-    """Improve monorepo whose feature branch changes billing AND catalog."""
-    return _improve_monorepo(tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog"))
-
-
-@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Feature-branch diff with one Python, React, and Markdown file."""
     return _feature_repo(tmp_path, "multi_stack", {
@@ -275,18 +269,6 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
     }
     after["core.py"] = "def core_helper():\n    return 1\n# v2\n"
     return _feature_repo(tmp_path, "canary", before, after)
-
-
-@pytest.fixture
-def rust_wire_target(tmp_path: Path) -> Path:
-    """Rust and Markdown diff exercising Rust and generic wire-contract prompts."""
-    return _feature_repo(tmp_path, "rust_wire", {
-        "src/main.rs": "fn main() {\n    println!(\"hi\");\n}\n",
-        "README.md": "# Project\n",
-    }, {
-        "src/main.rs": "fn main() {\n    println!(\"hello from wire\");\n}\n",
-        "README.md": "# Project\n\nUpdated.\n",
-    })
 
 
 @pytest.fixture
@@ -416,12 +398,8 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_github_cli_env(
-    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hide host gh credentials; explicit test auth and live opt-ins remain available."""
-    if request.node.get_closest_marker("live_gh") is not None:
-        return
+def _isolate_github_cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide host gh credentials; explicit test auth remains available."""
     for name in (
         "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_REPO",
     ):
