@@ -94,8 +94,8 @@ lockcheck:
 check: lockcheck install static test coverage-report
 
 # Independent static checks run in parallel, so the gate pays for the slowest
-# one rather than their sum. Pytest runs after them, never alongside: a loaded
-# host starves its real-Git timing windows.
+# one rather than their sum. Run `make check` itself without -j so pytest starts
+# only after them: a loaded host starves its real-Git timing windows.
 STATIC_CHECKS = lint deadcode typecheck package-check actionlint check-naming
 
 static:

@@ -17,8 +17,11 @@ from zipfile import ZipFile
 with ZipFile(sys.argv[1]) as archive:
     shipped = set(archive.namelist())
     source = Path(sys.argv[3])
-    resources = {path.relative_to(source).as_posix() for path in (source / 'daydream/templates/workflows').rglob('*.yml')}
-    resources |= {f'daydream/backends/{name}' for name in ('pi_structured_output.ts', 'pi_host_tools.ts', 'pi_diagnostics.ts')}
+    resources = {path.relative_to(source).as_posix() for pattern in (
+        'daydream/templates/workflows/**/*.yml', 'daydream/benchmark/harbor/templates/**/*',
+        'daydream/backends/pi_*.ts', 'daydream/benchmark/reviewbench/*.mjs',
+        'daydream/benchmark/reviewbench/pi-reviewer/*.json',
+    ) for path in source.glob(pattern) if path.is_file() and '__pycache__' not in path.parts and not path.name.startswith('.')}
     if missing := sorted(resources - shipped):
         sys.exit(f'wheel is missing packaged resources: {missing}')
     # Reviewer locks and seccomp profiles are generated at export, never shipped.

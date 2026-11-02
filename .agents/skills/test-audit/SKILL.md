@@ -162,8 +162,9 @@ preserving existing user changes.
    separately. If runtime reduction is claimed, compare identical selections,
    workers, coverage settings, and environments, including fixture setup cost.
 
-Live CLI/GitHub and Docker-dependent proof has separate prerequisites. Inspect
-the relevant markers and harness; record skipped/unavailable proof explicitly.
+The gate has no live or opt-in tests: prove live CLI, GitHub, and Docker
+boundaries through the files, arguments, and output we own. Record any
+platform-specific skip and confirm the Linux gate runs it.
 A narrow green run, coverage percentage, or live smoke test cannot establish
 every retained contract.
 
