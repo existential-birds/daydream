@@ -88,9 +88,12 @@ result cannot prove cleanup. See
 
 ## Committed-review evidence
 
-[Committed reviews](runtime.md#committed-review-requestresult) record discovery and
-fresh challenges as separate native invocations. Claim UID/revision and captured
-source identify challenge evidence. `settings.native_contexts` holds opaque native
+[Committed reviews](runtime.md#committed-review-requestresult) record each
+[work item](runtime.md#assignment-policy-and-work) as a separate native invocation;
+concurrent local work uses forked sibling trajectories. Claim UID/revision, verdict
+`work_id` and captured source identify challenge evidence. Execution entries carry
+`work_id`, `allocation`, `observed_starts` and `overshoot`; superseded attempts remain
+evidence. `settings.native_contexts` holds opaque native
 configuration identities and phase associations; actual generation settings remain
 separate trajectory observations. Credentials stay private and refreshable.
 

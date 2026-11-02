@@ -532,6 +532,15 @@ async def _run_agent(
             if host_tools is not None:
                 host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
             native_calls_before = host_tools.calls if host_tools is not None else 0
+            native_denied_before = host_tools.denied_starts if host_tools is not None else 0
+
+            def charged_calls() -> int:
+                # Pi awaits the extension's /admit before writing the start to stdout,
+                # so every streamed start's protected-slot denial is already recorded here.
+                # A denial ahead of its stream event only undercounts; the binding enforces.
+                if host_tools is None:
+                    return tool_calls
+                return tool_calls - (host_tools.denied_starts - native_denied_before)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its
@@ -601,7 +610,7 @@ async def _run_agent(
                 result_continuation = None
                 if investigation_budget is None and host_tools is None:
                     tool_calls = 0
-                remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
+                remaining_calls = tool_call_budget - charged_calls() if tool_call_budget is not None else None
                 if host_tools is not None and host_tools.remaining_tool_calls is not None:
                     native_remaining = host_tools.remaining_tool_calls
                     remaining_calls = min(remaining_calls, native_remaining) if remaining_calls is not None else (
@@ -822,7 +831,7 @@ async def _run_agent(
                                         break
                                     if investigation_budget is None and not native_output:
                                         tool_calls += 1
-                                    if tool_call_budget is not None and tool_calls > tool_call_budget:
+                                    if tool_call_budget is not None and charged_calls() > tool_call_budget:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 

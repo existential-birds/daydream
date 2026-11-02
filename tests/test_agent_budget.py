@@ -23,7 +23,7 @@ from daydream.backends import (
 )
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal
+from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.retry_policy import derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
@@ -460,6 +460,49 @@ async def test_host_admitted_starts_remain_charged_when_native_events_are_lost(
     trajectory = json.loads(recorder.path.read_text())
     calls = [call for step in trajectory["steps"] for call in step.get("tool_calls") or []]
     assert [call["tool_call_id"] for call in calls] == ["read-1"]
+
+
+async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Denied protected-slot starts are recorded once without aborting the submission attempt.
+
+    The binding tests prove admission alone; the stream ceiling counts every native
+    start, so without excluding denials it aborted the attempt on the second member of
+    a denied batch, before the reserved structured_output start could arrive. A
+    denied start lost from the stream must still be reconciled exactly once.
+    """
+    deadline = anyio.current_time() + 60
+    budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=3), deadline=deadline)
+    binding = HostToolBinding(deadline=deadline, accept=lambda payload: payload, protected_submission=True)
+
+    async def stream(*_args: Any, host_tools: HostToolBinding, **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        host_tools.configure_schema({"type": "object"})
+        async with host_tools.session():
+            # Pi awaits /admit before writing each start, so admission precedes its event.
+            for call_id in ("read-1", "read-2", "read-3", "read-lost"):
+                try:
+                    host_tools.admit(call_id, "read", None)
+                except HostToolRejected as exc:
+                    assert exc.code == "capacity_protected"
+                if call_id != "read-lost":
+                    yield ToolStartEvent(id=call_id, name="read", input={})
+            host_tools.admit("submit", NATIVE_SUBMIT, {}, terminal=True)
+            yield ToolStartEvent(id="submit", name=NATIVE_SUBMIT, input={})
+            host_tools.submit("submit", {})
+            yield TextEvent(text="done")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True)
+    monkeypatch.setattr(backend, "execute", stream)
+    with anyio.fail_after(10):
+        output, _, reason = await run_agent(
+            backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+            investigation_budget=budget, host_tools=binding, tool_call_budget=3,
+        )
+    assert (output, reason) == ("done", None) and binding.accepted
+    assert (binding.calls, binding.denied_starts, binding.charged_starts) == (5, 2, 3)
+    assert budget.observed_tool_starts == 5
 
 
 async def test_group_deadline_still_wins_over_a_larger_allowance(

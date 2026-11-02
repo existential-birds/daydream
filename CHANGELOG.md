@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and native model registries must declare `contextWindow`/`maxTokens`. Extension
   API 8 is unchanged.
 
+- Committed review accepts an optional `assignment_policy="adaptive"` that splits
+  large changes into concurrent bounded assignments followed by a required
+  cross-assignment investigation; the default broad review is unchanged. All work
+  now shares one retry-recovery budget, and the final `structured_output` start is
+  protected ([#1628](https://github.com/existential-birds/daydream/issues/1628));
+  see [the runtime contract](docs/runtime.md#assignment-policy-and-work).
+  **Breaking (0.y.z):** committed/immutable/local results move to schemas 7/8/9 with
+  work records and per-execution capacity evidence. Restart reviews; results with
+  versions 4/5/6 are rejected. Extension API 8 is unchanged.
+
 - Stream captured review sources with bounded Python payload buffers and one raw
   Git reader per operation. Native submissions perform one complete integrity
   check before atomic admission, reducing capture memory and repeated validation
