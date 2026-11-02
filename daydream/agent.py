@@ -37,6 +37,7 @@ from daydream.backends import (
 )
 from daydream.backends.codex import supervisor_shell_command
 from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecycleSnapshot
+from daydream.backends.pi import PiBackend
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
@@ -44,7 +45,11 @@ from daydream.host_tools import HostToolBinding
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
-from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE, REVIEW_STOPPING_GUIDANCE
+from daydream.prompts.grounding import (
+    READ_ONLY_PI_SEARCH_GUIDANCE,
+    REPOSITORY_SEARCH_GUIDANCE,
+    REVIEW_STOPPING_GUIDANCE,
+)
 from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
@@ -345,10 +350,18 @@ async def run_agent(
         DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY,
     }:
         # Host composition also covers wholesale extension prompt overrides.
-        if REPOSITORY_SEARCH_GUIDANCE not in prompt:
-            prompt += "\n\n" + REPOSITORY_SEARCH_GUIDANCE
-        if review_instructions and REPOSITORY_SEARCH_GUIDANCE not in review_instructions:
-            review_instructions += "\n\n" + REPOSITORY_SEARCH_GUIDANCE
+        # Read-only Pi has only its stock bounded tools: no shell, Git or helper.
+        search_guidance = REPOSITORY_SEARCH_GUIDANCE
+        if read_only and isinstance(backend, PiBackend):
+            # Composed review prompts embed the shell guidance; substitute it in place.
+            search_guidance = READ_ONLY_PI_SEARCH_GUIDANCE
+            prompt = prompt.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
+            if review_instructions:
+                review_instructions = review_instructions.replace(REPOSITORY_SEARCH_GUIDANCE, search_guidance)
+        if search_guidance not in prompt:
+            prompt += "\n\n" + search_guidance
+        if review_instructions and search_guidance not in review_instructions:
+            review_instructions += "\n\n" + search_guidance
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import AsyncIterator, Callable, Coroutine, Set
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Set
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
@@ -33,6 +34,10 @@ _CALLBACK_TIMEOUT_S = 3.0
 _SETUP_TIMEOUT_S = 5.0
 _CLEANUP_TIMEOUT_S = 2.0
 NATIVE_SUBMIT = "structured_output"
+# Conservative byte/token ratio for preflight only; providers tokenize differently.
+BYTES_PER_TOKEN_ESTIMATE = 3
+# Pi 1.4.0 compaction defaults (dist/core/compaction) when native settings omit them.
+PI_DEFAULT_COMPACTION = {"reserve_tokens": 16384, "keep_recent_tokens": 20000}
 
 
 class HostToolRejected(Exception):
@@ -46,7 +51,30 @@ class HostToolRejected(Exception):
 HostToolFailureCode = Literal[
     "input_unavailable", "evidence_incomplete", "authority_closed", "deadline_expired", "capacity_exhausted",
     "native_correlation", "native_readiness", "invalid_frame", "callback_failed", "invalid_result",
+    "native_capacity",
 ]
+
+
+@dataclass(frozen=True)
+class HostTool:
+    """One charged nonterminal model tool served synchronously by the host.
+
+    ``mutating`` callbacks install domain state at the same closure-first
+    boundary as terminal acceptance; an unexpected failure is indeterminate.
+    Read-only callbacks never change domain state.
+    """
+
+    schema: dict[str, Any]
+    callback: Callable[[dict[str, Any]], dict[str, Any]]
+    mutating: bool = False
+
+
+@dataclass(frozen=True)
+class NativeCapacityRequirement:
+    """Whole-invocation bytes that must fit the native model before provider work."""
+
+    largest_tool_result_bytes: int
+    submission_bytes: int
 
 
 def _bounded_message(message: str, *, limit: int = 1024) -> str:
@@ -147,7 +175,9 @@ class HostToolBinding:
     """One review capability with cumulative limits and attempt-local correlation."""
 
     def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]],
-                 allowed_tools: Set[str] | None = None) -> None:
+                 allowed_tools: Set[str] | None = None, host_tools: Mapping[str, HostTool] | None = None,
+                 reserves: Mapping[str, Any] | None = None,
+                 native_requirement: NativeCapacityRequirement | None = None) -> None:
         if type(deadline) not in {int, float} or not math.isfinite(deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
         if not callable(accept):
@@ -167,6 +197,14 @@ class HostToolBinding:
         self._admitted: set[str] = set()
         self._pending: dict[str, str] = {}
         self._late_cleanup: set[asyncio.Task[None]] = set()
+        self.host_tools: dict[str, HostTool] = dict(host_tools or {})
+        if NATIVE_SUBMIT in self.host_tools:
+            raise ValueError("the terminal submission tool cannot be a nonterminal host tool")
+        self.reserves = dict(reserves or {})
+        self.native_requirement = native_requirement
+        self.prompt_bytes = 0
+        self.native_limits: dict[str, Any] | None = None
+        self._host_pending: dict[str, str] = {}
 
     @property
     def accepted(self) -> bool:
@@ -287,6 +325,8 @@ class HostToolBinding:
         if malformed:
             raise self._reject(malformed if isinstance(malformed, str) else
                                "Invalid bounded host frame; reduce the submitted argument size and nesting")
+        if name in self.host_tools:
+            self._host_pending[call_id] = name
         if name == NATIVE_SUBMIT:
             if terminal is not True:
                 raise self._reject("Submit structured_output alone in a completed native generation")
@@ -344,6 +384,85 @@ class HostToolBinding:
         self._pending.clear()
         return admitted
 
+    def capacity(self) -> dict[str, Any]:
+        """Current host ledger, distinct from any dispatch-time snapshot in instructions."""
+        return {
+            "basis": "current host ledger after charging this call; supersedes dispatch-time snapshots",
+            "remaining_tool_calls": self.remaining_tool_calls,
+            "remaining_s": round(max(0.0, self.deadline - clock.monotonic()), 3),
+            "protected": dict(self.reserves),
+        }
+
+    def call(self, call_id: Any, name: Any, arguments: Any) -> dict[str, Any]:
+        """Serve one charged nonterminal host tool exactly once for its admitted start."""
+        self._check_open()
+        if self.possibly_accepted:
+            raise self._fatal("This invocation has already entered terminal acceptance", code="native_correlation")
+        if (not isinstance(call_id, str) or not isinstance(name, str)
+                or self._host_pending.pop(call_id, None) != name or name not in self.host_tools):
+            raise self._fatal("Host tool call has no matching unused admitted start", code="native_correlation")
+        tool = self.host_tools[name]
+        if schema_error := _submission_schema_error(arguments, tool.schema):
+            raise self._reject(schema_error.replace("terminal submission", f"{name} argument"))
+        self._check_open()
+        try:
+            result = tool.callback(arguments)
+        except HostToolRejected as exc:
+            raise self._reject(str(exc), code=exc.code) from exc
+        except HostToolFatal as exc:
+            raise self.fail(exc) from exc
+        except Exception as exc:
+            raise self.fail(HostToolFatal(f"Host {name} callback failed unexpectedly", code="callback_failed",
+                                          preacceptance=not tool.mutating)) from exc
+        try:
+            encoded = json.dumps({**result, "capacity": self.capacity()}, ensure_ascii=False, allow_nan=False,
+                                 separators=(",", ":"))
+            if not isinstance(result, dict) or len(encoded.encode("utf-8", errors="strict")) > _MAX_RESULT_BYTES:
+                raise ValueError("invalid host tool result")
+            response: dict[str, Any] = json.loads(encoded)
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise self.fail(HostToolFatal(f"Host {name} returned an invalid bounded result", code="invalid_result",
+                                          preacceptance=not tool.mutating)) from exc
+        return response
+
+    def check_native_limits(self, reported: Any) -> dict[str, Any]:
+        """Record native model/compaction limits and refuse a whole invocation that cannot fit."""
+        model = reported.get("model") if isinstance(reported, dict) else None
+        settings = reported.get("compaction") if isinstance(reported, dict) else None
+        def positive(value: Any) -> int | None:
+            return value if type(value) is int and value > 0 else None
+        evidence: dict[str, Any] = {
+            "context_window": positive(model.get("context_window")) if isinstance(model, dict) else None,
+            "max_tokens": positive(model.get("max_tokens")) if isinstance(model, dict) else None,
+            "compaction_enabled": settings.get("enabled") if isinstance(settings, dict)
+            and type(settings.get("enabled")) is bool else None,
+        }
+        for key, default in PI_DEFAULT_COMPACTION.items():
+            value = positive(settings.get(key)) if isinstance(settings, dict) else None
+            evidence[key] = value if value is not None else default
+            evidence[f"{key}_source"] = "native_settings" if value is not None else "pi_1.4.0_default"
+        self.native_limits = evidence
+        requirement = self.native_requirement
+        if requirement is not None:
+            def tokens(size: int) -> int:
+                return -(-size // BYTES_PER_TOKEN_ESTIMATE)
+            context = (tokens(self.prompt_bytes + requirement.largest_tool_result_bytes + requirement.submission_bytes)
+                       + evidence["reserve_tokens"] + evidence["keep_recent_tokens"])
+            output = tokens(requirement.submission_bytes)
+            evidence.update(required_context_tokens=context, required_output_tokens=output)
+            if evidence["context_window"] is None or evidence["max_tokens"] is None:
+                raise self._fatal("Native model context/output limits are unavailable before provider work; "
+                                  "declare contextWindow and maxTokens in the native model registry",
+                                  code="native_capacity")
+            if evidence["context_window"] < context or evidence["max_tokens"] < output:
+                raise self._fatal(
+                    f"Native model limits cannot fit this review invocation: needs contextWindow >= {context} "
+                    f"(instructions, largest tool result, bounded submission, compaction reserve and kept "
+                    f"context) and maxTokens >= {output}; observed contextWindow "
+                    f"{evidence['context_window']} and maxTokens {evidence['max_tokens']}. Select a model "
+                    "with larger native limits or adjust native compaction settings.", code="native_capacity")
+        return evidence
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[PiHostToolServer]:
         """Open one attempt's endpoint; unaccepted retries retain counters and deadline."""
@@ -361,6 +480,7 @@ class HostToolBinding:
         self.cleanup_complete = self.native_settled = False
         self._admitted.clear()
         self._pending.clear()
+        self._host_pending.clear()
         server = PiHostToolServer(self)
         try:
             try:
@@ -438,3 +558,4 @@ class HostToolBinding:
         """Revoke this transport; a permitted live retry keeps cumulative policy."""
         self.authority_open = False
         self._pending.clear()
+        self._host_pending.clear()

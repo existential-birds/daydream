@@ -10,7 +10,7 @@ import tempfile
 import tracemalloc
 import zlib
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -130,12 +130,43 @@ def _verdict(inputs: StageInputFactory, claim: dict[str, Any], **fields: Any) ->
             "evidence_refs": _selectors(inputs), **fields}
 
 
+def _assignment(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The dispatch's assignment, carried in compaction-stable system instructions."""
+    text = kwargs["review_system_instructions"]
+    value: dict[str, Any] = json.loads(text.split("\nCommitted review assignment:\n")[1]
+                                       .split("\nEnd committed review assignment.\n")[0])
+    return value
+
+
+def _owner(binding: HostToolBinding) -> Review:
+    """The Review serving this binding's read-only lookup."""
+    owner: Review = getattr(binding.host_tools["review_source"].callback, "__self__")
+    return owner
+
+
+def _looked_up(binding: HostToolBinding) -> list[dict[str, Any]]:
+    """Every planned target's mapping through the host lookup, paging the catalog."""
+    lookup = binding.host_tools["review_source"].callback
+    parts: list[dict[str, Any]] = []
+    cursor = None
+    while True:
+        page = lookup({"target_id": None, "path": None, "cursor": cursor})
+        parts.extend(lookup({"target_id": entry["target_id"], "path": None, "cursor": None})["target"]
+                     for entry in page["entries"])
+        if (cursor := page["next_cursor"]) is None:
+            return parts
+
+
 def _forge_completion(value: dict[str, Any]) -> None:
     terminal = value["terminal_result"]
-    terminal["stack_outcomes"][0].update(status="complete", reason_codes=[], partial_evidence=False)
+    for outcome in terminal["stack_outcomes"]:
+        outcome.update(status="complete", reason_codes=[], partial_evidence=False)
+        for decision in outcome["target_decisions"]:
+            decision["status"] = "reviewed"
     terminal["phase_outcomes"][0].update(status="complete", reason_codes=[])
     terminal.update(analysis_state="complete", pipeline_state="completed", reason_codes=[],
-                    completed_stacks=["committed"], uncovered_stacks=[])
+                    completed_stacks=[outcome["scope_id"] for outcome in terminal["stack_outcomes"]],
+                    uncovered_stacks=[])
     validate_terminal_result(terminal)
 
 
@@ -305,7 +336,7 @@ async def test_whole_admission_rejection_preserves_prior_work_and_obligations(
     "challenge", [
         "missing", "timeout", "accepted-then-failed", "last-call-quota", "exhausted", "setup", "output-install",
         "cancelled", "preparation",
-        "report-stage", "bundle-stage", "too-many-assignments", "hub-export", "hosted-output-install",
+        "report-stage", "bundle-stage", "hub-export", "hosted-output-install",
         "hosted-bundle-install",
     ]
 )
@@ -343,9 +374,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         monkeypatch.setattr(os, "open", charge_preparation)
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
-        assignment = json.loads(
-            prompt.split("\nCommitted review assignment:\n")[1].split("\nEnd committed review assignment.\n")[0]
-        )
+        assignment = _assignment(kwargs)
         dispatches.append(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"]}
         )
@@ -397,8 +426,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
                 raise RuntimeError("native failed after host acceptance")
             binding.native_settled = True
         if assignment["kind"] == "discovery" and challenge == "setup":
-            # The actual next input-capture filesystem operation must fail.
-            for item in kwargs["sanctioned_inputs"].inputs:
+            # The actual next canonical-input capture filesystem operation must fail.
+            for item in _owner(kwargs["host_tools"]).inputs.canonical:
                 item.path.unlink()
         return accepted, None, None
 
@@ -408,12 +437,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
     if challenge == "exhausted":
         profile_path = repo.parent / "pipeline-only.toml"
         profile_path.write_text('name = "pipeline-only"\n[pipeline]\nreviewer_investigation_budget_s = 60\n')
-    if challenge == "too-many-assignments":
-        paths = [f"extra-{number:03}.py" for number in range(511)]
-        for path in paths:
-            (repo / path).write_text("VALUE = 1\n")
-        git(repo, "add", *paths)
-        commit(repo, "add files beyond committed review capacity")
     output_root = repo
     hosted_policy = None
     if challenge.startswith("hosted-"):
@@ -473,9 +496,8 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         limits=ReviewLimits(90, 12, 10),
         hosted_policy=hosted_policy,
     )
-    if challenge in {"too-many-assignments", "hub-export"}:
-        expected = "at most 512 assignment parts" if challenge == "too-many-assignments" else "external export"
-        with pytest.raises(ValueError, match=expected):
+    if challenge == "hub-export":
+        with pytest.raises(ValueError, match="external export"):
             await run_committed_review(review_request)
         assert dispatches == []
         assert not (repo / ".daydream/committed-review.json").exists()
@@ -606,12 +628,12 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     calls: list[dict[str, Any]] = []
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
-        assignment = json.loads(prompt.split('\nCommitted review assignment:\n')[1]
-                                .split('\nEnd committed review assignment.\n')[0])
+        assignment = _assignment(kwargs)
         calls.append(assignment)
+        parts = _looked_up(kwargs['host_tools'])
 
         def selectors(file: str) -> list[dict[str, Any]]:
-            part = next(part for part in assignment['assignments'] if part['file'] == file)
+            part = next(part for part in parts if part['file'] == file)
             option = next(option for option in part['source_options'] if option['side'] == 'new')
             return [{'source_id': option['source_id'], 'basis': 'supplied_diff', 'source_range': None}]
 
@@ -620,7 +642,7 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
         if assignment['kind'] == 'discovery':
             value = {'targets': [
                 {'target_id': part['target_id'], 'status': 'reviewed', 'reason': 'Captured source inspected.',
-                 'evidence_refs': selectors(part['file'])} for part in assignment['assignments']], 'claims': [claim]}
+                 'evidence_refs': selectors(part['file'])} for part in parts], 'claims': [claim]}
         else:
             claim['payload'].update(file='caller.py', grounds='A distinct changed caller needs fresh challenge.',
                                     evidence_refs=selectors('caller.py'))
@@ -648,12 +670,12 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
     value = result.to_dict()
     assert result.output_installed and not result.complete
     assert [call['kind'] for call in calls] == ['discovery', 'challenge']
-    assert value['schema_version'] == 3 and value['terminal_result']['schema_version'] == 2
+    assert value['schema_version'] == 6 and value['terminal_result']['schema_version'] == 2
     validate_committed_result(value)
-    legacy_result = deepcopy(value)
-    legacy_result['schema_version'] = 1
+    relabeled = deepcopy(value)
+    relabeled['schema_version'] = 4
     with pytest.raises(ValueError, match='result version does not match captured source identity'):
-        validate_committed_result(legacy_result)
+        validate_committed_result(relabeled)
     assert value['analyzed_revision']['head_sha'] == review_inputs.revision['head_sha']
     assert value['analyzed_revision']['source_id'] == calls[0]['analyzed_revision']['source_id']
     assert value['terminal_result']['analysis_state'] == 'incomplete'
@@ -661,7 +683,7 @@ async def test_local_capture_corruption_retains_challenged_findings_and_unfinish
         ['backend_failure', 'evidence_incomplete'] if new_concern else ['evidence_incomplete'])
     assert len(value['claims']) == (2 if new_concern else 1) and len(value['findings']) == 1
     assert value['findings'][0]['uid'] == calls[1]['claims'][0]['uid']
-    assert all(part['file'] != 'support/helper.py' for part in calls[0]['assignments'])
+    assert all(entry['file'] != 'support/helper.py' for entry in calls[0]['catalog']['entries'])
     assert value['findings'][0]['payload']['file'] == 'api.py'
     assert value['findings'][0]['payload']['evidence_refs'] == value['claims'][0]['payload']['evidence_refs']
     if new_concern:
@@ -872,13 +894,11 @@ async def test_committed_review_materializes_raw_bytes_despite_checkout_transfor
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
         assert (cwd / "api.py").read_bytes() == b"VALUE = 'CANONICAL head'\n"
-        assignment = json.loads(prompt.split("\nCommitted review assignment:\n")[1]
-                                .split("\nEnd committed review assignment.\n")[0])
         value = {"claims": [], "targets": [
             {"target_id": part["target_id"], "status": "reviewed", "reason": "Raw captured bytes inspected.",
              "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
                                 "basis": "supplied_diff", "source_range": None}]}
-            for part in assignment["assignments"]]}
+            for part in _looked_up(kwargs["host_tools"])]}
         binding = kwargs["host_tools"]
         async with binding.session():
             binding.admit("terminal", "structured_output", value, terminal=True)
@@ -1139,17 +1159,17 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     seen: list[dict[str, Any]] = []
 
     async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, None]:
-        assignment = json.loads(prompt.split("\nCommitted review assignment:\n")[1].split(
-            "\nEnd committed review assignment.\n")[0])
+        assignment = _assignment(kwargs)
         seen.append(assignment)
         assert cwd != repo and (cwd / "api.py").read_bytes() == (repo / "api.py").read_bytes()
         assert not (cwd / ".git/hooks/post-checkout").exists()
-        assert "captured/repository" not in prompt and '"pr_number"' not in prompt
-        assert "Historical captured title" in prompt
+        instructions = kwargs["review_system_instructions"]
+        assert "captured/repository" not in prompt + instructions and '"pr_number"' not in prompt + instructions
+        assert "Historical captured title" in instructions
         binding = kwargs["host_tools"]
         binding.configure_schema(kwargs["output_schema"])
         async with binding.session():
-            part = assignment["assignments"][0]
+            part = _looked_up(binding)[0]
             assert part["source_options"][0]["source_id"] == "source:1"
             refs = [{"source_id": part["source_options"][0]["source_id"], "source_range": None,
                      "basis": "supplied_diff"}]
@@ -1267,7 +1287,7 @@ async def test_immutable_review_uses_only_captured_evidence_and_inert_source(
     assert attempts == [] and fake_gh.process_calls() == [] and not marker.exists()
     value = result.to_dict()
     validate_committed_result(value)
-    assert value["schema_version"] == 2 and value["immutable_input"] == envelope
+    assert value["schema_version"] == 5 and value["immutable_input"] == envelope
     assert result.complete == (outcome in {"complete", "attributes", "legal-ref", "packed", "empty", "no-diff"})
     assert len(seen) == (0 if outcome == "no-diff" else 1 if outcome == "empty" else 2)
     if outcome == "attributes":
@@ -1554,3 +1574,344 @@ async def test_sibling_submission_revalidates_after_prior_acceptance(
     assert first.pending() == prior
     assert len(first.seal({})['claims']) == 1
     assert sibling.seal({})['claims'] == []
+
+
+_LONG_LINE = "VALUE = '" + "é" * 30000 + "'\n"  # One UTF-8 line over 50 KB: unreadable by stock Pi read.
+
+
+def _charged(binding: HostToolBinding, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Drive one host tool through its real charged admission and correlated call."""
+    call_id = f"{name}-{binding.calls}"
+    binding.admit(call_id, name, arguments)
+    return binding.call(call_id, name, arguments)
+
+
+def _read_target(binding: HostToolBinding, target_id: str) -> tuple[dict[str, Any], bytes]:
+    """Reassemble every lookup page through the opaque cursor and verify each page digest."""
+    pages: list[bytes] = []
+    cursor = None
+    while True:
+        page = _charged(binding, "review_source", {"target_id": target_id, "path": None, "cursor": cursor})
+        content = page["content"].encode()
+        assert hashlib.sha256(content).hexdigest() == page["page"]["sha256"]
+        assert page["page"]["offset"] == sum(map(len, pages)) and page["page"]["bytes"] == len(content)
+        pages.append(content)
+        if (cursor := page["next_cursor"]) is None:
+            body = b"".join(pages)
+            assert hashlib.sha256(body).hexdigest() == page["page"]["content_sha256"]
+            assert len(body) == page["page"]["total_bytes"]
+            return page["target"], body
+
+
+async def test_bounded_navigation_reaches_late_bytes_and_retains_partial_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proof A: a ~20k-line real capture is navigable through bounded lookup, not inline inventory.
+
+    The former 512-part refusal and whole inline inventory missed this regression:
+    the population is computed before bounding, the system catalog is explicitly
+    partial, and every frozen byte (including a multibyte line over 50 KB split into
+    continuation fragments) is reachable by charged lookups. A late discovery failure
+    keeps earlier admitted decisions and the challenged finding, types every
+    undecided target as unfinished, and cannot report complete coverage.
+    """
+    repo = tmp_path / "source"
+    # About 20k changed lines across more than 512 files.
+    base_files = {f"pkg/module_{index:04d}.py": "BASE = 0\n" for index in range(600)}
+    feature = {path: "".join(f"ITEM_{line} = {line}\n" for line in range(33)) for path in base_files}
+    feature["zz_late/target.py"] = "LATE_MARKER = 'late'\n" + _LONG_LINE
+    head = seed_feature_branch(repo, base=base_files, feature=feature)
+    base = git(repo, "rev-parse", "main")
+    numstat = [line.split("\t") for line in git(repo, "diff", "--numstat", base, head).splitlines()]
+    expected_files = {path for _, _, path in numstat}
+    expected_added = sum(int(added) for added, _, _ in numstat)
+    assert expected_added >= 19800
+    observed: dict[str, Any] = {}
+
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
+        instructions = kwargs["review_system_instructions"]
+        assignment = _assignment(kwargs)
+        binding: HostToolBinding = kwargs["host_tools"]
+        binding.configure_schema(kwargs["output_schema"])
+        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
+        async with binding.session():
+            if assignment["kind"] == "challenge":
+                claim, = assignment["claims"]
+                verdict = {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                           "grounds": "The late captured bytes contain the marker after counterevidence search.",
+                           "evidence_refs": []}
+                value = {"verdicts": [verdict], "claims": []}
+                binding.admit("challenge-final", "structured_output", value, terminal=True)
+                accepted = binding.submit("challenge-final", value)
+                kwargs["investigation_budget"].observed_tool_starts += binding.calls
+                binding.native_settled = True
+                return accepted, None, None
+            catalog = assignment["catalog"]
+            observed["system_catalog"] = catalog
+            assert len(instructions.encode()) < 64 * 1024
+            # Page the complete population through the host cursor.
+            entries: list[dict[str, Any]] = []
+            cursor = None
+            while True:
+                page = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": cursor})
+                entries.extend(page["entries"])
+                if (cursor := page["next_cursor"]) is None:
+                    break
+            observed["entries"] = entries
+            contents: dict[str, bytes] = {}
+            targets: dict[str, dict[str, Any]] = {}
+            for entry in entries:
+                targets[entry["target_id"]], contents[entry["target_id"]] = _read_target(binding, entry["target_id"])
+            observed["contents"], observed["targets"] = contents, targets
+            late = [entry["target_id"] for entry in entries if "LATE_MARKER" in contents[entry["target_id"]].decode()]
+            late_target = targets[late[0]]
+            observed["late_refs"] = [{"source_id": next(option["source_id"] for option in late_target["source_options"]
+                                                        if option["side"] == "new"),
+                                      "basis": "supplied_diff", "source_range": None}]
+            reviewed = entries[:len(entries) // 2]
+            for start in range(0, len(reviewed), 75):
+                batch = {"targets": [{
+                    "target_id": entry["target_id"], "status": "reviewed", "reason": "", "evidence_refs": [],
+                } for entry in reviewed[start:start + 75]], "claims": [] if start else [{
+                    "uid": "", "revision": 0, "source_uids": [], "title": "Late marker value",
+                    "payload": {"claim": "The late marker changes captured behavior.", "trigger": "Import the file.",
+                                "consequence": "The marker value is observed.", "grounds": "Late captured bytes.",
+                                "file": late_target["file"], "line": None, "evidence_refs": observed["late_refs"]}}]}
+                receipt = _charged(binding, "review_admit", batch)
+                assert receipt["progress"]["decided"] == start + len(batch["targets"])
+            kwargs["investigation_budget"].observed_tool_starts += binding.calls
+        raise PiError("native discovery failed after progressive admissions")
+
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    result = await run_committed_review(CommittedReviewRequest(repo, base, limits=ReviewLimits(600, 60, 8000)))
+    value = result.to_dict()
+    validate_committed_result(value)
+
+    # Population precedes bounding: inventory equals the independent Git population.
+    entries = observed["entries"]
+    assert {part["file"] for part in value["assignments"]} == {entry["file"] for entry in entries} == expected_files
+    assert [entry["target_id"] for entry in entries] == [part["target_id"] for part in value["assignments"]]
+    assert len({entry["target_id"] for entry in entries}) == len(entries)
+    assert len(entries) > 512
+    catalog = observed["system_catalog"]
+    assert catalog["omitted_after"] == len(entries) - len(catalog["entries"])
+    assert catalog["status"] == "partial"
+    assert catalog["total_targets"] == len(entries) and catalog["total_files"] == len(expected_files)
+    # Every changed line is reachable: lookups expose at least the independently counted additions.
+    added = sum(line.startswith("+") and not line.startswith("+++ ")
+                for body in observed["contents"].values() for line in body.decode().split("\n"))
+    assert all(not body.startswith(b"[Ordered continuation") for body in observed["contents"].values())
+    fragments = [observed["contents"][entry["target_id"]] for entry in entries
+                 if observed["targets"][entry["target_id"]]["kind"] == "continuation"
+                 and observed["targets"][entry["target_id"]]["file"].endswith("target.py")]
+    assert fragments, "the long multibyte line must require continuation fragments"
+    reassembled = b"".join(fragment.split(b"\n@@", 1)[1].split(b"\n", 1)[1] for fragment in fragments)
+    assert ("+" + _LONG_LINE).encode() in reassembled
+    assert added >= expected_added
+    # Retained admissions survive the late discovery failure; unfinished work is typed per target.
+    terminal = value["terminal_result"]
+    assert terminal["analysis_state"] == "incomplete" and not result.complete
+    decisions = {d["target_id"]: d for scope in terminal["stack_outcomes"] for d in scope["target_decisions"]}
+    assert decisions.keys() == {entry["target_id"] for entry in entries}
+    admitted = {e["target_id"] for e in entries[:len(entries) // 2]}
+    assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == admitted
+    undecided = [d for t, d in decisions.items() if t not in admitted]
+    assert undecided and all(d["status"] == "not_reviewed" and d["reason"].startswith("unsubmitted:")
+                             and d["evidence_refs"] == [] for d in undecided)
+    assert len(value["findings"]) == 1 and value["findings"][0]["payload"]["file"].endswith("target.py")
+    assert [e["assignment"] for e in value["execution"]] == ["discovery", "challenge"]
+    assert value["execution"][0]["reason"] == "backend_failure" and not value["execution"][0]["accepted"]
+
+
+async def test_lookup_is_read_only_and_cursor_bound(tmp_path: Path) -> None:
+    """Navigation cannot mutate review state or alias another query's cursor.
+
+    Proof A drives lookups only along valid cursors; this catches a cursor reused across
+    queries, a forged offset inside a multibyte character killing the invocation instead
+    of a correctable rejection, and unavailable selections reported as errors instead of
+    typed data.
+    """
+    repo = tmp_path / "subject"
+    seed_feature_branch(repo, base={"api.py": "VALUE = 1\n", "uni.py": "TEXT = ''\n", "helper.py": "H = 1\n"},
+                        feature={"api.py": "VALUE = 0\n", "uni.py": "TEXT = '\u00e9\u00e9\u00e9'\n",
+                                 "helper.py": "H = 1\n"})
+    review = Review(_inputs(repo, tmp_path / "inputs", ["api.py", "uni.py"]), "domain",
+                    deadline=clock.monotonic() + 60)
+    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    async with binding.session():
+        path_page = _charged(binding, "review_source", {"target_id": None, "path": "api.py", "cursor": None})
+        assert path_page["status"] == "complete" and {e["file"] for e in path_page["entries"]} == {"api.py"}
+        unavailable = _charged(binding, "review_source", {"target_id": None, "path": "helper.py", "cursor": None})
+        assert unavailable["status"] == "unavailable" and "not proof of absence" in unavailable["reason"]
+        unknown = _charged(binding, "review_source", {"target_id": "part:999999", "path": None, "cursor": None})
+        assert unknown["status"] == "unavailable"
+        uni = _charged(binding, "review_source", {"target_id": "uni.py", "path": None, "cursor": None})
+        body = uni["content"].encode()
+        inside = body.index("\u00e9".encode()) + 1
+        # Forged cursors (built from the private format) model a model editing opaque cursors.
+        uni_query = {"target_id": "uni.py", "path": None}
+        for target, cursor, message in [
+            (None, Review._cursor({"target_id": None, "path": "api.py"}, 0), "same target_id/path query"),
+            ("uni.py", Review._cursor(uni_query, inside), "outside this target's content"),
+            ("uni.py", Review._cursor(uni_query, len(body) + 1), "outside this target's content"),
+            (None, Review._cursor({"target_id": None, "path": None}, 99), "outside this query's results"),
+        ]:
+            with pytest.raises(HostToolRejected, match=message):
+                _charged(binding, "review_source", {"target_id": target, "path": None, "cursor": cursor})
+        with pytest.raises(HostToolRejected, match="not both"):
+            _charged(binding, "review_source", {"target_id": "api.py", "path": "api.py", "cursor": None})
+        assert binding.authority_open and binding.fatal_error is None and binding.calls == 9
+        catalog = _charged(binding, "review_source", {"target_id": None, "path": None, "cursor": None})
+        assert catalog["decided_targets"] == 0 and all(entry["decided"] is None for entry in catalog["entries"])
+
+
+async def test_progressive_batches_are_atomic_and_earlier_admissions_survive(review_inputs: StageInputFactory) -> None:
+    """Progressive admission replaces single-shot discovery without weakening atomicity.
+
+    The single-submission path never exercised partial batches: a rejected batch must
+    leave no decision, claim or coverage reservation, earlier decisions are final,
+    oversized batches are refused, and sealing types undecided targets per target.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    first, second = (part["target_id"] for part in review.assignments[:2])
+
+    def decision(target: str, **fields: Any) -> dict[str, Any]:
+        part = next(part for part in review.assignments if part["target_id"] == target)
+        return {"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": [{
+            "source_id": part["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}],
+            **fields}
+
+    async with binding.session():
+        receipt = _charged(binding, "review_admit",
+                           {"targets": [decision(first)], "claims": [_proposal(review_inputs)]})
+        assert receipt["progress"]["decided"] == 1 and receipt["admitted"]["claims"][0]["revision"] == 1
+        bad = decision(second)
+        bad["evidence_refs"][0]["source_id"] = "source:" + "0" * 64
+        for batch, message in [
+            ({"targets": [bad], "claims": [_proposal(review_inputs)]}, "outside this target"),
+            ({"targets": [decision(first)], "claims": []}, "already admitted"),
+            ({"targets": [decision(second), decision(second)], "claims": []}, "at most once per batch"),
+            ({"targets": [decision(second, status="not_reviewed", reason="x" * 1024)], "claims": [
+                {**_proposal(review_inputs), "title": "t" * 4096} for _ in range(33)]}, "exceeds 131072 UTF-8 bytes"),
+        ]:
+            with pytest.raises(HostToolRejected, match=message):
+                _charged(binding, "review_admit", batch)
+        final = {"targets": [decision(second)], "claims": []}
+        binding.admit("final", "structured_output", final, terminal=True)
+        # Rejected batches installed nothing: one claim and exactly the two admitted decisions remain.
+        progress = binding.submit("final", final)["progress"]
+        assert (progress["decided"], progress["pending_challenge"]) == (2, 1)
+    value = review.seal({})
+    decisions = [d for scope in value["terminal_result"]["stack_outcomes"] for d in scope["target_decisions"]]
+    assert {d["target_id"] for d in decisions if d["status"] == "reviewed"} == {first, second}
+    assert all(d["reason"].startswith("unsubmitted:") for d in decisions if d["status"] == "not_reviewed")
+    assert value["terminal_result"]["analysis_state"] == "incomplete" and len(value["claims"]) == 1
+
+
+async def test_denied_over_limit_discovery_start_cannot_spend_protected_challenge_reserve(
+    review_inputs: StageInputFactory, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The binding charges a denied over-limit start; the program must not let it shrink challenge.
+
+    Previously challenge received the shared ledger's remainder, so discovery's
+    rejected extra start (charged before the limit check) consumed one protected call.
+    """
+    allocations: list[tuple[str, int]] = []
+
+    async def execute(backend: Any, cwd: Path, prompt: str, **kwargs: Any) -> tuple[Any, None, str | None]:
+        kind = "discovery" if kwargs["phase"].value == "review" else "challenge"
+        allocations.append((kind, kwargs["tool_call_budget"]))
+        binding: HostToolBinding = kwargs["host_tools"]
+        binding.configure_schema(kwargs["output_schema"])
+        binding.restrict(deadline=kwargs["deadline"], tool_call_budget=kwargs["tool_call_budget"])
+        async with binding.session():
+            if kind == "discovery":
+                parts = _looked_up(binding)
+                value = {"targets": [{"target_id": part["target_id"], "status": "reviewed", "reason": "",
+                                      "evidence_refs": [{"source_id": part["source_options"][0]["source_id"],
+                                                         "basis": "supplied_diff", "source_range": None}]}
+                                     for part in parts], "claims": [_proposal(review_inputs)]}
+                binding.admit("terminal", "structured_output", value, terminal=True)
+                accepted = binding.submit("terminal", value)
+                for number in range(kwargs["tool_call_budget"]):  # The last start is over the limit.
+                    with suppress(HostToolFatal):
+                        binding.admit(f"extra-{number}", "read", {})
+                assert binding.calls == kwargs["tool_call_budget"] + 1
+            else:
+                claim = _owner(binding).pending()[0]
+                value = {"verdicts": [_verdict(review_inputs, claim)], "claims": []}
+                binding.admit("terminal", "structured_output", value, terminal=True)
+                accepted = binding.submit("terminal", value)
+            kwargs["investigation_budget"].observed_tool_starts += binding.calls
+            binding.native_settled = True
+        return accepted, None, "tool_call_budget_exceeded" if kind == "discovery" else None
+
+    monkeypatch.setattr(committed_review, "agent", SimpleNamespace(run_agent=execute, console=agent.console))
+    result = await run_committed_review(CommittedReviewRequest(
+        review_inputs.work.source, review_inputs.revision["merge_base_sha"], limits=ReviewLimits(90, 12, 10)))
+    assert allocations == [("discovery", 5), ("challenge", 5)] and result.output_installed
+
+
+async def test_claim_lines_inside_continuation_fragments_use_summarized_spans(tmp_path: Path) -> None:
+    """A new 20k-line file is one hunk of null-range fragments; its claims previously had no valid line.
+
+    The fragment identity stays canonical; only its summarized complete-line span admits
+    the claim line, and a line outside that span is still rejected. The model learns that
+    span from review_source, so the lookup itself must return it for a late fragment.
+    """
+    repo = tmp_path / "subject"
+    seed_feature_branch(repo, base={"keep.py": "KEEP = 1\n"},
+                        feature={"keep.py": "KEEP = 1\n", "big.py": "".join(f"ITEM_{n} = {n}\n" for n in range(20000))})
+    inputs = _inputs(repo, tmp_path / "inputs", ["big.py"])
+    review = Review(inputs, "domain", deadline=clock.monotonic() + 60)
+    planned = review.assignments[-1]
+    assert planned["kind"] == "continuation" and planned["source_refs"][0]["source_range"] is None
+    binding, _ = review.assignment("discovery", deadline=clock.monotonic() + 30)
+    lookup = binding.host_tools["review_source"].callback
+    late = lookup({"target_id": planned["target_id"], "path": None, "cursor": None})["target"]
+    assert late["fragment_line_offset"] == planned["fragment_line_offset"]
+    span = late["source_summary"][0]["new"]
+    selector = [{"source_id": late["source_options"][0]["source_id"], "basis": "supplied_diff", "source_range": None}]
+
+    def claim(line: int) -> dict[str, Any]:
+        return {"uid": "", "revision": 0, "source_uids": [], "title": "Late item", "payload": {
+            "claim": "A late item changes.", "trigger": "Import big.py.", "consequence": "Value differs.",
+            "grounds": "Captured late fragment.", "file": "big.py", "line": line, "evidence_refs": selector}}
+
+    async with binding.session():
+        with pytest.raises(HostToolRejected, match="claim.payload.line"):
+            _charged(binding, "review_admit", {"targets": [], "claims": [claim(span["start"] - 1)]})
+        receipt = _charged(binding, "review_admit", {"targets": [], "claims": [claim(span["end"])]})
+    assert receipt["admitted"]["claims"][0]["revision"] == 1
+    assert review.pending()[0]["payload"]["evidence_refs"][0]["fragment"] == planned["source_refs"][0]["fragment"]
+
+
+async def test_challenge_verdict_must_name_the_claim_revision_current_at_admission(
+    review_inputs: StageInputFactory,
+) -> None:
+    """A verdict on a revision superseded by an earlier batch must be rejected, not sealed.
+
+    The assignment snapshots pending revisions once. Progressive batches can revise a
+    claim first; a later verdict naming the dispatch-time revision previously passed,
+    marked the newer revision confirmed without evidence, and made sealing raise so
+    every admitted finding was lost.
+    """
+    review = Review(review_inputs, "domain", deadline=clock.monotonic() + 60)
+    await _submit(review, "discovery", _discovery(review_inputs))
+    claim = review.pending()[0]
+    binding, _ = review.assignment("challenge", deadline=clock.monotonic() + 30)
+    revised = {key: deepcopy(claim[key]) for key in ("uid", "revision", "source_uids", "title", "payload")}
+    revised["payload"].update(grounds="Refined grounds change the semantic payload.",
+                              evidence_refs=_selectors(review_inputs))
+    async with binding.session():
+        receipt = _charged(binding, "review_admit", {"verdicts": [], "claims": [revised]})
+        assert receipt["admitted"]["claims"][0]["revision"] == 2
+        stale = {"verdicts": [_verdict(review_inputs, claim)], "claims": []}
+        with pytest.raises(HostToolRejected, match="current revision at most once"):
+            _charged(binding, "review_admit", stale)
+        assert binding.authority_open and binding.fatal_error is None
+    value = review.seal({})
+    validate_committed_result(value)
+    retained, = value["claims"]
+    assert retained["revision"] == 2 and retained["disposition"] == "unresolved" and value["findings"] == []

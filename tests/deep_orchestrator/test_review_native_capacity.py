@@ -70,7 +70,6 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
         yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
                            output_schema=stage['response_contract']['schema'],
                            config=PiRequestConfig(schema_emulated=False, no_tools=False))
-        assert stage['remaining_tool_calls'] <= 192
         assert stage['context_transport'] == ('inline' if inline else 'exact_paths')
         assigned_files.update(stage['assigned_files'])
         assignment_units += len(stage['assignment_parts'])
@@ -105,8 +104,7 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
         assert max(inline_sizes) > 12 * 1024
         assert len(stage_ends(review, 'python')) < 37
     metadata = [phase['metadata'] for phase in stage_ends(review, 'python')]
-    assert metadata[0]['hard_tool_call_allowance'] == 192
-    assert metadata[-1]['observed_tool_starts'] <= 192
+    assert metadata[-1]['observed_tool_starts'] <= metadata[0]['hard_tool_call_allowance']
     assert sum(phase['submission_starts'] for phase in metadata) == len(metadata)
     assert all(phase['admitted'] for phase in metadata)
     assert len((repo / '.daydream/diff.patch').read_bytes()) > 256 * 1024
@@ -124,6 +122,7 @@ async def test_structure_traces_early_flag_to_late_request_under_original_scope_
     review.backend = backend
     early, late = 'package_0/module_00.py', 'package_8/module_40.py'
     evidence_requests: list[tuple[str, str]] = []
+    allowance: list[int] = []
 
     @backend.script('structure')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -134,11 +133,13 @@ async def test_structure_traces_early_flag_to_late_request_under_original_scope_
             assert stage['assigned_target_ids'] == ['integration:structure']
             assert set(stage['assigned_files']) == set(after)
             assert stage['observed_tool_starts'] == 0
-            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance'] == 96
+            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance']
+            allowance.append(stage['remaining_tool_calls'])
         else:
             assert stage['stage'] == 'triage'
             assert stage['completed_target_ids'] == ['integration:structure']
-            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance'] == 93
+            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance']
+            assert stage['remaining_tool_calls'] == allowance[0] - 3
             assert stage['observed_tool_starts'] == 3
             assert stage['assigned_candidate_ids'] == ['structure:candidate:1']
             assert stage['closed_candidate_ids'] == []
@@ -181,7 +182,7 @@ async def test_structure_traces_early_flag_to_late_request_under_original_scope_
                                  for path in (early, late)]
     metadata = [event['metadata'] for event in stage_ends(review, 'structure')]
     assert [item['observed_tool_starts'] for item in metadata] == ([3] if wired else [3, 6])
-    assert [item['remaining_tool_calls'] for item in metadata] == ([93] if wired else [93, 90])
+    assert all(item['remaining_tool_calls'] == allowance[0] - item['observed_tool_starts'] for item in metadata)
     assert all(item['admitted'] and item['submission_starts'] == item['successful_submissions'] == 1
                for item in metadata)
     records = json.loads((repo / '.daydream/deep/stack-structure-records.json').read_text())

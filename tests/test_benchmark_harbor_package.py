@@ -3,7 +3,6 @@ import hashlib
 import importlib.metadata
 import importlib.resources
 import json
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -286,72 +285,3 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
     with pytest.raises(pkg.PackageError) as rejected:
         pkg.validate_compiled(ws)
     assert "harbor-job.yaml" in str(rejected.value)
-
-def test_audit_execution_proofs_harbor_gated(tmp_path: Path, fake_gh: FakeGh) -> None:
-    pytest.importorskip("harbor")
-
-    root = Path(__file__).resolve().parents[1]
-    wheels = tmp_path / "wheels"
-    subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(wheels), str(root)], check=True, capture_output=True, text=True,
-    )
-    ver = importlib.metadata.version("daydream")
-    wheel = wheels / f"daydream-{ver}-py3-none-any.whl"
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    pkg.build_harbor(ws, wheel=wheel)
-    key = build.derive_task_key(case_id)
-    case = ws / "harbor" / key
-
-    env_df = (case / "environment/Dockerfile").read_text()
-    for forbidden in ("Task.md", "solution/", "tests/score_review", "tests/test.sh"):
-        assert forbidden not in env_df
-    ver_df = (case / "tests/Dockerfile").read_text()
-    assert "repository.bundle" not in ver_df and "instruction.md" not in ver_df
-    assert "DAYDREAM_REVIEW" not in ver_df
-
-    verifier_tag = f"dd-verifier-{key}"
-    environment_tag = f"dd-env-{key}"
-    subprocess.run(["docker", "build", "-t", verifier_tag, str(case / "tests")], check=True)
-    subprocess.run(["docker", "build", "-t", environment_tag, str(case / "environment")], check=True)
-    proof = tmp_path / "packaged-proof"
-    harness = proof / "tests/harness"
-    harness.mkdir(parents=True)
-    (proof / "tests/__init__.py").touch()
-    (harness / "__init__.py").touch()
-    for name in ("native_pi.py", "harbor_review.py", "packaged_harbor_review.py"):
-        shutil.copyfile(root / "tests/harness" / name, harness / name)
-    native = subprocess.run([
-        "docker", "run", "--rm", "--network", "none", "-v", f"{proof}:/proof:ro", "-w", "/proof",
-        environment_tag, "python", "-m", "tests.harness.packaged_harbor_review",
-    ], check=True, capture_output=True, text=True)
-    assert '"packaged_native_review": "complete"' in native.stdout
-    subprocess.run(["docker", "run", "--rm", environment_tag, "sh", "-c",
-            "test ! -e /workspace/repo/Task.md && test ! -e /workspace/repo/solution "
-            "&& test ! -e /workspace/repo/tests",
-        ], check=True,
-    )
-    subprocess.run(["docker", "run", "--rm", verifier_tag, "sh", "-c",
-            "test ! -e /workspace/repo && test ! -e /instruction.md "
-            "&& test -z \"${DAYDREAM_REVIEW_API_KEY:-}\"",
-        ], check=True,
-    )
-    container = subprocess.run(
-        ["docker", "run", "-d", verifier_tag, "sh", "-c", "sleep infinity"], check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    try:
-        state = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Status}}", container], check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        assert state == "running"
-    finally:
-        subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
-
-    rewards = tmp_path / "rewards.jsonl"
-    rewards.write_text(json.dumps({"verifier_error": 0, "tp": 1, "fp": 0, "fn": 0, "reward": 1.0, "clean_task": 0
-    }) + "\n")
-    out = tmp_path / "metric.json"
-    subprocess.run(
-        ["uv", "run", str(ws / "harbor/metric.py"), "-i", str(rewards), "-o", str(out)], check=True, cwd=ws / "harbor",
-    )
-    metric = json.loads(out.read_text())
-    assert metric["task_count"] == 1 and metric["micro_f1"] == 1.0

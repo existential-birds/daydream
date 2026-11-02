@@ -16,9 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own files and is required only above 5 changed files or 500 added lines;
   full-repository sweeps run on request.
 
+- Give large reviews 50% more time and tool calls at each diff-size tier (×3, ×6
+  and ×9 above 1,000, 5,000 and 10,000 lines); automatic sharding thresholds are
+  unchanged.
+
 - Default the Claude backend to `claude-haiku-5-5`, `claude-sonnet-5-5` and
   `claude-opus-5-5` across the existing phase tiers. Claude effort stays ambient,
   and explicit model pins are unchanged.
+
+- Committed review handles very large changes by navigating captured source with
+  the charged read-only `review_source` lookup and admitting progressive
+  `review_admit` batches, instead of refusing plans over 512 assignment parts or
+  inlining the whole inventory ([#1677](https://github.com/existential-birds/daydream/issues/1677));
+  see [the runtime contract](docs/runtime.md#committed-review-requestresult).
+  **Breaking (0.y.z):** committed/immutable/local results move to schemas 4/5/6
+  (earlier results must be restarted), the hosted grant becomes `pi-read-only-v2`,
+  and native model registries must declare `contextWindow`/`maxTokens`. Extension
+  API 8 is unchanged.
 
 - Stream captured review sources with bounded Python payload buffers and one raw
   Git reader per operation. Native submissions perform one complete integrity
@@ -47,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
+- Make the local gate pass in root-run containers with host-injected Git config,
+  and remove a timing race in a Pi diagnostic test. The gate no longer pulls from
+  Docker Hub: `make actionlint` runs actionlint 1.7.7 from the uv dev group, and
+  the Docker-image tests and the root-incompatible native Claude finalization
+  test are deleted.
 
 ### Security
 

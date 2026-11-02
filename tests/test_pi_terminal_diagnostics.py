@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import FrameType
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ import pytest
 
 from daydream.agent import run_agent
 from daydream.backends.pi import PiBackend, PiError
+from daydream.review_stage_inputs import StageInputFactory
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
@@ -116,9 +118,19 @@ async def test_staged_pi_terminal_failure_survives_trajectory_and_frozen_jsonl(
     fail_next_canonical_open = False
     canonical_faults = 0
     real_open = os.open
+    def python_stage_caller() -> bool:
+        # Stacks share the canonical diff and revalidate concurrently; fault only the python stage's read.
+        frame: FrameType | None = sys._getframe(2)
+        while frame is not None:
+            owner = frame.f_locals.get('self')
+            if isinstance(owner, StageInputFactory):
+                return owner.stack.stack_name == 'python'
+            frame = frame.f_back
+        return False
     def open_source(path: Any, *args: Any, **kwargs: Any) -> int:
         nonlocal fail_next_canonical_open, canonical_faults
-        if fail_next_canonical_open and isinstance(path, (str, Path)) and Path(path).name == 'diff.patch':
+        if (fail_next_canonical_open and isinstance(path, (str, Path)) and Path(path).name == 'diff.patch'
+                and python_stage_caller()):
             fail_next_canonical_open = False
             canonical_faults += 1
             raise OSError('Frozen canonical bytes unavailable at admission')

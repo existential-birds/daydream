@@ -54,6 +54,13 @@ responses remain unknown: the hook need not run for rejected requests or a
 connection failure before headers arrive. These observations do not establish a
 provider outage or change retry decisions.
 
+Native `compaction_start`/`compaction_end` events become `pi_compaction` diagnostics
+on the active step: reason, abort/retry flags, token estimates, summary size and
+SHA-256 (never the summary text) and the summary call's usage when Pi reports it.
+That usage is billed in the invocation's terminal totals rather than as a reviewer
+generation. Readiness also records the model's declared `contextWindow`/`maxTokens`
+and compaction settings as a `pi_native_capacity` diagnostic.
+
 On ordinary invocation errors, retain a redacted diagnostic tail (20 lines, up to
 1,024 characters each) from the merged native stream, including bounded cleanup output.
 Pi routes extension events through stderr, so that stream stays merged to preserve

@@ -47,6 +47,7 @@ from daydream.backends.pi import (
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
+from daydream.review_budget import ReviewLimits
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from tests.conftest import ExtDir
@@ -1242,6 +1243,87 @@ async def test_pi_response_without_generation_is_retained_without_previous_attri
                     if isinstance(event, DiagnosticEvent) and event.code == "pi_provider_response")
     assert response.metadata["generation_id"] is None
     assert response.metadata["headers"] == {"x-request-id": "interrupted-request"}
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+async def test_pi_compaction_is_retained_and_billed_without_generation_metrics(outcome: str) -> None:
+    """Native compaction is bounded evidence and billed, but never a reviewer generation.
+
+    Native fixture models never reach Pi's compaction threshold, and the existing
+    replays have no compaction frames, so neither catches dropped summary billing,
+    a persisted summary, or compaction usage presented as generation metrics.
+    """
+    summary = "Summary with TOKEN=private-summary-canary " + "x" * 5000
+    result = {"summary": summary, "firstKeptEntryId": "entry-" + "k" * 500, "tokensBefore": 120000,
+              "estimatedTokensAfter": 30000,
+              "usage": {"input": 900, "output": 80, "cacheRead": 100, "cacheWrite": 20, "cost": {"total": 0.02}}}
+    end = ({"type": "compaction_end", "reason": "threshold", "result": result, "aborted": False,
+            "willRetry": False} if outcome == "completed" else
+           {"type": "compaction_end", "reason": "overflow", "result": None, "aborted": True, "willRetry": True,
+            "errorMessage": "TOKEN=private-error-canary " + "e" * 3000})
+    lines = (FIXTURES_DIR / "simple_text.jsonl").read_text().splitlines()
+    process = make_mock_process([*lines[:-1], json.dumps({"type": "compaction_start", "reason": end["reason"]}),
+                                 json.dumps(end), lines[-1]])
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        events = [event async for event in PiBackend(model="fixture-model").execute(Path("/tmp"), "Review")]
+    compactions = [event for event in events if isinstance(event, DiagnosticEvent) and event.code == "pi_compaction"]
+    assert [event.metadata["phase"] for event in compactions] == ["start", "end"]
+    assert all(event.metadata["generation_id"] is not None for event in compactions)
+    metadata = compactions[1].metadata
+    encoded = json.dumps([event.metadata for event in compactions])
+    assert "private-summary-canary" not in encoded and "private-error-canary" not in encoded
+    assert len([event for event in events if isinstance(event, MetricsEvent)]) == 1
+    cost = next(event for event in events if isinstance(event, CostEvent))
+    if outcome == "completed":
+        assert metadata["summary_bytes"] == len(summary.encode())
+        assert metadata["summary_sha256"] == hashlib.sha256(summary.encode()).hexdigest()
+        assert len(metadata["first_kept_entry_id"]) == 128 and metadata["tokens_before"] == 120000
+        assert metadata["usage"]["cost"] == {"total": 0.02}
+        # Generation 100+10 input, then compaction 900+100+20; costs sum both calls.
+        assert (cost.input_tokens, cost.output_tokens, cost.cached_tokens) == (110 + 1020, 50 + 80, 10 + 100)
+        assert cost.cache_creation_tokens == 20 and cost.cost_usd == pytest.approx(0.0203)
+    else:
+        assert metadata["aborted"] is True and metadata["will_retry"] is True and "usage" not in metadata
+        assert len(metadata["error_message"]) == 1024 and metadata["error_message_truncated"] is True
+        assert (cost.input_tokens, cost.output_tokens) == (110, 50)
+
+
+@pytest.mark.parametrize("backend_kind", ["pi-read-only", "pi-writable", "other-read-only"])
+async def test_read_only_pi_search_guidance_names_only_its_stock_tools(tmp_path: Path, backend_kind: str) -> None:
+    """Read-only Pi is told about its real bounded tools, not a shell or `daydream search`.
+
+    Search-guidance tests use backends with a shell, so they cannot catch read-only
+    Pi being told to run `daydream search`/Git it does not have, or that guidance
+    leaking to backends where those commands do exist.
+    """
+    from daydream.prompts.grounding import READ_ONLY_PI_SEARCH_GUIDANCE, REPOSITORY_SEARCH_GUIDANCE
+    from tests.harness.backend import ScriptedBackend
+
+    seen: list[tuple[str, str | None]] = []
+
+    class CapturingPi(PiBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+            seen.append((prompt, kwargs.get("review_instructions")))
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    read_only = backend_kind != "pi-writable"
+    def respond(_cwd: Path, prompt: str, *_args: Any) -> None:
+        seen.append((prompt, None))
+
+    backend: Any = (CapturingPi(model="fixture-model") if backend_kind.startswith("pi") else
+                    ScriptedBackend(responder=respond))
+    # Composed review prompts embed the shell guidance; read-only Pi must substitute it in place.
+    await run_agent(backend, tmp_path, "Review\n\n" + REPOSITORY_SEARCH_GUIDANCE, phase=DaydreamPhase.REVIEW,
+                    read_only=read_only,
+                    persist_session=False, review_limits=ReviewLimits(), progress_callback=lambda _: None)
+    prompt, instructions = seen[0]
+    expected = READ_ONLY_PI_SEARCH_GUIDANCE if backend_kind == "pi-read-only" else REPOSITORY_SEARCH_GUIDANCE
+    other = REPOSITORY_SEARCH_GUIDANCE if expected is READ_ONLY_PI_SEARCH_GUIDANCE else READ_ONLY_PI_SEARCH_GUIDANCE
+    assert prompt.count(expected) == 1 and other not in prompt
+    if backend_kind != "other-read-only":
+        assert instructions is not None and instructions.count(expected) == 1 and other not in instructions
+    if backend_kind == "pi-read-only":
+        assert prompt.startswith("Review\n\n" + READ_ONLY_PI_SEARCH_GUIDANCE)
 
 
 # Retry env knobs

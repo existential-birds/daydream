@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import stat
@@ -123,6 +124,8 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
         "agent_start",
         "agent_end",
         "agent_settled",
+        "compaction_start",
+        "compaction_end",
         "daydream_host_tools_ready",
         "daydream_host_tools_failed",
         "daydream_host_tool_fatal",
@@ -137,6 +140,46 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
         "tool_execution_end",
     }
 )
+
+
+def _pi_compaction_metadata(event: dict[str, Any], generation_id: str | None) -> dict[str, Any]:
+    """Bounded native compaction evidence; the summary text itself is never retained."""
+    metadata: dict[str, Any] = {"phase": "start" if event.get("type") == "compaction_start" else "end",
+                                "generation_id": generation_id}
+    reason = event.get("reason")
+    if isinstance(reason, str):
+        metadata["reason"] = _pi_diagnostic_text(reason, 64)[0]
+    for native, key in (("aborted", "aborted"), ("willRetry", "will_retry")):
+        if type(event.get(native)) is bool:
+            metadata[key] = event[native]
+    error = event.get("errorMessage")
+    if isinstance(error, str) and error:
+        metadata["error_message"], clipped = _pi_diagnostic_text(error, 1024)
+        if clipped:
+            metadata["error_message_truncated"] = True
+    result = event.get("result")
+    if isinstance(result, dict):
+        for native, key in (("tokensBefore", "tokens_before"), ("estimatedTokensAfter", "estimated_tokens_after")):
+            if type(result.get(native)) is int:
+                metadata[key] = result[native]
+        kept = result.get("firstKeptEntryId")
+        if isinstance(kept, str):
+            metadata["first_kept_entry_id"] = _pi_diagnostic_text(kept, 128)[0]
+        summary = result.get("summary")
+        if isinstance(summary, str):
+            encoded = summary.encode("utf-8", errors="replace")
+            metadata.update(summary_bytes=len(encoded), summary_sha256=hashlib.sha256(encoded).hexdigest())
+        usage = result.get("usage")
+        if isinstance(usage, dict):
+            selected = {key: usage[key] for key in ("input", "output", "cacheRead", "cacheWrite")
+                        if type(usage.get(key)) is int}
+            cost = usage.get("cost")
+            if isinstance(cost, dict) and type(cost.get("total")) in {int, float} and math.isfinite(cost["total"]):
+                selected["cost"] = {"total": cost["total"]}
+            if selected:
+                metadata["usage"] = selected
+    return metadata
+
 
 # Read-only tool subset. Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
@@ -989,10 +1032,14 @@ class PiBackend:
             system_prompt,
         ])
 
+        # Charged nonterminal host tools precede the terminal submission tool.
+        selected_tools = [*_PI_READ_ONLY_TOOLS.split(","),
+                          *(sorted(host_tools.host_tools) if host_tools is not None else ()),
+                          *(["structured_output"] if native_output else [])]
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")])
+            args.extend(["--tools", ",".join(selected_tools)])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -1206,8 +1253,7 @@ class PiBackend:
                 model_mode="single",
                 selected_tools_count=(
                     0 if finalization or tools_disabled else
-                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output)
-                    if read_only else None
+                    len(selected_tools) if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
                 no_tools=finalization or tools_disabled,
@@ -1285,6 +1331,8 @@ class PiBackend:
         try:
             extensions: list[tuple[str, str, dict[str, Any]]] = []
             if host_tools is not None:
+                # Native capacity preflight counts the exact instructions sent to Pi.
+                host_tools.prompt_bytes = len(system_prompt.encode()) + len(full_prompt.encode())
                 host_server = await attachments.enter_async_context(host_tools.session())
                 await self._require_host_tools_version(process_cwd, child_env, host_tools)
                 host_packet = host_server.packet()
@@ -1399,8 +1447,15 @@ class PiBackend:
                     if host_server is None or not host_server.ready:
                         raise PiError("Native host readiness was not established", category="HOST_TOOLS")
                     host_ready = True
+                    limits = host_tools.native_limits if host_tools is not None else None
+                    yield DiagnosticEvent(code="pi_native_capacity", message="Native model limits",
+                                          metadata=dict(limits or {}))
                     continue
                 if event_type == "daydream_host_tools_failed":
+                    capacity = host_tools.fatal_error if host_tools is not None else None
+                    if capacity is not None and capacity.code == "native_capacity":
+                        # A model that cannot fit the invocation is refused before provider work.
+                        raise PiError(str(capacity), category="HOST_TOOLS", retryable=False)
                     if self._hosted_read_only:
                         if event.get("code") == "hosted_model_selection":
                             raise _unsupported_hosted_policy(
@@ -1731,6 +1786,17 @@ class PiBackend:
                             category=category,
                             retry_after=parse_message_retry_hint(error_msg),
                         )
+
+                elif event_type in {"compaction_start", "compaction_end"}:
+                    # Native context compaction is neither completion nor settlement
+                    # evidence. Its summary call is billed, but is not a reviewer
+                    # generation, so it never yields per-generation metrics.
+                    compaction_metadata = _pi_compaction_metadata(event, last_generation_id)
+                    usage = compaction_metadata.get("usage")
+                    if event_type == "compaction_end" and isinstance(usage, dict):
+                        observe_usage({"usage": usage}, "turn_end")
+                    yield DiagnosticEvent(code="pi_compaction", message=f"Pi native {event_type}",
+                                          metadata=compaction_metadata)
 
                 elif event_type == "agent_end":
                     # No inline finalization — Cost/Result are emitted once from

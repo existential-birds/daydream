@@ -7,6 +7,12 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "actionlint-py"
+version = "1.7.7.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/88/0c37fc8d91bd53c191c6299fcfe16dc76d31e5230c3aae7bf73956f9d65f/actionlint_py-1.7.7.23.tar.gz", hash = "sha256:698e2d35833bd9f80f527d129df8816ce9de07ff6bdec90fae178181de385f73", size = 11881, upload-time = "2025-01-20T07:08:45.145Z" }
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -622,6 +628,7 @@ hub = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "actionlint-py" },
     { name = "grpc-stubs" },
     { name = "grpcio" },
     { name = "mypy" },
@@ -670,6 +677,7 @@ provides-extras = ["benchmark", "hub"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "actionlint-py", specifier = "==1.7.7.23" },
     { name = "grpc-stubs", specifier = ">=1.53" },
     { name = "grpcio", specifier = ">=1.85.0" },
     { name = "mypy", specifier = ">=2.4.1" },

@@ -38,13 +38,32 @@ def forbid_github() -> Iterator[list[str]]:
         yield attempts
 
 
+def _text(message: dict[str, Any]) -> str:
+    content = message["content"]
+    return content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content)
+
+
 def assignment_from_request(request: dict[str, Any]) -> dict[str, Any]:
-    user, = [message for message in request["messages"] if message["role"] == "user"]
-    content = user["content"]
-    text = content if isinstance(content, str) else "\n".join(block.get("text", "") for block in content)
+    """Committed assignments live in system instructions, which survive native compaction."""
+    text = "\n".join(_text(message) for message in request["messages"] if message["role"] in {"system", "developer"})
     assignment: dict[str, Any] = json.loads(text.split("\nCommitted review assignment:\n", 1)[1].split(
         "\nEnd committed review assignment.\n", 1)[0])
     return assignment
+
+
+def looked_up_targets(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Targets returned by review_source; its first text line is compact JSON metadata."""
+    found: dict[str, dict[str, Any]] = {}
+    for message in request["messages"]:
+        if message["role"] != "tool":
+            continue
+        try:
+            metadata = json.loads(_text(message).split("\n", 1)[0])
+        except ValueError:
+            continue
+        if isinstance(metadata, dict) and isinstance(metadata.get("target"), dict):
+            found[metadata["target"]["target_id"]] = metadata["target"]
+    return found
 
 
 def answer_review(
@@ -52,13 +71,17 @@ def answer_review(
 ) -> list[tuple[str, str, dict[str, Any]]]:
     assignment = assignment_from_request(request)
     kind = assignment["kind"]
+    entries = assignment["catalog"]["entries"]
     if not any(message["role"] == "tool" for message in request["messages"]):
-        return [(f"{kind}-read", "read", {"path": "feature.py"})]
-    refs_by_target = {part["target_id"]: [{
+        return [(f"{kind}-read", "read", {"path": "feature.py"}), *[
+            (f"{kind}-lookup-{index}", "review_source", {"target_id": entry["target_id"], "path": None, "cursor": None})
+            for index, entry in enumerate(entries)]]
+    targets = looked_up_targets(request)
+    refs_by_target = {target_id: [{
         "source_id": next(option["source_id"] for option in part["source_options"] if option["side"] == "new"),
         "source_range": None, "basis": "supplied_diff",
-    }] for part in assignment["assignments"]}
-    feature_part = next(part for part in assignment["assignments"] if part["file"] == "feature.py")
+    }] for target_id, part in targets.items()}
+    feature_part = next(entry for entry in entries if entry["file"] == "feature.py")
     refs = refs_by_target[feature_part["target_id"]]
     if kind == "discovery":
         payload = {"targets": [{"target_id": target_id, "status": "reviewed", "reason": "Captured source checked.",

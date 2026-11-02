@@ -16,7 +16,7 @@ from daydream.backends import BackendExecutionInput
 from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile
 
-HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "structured_output"})
+HOSTED_PI_TOOLS = frozenset({"read", "find", "ls", "grep", "review_source", "review_admit", "structured_output"})
 
 
 class UnsupportedHostedPolicy(ValueError):

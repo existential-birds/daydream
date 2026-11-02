@@ -111,8 +111,6 @@ jobs:
       - name: Naming grep-gate
         run: make check-naming
       - name: Lint workflows with actionlint
-        env:
-          ACTIONLINT_REQUIRE_DOCKER: "1"
         run: make actionlint
 
   test-shard:
@@ -278,11 +276,6 @@ jobs:
         run: make check-naming
 
       - name: Lint workflows with actionlint
-        # Required here: the step skips with a note when no Docker daemon is
-        # available, and a silent skip would turn a workflow-lint failure into
-        # a green run.
-        env:
-          ACTIONLINT_REQUIRE_DOCKER: "1"
         run: make actionlint
 
       - name: Run tests
@@ -395,8 +388,6 @@ jobs:
 
       # The full documented standalone gate (rl/daydream_review/README.md:17-21),
       # including the two `slow` Docker-baseline image tests. The runner's daemon
-      # must be usable so they PASS rather than skip (Task 0 spike); the check
-      # job's required Docker-backed `make actionlint` step proves this runner
-      # runs containers. No selection flags: the full suite is the gate.
+      # must be usable so they PASS rather than skip (Task 0 spike). No selection flags: the full suite is the gate.
       - name: Run tests
         run: uv run pytest

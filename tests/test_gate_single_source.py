@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -81,21 +80,6 @@ def test_pr_checklist_does_not_claim_the_rl_gate_runs_under_make_check() -> None
 
     assert "RL" not in gate_line, gate_line
     assert any("`make rl-check`" in line for line in checklist), checklist
-
-def test_actionlint_cannot_be_skipped_silently_when_required(tmp_path: Path) -> None:
-    """`ACTIONLINT_REQUIRE_DOCKER` turns the missing-daemon skip into a failure."""
-    make = shutil.which("make")
-    assert make is not None
-    env = {key: value for key, value in os.environ.items() if key != "ACTIONLINT_REQUIRE_DOCKER"}
-    env["PATH"] = str(tmp_path)  # no docker on PATH
-    optional = subprocess.run([make, "actionlint"], cwd=_ROOT, env=env, capture_output=True, text=True, input="")
-    required = subprocess.run(
-        [make, "actionlint"], cwd=_ROOT, env={**env, "ACTIONLINT_REQUIRE_DOCKER": "1"}, capture_output=True, text=True,
-        input="",
-    )
-
-    assert optional.returncode == 0 and "skipped" in optional.stdout
-    assert required.returncode != 0, required.stdout + required.stderr
 
 
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
@@ -177,7 +161,6 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
 }
 
 _MAKE_INVOCATION_RE = re.compile(r"^make\s+([A-Za-z0-9_.-]+)\s*$")
-_ACTIONLINT_DIGEST_RE = re.compile(r"rhysd/actionlint:[\w.]+@sha256:[0-9a-f]{64}")
 
 
 def _dry_run_recipe(target: str) -> str:
@@ -210,12 +193,6 @@ def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.Mo
         assert invocation and invocation.group(1) in targets, (
             f"{step.get('name')}: invoke a declared make gate target or explain the CI-only exception"
         )
-
-def test_pinned_actionlint_image_has_one_owner() -> None:
-    """Only the gate's actionlint step declares the workflow-lint image digest."""
-    owners = [rel for rel in _GATE_FILES if _ACTIONLINT_DIGEST_RE.search((_ROOT / rel).read_text(encoding="utf-8"))]
-
-    assert owners == ["Makefile"], owners
 
 
 def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> None:

@@ -49,23 +49,10 @@ coverage-report:
 	@test -f coverage.xml || { echo "no coverage.xml — run make test first"; exit 1; }
 	@echo "coverage.xml present (uploaded as a CI artifact on the check job)."
 
-# Docker-backed actionlint over every workflow the project ships (repo-owned
-# plus all template files, nested included). This recipe owns the pinned image
-# digest and mounts $(CURDIR) at /repo so the selectors include all workflows.
-# CI reaches it through `make actionlint` with ACTIONLINT_REQUIRE_DOCKER set,
-# making a missing daemon fatal. Without that variable, the local/pre-push gate
-# skips with a note when no Docker daemon is available.
+# actionlint over every workflow the project ships (repo-owned plus all
+# template files, nested included), pinned through the uv dev group.
 actionlint:
-	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
-	  docker run --rm \
-	    -v "$(CURDIR)":/repo -w /repo \
-	    rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
-	    -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml; \
-	elif [ -n "$$ACTIONLINT_REQUIRE_DOCKER" ]; then \
-	  echo "actionlint: Docker daemon is required here but is not available" >&2; exit 1; \
-	else \
-	  echo "actionlint skipped: Docker daemon is not available"; \
-fi
+	uv run actionlint -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
 
 # Standalone RL project gates, run from its own directory via per-line cd
 # (each recipe line is its own shell). Mirrors ci.yml's rl-check job, including

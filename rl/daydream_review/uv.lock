@@ -496,6 +496,7 @@ provides-extras = ["benchmark", "hub"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "actionlint-py", specifier = "==1.7.7.23" },
     { name = "grpc-stubs", specifier = ">=1.53" },
     { name = "grpcio", specifier = ">=1.85.0" },
     { name = "mypy", specifier = ">=2.4.1" },

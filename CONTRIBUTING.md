@@ -22,12 +22,6 @@ Verify these prerequisites before running the local gate:
 Pi's native tests use an isolated offline provider; `make install` only provisions
 Python dependencies. Other backend CLIs (`gh`, Codex, Osprey) are feature-specific.
 
-Docker is optional: `make actionlint` runs the workflow-YAML checks in a
-pinned container, but when no Docker daemon is available that target is
-skipped with a note (`actionlint skipped: Docker daemon is not available`)
-and exits 0 — so `make check` still passes locally. CI always runs
-actionlint, so a workflow error a local run skipped will still fail your PR.
-
 ## Setup
 
 Install the pinned Node/Pi tools (matching CI), then set up the repository:
@@ -93,7 +87,7 @@ The focused targets, all run from the repo root:
 | `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
-| `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; without `ACTIONLINT_REQUIRE_DOCKER`, a missing daemon skips with a note (exit 0); with it set, a missing daemon fails |
+| `make actionlint` | actionlint over `.github/workflows/*.yml` plus the packaged workflow templates |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
 | `make package-check` | Build the wheel and install each shipped ReviewBench runtime lock in a fresh environment; check dependencies and installed entrypoints |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |

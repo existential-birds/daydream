@@ -44,7 +44,9 @@ Findings exports reserve a separate 1 MiB for all other fields and reject raw in
 over 9 MiB before parsing. Writer, loader, and optional-context trimming use the
 same published UTF-8 field accounting; trimming preserves every retained decision.
 Producer and poster versions must support this policy together. Larger plans can
-still exhaust these fixed bounds and retain truthful incomplete coverage.
+still exhaust these fixed bounds and retain truthful incomplete coverage. Committed
+review shards its planned targets into fixed scopes (see below) so these per-scope
+bounds never limit its population.
 
 Ordinary commit-bound capture pins repository, PR, comparison and head independently
 and visibly excludes local tracked/untracked edits. Dirtiness does not block it.
@@ -60,8 +62,60 @@ because a failed replacement may preserve an older complete artifact.
 reviews a captured committed diff through native Pi. `local=True` selects the net
 base-to-final-working change described below. Committed capture excludes working-tree
 edits, external diff drivers and text conversion; inert materialization supplies raw
-Git blobs even when the original checkout uses filters/EOL conversion. Plans over 512 assignment
-parts are refused before dispatch.
+Git blobs even when the original checkout uses filters/EOL conversion.
+
+The complete planned population is computed from the full captured patch before
+any prompt bounding; there is no decomposition threshold. One broad discovery
+conversation, followed by host-scheduled fresh challenge, navigates it:
+
+- System instructions, which native compaction never summarizes, carry the stable
+  policy, the assignment identity, pending challenge claims and a bounded
+  (16 KiB) first catalog page with `status`, `total_targets`, `total_files` and
+  omitted counts. Catalog and decided markers there are a dispatch-time snapshot.
+- `review_source` is a charged, read-only host lookup over frozen canonical inputs:
+  with `target_id`/`path` null it pages the whole catalog; `path` lists one changed
+  path's targets; `target_id` returns the target's `source_options`, ranges (for a
+  continuation fragment, its `source_summary` claim-line span and split-line
+  `fragment_line_offset`) and its exact captured change bytes in 32 KiB pages with
+  per-page and whole-content SHA-256. Cursors are opaque and bound to their query. Unknown targets and
+  unchanged paths return `status: unavailable` data, not errors. It never reads
+  live checkout bytes, follows links or mutates review state, and is refused once
+  assignment authority closes. A single line over 50 KB, unreachable through stock
+  `read`, is reachable through its exact continuation fragments.
+- `review_admit` admits one bounded batch (at most 128 targets or verdicts plus
+  claims, within the shared 128 KiB argument bound) through the same synchronous
+  closure-first path as `structured_output`, which submits the final batch and ends
+  the assignment. Each batch is validated and installed atomically (coverage
+  capacity before review state), decides each target at most once and answers
+  with a compact receipt. Admitted decisions and claims survive later omission,
+  unavailability, retries or failure.
+- Both tools report current host capacity after charging the call (remaining tool
+  starts, remaining time to the original deadline and protected reserves),
+  labelled as distinct from dispatch-time snapshots.
+
+A reviewed target decision or challenge verdict with empty `evidence_refs` records
+the target's assigned sources or the judged claim's evidence; models cite source IDs
+only to locate claims or add evidence.
+At sealing every planned target has exactly one typed decision: an admitted model
+decision or a host-authored `not_reviewed` decision whose reason starts with
+`unsubmitted:`. Coverage shards targets in inventory order into scopes of 12
+(`committed:NNNNN`, `shard` = index); a full shard of worst-case decisions (four
+references, 1024-character reasons) fits the 256 KiB scope bound. Review reserves
+that typed unfinished attribution before model work and refuses, before any model
+work, a plan whose minimal attribution exceeds the 8 MiB run allocation. Claim lines must fall inside a cited `source_range` or, for exact
+continuation fragments, inside that fragment's summarized complete-line span; the
+canonical fragment identity is unchanged.
+
+Discovery receives half of the tool allowance. Its denied over-limit start remains
+charged to discovery's own ledger but cannot reduce the protected challenge reserve;
+unspent discovery calls carry into challenge. Before provider work the native
+extension reports the selected model's `contextWindow`/`maxTokens` and compaction
+settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
+instructions and prompt, the largest single tool result (64 KiB), one recommended
+32 KiB batch, the compaction reserve and kept context to fit, estimated at three
+bytes per token, and requires output for that batch; otherwise it fails with an
+actionable `native_capacity` error. Larger batches up to the 128 KiB argument bound
+remain admissible; an oversized `review_admit` is a correctable rejection. Daydream never writes native model registries or settings.
 
 Review alone owns planned targets, semantic claim revisions, mandatory challenge
 and derived coverage. Every publication claim receives counterevidence-seeking
@@ -88,7 +142,7 @@ use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
 Profile discovery/arbitration strategies cannot disable host obligations.
 
-The run's artifact session stages the report then atomically writes schema-1
+The run's artifact session stages the report then atomically writes schema-4
 `committed-review.json`: claims/challenge evidence, typed coverage, run/source and
 complete planned-work identity. Prior/competing bytes survive publication failure.
 `CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
@@ -174,8 +228,10 @@ recorded gitlink commit. Nested dirty files are not captured. This materializati
 is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
-Local program results use schema 3 and terminal/coverage version 2; committed
-results 1, immutable results 2 and their committed terminal version 1 stay distinct.
+Local program results use schema 6 and terminal/coverage version 2; committed
+results 4, immutable results 5 and their committed terminal version 1 stay distinct.
+Results 1–3 predate bounded navigation and sharded per-target coverage; they are
+rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
 Private stage/cache contract 15 invalidates older cache entries. Captured review
 paths reject `--start-at` and do not restore judgment shards: a complete shard
@@ -209,7 +265,7 @@ cannot supply hosted authority.
 | Backend | Native Pi |
 | Provider / model | Operator-selected nonblank strings supported by the isolated native configuration |
 | Native baseline | Official Pi 1.4.0 / Node 24.18.1 |
-| Model tools | Stock `read`, `find`, `ls`, `grep`; bounded `structured_output` admission |
+| Model tools | Stock `read`, `find`, `ls`, `grep`; charged host `review_source` lookup and `review_admit` batches; bounded `structured_output` admission (policy `pi-read-only-v2`) |
 | Source preparation | Explicit `trusted_prepared_source=True` operator attestation |
 
 Prepare `agent_dir` separately from target and ambient user configuration. Only
@@ -246,7 +302,7 @@ private session and conflict-safe installation. Existing source public artifacts
 are restored unchanged. Diagnostics stay under `private_base`; output destinations
 do not become model write grants. Recorded policy/configuration identities omit
 credentials and callback capabilities. This additive API retains committed result
-schema 1 and extension API 8; it is a minor feature addition.
+schema 4 and extension API 8.
 
 For ordinary hosted committed input, the preparation attestation is required **before Git worktree materialization**:
 the operator must control/audit source Git configuration, checkout hooks and filters.
@@ -255,7 +311,7 @@ prepare arbitrary local Git repositories. Read/search policy is not filesystem
 confinement or an egress firewall; stock readers can follow symlinks. The host owns
 infrastructure isolation, scoped credentials, staging, deadlines, concurrency and
 cleanup. Use the immutable input contract below for inert source materialization;
-the 512-assignment limit and other-harness/CLI integration boundaries still apply.
+other-harness/CLI integration boundaries still apply.
 
 ### Immutable PR inputs
 
@@ -264,8 +320,8 @@ The same embedding API accepts
 `daydream.immutable_review.ImmutableReviewInput.from_dict(envelope)`. The trusted
 host supplies schema version 1; repository configuration cannot provide identity,
 source attestation or execution authority. The canonical envelope is frozen before
-model work and retained in schema-2 `committed-review.json`. Ordinary committed
-results remain schema 1. Both result versions retain the local analyzed revision,
+model work and retained in schema-5 `committed-review.json`. Ordinary committed
+results use schema 4. Both result versions retain the local analyzed revision,
 source references, complete planned-work binding and independent execution outcomes.
 
 ```python
@@ -312,8 +368,7 @@ fsck or tree reads. Git checks each allocation against 2 GiB plus one
 byte for object terminators; this is a per-allocation guard, not a total memory
 limit. Historical blobs retain the object-store limit. Both comparison and head
 trees are checked before diff expansion; each diff capture stops at 256 MiB of
-subprocess output. Control and blob captures are bounded while reading. The
-committed program separately admits at most 512 assignment parts.
+subprocess output. Control and blob captures are bounded while reading.
 
 Cloud supplies exact original local objects. Their commit identities, merge-base
 relationship, trees, raw checkout bytes and current execution diff key must match.
@@ -420,6 +475,18 @@ subtracts the full round-trip time, without sharing clock origins or renewing
 authority. Lost receipts still prohibit replay and retain incomplete coverage.
 Every real native tool start counts, including failed submissions, with no separate
 eight-call ceiling or hidden nested tool execution.
+
+A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
+them in the existing extension; `/admit` charges each start, and `/call` serves
+that admitted identity exactly once under the same readiness, authority, deadline
+and correlation rules. Read-only tools never mutate domain state; mutating tools
+install at the same synchronous boundary as acceptance, and their unexpected
+failures are indeterminate. Their results carry exact frozen bytes as a separate
+text block and report current capacity. `/ready` exact-matches the declared
+schemas and runs the binding's native-capacity preflight before provider work.
+Compaction evidence is described in [observability](observability.md); compaction
+is neither completion nor settlement evidence. The read-only Pi search guidance
+names only the tools it can run.
 
 Close authority before shutdown and join/isolate callback transports and evidence
 writers before freezing. Native reads use the existing process cleanup. Acceptance,

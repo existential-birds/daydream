@@ -20,8 +20,10 @@ from typing import Any
 
 import pytest
 
+from daydream import committed_review
 from daydream.agent import run_agent
 from daydream.backends import (
+    DiagnosticEvent,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
@@ -33,7 +35,7 @@ from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
 from daydream.committed_review_model import validate_committed_result
-from daydream.host_tools import HostToolBinding
+from daydream.host_tools import HostTool, HostToolBinding, HostToolFatal, HostToolRejected, NativeCapacityRequirement
 from daydream.host_tools_server import PiHostToolServer
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_source_refs import (
@@ -46,11 +48,14 @@ from daydream.review_source_refs import (
 from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase
 from tests.harness.git_helpers import git, seed_feature_branch
-from tests.harness.harbor_review import assignment_from_request
+from tests.harness.harbor_review import assignment_from_request, looked_up_targets
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
 from tests.test_committed_review import immutable_input_for
 
+# Declared loopback model limits must fit committed review's native-capacity preflight.
+FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 16384
+HOSTED_TOOLS = {"read", "grep", "find", "ls", "review_source", "review_admit", "structured_output"}
 _SCHEMA = {"type": "object", "additionalProperties": False,
     "properties": {"verdict": {"type": "string"}, "findings": {"type": "array"}}, "required": ["verdict", "findings"]}
 
@@ -74,7 +79,7 @@ def native_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator
         (config / "models.json").write_text(json.dumps({"providers": {"output-fixture": {
             "baseUrl": f"{base_url}/v1", "api": "openai-completions", "apiKey": "synthetic-loopback-only",
             "models": [{"id": "output-model", "reasoning": False, "input": ["text"],
-                        "contextWindow": 32768, "maxTokens": 8192}]}}}))
+                        "contextWindow": FIXTURE_CONTEXT_WINDOW, "maxTokens": FIXTURE_MAX_TOKENS}]}}}))
         monkeypatch.setenv("PI_PROVIDER", "output-fixture")
         yield fixture
 
@@ -362,8 +367,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                   if message["role"] in {"system", "developer"}])
             assert context.strip() not in systems
             assert "HOSTILE_ANCESTOR_POLICY" not in systems and "HOSTILE_GLOBAL_POLICY" not in systems
-            assert {tool["function"]["name"] for tool in request["tools"]} == {
-                "read", "grep", "find", "ls", "structured_output"}
+            assert {tool["function"]["name"] for tool in request["tools"]} == HOSTED_TOOLS
         else:
             assert context.strip() in json.dumps(request["messages"])
         assert "DIRTY_CONTEXT_MUST_REMAIN_UNREVIEWED" not in json.dumps(request["messages"])
@@ -377,7 +381,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert assignment["profile"]["hosted_policy"]["model"] == expected_model
             assert assignment["profile"]["limits"]["effective_investigation_s"] == pytest.approx(50)
             marker = "HOSTED_OPERATOR_DISCOVERY_POLICY" if kind == "discovery" else "HOSTED_OPERATOR_CHALLENGE_POLICY"
-            assert marker in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
+            # Stable strategy policy survives compaction in system instructions, not the user turn.
+            assert marker in json.dumps([m["content"] for m in request["messages"]
+                                         if m["role"] in {"system", "developer"}])
+            assert marker not in json.dumps([m["content"] for m in request["messages"] if m["role"] == "user"])
             assert assignment["profile"]["strategies"][kind] == marker
         revision = assignment["claims"][0]["revision"] if kind == "challenge" else 0
         call_kind = f"{kind}-{revision}" if hosted else kind
@@ -385,6 +392,10 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         challenge_attempt = sum(prior["kind"] == "challenge" for prior in assignments_seen) + int(not tools)
         if retry and kind == "challenge":
             call_kind = f"challenge-{challenge_attempt}"
+        # Targets and source handles come only from charged review_source lookups.
+        lookups = [(f"{call_kind}-lookup-{index}", "review_source",
+                    {"target_id": entry["target_id"], "path": None, "cursor": None})
+                   for index, entry in enumerate(assignment["catalog"]["entries"])]
         if not tools:
             assignments_seen.append(assignment)
             histories[kind] = request["messages"]
@@ -398,16 +409,16 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                 if kind == "discovery":
                     for name in ("ratio.py", "supporting.py", "untracked.py", "late.py"):
                         (repo / name).write_text("VALUE = 'POST_CAPTURE_SOURCE_MUST_REMAIN_UNREVIEWED'\n")
-                return [(f"{call_kind}-read", "read", {"path": "ratio.py"}),
+                return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups,
                         (f"{call_kind}-helper", "read", {"path": "supporting.py"}),
                         (f"{call_kind}-untracked", "read", {"path": "untracked.py"}),
                         (f"{call_kind}-grep", "grep", {"pattern": "LOCAL_CAPTURE", "path": "."}),
                         (f"{call_kind}-ls", "ls", {"path": "."})]
-            return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
+            return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups]
         if hosted and not any(tool["tool_call_id"] == f"{call_kind}-read" for tool in tools):
             assert len(tools) == 4
             assert all("not found" in tool["content"].lower() or "denied" in tool["content"].lower() for tool in tools)
-            return [(f"{call_kind}-read", "read", {"path": "ratio.py"})]
+            return [(f"{call_kind}-read", "read", {"path": "ratio.py"}), *lookups]
         read_result, = [tool for tool in tools if tool["tool_call_id"] == f"{call_kind}-read"]
         assert read_result["content"] == captured
         if local:
@@ -427,8 +438,9 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
             assert rejection["content"].startswith('Validation failed for tool "structured_output":')
         refs_by_target = {part["target_id"]: [{"source_id": next(
             option["source_id"] for option in part["source_options"] if option["side"] == "new"),
-            "source_range": None, "basis": "supplied_diff"}] for part in assignment["assignments"]}
-        ratio_part = next(part for part in assignment["assignments"] if part["file"] == "ratio.py")
+            "source_range": None, "basis": "supplied_diff"}] for part in looked_up_targets(request).values()}
+        assert refs_by_target.keys() == {entry["target_id"] for entry in assignment["catalog"]["entries"]}
+        ratio_part = next(part for part in looked_up_targets(request).values() if part["file"] == "ratio.py")
         refs = refs_by_target[ratio_part["target_id"]]
         if local:
             refs = [*refs, {"path": "supporting.py", "side": "new", "source_range": {"start": 1, "end": 1},
@@ -479,7 +491,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                                     review_profile_path="hostile-missing-profile.toml" if hosted else None,
                                     model="request-forbidden-model" if hosted else
                                     "output-model:high" if case == "false-positive" else None),
-        limits=ReviewLimits(90, 12, 12), hosted_policy=hosted_policy, immutable_input=immutable_input, local=local)
+        limits=ReviewLimits(90, 12, 16 if local else 12), hosted_policy=hosted_policy, immutable_input=immutable_input,
+        local=local)
     unsupported = {"hosted-resources", "hosted-capability", "hosted-config-link", "hosted-challenge-capability",
                    "hosted-model-fallback", "hosted-settings-encoding", "hosted-loader-override"}
     if case.startswith("hosted-unsupported") or case in unsupported:
@@ -508,7 +521,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
                 assert [assignment["kind"] for assignment in assignments_seen] == ["discovery"]
                 assert partial["analyzed_revision"] == assignments_seen[0]["analyzed_revision"]
                 assert partial["run_id"] == assignments_seen[0]["run_id"]
-                assert partial["assignments"] == assignments_seen[0]["assignments"]
+                assert [part["target_id"] for part in partial["assignments"]] == [
+                    entry["target_id"] for entry in assignments_seen[0]["catalog"]["entries"]]
                 report = (output_root / "review-output.md").read_text()
                 identities = (partial["planned_work_id"], partial["run_id"], head, base)
                 assert all(identity in report for identity in identities)
@@ -533,8 +547,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
         assert all(request["reasoning_effort"] == expected_effort for request in native_provider.requests)
     else:
         assert native_provider.authorizations == ["Bearer synthetic-hosted-credential"] * len(native_provider.requests)
-        assert all({tool["function"]["name"] for tool in request["tools"]} == {
-            "read", "grep", "find", "ls", "structured_output"} for request in native_provider.requests)
+        assert all({tool["function"]["name"] for tool in request["tools"]} == HOSTED_TOOLS
+                   for request in native_provider.requests)
         assert not forbidden_marker.exists()
         assert value["settings"]["profile_name"] == operator_profile.name
         assert value["settings"]["profile_digest"] == operator_profile.digest
@@ -579,7 +593,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     trajectory = json.loads(trajectory_path.read_text())
     if immutable:
         assert immutable_input is not None
-        assert value["schema_version"] == 2 and value["immutable_input"] == immutable_input.to_dict()
+        assert value["schema_version"] == 5 and value["immutable_input"] == immutable_input.to_dict()
         assert trajectory["extra"]["pr_repo"] == "captured/repository"
         assert trajectory["extra"]["pr_number"] == 1421
         assert trajectory["extra"]["immutable_input"] == immutable_input.to_dict()
@@ -593,16 +607,17 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     if retry:
         assert assignments_seen[1] == assignments_seen[2]
         assert [call["tool_call_id"] for call in calls] == [
-            "discovery-read", "discovery-submit", "challenge-1-read", "challenge-1-rejected",
-            "challenge-2-read", "challenge-2-submit"]
+            "discovery-read", "discovery-lookup-0", "discovery-submit", "challenge-1-read", "challenge-1-lookup-0",
+            "challenge-1-rejected", "challenge-2-read", "challenge-2-lookup-0", "challenge-2-submit"]
         observations = {item["source_call_id"]: item["content"] for step in trajectory["steps"]
                         for item in (step.get("observation") or {}).get("results", [])}
         assert "assigned uid/current revision" in observations["challenge-1-rejected"]
         assert len(value["execution"]) == 2
         decisions = value["terminal_result"]["stack_outcomes"][0]["target_decisions"]
         assert decisions and all(target["status"] == "reviewed" for target in decisions)
-        assert "tool-call allocation is 10 calls" in json.dumps(native_provider.requests[2]["messages"])
-        assert "tool-call allocation is 8 calls" in json.dumps(native_provider.requests[5]["messages"])
+        # Discovery spent read+lookup+submit of its six; the failed attempt's three stay charged.
+        assert "tool-call allocation is 9 calls" in json.dumps(native_provider.requests[2]["messages"])
+        assert "tool-call allocation is 6 calls" in json.dumps(native_provider.requests[5]["messages"])
         failed_history = native_provider.requests[4]["messages"]
         assert any(message["role"] == "tool" and message["tool_call_id"] == "challenge-1-rejected"
                    for message in failed_history)
@@ -611,7 +626,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     elif not hosted:
         assert [call["tool_call_id"] for call in calls] == [
             f"{kind}-{action}" for kind in expected_kinds
-            for action in (("read", "helper", "untracked", "grep", "ls", "submit") if local else ("read", "submit"))]
+            for action in (("read", "lookup-0", "lookup-1", "helper", "untracked", "grep", "ls", "submit") if local
+                           else ("read", "lookup-0", "submit"))]
     else:
         assert {"discovery-0-read", "challenge-1-read", "challenge-2-read"} <= {
             call["tool_call_id"] for call in calls}
@@ -625,7 +641,7 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     assert all(invocation["generation_lifecycle"]["drafts"] for invocation in invocations)
     if retry:
         lifecycles = [invocation["backend_lifecycle"] for invocation in invocations]
-        assert [lifecycle["host_tool_call_count"] for lifecycle in lifecycles] == [2, 2, 4]
+        assert [lifecycle["host_tool_call_count"] for lifecycle in lifecycles] == [3, 3, 6]
         assert [lifecycle["host_native_settled"] for lifecycle in lifecycles] == [True, False, True]
         assert all(lifecycle["host_authority_closed"] and lifecycle["host_cleanup_complete"]
                    for lifecycle in lifecycles)
@@ -1053,6 +1069,89 @@ async def test_native_reused_tool_identity_cannot_repeat_effect_or_hide_correlat
     assert installed == [] and binding.accepted_result is None
     assert binding.calls == 1 and binding.cleanup_complete and binding.native_settled
     assert [event.id for event in events if isinstance(event, ToolStartEvent)] == ["same-native-id"]
+
+
+_LOOKUP = {"type": "object", "additionalProperties": False, "properties": {"target_id": {"type": "string"}},
+           "required": ["target_id"]}
+
+
+@pytest.mark.parametrize("case", ["correctable", "oversized", "fatal", "capacity"])
+async def test_native_host_lookup_is_registered_charged_and_served_with_exact_bytes(
+    tmp_path: Path, native_provider: _NativeProvider, case: str,
+) -> None:
+    """Installed Pi exposes a host tool, serves its exact bytes once and refuses unfit models.
+
+    Endpoint tests call /call directly; only the shipped extension proves Pi
+    registers the declared schema, keeps frozen bytes out of JSON escaping,
+    returns a correctable error to the model, stops after a fatal callback, and
+    refuses native limits before the first provider request.
+    """
+    frozen = 'line "quoted"\n\ttabbed \\ bytes\n'
+    served: list[Any] = []
+    def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        served.append(arguments)
+        if case == "correctable" and len(served) == 1:
+            raise HostToolRejected("Unknown target_id; request the paged catalog first", code="unknown_target")
+        if case == "fatal":
+            raise HostToolFatal("Frozen review input is unavailable", code="input_unavailable")
+        return {"target_id": arguments["target_id"], "content": frozen}
+    accepted = {"verdict": "complete", "findings": []}
+    # An oversized host-tool argument is a correctable payload fault, not an aborted invocation.
+    first = {"target_id": "t" * 140_000} if case == "oversized" else {"target_id": "t1"}
+    native_provider.turns = [[("lookup-1", "review_source", first)],
+                             [("lookup-2", "review_source", {"target_id": "t1"})],
+                             [("submit", "structured_output", accepted)]]
+    binding = HostToolBinding(deadline=time.monotonic() + 30, accept=lambda value: value,
+        host_tools={"review_source": HostTool(_LOOKUP, lookup)},
+        # A largest tool result beyond the declared window cannot fit any invocation.
+        native_requirement=NativeCapacityRequirement(400_000, 1_000) if case == "capacity" else None)
+    events: list[Any] = []
+    failure: PiError | None = None
+    try:
+        async for event in PiBackend(model="output-model").execute(tmp_path, "Look up the frozen target.",
+            output_schema=_SCHEMA, read_only=True, host_tools=binding, tool_call_budget=6, persist_session=False):
+            events.append(event)
+    except PiError as exc:
+        failure = exc
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert isinstance(request.config, PiRequestConfig) and request.config.selected_tools_count == 6
+    assert binding.prompt_bytes == len((request.system_prompt or "").encode()) + len(request.prompt.encode())
+    if case == "capacity":
+        assert failure is not None and failure.category == "HOST_TOOLS" and not failure.retryable
+        assert "needs contextWindow >= " in str(failure)
+        assert f"observed contextWindow {FIXTURE_CONTEXT_WINDOW}" in str(failure)
+        assert any(isinstance(event, DiagnosticEvent) and event.code == "pi_host_tool_fatal"
+                   and event.metadata["code"] == "native_capacity" for event in events)
+        assert native_provider.requests == [] and served == [] and binding.calls == 0
+        return
+    capacity = next(event for event in events if isinstance(event, DiagnosticEvent)
+                    and event.code == "pi_native_capacity")
+    assert capacity.metadata["context_window"] == FIXTURE_CONTEXT_WINDOW
+    assert capacity.metadata["max_tokens"] == FIXTURE_MAX_TOKENS
+    assert capacity.metadata["reserve_tokens_source"] == "pi_1.4.0_default"
+    tools = [tool["function"]["name"] for tool in native_provider.requests[0]["tools"]]
+    assert sorted(tools) == ["find", "grep", "ls", "read", "review_source", "structured_output"]
+    lookup_tool = next(tool["function"] for tool in native_provider.requests[0]["tools"]
+                       if tool["function"]["name"] == "review_source")
+    assert lookup_tool["parameters"] == _LOOKUP and "frozen captured review" in lookup_tool["description"]
+    if case == "fatal":
+        assert failure is not None and failure.category == "HOST_TOOLS" and not failure.retryable
+        assert len(native_provider.requests) == 1 and binding.accepted_result is None
+        assert not binding.authority_open and binding.cleanup_complete
+        return
+    assert failure is None and binding.accepted_result == accepted
+    history = {message["tool_call_id"]: message["content"] for message in native_provider.requests[-1]["messages"]
+               if message["role"] == "tool"}
+    # The exact frozen bytes arrive unescaped, after the bounded metadata JSON block.
+    assert frozen in history["lookup-2"] and '"capacity"' in history["lookup-2"]
+    assert '"content"' not in history["lookup-2"]
+    if case == "correctable":
+        assert "Unknown target_id" in history["lookup-1"] and binding.rejections == 1
+    if case == "oversized":
+        assert "exceeds" in history["lookup-1"] and "split it into smaller batches" in history["lookup-1"]
+        assert binding.fatal_error is None
+    assert served == [{"target_id": "t1"}] * (2 if case == "correctable" else 1)
+    assert binding.calls == 3
 
 
 @pytest.mark.parametrize("cancel_at", ["active-read", "late-start"])
@@ -1597,3 +1696,138 @@ async def test_native_pi_retry_refreshes_attempt_count_without_renewing_host_all
     assert 'tool-call allocation is 3 calls' in json.dumps(requests[0]['messages'])
     assert 'tool-call allocation is 1 calls' in json.dumps(requests[2]['messages'])
     assert 'attempt-1-a' not in json.dumps(requests[2]['messages'])
+
+
+async def test_committed_navigation_survives_native_compaction_on_one_cumulative_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
+) -> None:
+    """Proof B: installed Pi compacts after 52 of 96 discovery starts; host authority is unchanged.
+
+    Scripted journeys never reached native compaction, so dropped compaction events, a
+    renewed allowance after summarization, navigation that lived only in summarized
+    history, or unavailable selections erasing earlier admissions all went unnoticed.
+    The scripted model proves software behavior, not review quality.
+    """
+    repo = tmp_path / "source"
+    files = {name: f"VALUE_{index} = {index}\n" for index, name in enumerate(("a.py", "b.py", "c.py", "d.py"))}
+    head = seed_feature_branch(repo, base={name: "VALUE = 0\n" for name in files}, feature=files)
+    base = git(repo, "rev-parse", "main")
+    settings = native_provider.config / "settings.json"
+    settings.write_text(json.dumps({"defaultProvider": "output-fixture", "defaultModel": "output-model",
+                                    "defaultProjectTrust": "always", "retry": {"enabled": False, "maxRetries": 0},
+                                    "compaction": {"enabled": True, "reserveTokens": 16384, "keepRecentTokens": 64}}))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    bindings: list[HostToolBinding] = []
+    real_assignment = committed_review.Review.assignment
+
+    def assignment(self: Any, kind: str, **kwargs: Any) -> Any:
+        binding, schema = real_assignment(self, kind, **kwargs)
+        bindings.append(binding)
+        return binding, schema
+
+    monkeypatch.setattr(committed_review.Review, "assignment", assignment)
+    state: dict[str, Any] = {"starts": 0, "remaining": [], "summaries": 0}
+    # The 52nd start's generation reports a context above contextWindow - reserveTokens.
+    native_provider.usage[51] = {"prompt_tokens": 120000, "completion_tokens": 5, "total_tokens": 120005}
+
+    def call(name: str, arguments: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        state["starts"] += 1
+        return [(f"call-{state['starts']}", name, arguments)]
+
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        text = json.dumps(request["messages"])
+        if "context summarization assistant" in text:
+            state["summaries"] += 1
+            native_provider.text = "Summary: earlier lookups and one admitted batch."
+            return []
+        native_provider.text = None
+        assignment = assignment_from_request(request)
+        binding = bindings[-1]
+        assert "Navigation:" in text and assignment["catalog"]["total_targets"] == 4
+        if assignment["kind"] == "discovery":
+            # One cumulative 96-start ledger: neither compaction nor summarization renews it.
+            assert binding.remaining_tool_calls == 96 - state["starts"]
+        if assignment["kind"] == "challenge":
+            claim, = assignment["claims"]
+            if not any(m["role"] == "tool" for m in request["messages"]):
+                return [("challenge-lookup", "review_source", {"target_id": state["a"], "path": None, "cursor": None})]
+            return [("challenge-final", "structured_output", {"verdicts": [{
+                "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+                "grounds": "The reread frozen bytes confirm the changed value.",
+                "evidence_refs": state["refs"]["a.py"]}],
+                "claims": []})]
+        targets = {target["file"]: target for target in looked_up_targets(request).values()}
+        starts = state["starts"]
+        if state["summaries"]:
+            # Before the next charged start the host ledger still reflects all 52 charged starts.
+            state["remaining"].append(binding.remaining_tool_calls)
+            if starts == 52:
+                assert binding.remaining_tool_calls == 44
+                assert state["a_bytes"] not in text  # Exact detail now lies outside retained context.
+                return call("review_source", {"target_id": state["a"], "path": None, "cursor": None})
+            if starts == 53:
+                assert targets["a.py"]["target_id"] == state["a"]
+                reread = next(m for m in request["messages"] if m["role"] == "tool"
+                              and m["tool_call_id"] == "call-53")
+                assert reread["content"].split("\n", 1)[1] == state["a_bytes"]
+                return call("review_source", {"target_id": None, "path": "missing.py", "cursor": None})
+            if starts == 54:
+                unavailable = json.loads(next(m for m in request["messages"] if m.get("tool_call_id") == "call-54")
+                                         ["content"].split("\n", 1)[0])
+                assert unavailable["status"] == "unavailable" and unavailable["capacity"]["remaining_tool_calls"] == 42
+                return call("review_admit", {"targets": [{"target_id": state["b"], "status": "reviewed", "reason": "",
+                    "evidence_refs": [{"path": "missing.py", "side": "new", "source_range": {"start": 1, "end": 1},
+                                       "basis": "source_inspection"}]}], "claims": []})
+            assert starts == 55
+            return call("structured_output", {"targets": [
+                {"target_id": state[name[0]], "status": "reviewed", "reason": "", "evidence_refs": state["refs"][name]}
+                for name in ("c.py", "d.py")], "claims": []})
+        if starts == 0:
+            return call("review_source", {"target_id": None, "path": None, "cursor": None})
+        if starts <= 4:
+            return call("review_source", {"target_id": assignment["catalog"]["entries"][starts - 1]["target_id"],
+                                          "path": None, "cursor": None})
+        if starts == 5:
+            state["refs"] = {name: [{"source_id": next(o["source_id"] for o in target["source_options"]
+                                                       if o["side"] == "new"),
+                                     "basis": "supplied_diff", "source_range": None}]
+                          for name, target in targets.items()}
+            for name in files:
+                state[name[0]] = targets[name]["target_id"]
+            state["a_bytes"] = next(m for m in request["messages"] if m.get("tool_call_id") == "call-2")[
+                "content"].split("\n", 1)[1]
+            return call("review_admit", {"targets": [{"target_id": state["a"], "status": "reviewed", "reason": "",
+                "evidence_refs": state["refs"]["a.py"]}], "claims": [{"uid": "", "revision": 0, "source_uids": [],
+                "title": "Changed value", "payload": {"claim": "VALUE_0 changes.", "trigger": "Import a.py.",
+                    "consequence": "Callers see 0.", "grounds": "Frozen captured bytes.", "file": "a.py", "line": None,
+                    "evidence_refs": state["refs"]["a.py"]}}]})
+        return call("read", {"path": "a.py"})
+
+    native_provider.choose = choose
+    result = await run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
+        limits=ReviewLimits(240, 12, 192)))
+    value = result.to_dict()
+    validate_committed_result(value)
+    assert state["summaries"] == 1 and state["remaining"] == [44, 43, 42, 41]
+    discovery = bindings[0]
+    assert discovery.accepted and discovery.calls == 56 and discovery.remaining_tool_calls == 40
+    decisions = {d["target_id"]: d for scope in value["terminal_result"]["stack_outcomes"]
+                 for d in scope["target_decisions"]}
+    assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == {state["a"], state["c"], state["d"]}
+    assert decisions[state["b"]]["reason"].startswith("unsubmitted:")
+    assert len(value["findings"]) == 1 and value["terminal_result"]["analysis_state"] == "incomplete"
+    assert value["analyzed_revision"]["head_sha"] == head
+    trajectory = json.loads((repo / ".daydream/runs" / value["run_id"] / "trajectory.json").read_text())
+    compaction = [item for step in trajectory["steps"] for item in step.get("extra", {}).get("backend_diagnostics", [])
+                  if item["code"] == "pi_compaction"]
+    assert [item["metadata"]["phase"] for item in compaction] == ["start", "end"]
+    assert compaction[1]["metadata"]["usage"]["input"] == 10 and compaction[1]["metadata"]["summary_bytes"] > 0
+    assert "earlier lookups and one admitted batch" not in json.dumps(compaction)
+    # Every provider request is billed once, including the summarization call that is not a generation.
+    billed = [native_provider.usage.get(index, {"prompt_tokens": 10, "completion_tokens": 5})
+              for index in range(len(native_provider.requests))]
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == sum(usage["prompt_tokens"] for usage in billed)
+    assert trajectory["final_metrics"]["total_completion_tokens"] == sum(u["completion_tokens"] for u in billed)
+    rejection = next(m for r in native_provider.requests for m in r["messages"] if m.get("tool_call_id") == "call-55")
+    assert "no available regular blob" in rejection["content"]

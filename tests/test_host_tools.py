@@ -16,10 +16,12 @@ import pytest
 from daydream import host_tools as policy
 from daydream.host_tools import (
     NATIVE_SUBMIT,
+    HostTool,
     HostToolBinding,
     HostToolCallBudgetExceeded,
     HostToolFatal,
     HostToolRejected,
+    NativeCapacityRequirement,
 )
 from daydream.review_source_refs import SOURCE_SELECTORS_SCHEMA
 from tests.harness.fake_clock import FakeClock
@@ -579,3 +581,108 @@ async def test_endpoint_cleanup_joins_incomplete_callback_frames_before_return(
             "arguments": _RESULT, "terminal": True})).json()["allowed"]
         assert (await client.post("/submit", json={"id": "retry", "arguments": _RESULT})).json()["accepted"]
     assert installed == [_RESULT] and binding.calls == 1 and binding.cleanup_complete
+
+
+_LOOKUP_SCHEMA = {"type": "object", "additionalProperties": False,
+                  "properties": {"target_id": {"type": "string"}}}
+
+
+def _lookup_binding(callback: Any, *, mutating: bool = False, **kwargs: Any) -> HostToolBinding:
+    return HostToolBinding(deadline=time.monotonic() + 10, accept=lambda value: value,
+                           host_tools={"review_source": HostTool(_LOOKUP_SCHEMA, callback, mutating)}, **kwargs)
+
+
+async def _ready(client: httpx.AsyncClient, **extra: Any) -> dict[str, Any]:
+    response: dict[str, Any] = (await client.post("/ready", json={
+        "tool_name": NATIVE_SUBMIT, "schema": _SCHEMA, "host_tools": {"review_source": _LOOKUP_SCHEMA}, **extra,
+    })).json()
+    return response
+
+
+@pytest.mark.parametrize("fault", ["unadmitted", "reused", "wrong-name"])
+async def test_http_host_tool_call_serves_each_admitted_start_once(fault: str) -> None:
+    """A /call reply is served only for one unused admitted start of that exact tool.
+
+    Native journeys only exercise correlated calls, so they cannot catch an endpoint
+    that serves an unadmitted identity, replays a consumed one, or lets a read
+    admission authorize a different host tool.
+    """
+    served: list[Any] = []
+    def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        served.append(arguments)
+        return {"target_id": arguments["target_id"], "content": "exact\n\"bytes\""}
+    binding = _lookup_binding(lookup)
+    async with _endpoint(binding) as client:
+        assert (await _ready(client))["ready"] is True
+        admitted = "read" if fault == "wrong-name" else "review_source"
+        if fault != "unadmitted":
+            assert (await client.post("/admit", json={"id": "lookup", "name": admitted,
+                                                     "arguments": None})).json()["allowed"]
+        call = {"id": "lookup", "name": "review_source", "arguments": {"target_id": "t1"}}
+        response = (await client.post("/call", json=call)).json()
+        if fault == "reused":
+            assert response["id"] == "lookup" and response["result"]["content"] == "exact\n\"bytes\""
+            assert response["result"]["capacity"]["remaining_s"] > 0
+            response = (await client.post("/call", json=call)).json()
+        assert response["outcome"] == "fatal" and response["code"] == "native_correlation"
+        assert not binding.authority_open
+    assert served == ([{"target_id": "t1"}] if fault == "reused" else [])
+
+
+@pytest.mark.parametrize("mutating", [False, True], ids=["read-only", "mutating"])
+async def test_http_host_tool_unexpected_failure_is_indeterminate_only_when_mutating(mutating: bool) -> None:
+    """An unexpected callback failure prohibits replay only for a mutating host tool.
+
+    Terminal callback tests cover /submit only; they cannot catch /call presenting
+    a possibly installed batch admission as a fatal preacceptance outcome.
+    """
+    invoked: list[dict[str, Any]] = []
+
+    def broken(arguments: dict[str, Any]) -> dict[str, Any]:
+        invoked.append(arguments)
+        raise ValueError("private-token")
+    binding = _lookup_binding(broken, mutating=mutating)
+    async with _endpoint(binding) as client:
+        assert (await _ready(client))["ready"]
+        assert (await client.post("/admit", json={"id": "x", "name": "review_source",
+                                                 "arguments": None})).json()["allowed"]
+        call = {"id": "x", "name": "review_source", "arguments": {"target_id": "t1"}}
+        response = (await client.post("/call", json=call)).json()
+        replay = (await client.post("/call", json=call)).json()
+    assert response["outcome"] == ("indeterminate" if mutating else "fatal")
+    assert response["code"] == "callback_failed" and "private-token" not in response["error"]
+    # Only a read-only failure is a confirmed preacceptance refusal; a mutation may have happened.
+    assert response.get("accepted") is (None if mutating else False)
+    assert binding.fatal_error is not None and binding.fatal_error.preacceptance is not mutating
+    assert not binding.authority_open and replay["outcome"] in {"fatal", "indeterminate"}
+    assert invoked == [{"target_id": "t1"}]
+
+
+@pytest.mark.parametrize("case", ["unavailable", "host-schema"])
+async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provider_work(case: str) -> None:
+    """Readiness refuses undeclared native limits, or a drifted host tool, before any admission.
+
+    The installed native capacity row covers an insufficient model end to end; it
+    cannot prove undeclared limits or a host-tool schema differing from the bound
+    one fail native readiness.
+    """
+    binding = _lookup_binding(lambda value: value,
+                              native_requirement=NativeCapacityRequirement(largest_tool_result_bytes=90_000,
+                                                                           submission_bytes=30_000))
+    binding.prompt_bytes = 3_000
+    limits: dict[str, Any] = {"model": {}}
+    async with _endpoint(binding) as client:
+        if case == "host-schema":
+            response = (await client.post("/ready", json={"tool_name": NATIVE_SUBMIT, "schema": _SCHEMA,
+                "host_tools": {"review_source": {"type": "object"}}, "native_limits": limits})).json()
+            assert response["code"] == "native_readiness"
+        else:
+            response = await _ready(client, native_limits=limits)
+            assert response["outcome"] == "fatal" and response["code"] == "native_capacity"
+            assert binding.native_limits is not None
+            assert binding.native_limits["keep_recent_tokens_source"] == "pi_1.4.0_default"
+            # 41,000 prompt/result/submission tokens plus Pi's default compaction allowances.
+            assert binding.native_limits["required_context_tokens"] == 41_000 + 16_384 + 20_000
+        admitted = (await client.post("/admit", json={"id": "late", "name": "read", "arguments": None})).json()
+        assert admitted["outcome"] == "fatal" and not binding.authority_open
+    assert binding.calls == 0
