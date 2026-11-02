@@ -18,8 +18,8 @@ the environment and prerequisites for live CLI, GitHub, and Docker cases.
 
 Use an isolated checkout when the working tree has unrelated edits. Preserve a
 separate failure list with reproduction commands; baseline failure is not
-evidence that a test is stale. If runtime is a goal, collect wall time and
-setup/call/teardown durations under fixed workers and coverage settings.
+evidence that a test is stale. Collect wall time and setup/call/teardown durations
+under fixed workers and coverage settings, because the gate's time budget applies.
 
 Done when every in-scope file has a baseline result or explicit prerequisite
 blocker, and the baseline can be reproduced. Resolve required blockers before
@@ -31,7 +31,8 @@ Partition by production owner, not filename prefix. Deep-review lanes might
 cover runner/workspace, review and adjudication, fix authorization, quality and
 remote CI gates, findings publication, and shared recording/artifact lifecycle.
 Backend lanes distinguish transport parsing, event normalization, invocation
-lifecycle, and shared recording instead of treating each adapter as a duplicate.
+lifecycle, and shared recording; a case repeated per adapter over shared handling
+is a duplicate.
 
 Include subsystem cases in `tests/contract/`, CLI/integration suites,
 `tests/harness/`, fixtures, packaged workflow/sandbox tests, and applicable
@@ -62,8 +63,8 @@ Judge executed paths and assertions, not names. For instance, asserting no
 published comment after a failure is vacuous if the fixture never permitted
 publication even on success. Verify that the positive control reaches it.
 
-Done when every declaration/row has a mark and evidence; uncertain candidates
-remain retained until their evidence is sufficient.
+Done when every declaration/row has a mark and evidence. A candidate is retained
+only with a named unique contract or uncovered branch.
 
 ## 4. Layer plan per lane
 
@@ -72,12 +73,12 @@ Name the keeper for each contract and unique cases to move. Choose the boundary
 that owns the observable behavior or independent contract, using unit,
 integration, or end-to-end tests according to behavior and risk. Exercise the
 orchestrator, registry, recorder, or store when its behavior is the contract;
-script external boundaries as needed. Preserve distinct backend transport cases.
+script external boundaries as needed.
 
-Map each retained contract to its keeper. Preserve real filesystem, Git, and
-event-loop behavior when those are part of the contract; a helper test that
-omits them cannot replace that proof. Identify removable production seams
-separately from legitimate extension/external/fault-injection boundaries.
+Map each retained contract to its keeper. When a contract depends on real
+filesystem, Git, or event-loop behavior, its one keeper exercises them; a helper
+test that omits them cannot replace that proof. Identify removable production
+seams separately from legitimate extension/external/fault-injection boundaries.
 
 Done when each lane names retired files/layers, a keeper per contract, assertions
 to carry over, support/seam changes, and validation commands.
