@@ -61,8 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
 - Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
-- Make the local gate pass in root-run containers with host-injected Git config and
-  no Docker daemon, and remove a timing race in a Pi diagnostic test.
+- Make the local gate pass in root-run containers with host-injected Git config,
+  and remove a timing race in a Pi diagnostic test. The gate no longer pulls from
+  Docker Hub: `make actionlint` runs actionlint 1.7.7 from the uv dev group, and
+  the Docker-image tests and the root-incompatible native Claude finalization
+  test are deleted.
 
 ### Security
 
