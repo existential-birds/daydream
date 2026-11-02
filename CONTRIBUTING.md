@@ -16,7 +16,7 @@ Verify these prerequisites before running the local gate:
 
 - **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
-- **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
+- **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend for running Daydream; the gate does not need it
 - **Node.js 24.18.1 and official Pi CLI 1.4.0** — required by the installed-native contract tests in every full gate; these match [CI provisioning](.github/workflows/ci.yml)
 
 Pi's native tests use an isolated offline provider; `make install` only provisions

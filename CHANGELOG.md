@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Make the pre-push `make check` gate finish in under two minutes on a cold
+  4-CPU Linux container. The suite keeps one proof per contract (5,886 to 1,271
+  collected tests, every test in every run), static checks run in parallel as one
+  `static` step, and JSON schemas compile once. Testing guidance now treats
+  slowness and overlap as deletion reasons
+  ([#1747](https://github.com/existential-birds/daydream/issues/1747)).
+
 - Move the `benchmark` extra's supported Harbor range to `[0.25, 0.26)`. Reinstall
   with `uv sync --all-extras`.
 
