@@ -113,7 +113,9 @@ def shard_scope_id(index: int) -> str:
 RESULT_VERSIONS = {"committed": 7, "immutable": 8, "local": 9}
 REQUIRED_PHASES = ["challenge", "cross_assignment"]
 ASSIGNMENT_POLICIES = frozenset({"broad", "adaptive"})
-WORK_KINDS = ["discovery", "follow_up", "cross_assignment", "challenge"]
+# Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
+INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
+WORK_KINDS = [*sorted(INVESTIGATION_KINDS), "challenge"]
 
 
 def planned_work_id(revision: dict[str, Any], assignments: list[dict[str, Any]]) -> str:
@@ -293,7 +295,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
         raise ValueError("execution evidence differs from retained work")
     # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
-        assignments and not native_assignments & {"discovery", "follow_up", "cross_assignment"}
+        assignments and not native_assignments & INVESTIGATION_KINDS
         or claims and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
         or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)

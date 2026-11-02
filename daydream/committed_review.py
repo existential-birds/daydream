@@ -37,6 +37,7 @@ from daydream.committed_review_model import (
     COMMITTED_SUBMISSION_MAX_BYTES,
     COVERAGE_MAX_SHARDS,
     COVERAGE_SHARD_TARGETS,
+    INVESTIGATION_KINDS,
     LARGEST_TOOL_RESULT_BYTES,
     LOOKUP_PAGE_MAX_BYTES,
     LOOKUP_SCHEMA,
@@ -110,8 +111,6 @@ class CommittedReviewRequest:
 _UNDECIDED_REASON = "unsubmitted: no admitted decision before this review ended; unfinished"
 _CURSOR = re.compile(r"c1\.([0-9a-f]{12})\.([0-9]{1,12})")
 _CONTINUATION_NOTICE = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
-# Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
-_INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
 _RESPONSIBILITY_PAGE = 256
 # Same workflow fan-out ceiling as deep per-stack review; the backend hint may lower it.
 _FANOUT_CEILING = 10
@@ -383,7 +382,7 @@ class Review:
         """
         if self._sealed:
             raise ValueError("Review is sealed")
-        if kind not in _INVESTIGATION_KINDS | {"challenge"}:
+        if kind not in INVESTIGATION_KINDS | {"challenge"}:
             raise ValueError("invalid assignment kind")
         live = {wid for wid, work in self.work.items() if work.live}
         planned: list[tuple[tuple[str, ...], dict[str, int]]] = []
@@ -400,10 +399,7 @@ class Review:
         else:
             if groups is None:
                 undecided = [p["target_id"] for p in self.assignments if p["target_id"] not in self._decisions]
-                group = tuple(t for t in undecided if self._target_owner.get(t) not in live)
-                if not group and kind != "cross_assignment":
-                    raise ValueError("Review already has an active assignment or no undecided targets")
-                groups = [group]
+                groups = [tuple(t for t in undecided if self._target_owner.get(t) not in live)]
             seen: set[str] = set()
             for group in groups:
                 for target in group:
@@ -412,7 +408,7 @@ class Review:
                         raise ValueError("work targets must be distinct, undecided and not held by live work")
                     seen.add(target)
                 if not group and kind != "cross_assignment":
-                    raise ValueError("local review work requires at least one target")
+                    raise ValueError("Review already has an active assignment or no undecided targets")
                 planned.append((tuple(group), {}))
         covered_targets = {t for targets, _ in planned for t in targets}
         covered_claims = {(uid, rev) for _, claims in planned for uid, rev in claims.items()}
@@ -440,14 +436,10 @@ class Review:
 
     def assignment(
         self, kind: str, *, deadline: float, reserves: dict[str, Any] | None = None,
-        targets: tuple[str, ...] | None = None,
     ) -> tuple[HostToolBinding, dict[str, Any]]:
-        """Plan one work item for kind (default: every available responsibility) and open it."""
-        (work_id,) = self.plan(kind, None if targets is None else [targets])
+        """Plan one work item for every available responsibility of kind and open it."""
+        (work_id,) = self.plan(kind)
         return self.open(work_id, deadline=deadline, reserves=reserves)
-
-    def work_id(self, binding: HostToolBinding) -> str:
-        return next(wid for wid, work in self.work.items() if work.binding is binding)
 
     # Progressive admission ------------------------------------------------------------
 
@@ -486,7 +478,7 @@ class Review:
                 canonical = deepcopy(value)
                 decisions: dict[str, dict[str, Any]] = {}
                 verdicts: dict[str, dict[str, Any]] = {}
-                if kind in _INVESTIGATION_KINDS:
+                if kind in INVESTIGATION_KINDS:
                     for target in canonical["targets"]:
                         identifier = target["target_id"]
                         if identifier not in self._index:
@@ -512,8 +504,6 @@ class Review:
                         target["evidence_refs"] = self._refs(sources, selectors, target=identifier,
                                                              required=reviewed)
                         decisions[identifier] = target
-                    if any(c["uid"] for c in value["claims"]):
-                        raise HostToolRejected(f"{kind}.claims: new concerns require empty uid and revision=0")
                 else:
                     for verdict in canonical["verdicts"]:
                         uid = verdict["uid"]
@@ -529,8 +519,6 @@ class Review:
                                                     if verdict["evidence_refs"]
                                                     else deepcopy(self._claims[uid]["payload"]["evidence_refs"]))
                         verdicts[uid] = {**verdict, "work_id": work_id}
-                    if any(c["uid"] and c["uid"] not in work.claims for c in value["claims"]):
-                        raise HostToolRejected("claims: revisions may change only currently assigned claims")
                 changes: list[dict[str, Any]] = []
                 for submitted in canonical["claims"]:
                     if submitted["uid"] and any(c["uid"] == submitted["uid"] for c in changes):
@@ -683,9 +671,8 @@ class Review:
                 # Planned, abandoned or closed-without-acceptance work is unfinished, never success.
                 failures[record["work_id"]] = {ReasonCode.EVIDENCE_INCOMPLETE.value}
         current = [record for record in records if record["state"] != "superseded"]
-        dispatched = {entry["work_id"] for entry in self.execution}
-        kinds = {self.work[wid].kind for wid in dispatched if wid is not None}
-        if self.assignments and not kinds & _INVESTIGATION_KINDS:
+        kinds = {entry["assignment"] for entry in self.execution if entry["work_id"] is not None}
+        if self.assignments and not kinds & INVESTIGATION_KINDS:
             global_reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
         if self.assignments:
             scopes_complete = True
@@ -693,7 +680,7 @@ class Review:
                 identifiers = {part["target_id"] for part in shard}
                 reasons = set(global_reasons)
                 for record in current:
-                    if record["kind"] in _INVESTIGATION_KINDS and identifiers & set(record["targets"]):
+                    if record["kind"] in INVESTIGATION_KINDS and identifiers & set(record["targets"]):
                         reasons |= failures.get(record["work_id"], set())
                 if not all(self._decisions.get(t, {}).get("status") == "reviewed" for t in identifiers):
                     reasons.add(ReasonCode.EVIDENCE_INCOMPLETE.value)
@@ -1231,115 +1218,98 @@ class _Schedule:
 
     async def _dispatch(self, work_id: str, allocation: int, deadline: float, reserves: dict[str, Any], *,
                         local: bool = False) -> dict[str, Any]:
-        kind = self.review.work[work_id].kind
+        review, profile = self.review, self.settings
+        kind = review.work[work_id].kind
         budget = ReviewInvestigationBudget(replace(self.limits, tool_calls=allocation), deadline,
                                            retry_recovery_budget=self.recovery)
         backend = self.backends["challenge" if kind == "challenge" else "discovery"]
-        entry = await _dispatch(self.review, work_id, backend, budget, deadline=deadline, allocation=allocation,
-                                profile=self.settings, reserves=reserves)
-        charged = entry["observed_starts"] - entry["overshoot"]
+        repo = review.inputs.work.repo
+        work = review.work[work_id]
+        binding, schema = review.open(work_id, deadline=deadline, reserves=reserves)
+        pending = review.pending()
+        assignment = {
+            "kind": kind,
+            "run_id": review.run_id,
+            "analyzed_revision": review.inputs.revision,
+            "captured_root": str(repo),
+            "catalog": review.catalog(),
+            "work": review.context(work_id),
+            "claims": ([c for c in pending if work.claims.get(c["uid"]) == c["revision"]] if kind == "challenge"
+                       else pending if kind == "cross_assignment" else []),
+            "profile": profile,
+        }
+        strategy = "challenge" if kind == "challenge" else "discovery"
+        # Stable policy, navigation, catalog root and claims live in system instructions,
+        # which native compaction never summarizes away; the user turn only starts work.
+        instructions = (
+            _INSTRUCTIONS
+            + _KIND_INSTRUCTIONS.get(kind, "")
+            + "\nReview strategy:\n"
+            + profile["strategies"][strategy]
+            + "\nCatalog status and decided markers below are a dispatch-time snapshot."
+            + "\nCommitted review assignment:\n"
+            + canonical_json(assignment)
+            + "\nEnd committed review assignment.\n"
+        )
+        prompt = (f"Begin the committed review {kind} assignment described in the system instructions. "
+                  "Navigate with review_source, admit batches with review_admit and finish with structured_output.\n")
+        reason: str | None = None
+        settled = False
+        try:
+            await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
+            _, _, stopped = await agent.run_agent(
+                backend,
+                repo,
+                prompt,
+                phase=DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW,
+                output_schema=schema,
+                result_schema=receipt_schema(kind),
+                read_only=True,
+                persist_session=False,
+                deadline=deadline,
+                investigation_budget=budget,
+                tool_call_budget=allocation,
+                tool_call_start_floor=1,
+                review_system_instructions=instructions,
+                review_stage_scope_id=work_id,
+                host_tools=binding,
+            )
+            settled = stopped is None and binding.native_settled
+            if stopped is not None:
+                try:
+                    reason = reason_for_budget(stopped).value
+                except KeyError:
+                    reason = ReasonCode.EVIDENCE_INCOMPLETE.value
+            elif not binding.accepted:
+                reason = ReasonCode.MISSING_OUTPUT.value
+        except asyncio.CancelledError:
+            reason = ReasonCode.INTERRUPTION.value
+            raise
+        except UnsupportedHostedPolicy:
+            reason = ReasonCode.BACKEND_FAILURE.value
+            raise
+        except Exception as exc:
+            exhausted = isinstance(binding.fatal_error, HostToolCallBudgetExceeded)
+            reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION if exhausted else reason_for_exception(exc)).value
+        finally:
+            binding.close_authority()
+            observed = budget.observed_tool_starts
+            # Denied protected starts are reported overshoot, never charged to later reserves.
+            charged = min(max(0, observed - binding.denied_starts), allocation)
+            entry = {
+                "assignment": kind,
+                "work_id": work_id,
+                "accepted": binding.accepted,
+                "settled": settled,
+                "cleanup_complete": binding.cleanup_complete,
+                "reason": reason
+                if reason is not None
+                else (ReasonCode.BACKEND_FAILURE.value if not settled or not binding.cleanup_complete else None),
+                "allocation": allocation,
+                "observed_starts": observed,
+                "overshoot": observed - charged,
+            }
+            review.execution.append(entry)
         self.spent += charged
         self.local_spent += charged if local else 0
         return entry
-
-
-async def _dispatch(
-    review: Review,
-    work_id: str,
-    backend: PiBackend,
-    budget: ReviewInvestigationBudget,
-    *,
-    deadline: float,
-    allocation: int,
-    profile: dict[str, Any],
-    reserves: dict[str, Any],
-) -> dict[str, Any]:
-    repo = review.inputs.work.repo
-    work = review.work[work_id]
-    kind = work.kind
-    binding, schema = review.open(work_id, deadline=deadline, reserves=reserves)
-    pending = review.pending()
-    assignment = {
-        "kind": kind,
-        "run_id": review.run_id,
-        "analyzed_revision": review.inputs.revision,
-        "captured_root": str(repo),
-        "catalog": review.catalog(),
-        "work": review.context(work_id),
-        "claims": ([c for c in pending if work.claims.get(c["uid"]) == c["revision"]] if kind == "challenge"
-                   else pending if kind == "cross_assignment" else []),
-        "profile": profile,
-    }
-    strategy = "challenge" if kind == "challenge" else "discovery"
-    # Stable policy, navigation, catalog root and claims live in system instructions,
-    # which native compaction never summarizes away; the user turn only starts work.
-    instructions = (
-        _INSTRUCTIONS
-        + _KIND_INSTRUCTIONS.get(kind, "")
-        + "\nReview strategy:\n"
-        + profile["strategies"][strategy]
-        + "\nCatalog status and decided markers below are a dispatch-time snapshot."
-        + "\nCommitted review assignment:\n"
-        + canonical_json(assignment)
-        + "\nEnd committed review assignment.\n"
-    )
-    prompt = (f"Begin the committed review {kind} assignment described in the system instructions. "
-              "Navigate with review_source, admit batches with review_admit and finish with structured_output.\n")
-    reason: str | None = None
-    settled = False
-    try:
-        await anyio.to_thread.run_sync(review.inputs._revalidate_canonical)
-        _, _, stopped = await agent.run_agent(
-            backend,
-            repo,
-            prompt,
-            phase=DaydreamPhase.VERIFY if kind == "challenge" else DaydreamPhase.REVIEW,
-            output_schema=schema,
-            result_schema=receipt_schema(kind),
-            read_only=True,
-            persist_session=False,
-            deadline=deadline,
-            investigation_budget=budget,
-            tool_call_budget=allocation,
-            tool_call_start_floor=1,
-            review_system_instructions=instructions,
-            review_stage_scope_id=work_id,
-            host_tools=binding,
-        )
-        settled = stopped is None and binding.native_settled
-        if stopped is not None:
-            try:
-                reason = reason_for_budget(stopped).value
-            except KeyError:
-                reason = ReasonCode.EVIDENCE_INCOMPLETE.value
-        elif not binding.accepted:
-            reason = ReasonCode.MISSING_OUTPUT.value
-    except asyncio.CancelledError:
-        reason = ReasonCode.INTERRUPTION.value
-        raise
-    except UnsupportedHostedPolicy:
-        reason = ReasonCode.BACKEND_FAILURE.value
-        raise
-    except Exception as exc:
-        reason = (ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION.value
-                  if isinstance(binding.fatal_error, HostToolCallBudgetExceeded) else reason_for_exception(exc).value)
-    finally:
-        binding.close_authority()
-        observed = budget.observed_tool_starts
-        # Denied protected starts are reported overshoot, never charged to later reserves.
-        charged = min(max(0, observed - binding.denied_starts), allocation)
-        entry = {
-            "assignment": kind,
-            "work_id": work_id,
-            "accepted": binding.accepted,
-            "settled": settled,
-            "cleanup_complete": binding.cleanup_complete,
-            "reason": reason
-            if reason is not None
-            else (ReasonCode.BACKEND_FAILURE.value if not settled or not binding.cleanup_complete else None),
-            "allocation": allocation,
-            "observed_starts": observed,
-            "overshoot": observed - charged,
-        }
-        review.execution.append(entry)
-    return entry

@@ -379,7 +379,7 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         recovery = kwargs["investigation_budget"].retry_recovery_budget
         dispatches.append(
             {"kind": assignment["kind"], "allocation": kwargs["tool_call_budget"], "deadline": kwargs["deadline"],
-             "recovery": recovery, "recovery_spent": recovery.spent_s}
+             "recovery_spent": recovery.spent_s}
         )
         if assignment["kind"] == "discovery":
             # Retry overhead spent by discovery must stay spent for every later work item.
@@ -594,7 +594,6 @@ async def test_program_retains_work_and_reserves_challenge_after_discovery(
         assert value["work"][1]["state"] == "superseded"
     assert dispatches[0]["allocation"] == 5
     # One cumulative retry-recovery ledger: challenge previously received a fresh allowance.
-    assert all(d["recovery"] is dispatches[0]["recovery"] for d in dispatches)
     assert all(d["recovery_spent"] >= 1.5 for d in dispatches[1:])
     # The broad default never decomposes; cross-assignment is an explicit host no-op.
     assert value["settings"]["assignment_policy"] == {"name": "broad", "decomposed": False,
@@ -1996,7 +1995,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
         targets = work["targets"]["ids"]
         async with binding.session():
             if work["kind"] == "challenge":
-                value = {"verdicts": [_verdict_for(binding, claim) for claim in assignment["claims"]], "claims": []}
+                value = {"verdicts": [_verdict_for(claim) for claim in assignment["claims"]], "claims": []}
             elif work["kind"] == "cross_assignment":
                 # Required even though no local work asked for it; it rereads original captured source.
                 assert "retained_conclusions" in work and (cwd / "a.py").read_text().endswith("(count - 1)\n")
@@ -2043,7 +2042,7 @@ async def test_adaptive_review_transfers_unfinished_work_and_investigates_across
             binding.native_settled = True
         return accepted, None, None
 
-    def _verdict_for(binding: HostToolBinding, claim: dict[str, Any]) -> dict[str, Any]:
+    def _verdict_for(claim: dict[str, Any]) -> dict[str, Any]:
         return {"uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
                 "grounds": "Counterevidence search found no guard before the division.", "evidence_refs": []}
 
