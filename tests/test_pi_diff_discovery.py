@@ -88,7 +88,7 @@ async def test_small_pi_review_keeps_structural_dispatch_bound_to_captured_refs(
 
     results, failures = await review_scopes(backend, work,
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
-        diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
+        diff_path=diff, intent_path=intent,
         alternatives_path=tmp_path / "alternatives.json", allow_standalone=True,
         run_context=RunContext(InteractionPolicy(interactive=False)),
     )

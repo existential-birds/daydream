@@ -199,16 +199,18 @@ def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage, *,
            and 'target_decisions' not in outcome for outcome in stored.scopes.values()):
         raise ValueError(f"Cannot resume review: source-attributed target decisions are unavailable. {restart}")
     from daydream.prompt_budget import SanctionedInputUnavailable
-    from daydream.review_stage_inputs import StageInputFactory
+    from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 
     try:
+        change: CanonicalChange | None = None
         for stack in stacks:
             outcome = stored.scopes[stack.stack_name]
             decisions = outcome.get('target_decisions')
             if decisions is None:
                 continue
-            factory = StageInputFactory.for_review(backend, work, stack,
-                diff_path=deep_dir_path.parent / 'diff.patch', shared_paths={},
+            change = change or CanonicalChange.capture(deep_dir_path.parent / 'diff.patch',
+                                                       deep_dir_path.parent / 'hunk-index.json', work.captured_source)
+            factory = StageInputFactory.for_review(backend, work, stack, change=change, shared_paths={},
                 revision=current.revision.to_dict(), registry=registry,
                 artifact_session=artifact_session, allow_standalone=allow_standalone)
             factory.validate_retained_decisions(decisions, complete=outcome['status'] == 'complete')

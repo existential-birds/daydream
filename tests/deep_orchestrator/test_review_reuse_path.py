@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import re
 import stat
+import weakref
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
+from daydream.backends import AgentEvent
+from daydream.review_stage_inputs import StageInputFactory
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _arbiter_stacks,
@@ -284,12 +290,37 @@ async def test_cache_population_restores_warm_bytes_then_recomputes_only_indepen
                 payload_path.write_text(json.dumps(payload))
                 manifest["payload"][payload_path.name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
+    # One fan-out slot: each miss builds scope-local inputs only once admitted, while hits validate without waiting.
+    review.backend.fanout_concurrency = 1
+    hits = {by_name["healthy"], "structure"}
+    live: weakref.WeakSet[StageInputFactory] = weakref.WeakSet()
+    built: list[str] = []
+    waited: set[str] = set()
+    construct = StageInputFactory.__init__
+
+    def tracked(inputs: StageInputFactory, *args: Any, **kwargs: Any) -> None:
+        construct(inputs, *args, **kwargs)
+        live.add(inputs)
+        built.append(inputs.stack.stack_name)
+
+    async def admitted(stage: dict[str, Any], output: dict[str, Any]) -> AsyncGenerator[AgentEvent, None]:
+        with anyio.fail_after(10):
+            while not hits <= set(built) or (gc.collect(), len(live))[1] != 1:
+                await anyio.sleep(0.01)
+        waited.add(stage["scope_id"])
+        events: tuple[AgentEvent, ...] = ()
+        for event in events:
+            yield event
+
+    monkeypatch.setattr(StageInputFactory, "__init__", tracked)
+    for name in damages:
+        review.backend.script(by_name[name])(admitted)
     review.backend.calls.clear()
     assert await review.run(**config) == 0
     actual = {
         stage["scope_id"] for call in review.backend.calls if (stage := review_stage_state(call["prompt"])) is not None
     }
-    assert actual == {by_name[name] for name in damages}
+    assert actual == waited == {by_name[name] for name in damages}
     assert _reused_stacks(deep) == {by_name["healthy"], "structure"}
     current = saved_coverage(deep)
     assert all(scope["status"] == "complete" for scope in current.scopes.values())

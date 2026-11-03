@@ -82,7 +82,7 @@ from daydream.review_result import (
     reason_for_exception,
 )
 from daydream.review_source_refs import _SubmissionSources, source_id
-from daydream.review_stage_inputs import StageInputFactory
+from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import _resolve_backend
@@ -1013,7 +1013,8 @@ async def _run_committed_review(
         # Full captured-source checks run off-loop so host-tool timers are never starved.
         inputs = await anyio.to_thread.run_sync(lambda: StageInputFactory(
             backends["discovery"], work, StackAssignment("committed", files),
-            diff_path=diff_path, hunk_index_path=index_path, shared_paths={}, revision=revision,
+            change=CanonicalChange.capture(diff_path, index_path, work.captured_source), shared_paths={},
+            revision=revision,
             artifact_session=session, allow_standalone=False, read_only=True,
         ))
         investigation_s = min(limits.investigation_s, profile.profile.pipeline.reviewer_investigation_budget_s)

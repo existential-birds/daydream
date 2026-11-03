@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Per-stack review shares one validated copy of the patch and hunk index across
+  every stack and shard scope. A queued scope no longer holds its own copy of the
+  patch, block map and parsed index; it builds its inputs only once it gets a
+  fan-out slot, and cache hits still validate without waiting for one. The private
+  stage/cache contract moves to 17, so existing review-cache entries miss once
+  ([#1711](https://github.com/existential-birds/daydream/issues/1711)).
+
+### Fixed
+
+- Review assignments for a file that changes type (a regular file becoming a
+  symlink or the reverse) now carry old-side source refs for the removed lines,
+  and oversized type changes split under each diff block's own header
+  ([#1711](https://github.com/existential-birds/daydream/issues/1711)).
 
 ## [0.33.0] - 2026-11-03
 

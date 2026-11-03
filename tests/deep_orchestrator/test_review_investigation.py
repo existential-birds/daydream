@@ -706,7 +706,7 @@ def test_assessment_rejects_domain_faults_and_irreparable_native_capacity(
 
     def fresh(batches: list[list[dict[str, Any]]] | None = None, *, scope_id: str = 'python',
               limits: ReviewLimits | None = None) -> ReviewInvestigation:
-        return ReviewInvestigation(StackAssignment(scope_id, ['api.py']), '', coverage.revision.to_dict(),
+        return ReviewInvestigation(StackAssignment(scope_id, ['api.py']), {}, coverage.revision.to_dict(),
                                    assignment_batches=batches or [[part]], coverage=coverage, limits=limits)
 
     judgment = {'trigger': 'x', 'consequence': 'x', 'grounds': 'x', 'disposition': 'open', 'candidate_id': ''}
@@ -816,7 +816,7 @@ def test_bounded_review_context_and_tool_evidence_drop_oldest_whole_entries() ->
 
     # Persisted source notes are reviewer assertions: bounded, clipped and credential-redacted.
     coverage = review_coverage(scope_ids=('python',), files=('api.py',))
-    investigation = ReviewInvestigation(StackAssignment('python', ['api.py']), '', coverage.revision.to_dict(),
+    investigation = ReviewInvestigation(StackAssignment('python', ['api.py']), {}, coverage.revision.to_dict(),
                                         assignment_batches=[], coverage=coverage)
     investigation.handoff['notes'] = [{
         'text': 'Source-only assertion ghp_1234567890 {"token": "private-value"} ' + 'x' * 700,

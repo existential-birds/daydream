@@ -45,7 +45,6 @@ from daydream.deep.reuse_key import (
 from daydream.deep.reuse_store import ReuseCache, entry_dir
 from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
-from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import atomic_write_bytes, validates_schema
 from daydream.observability.spans import stack_scope
 from daydream.phases.inputs import (
@@ -85,7 +84,7 @@ from daydream.review_result import (
     reason_for_budget,
     reason_for_exception,
 )
-from daydream.review_stage_inputs import StageInputFactory
+from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     load_test_recipe,
@@ -431,7 +430,6 @@ async def phase_per_stack_reviews(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
-    diff_text: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
     strategies: dict[str, str] | None = None,
@@ -447,6 +445,9 @@ async def phase_per_stack_reviews(
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
+    Every scope shares one immutable canonical change. A queued scope holds only
+    its assignment: a cache hit validates without a fan-out slot, while a miss
+    builds its scope-local inputs only after admission.
     """
     active_registry = registry if registry is not None else get_registry()
     if unavailable_report_scopes is None:
@@ -475,8 +476,6 @@ async def phase_per_stack_reviews(
     read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
                  or uses_diff_reference(backend, work.repo, read_only=True))
 
-    hunk_index = load_hunk_index(deep_dir_path.parent)
-
     structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
     structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
     # A rerun supersedes structural output from any earlier attempt.
@@ -489,6 +488,14 @@ async def phase_per_stack_reviews(
         phase=DaydreamPhase.DEEP,
         descriptors=dispatch_descriptors,
     ) as dispatch:
+        change: CanonicalChange | None = None
+        change_error: Exception | None = None
+        try:
+            change = await prepared_off_loop(partial(CanonicalChange.capture, diff_path,
+                                                     diff_path.parent / 'hunk-index.json', work.captured_source))
+        except Exception as exc:  # noqa: BLE001 -- every planned scope records this failure below
+            change_error = exc
+
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
             records_path = per_stack_records_path(deep_dir_path, stack.stack_name)
@@ -513,8 +520,11 @@ async def phase_per_stack_reviews(
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
                                      "exploration-affected-files": exploration_dir / "affected_files.md"})
-            input_factory = await prepared_off_loop(partial(StageInputFactory.for_review, backend, work, stack,
-                diff_path=diff_path, shared_paths=shared_paths, revision=coverage.revision.to_dict(),
+            if change_error is not None:
+                raise change_error
+            assert change is not None
+            build_inputs = partial(prepared_off_loop, partial(StageInputFactory.for_review, backend, work, stack,
+                change=change, shared_paths=shared_paths, revision=coverage.revision.to_dict(),
                 registry=active_registry, artifact_session=artifact_session, allow_standalone=allow_standalone))
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
@@ -523,8 +533,8 @@ async def phase_per_stack_reviews(
                     files=stack.files,
                     frontier_files=_frontier_files_for_stack(stack),
                     docs_only=stack.is_docs_only,
-                    diff_path_or_hunks=input_factory.full_diff,
-                    hunk_index=hunk_index,
+                    diff_path_or_hunks=change.text,
+                    hunk_index=change.index_slice(stack.files),
                     exploration_dir=exploration_dir,
                     worktree_root=work.repo,
                     identity=phase_identity,
@@ -548,6 +558,8 @@ async def phase_per_stack_reviews(
                 hit = reuse_unit.lookup(deep_dir_path, on_restore_failure=lambda reason: ui.print_warning(
                     agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"))
                 if hit is not None:
+                    # A hit validates outside the fan-out limiter and releases its inputs on return.
+                    retained_inputs = await build_inputs()
                     try:
                         restored = json.loads(records_path.read_text())
                         attribution_path = hit.payload_dir / attribution_name
@@ -558,7 +570,7 @@ async def phase_per_stack_reviews(
                         if not isinstance(attribution, dict) or set(attribution) != {'target_decisions'}:
                             raise ValueError('invalid source attribution payload')
                         target_decisions = preserved_target_decisions(attribution['target_decisions'])
-                        input_factory.validate_retained_decisions(target_decisions, complete=True)
+                        retained_inputs.validate_retained_decisions(target_decisions, complete=True)
                         coverage.check_target_decisions_budget(stack.stack_name, target_decisions)
                         cache_valid = valid_record_artifact(
                             restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
@@ -585,6 +597,7 @@ async def phase_per_stack_reviews(
                         coverage.record_scope(stack.stack_name, "complete",
                                               target_decisions=target_decisions)
                         return
+                    del retained_inputs
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
@@ -632,11 +645,12 @@ async def phase_per_stack_reviews(
             budget_reason: str | None = None
             investigation: ReviewInvestigation | None = None
             async with limiter:
+                input_factory = await build_inputs()
                 try:
                     async with maybe_fork(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
-                        investigation = ReviewInvestigation(stack, input_factory.full_diff, coverage.revision.to_dict(),
+                        investigation = ReviewInvestigation(stack, change.change_bytes, coverage.revision.to_dict(),
                             assignment_batches=input_factory.assignment_batches, coverage=coverage,
                             limits=review_limits)
                         with stack_scope(base_stack):

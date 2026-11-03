@@ -68,7 +68,7 @@ def frozen_target_decisions(target: Path, stack: StackAssignment, revision: Anal
     """Seed a compatible prior review assertion from the actual frozen Git inputs."""
     from daydream.backends import Backend
     from daydream.hunk_index import write_hunk_index
-    from daydream.review_stage_inputs import StageInputFactory
+    from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
     from daydream.workspace import WorkContext
     from tests.harness.stub_backend import StubBackend
 
@@ -79,8 +79,9 @@ def frozen_target_decisions(target: Path, stack: StackAssignment, revision: Anal
     index_path = write_hunk_index(dd, diff)
     work = WorkContext(repo=target, source=target, base_branch='main', base_sha=revision.merge_base_sha,
         head_branch=None, head_sha=revision.head_sha, is_ephemeral=False, run_id='primed-review-fixture')
-    factory = StageInputFactory(cast(Backend, StubBackend(target)), work, stack, diff_path=diff_path,
-        hunk_index_path=index_path, shared_paths={}, revision=revision.to_dict(), artifact_session=None,
+    factory = StageInputFactory(cast(Backend, StubBackend(target)), work, stack,
+        change=CanonicalChange.capture(diff_path, index_path), shared_paths={},
+        revision=revision.to_dict(), artifact_session=None,
         allow_standalone=True, read_only=True)
     parts = [part for batch in factory.assignment_batches for part in batch]
     if stack.stack_name == 'structure':

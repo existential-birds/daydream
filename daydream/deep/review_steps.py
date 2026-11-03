@@ -678,7 +678,6 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 intent_path=deep_state.intent_path,
                 alternatives_path=deep_state.alts_path,
                 exploration_dir=deep_state.exploration_dir,
-                diff_text=deep_state.diff,
                 intent_authoritative=deep_state.intent_authoritative,
                 include_alternatives=include_alternatives,
                 strategies={

@@ -116,13 +116,23 @@ IDs, hashes, selectors, and canonical bytes. Other input callers retain the
 through revalidation. Exact-path resource limits and backend read roots
 retain their existing policy.
 
+Per-stack review validates one immutable `CanonicalChange` (patch text, path
+resolution, deleted-file inventory, change weights and per-file index JSON) and
+shares it with every scope. A queued scope holds only its assignment: a cache hit
+builds and validates its inputs without a fan-out slot, while a miss builds its
+scope-local parts, aliases and index slice only after admission and releases them
+when it ends. A canonical failure fails every planned scope; one scope's preparation
+failure fails only that scope. A path with several diff blocks (a type change is a
+deletion then an addition) resolves its old side from the first block and its new
+side from the last; oversized parts split one block at a time under that block's header.
+
 Open/unresolved candidates receive one triage round. Closed reviewer assertions,
 contradictions, unfinished targets, and isolated failures preserve their original
 authority and incomplete coverage; later success cannot erase earlier failures.
 (The committed-review program instead decides completion from current, non-superseded
 [work](runtime.md#assignment-policy-and-work).)
 Final-turn output selection and native structured submission remain host-owned;
-malformed envelopes cannot recover nested fragments. Private stage contract 16
+malformed envelopes cannot recover nested fragments. Private stage contract 17
 uses selector submissions for every backend and one host-accepted canonical result;
 Pi's result follows clean native settlement. The model schema is distinct from
 retained canonical output. The private cache identity changes with this contract,
