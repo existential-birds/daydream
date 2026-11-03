@@ -528,10 +528,26 @@ async def _run_agent(
                     investigation_budget.retry_recovery_budget = recovery
             else:
                 recovery.allowance_s = min(recovery.allowance_s, resolved_allowance)
-            recovery_spent_before = recovery.spent_s
+            # A recovery ledger may be shared by concurrent work; telemetry reports only
+            # this invocation's own charges, never a sibling's.
+            invocation_recovery_s = 0.0
+
+            def charge_recovery(seconds: float) -> None:
+                nonlocal invocation_recovery_s
+                recovery.charge(seconds)
+                invocation_recovery_s += max(0.0, seconds)
             if host_tools is not None:
                 host_tools.restrict(deadline=effective_deadline, tool_call_budget=tool_call_budget)
             native_calls_before = host_tools.calls if host_tools is not None else 0
+            native_denied_before = host_tools.denied_starts if host_tools is not None else 0
+
+            def charged_calls() -> int:
+                # Pi awaits the extension's /admit before writing the start to stdout,
+                # so every streamed start's protected-slot denial is already recorded here.
+                # A denial ahead of its stream event only undercounts; the binding enforces.
+                if host_tools is None:
+                    return tool_calls
+                return tool_calls - (host_tools.denied_starts - native_denied_before)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
             # retry-recovery budget is a third, independent accumulator: its
@@ -572,7 +588,7 @@ async def _run_agent(
                         cleanup_elapsed_s=None,
                         retry_stop_reason=stop_reason,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before + pending,
+                        retry_recovery_spent_s=invocation_recovery_s + pending,
                         partial_edit_handling="discarded",
                     )
                 except Exception:  # noqa: BLE001 - telemetry must never break the run
@@ -601,7 +617,7 @@ async def _run_agent(
                 result_continuation = None
                 if investigation_budget is None and host_tools is None:
                     tool_calls = 0
-                remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
+                remaining_calls = tool_call_budget - charged_calls() if tool_call_budget is not None else None
                 if host_tools is not None and host_tools.remaining_tool_calls is not None:
                     native_remaining = host_tools.remaining_tool_calls
                     remaining_calls = min(remaining_calls, native_remaining) if remaining_calls is not None else (
@@ -625,7 +641,9 @@ async def _run_agent(
                         )
                         stop_recorded = True
                     break
-                if ((investigation_budget is not None and investigation_budget.remaining_tool_calls == 0)
+                # With host tools the binding's charged ledger (which excludes protected denials) governs.
+                if ((investigation_budget is not None and host_tools is None
+                     and investigation_budget.remaining_tool_calls == 0)
                     or ((investigation_budget is not None or host_tools is not None)
                         and remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
                     aborted_reason = "tool_call_budget_exceeded"
@@ -822,7 +840,7 @@ async def _run_agent(
                                         break
                                     if investigation_budget is None and not native_output:
                                         tool_calls += 1
-                                    if tool_call_budget is not None and tool_calls > tool_call_budget:
+                                    if tool_call_budget is not None and charged_calls() > tool_call_budget:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 
@@ -977,11 +995,11 @@ async def _run_agent(
                         # backend_s, or backend_s + backoff_s would overcount.
                         charged = telemetry.charge_attempt(clock.monotonic())
                         if telemetry.attempt_is_retry:
-                            recovery.charge(charged)
+                            charge_recovery(charged)
                         # The backoff sleep is retry overhead: charge it to the
                         # cumulative allowance before sleeping so a later
                         # failure sees the un-rebased remainder.
-                        recovery.charge(delay)
+                        charge_recovery(delay)
                         await anyio.sleep(delay)
                         telemetry.backoff_s += delay
                         # Recheck after backoff because a sibling may have opened the circuit.
@@ -1025,7 +1043,7 @@ async def _run_agent(
                                 clock.monotonic(), cleanup_elapsed_s=cleanup_elapsed_s
                             )
                             if telemetry.attempt_is_retry:
-                                recovery.charge(charged)
+                                charge_recovery(charged)
 
             # Emit at most one stop record. In-flight deadline stops retain partials;
             # pre-dispatch stops discard them. Recorder failure cannot change the return value.
@@ -1045,7 +1063,7 @@ async def _run_agent(
                         cleanup_elapsed_s=cleanup_elapsed_s,
                         retry_stop_reason=None,
                         circuit_state=run_context.outage_circuit.state(),
-                        retry_recovery_spent_s=recovery.spent_s - recovery_spent_before,
+                        retry_recovery_spent_s=invocation_recovery_s,
                         partial_edit_handling=(
                             "discarded" if partials_discarded_by_deadline else "kept"
                         ),

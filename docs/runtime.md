@@ -65,8 +65,9 @@ edits, external diff drivers and text conversion; inert materialization supplies
 Git blobs even when the original checkout uses filters/EOL conversion.
 
 The complete planned population is computed from the full captured patch before
-any prompt bounding; there is no decomposition threshold. One broad discovery
-conversation, followed by host-scheduled fresh challenge, navigates it:
+any prompt bounding. Host-dispatched investigation work, followed by host-scheduled
+fresh challenge, navigates it under the request's
+[assignment policy](#assignment-policy-and-work):
 
 - System instructions, which native compaction never summarizes, carry the stable
   policy, the assignment identity, pending challenge claims and a bounded
@@ -106,9 +107,7 @@ work, a plan whose minimal attribution exceeds the 8 MiB run allocation. Claim l
 continuation fragments, inside that fragment's summarized complete-line span; the
 canonical fragment identity is unchanged.
 
-Discovery receives half of the tool allowance. Its denied over-limit start remains
-charged to discovery's own ledger but cannot reduce the protected challenge reserve;
-unspent discovery calls carry into challenge. Before provider work the native
+Before provider work the native
 extension reports the selected model's `contextWindow`/`maxTokens` and compaction
 settings (Pi 1.4.0 defaults when unset, labelled as such). The host requires the
 instructions and prompt, the largest single tool result (64 KiB), one recommended
@@ -122,8 +121,7 @@ and derived coverage. Every publication claim receives counterevidence-seeking
 challenge in a distinct native conversation against captured source. Changes to
 claim, trigger, consequence, location or grounds renew that obligation; titles do
 not. Retain confirmed, substantively rejected and unresolved concerns separately.
-Missing/failed challenge is unfinished work. Discovery cannot consume protected
-challenge/finalization allowances. Whole-submission admission rechecks authority,
+Missing/failed challenge is unfinished work. Whole-submission admission rechecks authority,
 revisions and limits before installation; closure precedes cleanup and sealing.
 Cancellation installs interrupted coverage and retained concerns before propagating.
 
@@ -133,8 +131,7 @@ explicit revocation, supersession or sealing cannot be undone by another native
 session. Review checks the current assignment identity after prospective source
 validation at the same synchronous ordering point as installation. Stopped or
 crashed reviews start afresh; retained output is evidence, not resumable authority.
-The original review clock includes source preparation. Conversations share observed
-tool spending and retry-recovery consumption; backoff cannot renew either bound.
+The original review clock includes source preparation.
 
 Without a hosted policy, Pi's CLI resolves model/provider/thinking/trust/authentication in the original
 configuration context; stock read/search tools, model-visible cwd and AGENTS context
@@ -142,15 +139,71 @@ use captured source. Daydream forwards explicit phase/environment overrides and
 rejects drift in opaque configuration identities, while credentials remain live.
 Profile discovery/arbitration strategies cannot disable host obligations.
 
-The run's artifact session stages the report then atomically writes schema-4
-`committed-review.json`: claims/challenge evidence, typed coverage, run/source and
-complete planned-work identity. Prior/competing bytes survive publication failure.
+The run's artifact session stages the report then atomically writes the
+[versioned](#captured-local-source) `committed-review.json`: claims/challenge evidence, work records, typed coverage,
+run/source and complete planned-work identity. Prior/competing bytes survive publication failure.
 `CommittedReviewResult.to_dict()` copies the sealed payload; `output_installed`
 and `capture_state` report installation and trajectory independently. Admission,
 native settlement/cleanup, completeness, output, capture and delivery are separate.
 Explicit unsupported exports fail before dispatch. Immutable PR exports use the
 same artifact session as described below. Ordinary CLI routing/default cutover
 and external delivery remain separate integration work.
+
+### Assignment policy and work
+
+`CommittedReviewRequest.assignment_policy="broad"` (the default) dispatches one
+discovery work over every target. `"adaptive"` partitions the inventory with
+`StageInputFactory.assignment_batches` (whole parts, at most four files within the
+transport's assignment byte allowance, inventory order) into concurrent local discovery work under
+`anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))`, each in a forked
+trajectory. It decomposes only when every batch keeps a usable two-start allocation
+after the cross-assignment floor; otherwise it runs one broad assignment. There is no
+numeric threshold, CLI route (#1679) or default change (#1641). `settings.assignment_policy`
+records `name`, `decomposed`, `planned_assignments` and `cross_assignment`
+(`required` or `not_applicable`).
+
+After decomposition, follow-up work inherits a closed local work's unfinished targets
+only when that work admitted progress; work that failed native-capacity preflight
+without progress is split in two instead. The host then always dispatches one
+`cross_assignment` work over the original captured source and full catalog, even when
+local work found nothing. It inherits every unfinished target, receives compact
+`retained_conclusions` and pending claims as open concerns, and searches for defects
+spanning assignments. With one broad assignment the `cross_assignment` phase is a
+recorded host no-op.
+
+Review keeps one host-owned record per work (result `work`: `work_id`, `kind` of
+`discovery`/`follow_up`/`cross_assignment`/`challenge`, `parents`, `state`, `targets`,
+`claims`, `superseded_by`, `admitted_targets`, `admitted_claims`, `verdicts`). Only the
+owning work decides a target or judges a claim revision; catalog entries name each
+undecided target's owner. New work supersedes closed work only by taking exactly all
+of its unfinished targets and pending claim revisions; the old binding stays closed and
+its admissions keep their attribution. Claims carry `work_id`/`revised_by` and
+verdicts `work_id`; a current-revision verdict must come from a context other than that
+revision's author, and each target decision is credited to one work.
+
+Siblings admit independently. Preparation validates a delta; installation, at one
+synchronous point, rechecks only touched identities (target still undecided and owned
+by this work, claim revision current, retained claim/coverage capacity) and then mints
+claim ordinals. A sibling conflict is a correctable rejection; closure or deadline
+remains fatal.
+
+All work shares one ledger of observed tool starts, wall clock and a single
+retry-recovery budget, activated for the whole review window so the first failing work
+cannot clamp it for later phases; backoff cannot renew them. Investigation receives half of the
+tool allowance and challenge the remainder. Under decomposition, cross-assignment keeps
+`max(2, half // 4)` starts; local work runs until 3/8 of the review window,
+cross-assignment until 1/2 and challenge for the rest. Otherwise discovery runs until
+1/2. `finalization_s` is always reserved. Earlier work cannot spend later reserves;
+unspent capacity carries forward. Challenge takes every pending revision not held by
+live work in a fresh context. It is re-dispatched for new revisions, after a round
+that resolved a verdict or changed a claim, or once after an evidence-free failure; an
+unresolved verdict keeps the revision with its work, so the next round supersedes it.
+
+Each shard's status derives from its targets and the current (non-superseded) work
+responsible for them; required phases are `challenge` and `cross_assignment`.
+Superseded failed work whose responsibilities were transferred and accepted elsewhere
+remains evidence but does not make the review incomplete. The staged deep path keeps
+its own rule ([stage-aware builders](extensions.md#stage-aware-review-builders-api-8)).
 
 ### Captured local source
 
@@ -228,10 +281,10 @@ recorded gitlink commit. Nested dirty files are not captured. This materializati
 is not an OS sandbox. Native configuration/trust/authentication
 still resolve in the original project, while native cwd/read/search use the capture.
 
-Local program results use schema 6 and terminal/coverage version 2; committed
-results 4, immutable results 5 and their committed terminal version 1 stay distinct.
-Results 1–3 predate bounded navigation and sharded per-target coverage; they are
-rejected with a restart instruction rather than converted.
+Local program results use schema 9 and terminal/coverage version 2; committed
+results 7, immutable results 8 and their committed terminal version 1 stay distinct.
+Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
+work records; they are rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
 Private stage/cache contract 15 invalidates older cache entries. Captured review
 paths reject `--start-at` and do not restore judgment shards: a complete shard
@@ -292,8 +345,8 @@ checks verify the supported versions and exact tool set before provider work;
 `UnsupportedHostedPolicy` identifies unavailable support without switching harnesses.
 If native readiness fails during an invocation, already admitted work and partial
 coverage are sealed through the normal output session before that error propagates.
-Every discovery, fresh challenge/rechallenge and retry keeps the same policy and
-cumulative allowances. Tool admission intersects grants before effects, and domain
+Every investigation work, fresh challenge/rechallenge and retry keeps the same policy
+and cumulative allowances. Tool admission intersects grants before effects, and domain
 submission may change only the assigned in-memory Review state.
 
 Trusted host writers publish `review-output.md`, `committed-review.json` and
@@ -301,8 +354,8 @@ Trusted host writers publish `review-output.md`, `committed-review.json` and
 private session and conflict-safe installation. Existing source public artifacts
 are restored unchanged. Diagnostics stay under `private_base`; output destinations
 do not become model write grants. Recorded policy/configuration identities omit
-credentials and callback capabilities. This additive API retains committed result
-schema 4 and extension API 8.
+credentials and callback capabilities. This additive API retains the committed result
+schema and extension API 8.
 
 For ordinary hosted committed input, the preparation attestation is required **before Git worktree materialization**:
 the operator must control/audit source Git configuration, checkout hooks and filters.
@@ -320,8 +373,8 @@ The same embedding API accepts
 `daydream.immutable_review.ImmutableReviewInput.from_dict(envelope)`. The trusted
 host supplies schema version 1; repository configuration cannot provide identity,
 source attestation or execution authority. The canonical envelope is frozen before
-model work and retained in schema-5 `committed-review.json`. Ordinary committed
-results use schema 4. Both result versions retain the local analyzed revision,
+model work and retained in the immutable [result version](#captured-local-source) of
+`committed-review.json`. Both result versions retain the local analyzed revision,
 source references, complete planned-work binding and independent execution outcomes.
 
 ```python
@@ -436,7 +489,8 @@ correctable payload rejection returns a correlated native error naming the
 field/selector, violated constraint and concrete correction. It changes no
 findings, decisions, notes or retention capacity. Correction uses the same
 conversation and cumulative wall/tool allowance. A rejected real tool start
-still consumes that allowance; exhausted capacity cannot invite another call.
+still consumes that allowance, except a protected-slot denial (below); exhausted
+capacity cannot invite another call.
 Successful acceptance installs state once, returns canonical output and permits
 native termination; duplicate accepted callbacks cannot admit or charge retention
 again. Unbound structured calls retain their ordinary serializer behavior.
@@ -475,6 +529,16 @@ subtracts the full round-trip time, without sharing clock origins or renewing
 authority. Lost receipts still prohibit replay and retain incomplete coverage.
 Every real native tool start counts, including failed submissions, with no separate
 eight-call ceiling or hidden nested tool execution.
+
+Committed-review bindings set `protected_submission=True`: the last start belongs to
+`structured_output`. Any other start that would take it, ordinary or host tool and
+including parallel-batch members, is counted in `denied_starts` and refused with
+correctable `capacity_protected` without charging or closing authority; a bounded
+number of denials then fails closed. `capacity()` reports both counts and `run_agent`'s
+stream ceiling excludes denied starts. Pi denies prospectively at `/admit`, so a denied
+start is still observed and reported as [overshoot](observability.md#committed-review-evidence)
+that never reduces later reserves. Committed review is Pi-only; for other adapters, which
+do not serve host tools, Claude and Codex only observe starts.
 
 A binding may also declare charged nonterminal host tools (`HostTool`). Pi registers
 them in the existing extension; `/admit` charges each start, and `/call` serves

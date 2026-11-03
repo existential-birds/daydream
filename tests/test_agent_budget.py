@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -23,9 +24,9 @@ from daydream.backends import (
 )
 from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
-from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal
+from daydream.host_tools import NATIVE_SUBMIT, HostToolBinding, HostToolFatal, HostToolRejected
 from daydream.prompt_budget import prepare_sanctioned_inputs
-from daydream.retry_policy import derive_retry_summary
+from daydream.retry_policy import RetryRecoveryBudget, derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase, RunWriteSnapshot
@@ -462,6 +463,57 @@ async def test_host_admitted_starts_remain_charged_when_native_events_are_lost(
     assert [call["tool_call_id"] for call in calls] == ["read-1"]
 
 
+@pytest.mark.parametrize("retry", [False, True], ids=["one-attempt", "retry-after-denial"])
+async def test_protected_submission_denials_do_not_trip_the_stream_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool,
+) -> None:
+    """Denied protected-slot starts are recorded once without aborting the submission attempt.
+
+    The native compaction journey proves the stream ceiling end to end; this owns the
+    cases it cannot force: a denied start lost from the stream is reconciled exactly
+    once, and a retryable failure after denials still reaches the protected start. A retry
+    after denials previously stopped at the budget's observed-start gate although the
+    protected submission start was still unused.
+    """
+    deadline = anyio.current_time() + 60
+    budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=3), deadline=deadline)
+    binding = HostToolBinding(deadline=deadline, accept=lambda payload: payload, protected_submission=True)
+
+    attempts: list[int] = []
+
+    async def stream(*_args: Any, host_tools: HostToolBinding, **_kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
+        attempts.append(1)
+        host_tools.configure_schema({"type": "object"})
+        async with host_tools.session():
+            # Pi awaits /admit before writing each start, so admission precedes its event.
+            for call_id in ("read-1", "read-2", "read-3", "read-lost") if len(attempts) == 1 else ():
+                try:
+                    host_tools.admit(call_id, "read", None)
+                except HostToolRejected as exc:
+                    assert exc.code == "capacity_protected"
+                if call_id != "read-lost":
+                    yield ToolStartEvent(id=call_id, name="read", input={})
+            if retry and len(attempts) == 1:
+                raise _RetryableBackendError("transient native failure after denials")
+            host_tools.admit("submit", NATIVE_SUBMIT, {}, terminal=True)
+            yield ToolStartEvent(id="submit", name=NATIVE_SUBMIT, input={})
+            host_tools.submit("submit", {})
+            yield TextEvent(text="done")
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    backend = ScriptedBackend(model="mock-model", supports_host_tools=True,
+                              retry_policy=RetryPolicy(attempts=2, base_delay_s=0.0, max_delay_s=0.0))
+    monkeypatch.setattr(backend, "execute", stream)
+    with anyio.fail_after(10):
+        output, _, reason = await run_agent(
+            backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+            investigation_budget=budget, host_tools=binding, tool_call_budget=3,
+        )
+    assert (output, reason) == ("done", None) and binding.accepted and len(attempts) == 1 + retry
+    assert (binding.calls, binding.denied_starts, binding.charged_starts) == (5, 2, 3)
+    assert budget.observed_tool_starts == 5
+
+
 async def test_group_deadline_still_wins_over_a_larger_allowance(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -784,3 +836,45 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
     assert [step["message"] for step in trajectory["steps"] if step["source"] == "user"] == ["Earlier work"]
     assert stop["attempts"] == 0 and stop["backend_s"] == 0
     assert stop["partial_edit_handling"] == "discarded"
+
+
+async def test_shared_retry_recovery_spans_work_items_without_renewal_or_early_clamp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Committed review shares one recovery ledger, activated against the review deadline.
+
+    Challenge previously built a fresh budget and renewed recovery. Merely sharing the
+    ledger instead let the first failing local work clamp the allowance to its own short
+    deadline, starving later required work of any retry; and stop evidence computed as the
+    shared ledger's delta attributed earlier or concurrent work's retries to this invocation.
+    """
+    fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    recovery = RetryRecoveryBudget(math.inf)
+    recovery.activate(0.0, 1_000.0)  # As committed review's schedule does for its whole window.
+    for deadline, expected in [(30.0, "wall_budget_exceeded"), (1_000.0, None)]:
+        budget = ReviewInvestigationBudget(ReviewLimits(tool_calls=10), deadline=deadline,
+                                           retry_recovery_budget=recovery)
+        sibling = [5.0] if expected is None else []
+
+        def advance(seconds: float, sibling: list[float] = sibling) -> None:
+            fake.advance(seconds)
+            if sibling:
+                recovery.charge(sibling.pop())  # A concurrent sibling charges the shared ledger mid-invocation.
+
+        backend = _retryable_failing_backend(advance=advance, advance_s=20.0)
+        if expected is not None:
+            _, _, reason = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW,
+                                           investigation_budget=budget, retry_recovery_allowance_s=100.0)
+            assert reason == expected and recovery.spent_s == pytest.approx(20.0)
+            continue
+        recorder = make_recorder(tmp_path)
+        with pytest.raises(_RetryableBackendError):
+            async with recorder:
+                await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW,
+                                investigation_budget=budget, retry_recovery_allowance_s=100.0)
+    # The later work retries only within what remains of the one cumulative allowance.
+    assert backend.call_count == 4 and recovery.spent_s == pytest.approx(85.0) and recovery.spent_s <= 100.0
+    # Its stop evidence reports only its own retries, not the earlier work's shared-ledger charge.
+    _traj, meta = _budget_stop(recorder)
+    assert meta["retry_recovery_spent_s"] == pytest.approx(60.0)

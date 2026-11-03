@@ -38,6 +38,8 @@ NATIVE_SUBMIT = "structured_output"
 BYTES_PER_TOKEN_ESTIMATE = 3
 # Pi 1.4.0 compaction defaults (dist/core/compaction) when native settings omit them.
 PI_DEFAULT_COMPACTION = {"reserve_tokens": 16384, "keep_recent_tokens": 20000}
+# Correctable denials of the protected submission start before the binding fails closed.
+PROTECTED_DENIAL_LIMIT = 32
 
 
 class HostToolRejected(Exception):
@@ -177,13 +179,17 @@ class HostToolBinding:
     def __init__(self, *, deadline: float, accept: Callable[[Any], dict[str, Any]],
                  allowed_tools: Set[str] | None = None, host_tools: Mapping[str, HostTool] | None = None,
                  reserves: Mapping[str, Any] | None = None,
-                 native_requirement: NativeCapacityRequirement | None = None) -> None:
+                 native_requirement: NativeCapacityRequirement | None = None,
+                 protected_submission: bool = False) -> None:
         if type(deadline) not in {int, float} or not math.isfinite(deadline):
             raise ValueError("host tools require a finite absolute monotonic deadline")
         if not callable(accept):
             raise TypeError("host tools require a synchronous acceptance callback")
         self.deadline = float(deadline)
-        self.calls = self.rejections = 0
+        # ``calls`` records every admitted native start identity once; ``denied_starts``
+        # are the subset refused because they would consume the protected submission start.
+        self.calls = self.rejections = self.denied_starts = 0
+        self.protected_submission = protected_submission
         self.authority_open = self.native_settled = self.cleanup_complete = False
         self.closed = False
         self.fatal_error: HostToolFatal | None = None
@@ -228,8 +234,13 @@ class HostToolBinding:
         return self._allowed_tools
 
     @property
+    def charged_starts(self) -> int:
+        """Admitted starts that consumed allowance; protected-slot denials are recorded, not charged."""
+        return self.calls - self.denied_starts
+
+    @property
     def remaining_tool_calls(self) -> int | None:
-        return None if self._call_limit is None else max(0, self._call_limit - self.calls)
+        return None if self._call_limit is None else max(0, self._call_limit - self.charged_starts)
 
     def configure_schema(self, schema: dict[str, Any]) -> None:
         """Bind readiness and native argument validation to the model-facing schema."""
@@ -281,7 +292,7 @@ class HostToolBinding:
             return self.fail(HostToolFatal("Host callback could not confirm a new submission after terminal acceptance",
                                           code="native_correlation", preacceptance=False))
         rejection = HostToolRejected(message, code=code)
-        if self._call_limit is not None and self.calls >= self._call_limit:
+        if self._call_limit is not None and self.charged_starts >= self._call_limit:
             fatal = HostToolCallBudgetExceeded(
                 "Original cumulative tool allowance exhausted; no calls remain for correction. "
                 f"Rejected submission: {rejection}", preacceptance=not self.possibly_accepted)
@@ -304,7 +315,11 @@ class HostToolBinding:
 
     def admit(self, call_id: Any, name: Any, arguments: Any, *, terminal: bool = False,
               malformed: bool | str = False) -> None:
-        """Charge real starts before native validation; only sole final calls can submit."""
+        """Charge real starts before native validation; only sole final calls can submit.
+
+        A protected binding keeps its last start for the terminal submission: any other
+        start that would take it is recorded and correctably denied, never charged.
+        """
         self._check_open()
         if not _valid_call_id(call_id) or not isinstance(name, str) or not name or len(name) > 256:
             raise self._fatal("Invalid native tool identity or name prevents host correlation",
@@ -314,7 +329,23 @@ class HostToolBinding:
                               code="native_correlation")
         self.calls += 1
         self._admitted.add(call_id)
-        if self._call_limit is not None and self.calls > self._call_limit:
+        limit = self._call_limit
+        if (limit is not None and self.protected_submission and self.charged_starts > limit - 1
+                and not self.possibly_accepted and not (name == NATIVE_SUBMIT and terminal is True)):
+            # The last start belongs to structured_output: refuse this one without
+            # charging it or closing authority, so the model can still submit.
+            self.denied_starts += 1
+            self.rejections += 1
+            if self.denied_starts > PROTECTED_DENIAL_LIMIT:
+                raise self.fail(HostToolCallBudgetExceeded(
+                    f"More than {PROTECTED_DENIAL_LIMIT} starts were denied after the remaining tool start was "
+                    "reserved for structured_output; no further native calls are authorized",
+                    preacceptance=not self.possibly_accepted))
+            raise HostToolRejected(
+                "Tool start denied: the remaining tool start is reserved for structured_output. Submit your final "
+                "batch now with structured_output alone, truthfully marking unfinished targets.",
+                code="capacity_protected")
+        if limit is not None and self.charged_starts > limit:
             self.rejections += 1
             raise self.fail(HostToolCallBudgetExceeded(
                 "Original cumulative tool allowance exhausted; no further native calls are authorized",
@@ -391,6 +422,8 @@ class HostToolBinding:
             "remaining_tool_calls": self.remaining_tool_calls,
             "remaining_s": round(max(0.0, self.deadline - clock.monotonic()), 3),
             "protected": dict(self.reserves),
+            "protected_submission_calls": 1 if self.protected_submission else 0,
+            "denied_starts": self.denied_starts,
         }
 
     def call(self, call_id: Any, name: Any, arguments: Any) -> dict[str, Any]:

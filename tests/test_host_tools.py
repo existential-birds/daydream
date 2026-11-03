@@ -686,3 +686,60 @@ async def test_http_readiness_refuses_native_limits_or_host_schemas_before_provi
         admitted = (await client.post("/admit", json={"id": "late", "name": "read", "arguments": None})).json()
         assert admitted["outcome"] == "fatal" and not binding.authority_open
     assert binding.calls == 0
+
+
+@pytest.mark.parametrize("case", ["protected", "denial-bound", "unprotected"])
+async def test_http_parallel_batch_cannot_consume_the_protected_submission_start(case: str) -> None:
+    """With 95 of 96 starts charged, a two-member batch is denied and submission stays possible.
+
+    Before the protected slot, member 1 took start 96 and member 2 was fatal, so the
+    final batch could never be submitted. Existing allowance tests admit one call at a
+    time and only prove that over-limit starts close authority; they miss an endpoint
+    that charges or fatally rejects a correctable denial, renews remaining capacity,
+    loops on denials forever, or changes the unprotected deep-review behavior.
+    """
+    installed: list[Any] = []
+    def accept(value: dict[str, Any]) -> dict[str, Any]:
+        installed.append(value)
+        return value
+    binding = HostToolBinding(deadline=time.monotonic() + 10, accept=accept,
+                              host_tools={"review_source": HostTool(_LOOKUP_SCHEMA, lambda value: value)},
+                              protected_submission=case != "unprotected")
+    binding.restrict(deadline=None, tool_call_budget=96)
+    async with _endpoint(binding) as client:
+        assert (await _ready(client))["ready"] is True
+        for index in range(95):
+            binding.admit(f"read-{index}", "read", None)
+        members = [(await client.post("/admit", json={"id": f"member-{name}", "name": name, "arguments": None})).json()
+                   for name in ("read", "review_source")]
+        if case == "unprotected":
+            assert members[0] == {"id": "member-read", "allowed": True}
+            assert members[1]["outcome"] == "fatal" and members[1]["code"] == "capacity_exhausted"
+            assert not binding.authority_open and binding.calls == binding.charged_starts == 97
+            return
+        for member in members:
+            assert member["allowed"] is False and member["outcome"] == "correctable"
+            assert member["code"] == "capacity_protected" and "reserved for structured_output" in member["error"]
+        assert binding.authority_open and binding.fatal_error is None
+        assert (binding.calls, binding.denied_starts, binding.charged_starts) == (97, 2, 95)
+        assert binding.remaining_tool_calls == 1
+        assert binding.capacity()["protected_submission_calls"] == 1 and binding.capacity()["denied_starts"] == 2
+        if case == "denial-bound":
+            for index in range(policy.PROTECTED_DENIAL_LIMIT - 2):
+                with pytest.raises(HostToolRejected):
+                    binding.admit(f"retry-{index}", "read", None)
+            final = (await client.post("/admit", json={"id": "one-too-many", "name": "read",
+                                                       "arguments": None})).json()
+            assert final["outcome"] == "fatal" and final["code"] == "capacity_exhausted"
+            assert not binding.authority_open and binding.denied_starts == policy.PROTECTED_DENIAL_LIMIT + 1
+            assert binding.charged_starts == 95 and installed == []
+            return
+        assert (await client.post("/admit", json={"id": "submit", "name": NATIVE_SUBMIT,
+                                                  "arguments": _RESULT, "terminal": True})).json()["allowed"]
+        assert (await client.post("/submit", json={"id": "submit", "arguments": _RESULT})).json()["accepted"]
+        assert binding.charged_starts == 96 and binding.remaining_tool_calls == 0
+        extra = (await client.post("/admit", json={"id": "extra", "name": "read", "arguments": None})).json()
+        # Past the allowance a start is terminal, never another denial; acceptance already crossed.
+        assert extra["outcome"] == "indeterminate" and extra["code"] == "capacity_exhausted"
+        assert not binding.authority_open and binding.accepted
+    assert installed == [_RESULT] and binding.calls == 99 and binding.denied_starts == 2

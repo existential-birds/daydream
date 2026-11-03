@@ -119,6 +119,8 @@ retain their existing policy.
 Open/unresolved candidates receive one triage round. Closed reviewer assertions,
 contradictions, unfinished targets, and isolated failures preserve their original
 authority and incomplete coverage; later success cannot erase earlier failures.
+(The committed-review program instead decides completion from current, non-superseded
+[work](runtime.md#assignment-policy-and-work).)
 Final-turn output selection and native structured submission remain host-owned;
 malformed envelopes cannot recover nested fragments. Native Pi's private stage
 contract 15 uses selector submissions and one host-accepted canonical result after
@@ -145,7 +147,10 @@ The default remains defined in [configuration](../daydream/config.py).
 The [committed-review API](runtime.md#committed-review-requestresult) owns review
 independently of extension flow steps/builders. Optional `CommittedReviewRequest.local` and `AnalyzedRevision.source_id` retain
 extension API 8; captured local and committed subjects follow the
-[captured-source contract](runtime.md#captured-local-source). Broader route integration is #1679; default cutover is #1641 after #1686
+[captured-source contract](runtime.md#captured-local-source). Its
+[assignment policy and work records](runtime.md#assignment-policy-and-work) are host-owned;
+profile strategy text cannot change work authority or drop host-appended assignment
+context. Broader route integration is #1679; default cutover is #1641 after #1686
 comparison/owner acceptance; final retirement is #1687.
 
 ### Plan-writer
@@ -171,6 +176,8 @@ attempt owns its endpoint and credentials. `close_attempt()` revokes that endpoi
 assignment authority when cancelling, finishing or superseding its work. Neither
 method discards an accepted result. Shared investigation budgets retain retry
 recovery spending across conversations as well as observed native tool starts.
+`protected_submission=True` reserves the last start for the terminal submission
+([limits](runtime.md#pi-host-tool-lifetime-and-limits)).
 
 The packaged native extensions and bounded authenticated loopback endpoint require
 Pi 1.4.0 for the verified completion/tool APIs. They confirm the active terminal

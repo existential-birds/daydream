@@ -88,6 +88,7 @@ def receipt_schema(kind: str) -> dict[str, Any]:
     count = {"type": "integer", "minimum": 0}
     return strict_object({
         "assignment": {"const": kind},
+        "work_id": _ID,
         "final": {"type": "boolean"},
         "admitted": strict_object({"decisions": count, "claims": _array(strict_object({
             "uid": _ID, "revision": {"type": "integer", "minimum": 1}, "title": _TEXT}))}),
@@ -108,22 +109,44 @@ def shard_scope_id(index: int) -> str:
     return f"committed:{index:05d}"
 
 
-RESULT_VERSIONS = {"committed": 4, "immutable": 5, "local": 6}
+# Work records, attribution, per-execution capacity evidence and the cross_assignment phase (#1628).
+RESULT_VERSIONS = {"committed": 7, "immutable": 8, "local": 9}
+REQUIRED_PHASES = ["challenge", "cross_assignment"]
+ASSIGNMENT_POLICIES = frozenset({"broad", "adaptive"})
+# Investigation kinds decide owned targets and propose new concerns; challenge judges claim revisions.
+INVESTIGATION_KINDS = frozenset({"discovery", "follow_up", "cross_assignment"})
+WORK_KINDS = [*sorted(INVESTIGATION_KINDS), "challenge"]
 
 
 def planned_work_id(revision: dict[str, Any], assignments: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical_json({"revision": revision, "assignments": assignments}).encode()).hexdigest()
 
 
+_VERDICT_ITEMS = assignment_schema("challenge", selectors=False)["properties"]["verdicts"]
 _RECORD_SCHEMA = strict_object({
     **_claim_schema(selectors=False)["properties"],
     "item_uid": _ID,
     "id": {"type": "integer", "minimum": 1},
     "disposition": {"enum": ["confirmed", "rejected", "unresolved"]},
-    "challenge_evidence": assignment_schema("challenge", selectors=False)["properties"]["verdicts"],
+    # Originating work and the work that authored the current revision.
+    "work_id": _ID, "revised_by": _ID,
+    "challenge_evidence": {**_VERDICT_ITEMS, "items": strict_object({
+        **_VERDICT_ITEMS["items"]["properties"], "work_id": _ID})},
 })
+_REVISION_REF = strict_object({"uid": _ID, "revision": {"type": "integer", "minimum": 1}})
+_WORK_SCHEMA = strict_object({
+    "work_id": _ID, "kind": {"enum": WORK_KINDS}, "parents": {"type": "array", "items": _ID},
+    "state": {"enum": ["planned", "open", "accepted", "closed", "superseded"]},
+    "targets": {"type": "array", "items": _ID},
+    "claims": {"type": "array", "items": _REVISION_REF},
+    "superseded_by": {"type": "array", "items": _ID},
+    "admitted_targets": {"type": "array", "items": _ID},
+    "admitted_claims": {"type": "array", "items": _REVISION_REF},
+    "verdicts": {"type": "array", "items": _REVISION_REF},
+})
+_COUNT = {"type": ["integer", "null"], "minimum": 0}
 COMMITTED_RESULT_SCHEMA = strict_object({
-    "schema_version": {"const": 4},
+    "schema_version": {"const": RESULT_VERSIONS["committed"]},
     "run_id": _TEXT,
     "analyzed_revision": TERMINAL_RESULT_SCHEMA["properties"]["analyzed_revision"],
     "planned_work_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -136,21 +159,24 @@ COMMITTED_RESULT_SCHEMA = strict_object({
         },
     }, COVERAGE_SHARD_TARGETS * COVERAGE_MAX_SHARDS),
     **{key: _array(_RECORD_SCHEMA) for key in ("claims", "findings")},
+    "work": {"type": "array", "items": _WORK_SCHEMA},
     "terminal_result": TERMINAL_RESULT_SCHEMA,
     "settings": {"type": "object"},
     "execution": {"type": "array", "items": strict_object({
-        "assignment": _TEXT,
+        "assignment": _TEXT, "work_id": {"type": ["string", "null"], "maxLength": 512},
         **{key: {"type": "boolean"} for key in ("accepted", "settled", "cleanup_complete")},
         "reason": {"enum": [None, *[reason.value for reason in ReasonCode]]},
+        # Dispatch allocation, every observed native start, and starts beyond the charged allocation.
+        **{key: _COUNT for key in ("allocation", "observed_starts", "overshoot")},
     })},
 })
 IMMUTABLE_COMMITTED_RESULT_SCHEMA = strict_object({
     **COMMITTED_RESULT_SCHEMA["properties"],
-    "schema_version": {"const": 5},
+    "schema_version": {"const": RESULT_VERSIONS["immutable"]},
     "immutable_input": IMMUTABLE_REVIEW_INPUT_SCHEMA,
 })
 LOCAL_REVIEW_RESULT_SCHEMA = strict_object({
-    **COMMITTED_RESULT_SCHEMA['properties'], 'schema_version': {'const': 6},
+    **COMMITTED_RESULT_SCHEMA['properties'], 'schema_version': {'const': RESULT_VERSIONS['local']},
 })
 
 
@@ -191,7 +217,7 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             for scope in terminal["planned_scopes"]]
         != [(shard_scope_id(index), "committed", index, sorted({part["file"] for part in shard}))
             for index, shard in enumerate(shards)]
-        or terminal["required_phases"] != (["challenge"] if assignments else ["no_diff"])
+        or terminal["required_phases"] != (REQUIRED_PHASES if assignments else ["no_diff"])
     ):
         raise ValueError("terminal coverage differs from complete planned work")
     shard_targets = {shard_scope_id(index): {part["target_id"] for part in shard}
@@ -228,6 +254,8 @@ def validate_committed_result(value: dict[str, Any]) -> None:
                 by_target[decision["target_id"]]["source_refs"],
                 assigned=decision["status"] == "reviewed",
             )
+    work = {record["work_id"]: record for record in value["work"]}
+    _validate_work(value["work"], work, by_target, terminal)
     claims = value["claims"]
     known = {c["uid"] for c in claims}
     if len(known) != len(claims) or len({c["item_uid"] for c in claims}) != len(claims):
@@ -239,6 +267,9 @@ def validate_committed_result(value: dict[str, Any]) -> None:
             or claim["revision"] < 1
             or claim["uid"] in claim["source_uids"]
             or not set(claim["source_uids"]) <= known
+            or {"uid": claim["uid"], "revision": 1} not in work.get(claim["work_id"], {}).get("admitted_claims", [])
+            or {"uid": claim["uid"], "revision": claim["revision"]}
+            not in work.get(claim["revised_by"], {}).get("admitted_claims", [])
         ):
             raise ValueError("invalid retained claim identity/provenance")
         check_refs(claim["payload"]["evidence_refs"], expected_refs)
@@ -248,6 +279,10 @@ def validate_committed_result(value: dict[str, Any]) -> None:
                 verdict["uid"] != claim["uid"]
                 or verdict["revision"] > claim["revision"]
                 or not verdict["grounds"].strip()
+                or work.get(verdict["work_id"], {}).get("kind") != "challenge"
+                or {"uid": verdict["uid"], "revision": verdict["revision"]} not in work[verdict["work_id"]]["verdicts"]
+                # A current-revision verdict comes from a context distinct from that revision's author.
+                or verdict["revision"] == claim["revision"] and verdict["work_id"] == claim["revised_by"]
             ):
                 raise ValueError("invalid retained challenge evidence")
         if claim["disposition"] != "unresolved" and not any(
@@ -258,16 +293,54 @@ def validate_committed_result(value: dict[str, Any]) -> None:
     if value["findings"] != [claim for claim in claims if claim["disposition"] == "confirmed"]:
         raise ValueError("findings differ from challenged publication claims")
     native_assignments = {e["assignment"] for e in value["execution"]}
+    superseded = {wid for wid, record in work.items() if record["state"] == "superseded"}
+    if any(e["work_id"] is not None and e["work_id"] not in work for e in value["execution"]):
+        raise ValueError("execution evidence differs from retained work")
+    # Current accepted work decides completion; superseded attempts remain evidence only.
     if terminal["analysis_state"] == "complete" and (
-        assignments and "discovery" not in native_assignments
+        assignments and not native_assignments & INVESTIGATION_KINDS
         or claims and "challenge" not in native_assignments
         or any(c["disposition"] == "unresolved" for c in claims)
+        or any(record["state"] != "accepted" for wid, record in work.items() if wid not in superseded)
         or any(
             not e["settled"] or not e["accepted"] or not e["cleanup_complete"] or e["reason"] is not None
-            for e in value["execution"]
+            for e in value["execution"] if e["work_id"] not in superseded
         )
     ):
         raise ValueError("unfinished obligations/native execution cannot be complete")
+
+
+def _validate_work(records: list[dict[str, Any]], work: dict[str, dict[str, Any]],
+                   by_target: dict[str, dict[str, Any]], terminal: dict[str, Any]) -> None:
+    """Responsibilities are disjoint, transfers are exact and each admission is credited once."""
+    if len(work) != len(records):
+        raise ValueError("duplicate work identity")
+    order = {record["work_id"]: index for index, record in enumerate(records)}
+    admitted: dict[str, str] = {}
+    held: set[str] = set()
+    for index, record in enumerate(records):
+        if record["state"] != "superseded":
+            if held & set(record["targets"]):
+                raise ValueError("current work responsibilities overlap")
+            held.update(record["targets"])
+        if (
+            any(order.get(parent, index) >= index for parent in record["parents"])
+            or any(order.get(child, index) <= index for child in record["superseded_by"])
+            or (record["state"] == "superseded") != bool(record["superseded_by"])
+            or any(record["work_id"] not in work[child]["parents"] for child in record["superseded_by"])
+            or not set(record["admitted_targets"]) <= set(record["targets"]) <= by_target.keys()
+            or record["kind"] == "challenge" and record["targets"]
+            or record["kind"] != "challenge" and (record["claims"] or record["verdicts"])
+        ):
+            raise ValueError("invalid retained work responsibility or transfer")
+        for target in record["admitted_targets"]:
+            if admitted.setdefault(target, record["work_id"]) != record["work_id"]:
+                raise ValueError("duplicate completion credit for a target decision")
+    decided = {d["target_id"]: d for outcome in terminal["stack_outcomes"] for d in outcome.get("target_decisions", [])}
+    for target, decision in decided.items():
+        if target not in admitted and (decision["status"] != "not_reviewed" or decision["evidence_refs"]
+                                       or not decision["reason"].startswith("unsubmitted:")):
+            raise ValueError("target decision lacks admitting work attribution")
 
 
 @dataclass(frozen=True)
