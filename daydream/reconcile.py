@@ -2,6 +2,10 @@
 store; current fingerprints partition into new, matched, and stale. Minimize stale
 inline comments as OUTDATED using least-privilege App access, which cannot resolve
 review threads. Without GraphQL, REST still deduplicates but nothing is minimized.
+
+A prior inventory maps each fingerprint to the node id of the open GraphQL inline
+comment carrying it, or ``None`` when nothing is minimizable: review bodies, REST-read
+comments, resolved threads and minimized comments.
 """
 
 from __future__ import annotations
@@ -20,19 +24,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-@dataclass
-class PriorFinding:
-    """Recovered fingerprint plus carrying comment/thread identity. A resolved thread or
-    minimized comment is already closed; review bodies and REST-read inline comments
-    have no thread.
-    """
-
-    fingerprint: str
-    thread_id: str | None
-    is_resolved: bool
-    comment_node_id: str | None = None
-
-
 @dataclass(frozen=True)
 class PriorDiagramComment:
     """Bot-authored diagram comment with ordered unique marker kinds. REST omits minimized
@@ -46,12 +37,12 @@ class PriorDiagramComment:
 @dataclass
 class ReconcilePlan:
     """New fingerprints retain current order; matched findings stay closed even after human
-    resolution. Only unresolved stale inline findings become minimization targets.
+    resolution. Stale maps absent minimizable fingerprints to their comment node ids.
     """
 
     new: list[str]
     matched: set[str]
-    stale: list[PriorFinding]
+    stale: dict[str, str]
 
 
 _REVIEW_THREADS_QUERY = """
@@ -61,10 +52,9 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
       reviewThreads(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id
           isResolved
           comments(first: 100) {
-            nodes { id databaseId body isMinimized author { login } viewerDidAuthor }
+            nodes { id body isMinimized author { login } viewerDidAuthor }
           }
         }
       }
@@ -120,15 +110,14 @@ def fetch_prior_findings(
     *,
     bot_login: str | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> dict[str, PriorFinding]:
+) -> dict[str, str | None]:
     """Inventory authenticated markers from paginated GraphQL threads and REST review
     bodies. Viewer authorship or matching bot login is required; unresolved identity
-    admits only viewer-proven GraphQL nodes. First fingerprint occurrence wins. Thread
-    resolution or comment minimization closes inline findings. Refused GraphQL warns and
-    reads inline comments over REST without thread identity; other API failures propagate.
+    admits only viewer-proven GraphQL nodes. First fingerprint occurrence wins. Refused
+    GraphQL warns and reads inline comments over REST; other API failures propagate.
     """
     owner, name = repo_slug.split("/", 1)
-    prior: dict[str, PriorFinding] = {}
+    prior: dict[str, str | None] = {}
     rest_endpoints = [f"repos/{owner}/{name}/pulls/{pr_number}/reviews"]
 
     cursor: str | None = None
@@ -157,15 +146,9 @@ def fetch_prior_findings(
                     bot_login,
                 ):
                     continue
+                closed = thread["isResolved"] or comment["isMinimized"]
                 for fingerprint in parse_finding_markers(comment.get("body") or ""):
-                    if fingerprint in prior:
-                        continue
-                    prior[fingerprint] = PriorFinding(
-                        fingerprint=fingerprint,
-                        thread_id=thread["id"],
-                        is_resolved=bool(thread["isResolved"]) or bool(comment["isMinimized"]),
-                        comment_node_id=comment["id"],
-                    )
+                    prior.setdefault(fingerprint, None if closed else comment["id"])
         page_info = threads["pageInfo"]
         if not page_info["hasNextPage"]:
             break
@@ -177,31 +160,19 @@ def fetch_prior_findings(
             if not _authored_by_bot((item.get("user") or {}).get("login"), False, bot_login):
                 continue
             for fingerprint in parse_finding_markers(item.get("body") or ""):
-                if fingerprint in prior:
-                    continue
-                prior[fingerprint] = PriorFinding(
-                    fingerprint=fingerprint,
-                    thread_id=None,
-                    is_resolved=False,
-                    comment_node_id=item.get("node_id"),
-                )
+                prior.setdefault(fingerprint, None)
     return prior
 
 
-def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> ReconcilePlan:
-    """Keep prior matches closed, including human-resolved findings. Only absent,
-    unresolved findings with a thread become stale; thread-less findings simply stop
-    appearing.
+def partition(current: Sequence[str], prior: dict[str, str | None]) -> ReconcilePlan:
+    """Keep prior matches closed, including human-resolved findings. Only absent findings
+    with a minimizable comment become stale; the rest simply stop appearing.
     """
     current_set = set(current)
     return ReconcilePlan(
         new=[fp for fp in current if fp not in prior],
         matched={fp for fp in current if fp in prior},
-        stale=[
-            finding
-            for fingerprint, finding in prior.items()
-            if fingerprint not in current_set and finding.thread_id is not None and not finding.is_resolved
-        ],
+        stale={fp: node_id for fp, node_id in prior.items() if fp not in current_set and node_id is not None},
     )
 
 
@@ -259,31 +230,24 @@ def fetch_prior_diagram_comments(
 
 def resolve_threads(
     target_dir: Path,
-    stale: list[PriorFinding],
+    stale: dict[str, str],
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[int, int]:
-    """Minimize stale comments best-effort and return success/failure counts. Missing ids
-    or failed mutations warn and do not stop later findings.
+    """Minimize stale comments best-effort and return success/failure counts. Failed
+    mutations warn and do not stop later findings.
     """
     from daydream.agent import console
 
     resolved = 0
     failed = 0
-    for finding in stale:
-        if finding.comment_node_id is None:
-            print_warning(
-                console,
-                f"Cannot minimize stale finding {finding.fingerprint[:12]}…: no comment node id",
-            )
-            failed += 1
-            continue
-        if minimize_comment(target_dir, finding.comment_node_id, auth=auth):
+    for fingerprint, node_id in stale.items():
+        if minimize_comment(target_dir, node_id, auth=auth):
             resolved += 1
         else:
             print_warning(
                 console,
-                f"minimizeComment failed or did not minimize finding {finding.fingerprint[:12]}…",
+                f"minimizeComment failed or did not minimize finding {fingerprint[:12]}…",
             )
             failed += 1
     return resolved, failed
