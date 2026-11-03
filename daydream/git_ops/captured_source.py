@@ -250,6 +250,16 @@ def _copy_objects(common: Path, target: Path) -> None:
         raise _UnstableSource(_RERUN)
 
 
+def _copy_shallow_boundary(common: Path, git_dir: Path) -> None:
+    """Keep a shallow source's history boundary, so its absent parents read as cut off, not corrupt."""
+    if not (common / "shallow").exists():
+        return
+    boundary = immutable._regular(common / "shallow", limit=immutable._MAX_FILES * 65)
+    if any(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid) is None for oid in boundary.decode().splitlines()):
+        raise GitError("captured source shallow boundary is malformed")
+    (git_dir / "shallow").write_bytes(boundary)
+
+
 def _verify_object(root: Path, oid: str, raw_size: int, algorithm: str) -> None:
     """Verify an existing loose object through pinned descriptors and bounded inflation."""
     relative = f".git/objects/{oid[:2]}/{oid[2:]}"
@@ -595,6 +605,7 @@ def capture_source(
                 immutable._git(destination, "init", "--template=", "--object-format=" + algorithm, ".")
                 owned_directories.update((p, _directory_identity(destination / p)) for p in (".git", ".git/objects"))
                 _copy_objects(common, destination / ".git/objects")
+                _copy_shallow_boundary(common, destination / ".git")
                 _validate_commit(destination, base_sha)
                 _validate_commit(destination, head_sha)
                 before = immutable._inventory(destination, base_sha, max_blob_bytes=immutable._MAX_SOURCE_BYTES)

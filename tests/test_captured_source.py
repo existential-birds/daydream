@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from daydream.git_ops import immutable, process
+from daydream.git_ops import immutable, process, snapshot
 from daydream.git_ops.captured_source import capture_source
 from daydream.git_ops.models import GitError, PathAbsentError, SnapshotPreparationError
 from daydream.git_ops.source import FrozenSourceRejected
@@ -47,6 +47,19 @@ def test_capture_uses_working_bytes_of_a_staged_addition(source: tuple[Path, str
         captured.read("old", "added.py")
     assert captured.read("new", "added.py")[1] == b"value = 2\n"
     assert (captured.root / "added.py").read_bytes() == b"value = 2\n"
+
+
+def test_capture_of_a_shallow_clone_stays_copyable(source: tuple[Path, str, str], tmp_path: Path) -> None:
+    """Shallow history ends at a boundary; the capture keeps it, so read-only copies still clone."""
+    origin, _, head = source
+    write_and_stage(origin, "subject.py", "value = 2\n")
+    latest = commit(origin, "latest")
+    shallow = tmp_path / "shallow"
+    git(tmp_path, "clone", "--quiet", "--depth=2", origin.as_uri(), str(shallow))
+    assert git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    captured = capture_source(shallow, tmp_path / "captured", base_sha=head, head_sha=latest, local=True)
+    copy = snapshot.prepare_independent_snapshot(captured.root, tmp_path / "copy", include_untracked=True)
+    assert (copy.repo / "subject.py").read_text() == "value = 2\n"
 
 
 @pytest.mark.parametrize("change", ["bytes", "parent", "symlink"])

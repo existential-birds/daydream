@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reviews of a shallow clone work again. The captured source now keeps the clone's
+  shallow history boundary, so Codex's read-only copy of it no longer fails with
+  "failed to create disposable read-only checkout".
 - Review assignments for a file that changes type (a regular file becoming a
   symlink or the reverse) now carry old-side source refs for the removed lines,
   and oversized type changes split under each diff block's own header
