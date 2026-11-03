@@ -97,6 +97,21 @@ def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
     assert reviews.kwargs["paginate"] is True and reviews.kwargs["idempotent"] is True
 
 
+def test_unresolved_bot_inventory_accepts_only_viewer_proof(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    viewer, forged = "a" * 64, "b" * 64
+    api = Mock(side_effect=[_page([
+        _thread("RT_VIEWER", comment_node_id="C_VIEWER", database_id=1,
+                body=finding_marker(viewer), viewer_did_author=True),
+        _thread("RT_FORGED", comment_node_id="C_FORGED", database_id=2,
+                body=finding_marker(forged), author="daydream[bot]"),
+    ]), [{"node_id": "REST_FORGED", "body": finding_marker(forged), "user": {"login": "daydream[bot]"}}]])
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    assert fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None) == {
+        viewer: PriorFinding(viewer, "RT_VIEWER", False, "C_VIEWER"),
+    }
+    assert api.call_count == 2
+
+
 # --- Prior diagram comments (issue #1113) ------------------------------------
 
 
