@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import clock
-from daydream.config import REVIEWER_TOOL_CALL_BUDGET
+from daydream.config import REVIEWER_BATCHES_PER_ALLOWANCE, REVIEWER_TOOL_CALL_BUDGET
 from daydream.retry_policy import RetryRecoveryBudget
 
 _HOST_TOOL_SUBMISSION_GUIDANCE = """
@@ -149,9 +150,14 @@ def review_scale_for_diff(diff: str) -> int:
     return 1
 
 
-def review_limits_for_scope(limits: ReviewLimits) -> ReviewLimits:
-    """Scale each review role's existing time and call allowances together."""
-    scale = _review_scale.get()
+def review_limits_for_scope(limits: ReviewLimits, *, stages: int = 1) -> ReviewLimits:
+    """Scale a role's time and call allowances together, once.
+
+    The scale is the larger, never the product, of the run's diff-size tier and
+    ``stages`` first-pass batches per REVIEWER_BATCHES_PER_ALLOWANCE, so a
+    many-batch scope can reach every part. A configured zero stays zero.
+    """
+    scale = max(_review_scale.get(), math.ceil(stages / REVIEWER_BATCHES_PER_ALLOWANCE))
     return replace(
         limits,
         investigation_s=limits.investigation_s * scale,
@@ -209,12 +215,12 @@ class ReviewInvestigationBudget:
     retry_recovery_budget: RetryRecoveryBudget | None = None
 
     @classmethod
-    def from_limits(cls, limits: ReviewLimits, *, deadline: float | None = None) -> ReviewInvestigationBudget:
-        """Resolve scaling once; serialization time is never investigation time."""
-        scaled = review_limits_for_scope(limits)
+    def from_limits(cls, limits: ReviewLimits, *, stages: int = 1) -> ReviewInvestigationBudget:
+        """Resolve diff and batch scaling once; serialization time is never investigation time."""
+        scaled = review_limits_for_scope(limits, stages=stages)
         shared = review_deadline(discovery=scaled.discovery)
-        bounds = (clock.monotonic() + scaled.investigation_s, shared, deadline)
-        return cls(scaled, min(bound for bound in bounds if bound is not None), shared_deadline=shared)
+        deadline = clock.monotonic() + scaled.investigation_s
+        return cls(scaled, deadline if shared is None else min(deadline, shared), shared_deadline=shared)
 
     @property
     def remaining_tool_calls(self) -> int:

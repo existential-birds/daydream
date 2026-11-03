@@ -94,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Docker Hub: `make actionlint` runs actionlint 1.7.7 from the uv dev group, and
   the Docker-image tests and the root-incompatible native Claude finalization
   test are deleted.
+- Size each staged reviewer's cumulative time and tool-call allowance to its
+  first-pass batch count, so many-part scopes such as large lockfiles reach every
+  assigned part instead of stopping with `tool_call_budget_exceeded`. The shared
+  pipeline deadline still applies, and small scopes are unchanged
+  ([#1746](https://github.com/existential-birds/daydream/issues/1746)).
 
 ### Security
 
