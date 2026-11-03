@@ -18,9 +18,10 @@ from daydream.pr_run_info import (
     render_live_run_info,
 )
 from daydream.trajectory import (
-    TrajectoryDocumentSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryRecorder,
 )
+from daydream.trajectory.recorder import _SignalFlushRegistry
 from tests.harness.trajectory import make_recorder
 
 
@@ -65,29 +66,29 @@ def test_missing_live_source_returns_bounded_unavailable_result(source: LiveRunI
     assert FALLBACK_NOTE in result.markdown
     assert result.diagnostic == diagnostic
 
-class _SnapshotSource:
-    def __init__(self, snapshots: tuple[TrajectoryDocumentSnapshot, ...] = (), *, error: Exception | None = None,
-    ) -> None:
-        self.snapshots = snapshots
-        self.error = error
-
-    def snapshot_completed_sibling_trajectories(self, *, session_id: str,) -> tuple[TrajectoryDocumentSnapshot, ...]:
-        if self.error is not None:
-            raise self.error
-        return self.snapshots
-
-
-def _source_with_snapshots(
-    tmp_path: Path, snapshots: tuple[TrajectoryDocumentSnapshot, ...] = (), *, error: Exception | None = None,
-    recorder: TrajectoryRecorder | None = None,
+def _source(
+    tmp_path: Path, children: tuple[tuple[str, bytes], ...] = (), *, recorder: TrajectoryRecorder | None = None,
 ) -> LiveRunInfoSource:
-    return LiveRunInfoSource(recorder=recorder or _recorder(tmp_path),
-        artifacts=cast(ArtifactSession, _SnapshotSource(snapshots, error=error)),
-    )
+    """Retain real written child files as the active recorder registry's references."""
+    recorder = recorder or _recorder(tmp_path)
+    registry = _SignalFlushRegistry()
+    for index, (trajectory_id, content) in enumerate(children):
+        path = tmp_path / f"child-{index}.json"
+        path.write_bytes(content)
+        registry.retain(TrajectoryDocumentReference.written(trajectory_id, path, path, content))
+    recorder._signal_registry = registry
+    return LiveRunInfoSource(recorder=recorder, artifacts=cast(ArtifactSession, object()))
 
-def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(tmp_path: Path,) -> None:
+def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     secret = "private/session/path/and-bad-json"
-    source = _source_with_snapshots(tmp_path, error=RuntimeError(secret))
+    source = _source(tmp_path)
+
+    def unavailable() -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(source.recorder, "completed_child_documents", unavailable)
     result = render_live_run_info(source)
 
     assert result.diagnostic == "run info: trajectory snapshot unavailable"
@@ -97,7 +98,7 @@ def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(tmp_pa
 def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> None:
     recorder = _recorder(tmp_path)
     recorder._trajectory_id = "child-recorder"
-    result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
+    result = render_live_run_info(_source(tmp_path, recorder=recorder))
 
     assert result.diagnostic == "run info: trajectory identity invalid"
 
@@ -109,18 +110,16 @@ def test_invalid_sibling_identity_returns_unavailable(
     tmp_path: Path, snapshot_id: str, document_session: str, document_id: str,
 ) -> None:
     document = _trajectory(document_session, document_id)
-    snapshot = TrajectoryDocumentSnapshot(snapshot_id, tmp_path / "ignored.json", document.model_dump_json().encode(),)
-    result = render_live_run_info(_source_with_snapshots(tmp_path, (snapshot,)))
+    result = render_live_run_info(_source(tmp_path, ((snapshot_id, document.model_dump_json().encode()),)))
 
     assert result.diagnostic == "run info: trajectory identity invalid"
     assert FALLBACK_NOTE in result.markdown
 
 def test_malformed_sibling_and_duplicate_ids_return_unavailable(tmp_path: Path) -> None:
-    malformed = TrajectoryDocumentSnapshot("child", tmp_path / "ignored.json", b"{bad json",)
-    malformed_result = render_live_run_info(_source_with_snapshots(tmp_path, (malformed,)))
-    child = _trajectory("run-info", "child")
-    duplicate = TrajectoryDocumentSnapshot("child", tmp_path / "ignored.json", child.model_dump_json().encode(),)
-    duplicate_result = render_live_run_info(_source_with_snapshots(tmp_path, (duplicate, duplicate)))
+    malformed_result = render_live_run_info(_source(tmp_path, (("child", b"{bad json"),)))
+    # A retained child claiming the root's identity duplicates the parent.
+    root_copy = _trajectory("run-info", "run-info").model_dump_json().encode()
+    duplicate_result = render_live_run_info(_source(tmp_path, (("run-info", root_copy),)))
 
     assert malformed_result.diagnostic == "run info: trajectory document invalid"
     assert duplicate_result.diagnostic == "run info: trajectory identity invalid"
@@ -136,7 +135,7 @@ def test_pricing_or_render_failure_returns_unavailable(
         raise RuntimeError(message)
 
     monkeypatch.setattr(provider, operation, fail)
-    source = _source_with_snapshots(tmp_path)
+    source = _source(tmp_path)
     result = render_live_run_info(source)
 
     assert result.diagnostic == "run info: rendering unavailable"
@@ -144,18 +143,23 @@ def test_pricing_or_render_failure_returns_unavailable(
 
 
 def test_live_provider_renders_parent_and_completed_sibling_with_user_prices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A completed fix-phase sibling joins the parent's rows, and user price overrides synthesize missing cost."""
+    """A completed fix-phase sibling joins the parent's rows, and user price overrides synthesize missing cost.
+
+    A child whose file changed after it was written is omitted with a warning rather than blocking the post."""
     custom_model = "custom-live-model"
     prices_file = tmp_path / "prices.toml"
     prices_file.write_text(f'[prices."{custom_model}"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
                            encoding="utf-8")
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
-    child = _trajectory("run-info", "child", phase="fix")
-    sibling = TrajectoryDocumentSnapshot("child", tmp_path / "child.json", child.model_dump_json().encode())
+    child = _trajectory("run-info", "child", phase="fix").model_dump_json().encode()
+    changed = _trajectory("run-info", "changed", phase="fix").model_dump_json().encode()
     recorder = _recorder(tmp_path, model=custom_model, prompt_tokens=1_000_000, cost_usd=None)
-    result = render_live_run_info(_source_with_snapshots(tmp_path, (sibling,), recorder=recorder))
+    source = _source(tmp_path, (("child", child), ("changed", changed)), recorder=recorder)
+    (tmp_path / "child-1.json").write_bytes(changed.replace(b'"fix"', b'"FIX"'))
+    result = render_live_run_info(source)
+    assert "TrajectoryDocumentIntegrityError" in capsys.readouterr().out
     assert result.diagnostic is None and FALLBACK_NOTE not in result.markdown
     assert "| Review |" in result.markdown and "| Fix |" in result.markdown
     assert "- **Steps / tool calls:** 2 / 0" in result.markdown

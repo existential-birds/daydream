@@ -14,13 +14,16 @@ import anyio
 import pytest
 
 from daydream import runner
-from daydream.artifact_visibility import private_root_locations
+from daydream.artifact_visibility import ArtifactSession, private_root_locations
+from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig
+from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentReference
 from tests.harness.blocked_mode import wait_for_entered
 from tests.harness.claude_sdk import (
     MockResultMessage,
     patch_claude_sdk,
 )
+from tests.harness.dataset import read_records
 from tests.harness.git_helpers import commit, git
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 
@@ -374,7 +377,7 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
 @pytest.mark.asyncio
 async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctioned_input(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
-    archive_dir: Path,
+    archive_dir: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo = tiny_diff_target
     private_base = (tmp_path / "improve private base").resolve()
@@ -384,8 +387,20 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     model = "fixture-model"
     explicit_trajectory = tmp_path / "improve trajectory output.json"
-    config = _probe_config(make_config, repo, flow_name="improve", backend="claude", trajectory_path=explicit_trajectory
+    store = LocalRecordStore(tmp_path / "records")
+    config = _probe_config(make_config, repo, flow_name="improve", backend="claude",
+        trajectory_path=explicit_trajectory, dataset_capture=True, dataset_store_path=store.root,
     )
+    # A completed child file lost before freeze leaves archived evidence and the dataset, never the run's outputs.
+    freeze, dropped = ArtifactSession.freeze, []
+
+    def freeze_without_child(session: ArtifactSession, snapshot: RunWriteSnapshot) -> Any:
+        child = next(document for document in snapshot.documents if isinstance(document, TrajectoryDocumentReference))
+        child.private_path.unlink()
+        dropped.append(child.path.name)
+        return freeze(session, snapshot)
+
+    monkeypatch.setattr(ArtifactSession, "freeze", freeze_without_child)
     assert await _run_probe(config, private_base) == 0
     assert observations
 
@@ -451,6 +466,10 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     explicit = _assert_archived_run(archive_dir, explicit_trajectory, backend="claude", status="complete")
     assert explicit["extra"].get("partial") is not True
+    archived_children = archive_dir / "runs" / explicit["session_id"] / "trajectories"
+    assert dropped and any(archived_children.iterdir()) and not (archived_children / dropped[0]).exists()
+    # Incomplete trajectory evidence is never captured as a record.
+    assert "lost a completed child trajectory" in capsys.readouterr().out and not read_records(store).runs
 
 
 def _assert_pid_reaped(pid: int) -> None:

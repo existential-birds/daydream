@@ -33,6 +33,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     Invocation,
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     flush_active_signal_recorders,
@@ -225,21 +226,21 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                 async with parent.invocation(phase=DaydreamPhase.REVIEW) as invocation:
                     root.write_partial()
                     first = snapshots[-1]
-                    frozen = tuple(document.json_bytes for document in first.documents)
+                    frozen = tuple(document.read_bytes() for document in first.documents)
                     assert len(first.documents) == 2
                     for document in first.documents:
-                        payload = json.loads(document.json_bytes)
+                        payload = json.loads(document.read_bytes())
                         assert payload['steps'][0]['extra']['host_event'] == 'partial_snapshot'
                         assert payload['extra']['snapshot_at'] == first.cutoff_at
                         assert payload['final_metrics'].get('total_prompt_tokens') is None
-                    active = json.loads(first.documents[1].json_bytes)['extra']['subtrajectories'][0]
+                    active = json.loads(first.documents[1].read_bytes())['extra']['subtrajectories'][0]
                     assert active['ended_at'] is None and active['step_ids'] == []
                     secret = '{"type":"oauth","access":"opaque-event-canary"}'
                     split = secret.index('opaque-event-canary') + len('opaque-event-canary')
                     invocation.observe(TextEvent(secret[:split]))
                     root.write_partial()
                     interrupted = snapshots[-1]
-                    interrupted_bytes = tuple(document.json_bytes for document in interrupted.documents)
+                    interrupted_bytes = tuple(document.read_bytes() for document in interrupted.documents)
                     assert b'opaque-event-canary' not in b''.join(interrupted_bytes)
                     invocation.observe(TextEvent(secret[split:]))
                     events: list[AgentEvent] = [ToolStartEvent('private', 'Inspect',
@@ -253,6 +254,10 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                         async with leaf.invocation(phase=DaydreamPhase.REVIEW) as inner:
                             observe_text_and_result(inner, 'completed nested evidence')
                     completed_bytes = leaf.path.read_bytes()
+                    # Once a fork exits, the run keeps only its written-file reference.
+                    leaf_reference, = root.completed_child_documents()
+                    assert isinstance(leaf_reference, TrajectoryDocumentReference)
+                    assert (leaf_reference.private_path, leaf_reference.size) == (leaf.path, len(completed_bytes))
                     async with root.fork(second_label, dispatch=dispatch) as second:
                         async with second.invocation(phase=DaydreamPhase.REVIEW):
                             root.write_partial()
@@ -273,9 +278,9 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                 assert parent.trajectory_id == root.session_id + ':' + label
                                 assert second.trajectory_id == root.session_id + ':' + second_label
                             for document in snapshot.documents:
-                                payload = json.loads(document.json_bytes)
+                                payload = json.loads(document.read_bytes())
                                 assert atif_validate(payload, validate_images=False)
-                                assert '-canary' not in document.json_bytes.decode()
+                                assert '-canary' not in document.read_bytes().decode()
                                 if document.trajectory_id != leaf.trajectory_id:
                                     assert payload['extra']['snapshot_at'] == snapshot.cutoff_at
                                 for entry in payload.get('extra', {}).get('subtrajectories', []):
@@ -283,24 +288,25 @@ async def test_partial_graph_preserves_empty_ancestry_and_original_private_ident
                                         target = documents[entry['trajectory_id']]
                                         logical = target.path.relative_to(tmp_path / '.daydream').as_posix()
                                         assert logical.removesuffix('.partial') == reference
-                            assert documents[leaf.trajectory_id].json_bytes == completed_bytes
-                            partial = json.loads(documents[parent.trajectory_id].json_bytes)
+                            assert documents[leaf.trajectory_id] == leaf_reference
+                            assert leaf_reference.read_bytes() == completed_bytes  # Standalone writes exact bytes.
+                            partial = json.loads(documents[parent.trajectory_id].read_bytes())
                             assert partial['final_metrics']['total_prompt_tokens'] == 0
                             assert partial['final_metrics'].get('total_completion_tokens') is None
-                            assert tuple(document.json_bytes for document in first.documents) == frozen
+                            assert tuple(document.read_bytes() for document in first.documents) == frozen
                             assert '-canary' not in str(parent.path) + str(second.path)
                             assert snapshot_trajectories(snapshot)['main']['_source_file'] == RUN_DOCUMENT_NAME
                             with pytest.raises(AttributeError):
                                 setattr(snapshot, 'cutoff_at', 'changed')
                             if dispatch is not None:
-                                extra = json.loads(documents[root.trajectory_id].json_bytes)['extra']
+                                extra = json.loads(documents[root.trajectory_id].read_bytes())['extra']
                                 plan, = extra['active_dispatches']
                                 assert plan['dispatch_id'] == dispatch.dispatch_id
                                 assert plan['planned_descriptors'][:2] == [
                                     parent.descriptor if planned is None else planned, second.descriptor]
                                 assert len(plan['queued_descriptors']) == 1 and '-canary' not in json.dumps(plan)
                                 assert plan['attempted_count'] == 2 and plan['completed_count'] == 0
-    assert tuple(document.json_bytes for document in interrupted.documents) == interrupted_bytes
+    assert tuple(document.read_bytes() for document in interrupted.documents) == interrupted_bytes
     final_parent = json.loads(parent.path.read_bytes())
     message = next(step['message'] for step in final_parent['steps'] if step['source'] == 'agent')
     assert json.loads(message)['type'] == 'oauth'  # Snapshot redaction must not mutate the live text buffer.
@@ -348,6 +354,7 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
                 child.path = blocker / "child.json"
 
         assert get_current_recorder() is recorder
+        assert recorder.completed_child_documents() == ()  # A failed child write keeps no reference.
         child.path = original_path
 
         flush_active_signal_recorders()
@@ -417,7 +424,7 @@ async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapsho
                 invocation.observe(TextEvent('valid previous evidence'))
                 flush_active_signal_recorders()
                 previous = snapshots[-1]
-                saved = {document.path: document.json_bytes for document in previous.documents}
+                saved = {document.path: document.read_bytes() for document in previous.documents}
                 target = root
 
                 def fail(**kwargs: Any) -> Any:
@@ -435,11 +442,11 @@ async def test_signal_flush_prepare_failure_never_publishes_disconnected_snapsho
                 assert {document.trajectory_id for document in current.documents} == {
                     root.trajectory_id, child.trajectory_id}
                 for document in current.documents:
-                    payload = json.loads(document.json_bytes)
+                    payload = json.loads(document.read_bytes())
                     assert payload['extra']['snapshot_at'] == current.cutoff_at
                     assert atif_validate(payload, validate_images=False)
-                assert all(document.path.read_bytes() == document.json_bytes for document in current.documents)
-                assert {document.path: document.json_bytes for document in previous.documents} == saved
+                assert all(document.path.read_bytes() == document.read_bytes() for document in current.documents)
+                assert {document.path: document.read_bytes() for document in previous.documents} == saved
 
 
 async def test_signal_flush_excludes_exited_child(recorder: TrajectoryRecorder) -> None:
@@ -545,7 +552,7 @@ async def test_signal_handler_flushes_siblings_despite_a_writer_failure(
 
 async def test_explicit_document_writer_failure_never_replaces_primary(tmp_path: Path) -> None:
     """A failing explicit-path document writer during finalization never replaces the body's primary error."""
-    def writer(document: TrajectoryDocumentSnapshot, status: str) -> None:
+    def writer(document: TrajectoryDocumentSnapshot, status: str) -> TrajectoryDocumentReference:
         raise OSError('secondary writer failure')
 
     recorder = make_recorder(tmp_path, document_writer=writer, explicit_path=True)

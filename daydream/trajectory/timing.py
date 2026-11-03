@@ -89,10 +89,12 @@ def _clip_intervals(
 
 
 def _snapshot_payloads(write_snapshot: RunWriteSnapshot) -> list[dict[str, Any]]:
+    """Decode readable documents, skipping undecodable ones; a changed reference still raises."""
     payloads: list[dict[str, Any]] = []
     for document in write_snapshot.documents:
+        raw = document.read_bytes()
         try:
-            value = json.loads(document.json_bytes)
+            value = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(value, dict):
@@ -101,12 +103,16 @@ def _snapshot_payloads(write_snapshot: RunWriteSnapshot) -> list[dict[str, Any]]
 
 
 def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
-    """Return analyzer-shaped trajectory data from immutable document bytes."""
+    """Return analyzer-shaped trajectory data from checked document reads.
+
+    ``_source_file`` names each entry by its logical document path, never the
+    private file a reference reads.
+    """
     main: dict[str, Any] | None = None
     forked: list[dict[str, Any]] = []
     for document in write_snapshot.documents:
         try:
-            payload = json.loads(document.json_bytes)
+            payload = json.loads(document.read_bytes())
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("invalid frozen trajectory JSON") from exc
         if not isinstance(payload, dict):
@@ -131,7 +137,7 @@ def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
 
 
 def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | None:
-    """Reduce one immutable run snapshot without reading live recorder state."""
+    """Reduce one frozen run snapshot without reading live recorder state."""
     payloads = _snapshot_payloads(write_snapshot)
     root = next(
         (payload for payload in payloads if payload.get("trajectory_id") == write_snapshot.root_trajectory_id),

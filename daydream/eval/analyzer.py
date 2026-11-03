@@ -783,8 +783,8 @@ def analyze_session(
 ) -> dict[str, Any]:
     """Combine trajectory, findings, timing, routing, training, and quality analysis.
 
-    The immutable write snapshot supplies trajectory bytes and lifecycle timing. Artifact provenance supplies the
-    public display path; only quality reads the live code_workspace. Unavailable code
+    The frozen write snapshot supplies checked trajectory documents and lifecycle timing. Artifact
+    provenance supplies the public display path; only quality reads the live code_workspace. Unavailable code
     or unsafe tree-sitter versions preserve the remaining frozen-only evaluation.
     """
     daydream_dir = Path(daydream_dir)

@@ -63,5 +63,8 @@ from daydream.trajectory.types import (
     LifecycleReasonCode as LifecycleReasonCode,
     LifecycleStatus as LifecycleStatus,
     RunWriteSnapshot as RunWriteSnapshot,
+    TrajectoryDocument as TrajectoryDocument,
+    TrajectoryDocumentIntegrityError as TrajectoryDocumentIntegrityError,
+    TrajectoryDocumentReference as TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot as TrajectoryDocumentSnapshot,
 )

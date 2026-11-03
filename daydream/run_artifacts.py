@@ -36,6 +36,7 @@ from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPh
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     default_trajectory_path,
@@ -95,10 +96,10 @@ class _RunArtifacts:
 
     def write_trajectory_document(
         self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> None:
-        """Write through the host sink and retain a closed failure disposition."""
+    ) -> TrajectoryDocumentReference:
+        """Write through the host sink, return its file reference, and retain a closed failure disposition."""
         try:
-            self.session.write_trajectory_document(self.trajectory, document, status)
+            return self.session.write_trajectory_document(self.trajectory, document, status)
         except Exception as exc:
             self.capture.validation_error = _RunSnapshotCaptureError(
                 f"trajectory {status} output failed ({type(exc).__name__})"
@@ -382,8 +383,13 @@ def _finalize_run_artifacts(
     if identity is None:
         raise ArtifactVisibilityError("manifest run identity was not captured")
     snapshot = run_artifacts.session.freeze(selected)
+    if snapshot.trajectories is None:
+        raise ArtifactVisibilityError("frozen run snapshot was not retained")
+    dropped_children = len(snapshot.trajectories.documents) != len(selected.documents)
+    selected = snapshot.trajectories
     _capture_dataset(run_artifacts, snapshot=snapshot, selected=selected, config=config,
-                     work=work, successful=successful, interrupted=interrupted, progress=progress)
+                     work=work, successful=successful, interrupted=interrupted, progress=progress,
+                     dropped_children=dropped_children)
     recorder_provenance = archive_recorder_provenance_from_snapshot(
         write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
     )
@@ -423,9 +429,12 @@ def _finalize_run_artifacts(
 def _capture_dataset(
     run_artifacts: _RunArtifacts, *, snapshot: ArtifactTreeSnapshot, selected: RunWriteSnapshot | None,
     config: RunConfig, work: WorkContext, successful: bool, interrupted: bool,
-    progress: Callable[[str], None],
+    progress: Callable[[str], None], dropped_children: bool = False,
 ) -> None:
-    """Keep dataset failures optional while retaining frozen integrity gates."""
+    """Keep dataset failures optional while retaining frozen integrity gates.
+
+    A run whose freeze dropped a completed child has incomplete trajectory
+    evidence, so it is never captured as a record."""
     if not config.dataset_capture:
         return
     from daydream.archive.bundle import _validate_frozen_artifacts
@@ -435,6 +444,9 @@ def _capture_dataset(
     outcomes = run_artifacts.outcomes
     outcomes.capture = "failed"
     progress("Capturing run data")
+    if dropped_children:
+        print_error(console, "Data Collection", "Run evidence lost a completed child trajectory; nothing was captured.")
+        return
     try:
         _validate_frozen_artifacts(snapshot)
         try:

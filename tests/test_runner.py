@@ -45,6 +45,7 @@ from daydream.run_context import RunContext, current_run_context
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
 )
@@ -110,16 +111,21 @@ def test_run_write_capture_retains_valid_final_without_io_and_records_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture_recorder: TrajectoryRecorder
 ) -> None:
     """The recorder callback is a non-raising immutable handoff, not finalization."""
-    final = _capture_snapshot(tmp_path, "complete")
+    # Completed children are references: retention checks their metadata, never their files.
+    child = TrajectoryDocumentReference("session:child", tmp_path / "child.json", tmp_path / "child.json", 2, "0" * 64)
+    prepared = _capture_snapshot(tmp_path, "complete")
+    final = replace(prepared, documents=(*prepared.documents, child))
     capture = _RunWriteCapture(session_id="session")
     capture.retain(capture_recorder, final)
     assert capture.final is final
     assert capture.partial is None
     assert capture.validation_error is None
-    assert not final.documents[0].path.exists()
-    capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", root="other"))
-    assert capture.final is final
-    assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
+    assert not final.documents[0].path.exists() and not child.private_path.exists()
+    for invalid in (_capture_snapshot(tmp_path, "partial", root="other"),
+                    replace(final, documents=(*prepared.documents, replace(child, sha256="unchecked")))):
+        capture.retain(capture_recorder, invalid)
+        assert capture.final is final
+        assert isinstance(capture.validation_error, _RunSnapshotCaptureError)
     # A BaseException during validation propagates instead of being recorded.
     capture = _RunWriteCapture(session_id="session")
     def interrupt(_payload: bytes) -> Any:

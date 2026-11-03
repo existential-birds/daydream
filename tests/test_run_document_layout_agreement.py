@@ -13,6 +13,7 @@ from daydream.archive.bundle import _project_documents
 from daydream.eval.analyzer import _latest_main_trajectory, collect_trajectory_paths
 from daydream.trajectory import (
     RunWriteSnapshot,
+    TrajectoryDocumentReference,
     TrajectoryDocumentSnapshot,
     default_trajectory_path,
     snapshot_trajectories,
@@ -34,10 +35,13 @@ def _write_run(target: Path) -> Path:
 
 
 def _snapshot(root_path: Path, status: Literal["complete", "partial"] = "complete") -> RunWriteSnapshot:
+    """A prepared root plus a completed child referenced at a differently named private (frozen) copy."""
+    private_child = root_path.parents[3] / "frozen-copy.json"
+    private_child.write_bytes(trajectory_payload("fork-1"))
     return RunWriteSnapshot(status=status, cutoff_at="2026-01-01T00:00:00Z", root_trajectory_id=SESSION,
         documents=(TrajectoryDocumentSnapshot(SESSION, root_path, trajectory_payload(SESSION)),
-            TrajectoryDocumentSnapshot(
-                "fork-1", root_path.parent / "trajectories" / SIBLING, trajectory_payload("fork-1")
+            TrajectoryDocumentReference.written(
+                "fork-1", root_path.parent / "trajectories" / SIBLING, private_child, trajectory_payload("fork-1")
             ),
         ),
     )
