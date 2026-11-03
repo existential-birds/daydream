@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import replace
@@ -163,21 +164,27 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     assert len(retry_scopes) == 1
 
 
+@pytest.mark.parametrize('failing_open', [1, 3], ids=['shared-change', 'first-admitted-scope'])
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failing_open: int,
 ) -> None:
-    """A real canonical read failure must isolate its scope without hiding the successful sibling's evidence."""
-    review = InvestigationRun(multi_stack_target, tmp_path, monkeypatch)
-    real_read = Path.read_text
-    canonical_reads = 0
+    """A real canonical read failure fails the scopes it reaches without hiding a sibling's evidence.
 
-    def read(path: Path, *args: Any, **kwargs: Any) -> str:
-        nonlocal canonical_reads
-        if path.name == 'hunk-index.json' and 'stage-inputs' not in path.parts:
-            canonical_reads += 1
-            if canonical_reads == 2:
+    The shared change captures and revalidates the index once; each admitted scope revalidates next.
+    A failed shared capture records every planned scope as failed before any reviewer runs.
+    """
+    review = InvestigationRun(multi_stack_target, tmp_path, monkeypatch)
+    real_read, real_open = Path.read_text, os.open
+    canonical_opens = 0
+
+    def open_input(path: Any, *args: Any, **kwargs: Any) -> int:
+        nonlocal canonical_opens
+        if Path(path).name == 'hunk-index.json':
+            canonical_opens += 1
+            if canonical_opens == failing_open:
                 raise OSError('PRIVATE_DIAGNOSTIC_PATH_SENTINEL')
-        return real_read(path, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
 
     @review.backend.script('react')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -187,10 +194,17 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
         output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='App.tsx', line=1,
                                          grounds=finding['evidence'])]
 
-    monkeypatch.setattr(Path, 'read_text', read)
-    await review.finish('python', reason='malformed_artifact', statuses=('failed',),
-                               findings=('Surviving sibling defect',))
-    assert canonical_reads >= 2
+    monkeypatch.setattr(os, 'open', open_input)
+    if failing_open == 3:
+        await review.finish('python', reason='malformed_artifact', statuses=('failed',),
+                                   findings=('Surviving sibling defect',))
+        assert canonical_opens > 3
+    else:
+        assert await review.run() == 0
+        data = review.load()
+        assert data['findings'] == [] and review.backend.stages == []
+        assert {scope: (outcome['status'], outcome['reason_codes']) for scope, outcome in scopes(data).items()} == {
+            scope: ('failed', ['malformed_artifact']) for scope in ('generic', 'python', 'react', 'structure')}
     assert 'PRIVATE_DIAGNOSTIC_PATH_SENTINEL' not in capsys.readouterr().out
 
 

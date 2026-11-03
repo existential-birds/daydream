@@ -286,15 +286,15 @@ results 7, immutable results 8 and their committed terminal version 1 stay disti
 Results 1–3 predate bounded navigation and sharded per-target coverage, and 4–6 predate
 work records; they are rejected with a restart instruction rather than converted.
 Mismatched versions/identities and local-to-PR relabeling are explicitly rejected.
-Private stage/cache contract 16 invalidates older cache entries. Captured review
+Private stage/cache contract 17 invalidates older cache entries. Captured review
 paths reject `--start-at` and do not restore judgment shards: a complete shard
 marker does not establish that its enclosing review completed. Stopped reviews
 restart; retained evidence cannot restore assignment authority. Replace incompatible
 inputs by starting a new review; no historical converter is provided. The optional
 request/revision fields retain extension API 8. This changes local review semantics
 under the current `0.y.z` policy and requires release notes; package version bumps
-remain release work. Admission before heavy allocation and queued memory lifetime
-remain separately owned by #1711.
+remain release work. Queued-scope admission and the shared canonical change follow the
+[stage-aware review contract](extensions.md#stage-aware-review-builders-api-8).
 
 Run-record capture keeps `head_sha` as real provenance and retains local `source_id`
 in the task and final state. `captured_working` identifies its population policy;

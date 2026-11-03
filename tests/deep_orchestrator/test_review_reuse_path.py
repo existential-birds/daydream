@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import re
 import stat
+import weakref
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
+from daydream.backends import AgentEvent
+from daydream.deep import review_steps
+from daydream.phases.review import phase_per_stack_reviews
+from daydream.review_stage_inputs import StageInputFactory
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _arbiter_stacks,
@@ -284,12 +292,50 @@ async def test_cache_population_restores_warm_bytes_then_recomputes_only_indepen
                 payload_path.write_text(json.dumps(payload))
                 manifest["payload"][payload_path.name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest))
+    # One fan-out slot: each miss builds scope-local inputs only once admitted, while hits validate without waiting.
+    review.backend.fanout_concurrency = 1
+    hits = {by_name["healthy"], "structure"}
+    live: weakref.WeakSet[StageInputFactory] = weakref.WeakSet()
+    built: list[str] = []
+    waited: list[str] = []
+    planned: list[str] = []
+    construct = StageInputFactory.__init__
+
+    async def planned_review(backend: Any, work: Any, stacks: list[Any], **options: Any) -> Any:
+        planned.extend(stack.stack_name for stack in stacks)
+        return await phase_per_stack_reviews(backend, work, stacks, **options)
+
+    def tracked(inputs: StageInputFactory, *args: Any, **kwargs: Any) -> None:
+        construct(inputs, *args, **kwargs)
+        live.add(inputs)
+        built.append(inputs.stack.stack_name)
+
+    async def admitted(stage: dict[str, Any], output: dict[str, Any]) -> AsyncGenerator[AgentEvent, None]:
+        with anyio.fail_after(10):
+            while not hits <= set(built) or (gc.collect(), len(live))[1] != 1:
+                await anyio.sleep(0.01)
+        if stage["scope_id"] not in waited:
+            waited.append(stage["scope_id"])
+        events: tuple[AgentEvent, ...] = ()
+        for event in events:
+            yield event
+
+    monkeypatch.setattr(StageInputFactory, "__init__", tracked)
+    monkeypatch.setattr(review_steps, "phase_per_stack_reviews", planned_review)
+    for name in damages:
+        review.backend.script(by_name[name])(admitted)
     review.backend.calls.clear()
     assert await review.run(**config) == 0
     actual = {
         stage["scope_id"] for call in review.backend.calls if (stage := review_stage_state(call["prompt"])) is not None
     }
-    assert actual == {by_name[name] for name in damages}
+    assert actual == set(waited) == {by_name[name] for name in damages}
+    # Admission follows arrival at the limiter: misses without an entry in planned order, then
+    # scopes whose entry failed validation, in planned order once that validation finishes.
+    revalidated = {scope for scope in waited if built.count(scope) == 2}
+    assert waited == ([scope for scope in planned if scope in set(waited) - revalidated]
+                      + [scope for scope in planned if scope in revalidated])
+    assert revalidated and revalidated != set(waited)
     assert _reused_stacks(deep) == {by_name["healthy"], "structure"}
     current = saved_coverage(deep)
     assert all(scope["status"] == "complete" for scope in current.scopes.values())

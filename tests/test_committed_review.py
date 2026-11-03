@@ -39,7 +39,7 @@ from daydream.review_budget import ReviewLimits
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import validate_terminal_result
 from daydream.review_source_refs import source_options
-from daydream.review_stage_inputs import StageInputFactory
+from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
 from daydream.run_config import RunConfig
 from daydream.trajectory import get_current_recorder
 from tests.harness.fake_gh import FakeGh
@@ -100,8 +100,9 @@ def _inputs(repo: Path, root: Path, files: list[str], patch: str | None = None) 
     diff_path.write_text(patch)
     revision = {"head_sha": head, "merge_base_sha": base, "diff_key": hashlib.sha256(patch.encode()).hexdigest()}
     return StageInputFactory(PiBackend(model="unexecuted-domain-test"), work_context(repo, run_id="domain"),
-        StackAssignment("committed", files), diff_path=diff_path, hunk_index_path=write_hunk_index(root, patch),
-        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+        StackAssignment("committed", files),
+        change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)), shared_paths={},
+        revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
 
 
 def _selectors(inputs: StageInputFactory, file: str = "api.py") -> list[dict[str, Any]]:

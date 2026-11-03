@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from daydream import prompt_budget as inputs
@@ -17,6 +18,7 @@ from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
+from daydream.deep.sharding import file_change_bytes
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
@@ -34,6 +36,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.extensions.registry import Registry
+    from daydream.git_ops.captured_source import CapturedSource
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
 
@@ -60,11 +63,92 @@ def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: 
     return groups
 
 
+def _capture_canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
+    return inputs._capture_input(label, path, inputs.SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
+
+
+def _revalidate(canonical: tuple[inputs.PreparedSanctionedInput, ...], captured_source: CapturedSource | None) -> None:
+    if captured_source is not None:
+        try:
+            captured_source.validate()
+        except (GitError, OSError) as exc:
+            raise inputs.SanctionedInputUnavailable(f'captured source changed or is unavailable: {exc}') from exc
+    for expected in canonical:
+        if _capture_canonical(expected.label, expected.path) != expected:
+            raise inputs.SanctionedInputUnavailable(f"sanctioned input {expected.label!r} changed after capture")
+
+
+def _block_paths(file: str, first: str, last: str) -> tuple[str, str]:
+    """Resolve the old side from a path's first block and the new side from its last block."""
+    paths = []
+    for pattern, prefix, block in ((_DIFF_MINUS_HEADER, "a/", first), (_DIFF_PLUS_HEADER, "b/", last)):
+        header = pattern.search(block)
+        paths.append(_unquote_git_path(header[1].rstrip("\t")).removeprefix(prefix) if header else file)
+    rename_from = next((line.removeprefix("rename from ") for line in first.split('\n')
+                        if line.startswith("rename from ")), None)
+    return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
+
+
+@dataclass(frozen=True)
+class CanonicalChange:
+    """One validated canonical patch and hunk index, shared read-only by every scope of a review phase.
+
+    Fields are immutable; index entries stay canonical JSON text so each scope
+    parses private copies of only the files it is assigned.
+    """
+
+    canonical: tuple[inputs.PreparedSanctionedInput, ...]
+    text: str
+    diff_paths: Mapping[str, tuple[str, str]]
+    deleted_files: frozenset[str]
+    change_bytes: Mapping[str, int]
+    index_entries: Mapping[str, str]
+
+    @classmethod
+    def capture(cls, diff_path: Path, hunk_index_path: Path,
+                captured_source: CapturedSource | None = None) -> CanonicalChange:
+        """Capture identities with bounded no-follow streaming, then bind the bytes read to them once."""
+        canonical = tuple(_capture_canonical(label, path) for label, path in (
+            ("canonical-diff", diff_path), ("canonical-index", hunk_index_path)))
+        text = captured_source.diff if captured_source is not None else None
+        if text is None or hashlib.sha256(text.encode()).hexdigest() != canonical[0].sha256:
+            text = diff_path.read_text(encoding="utf-8")
+        index_text = hunk_index_path.read_text(encoding="utf-8")
+        index = json.loads(index_text)
+        # Each factory also validates the captured source before using this change.
+        _revalidate(canonical, None)
+        if hashlib.sha256(text.encode()).hexdigest() != canonical[0].sha256:
+            raise inputs.SanctionedInputUnavailable("canonical change bytes changed during preparation")
+        if hashlib.sha256(index_text.encode()).hexdigest() != canonical[1].sha256:
+            raise inputs.SanctionedInputUnavailable("canonical index bytes changed during preparation")
+        if not isinstance(index, dict) or not all(isinstance(entry, dict) for entry in index.values()):
+            raise inputs.SanctionedInputUnavailable("canonical hunk index is malformed")
+        firsts: dict[str, str] = {}
+        lasts: dict[str, str] = {}
+        for path, block in iter_diff_blocks(text):
+            firsts.setdefault(path, block)
+            lasts[path] = block
+        diff_paths = {path: _block_paths(path, firsts[path], lasts[path]) for path in firsts}
+        return cls(
+            canonical=canonical, text=text, diff_paths=MappingProxyType(diff_paths),
+            deleted_files=frozenset(path for path, (old, new) in diff_paths.items()
+                                    if new == "/dev/null" and old != "/dev/null"),
+            change_bytes=MappingProxyType(file_change_bytes(text)),
+            index_entries=MappingProxyType({path: _json(entry) for path, entry in index.items()}))
+
+    def paths(self, file: str) -> tuple[str, str]:
+        return self.diff_paths.get(file, (file, file))
+
+    def index_slice(self, files: Iterable[str]) -> dict[str, Any]:
+        """Parse private copies of the requested index entries."""
+        return {path: json.loads(self.index_entries[path]) for path in files if path in self.index_entries}
+
+
 class StageInputFactory:
     """Project scoped first-pass assignments with required-work priority; see the assignment limits in this module."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
-        diff_path: Path, hunk_index_path: Path, shared_paths: dict[str, Path | None],
+        change: CanonicalChange, shared_paths: dict[str, Path | None],
         revision: dict[str, Any], artifact_session: ArtifactSession | None, allow_standalone: bool, read_only: bool,
         bundle_capable: bool = False) -> None:
         self.backend, self.work, self.stack = backend, work, stack
@@ -74,23 +158,14 @@ class StageInputFactory:
         self.shared_paths = shared_paths
         self.bundle_capable = bundle_capable
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
-        # Capture identities with bounded no-follow streaming; keep them host-only on both transports.
-        self.canonical = tuple(self._canonical(label, path) for label, path in (
-            ("canonical-diff", diff_path), ("canonical-index", hunk_index_path)))
-        self.full_diff = diff_path.read_text(encoding="utf-8")
-        index_text = hunk_index_path.read_text(encoding="utf-8")
-        self.index = json.loads(index_text)
+        self.change = change
+        # Identities stay host-only on both transports.
+        self.canonical = change.canonical
         self._revalidate_canonical()
-        if hashlib.sha256(self.full_diff.encode()).hexdigest() != self.canonical[0].sha256:
-            raise inputs.SanctionedInputUnavailable("canonical change bytes changed during preparation")
-        if hashlib.sha256(index_text.encode()).hexdigest() != self.canonical[1].sha256:
-            raise inputs.SanctionedInputUnavailable("canonical index bytes changed during preparation")
-        if not isinstance(self.index, dict):
-            raise inputs.SanctionedInputUnavailable("canonical hunk index is malformed")
+        self.index = change.index_slice(stack.files)
         self.binding = {"analyzed_revision": revision,
                         "canonical_inputs": {item.label: item.sha256 for item in self.canonical}}
         self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
-        self.blocks = dict(iter_diff_blocks(self.full_diff))
         self.parts = self._parts()
         # Scope-local handles stay fixed when later projections select only some parts.
         self._source_aliases: dict[str, str] = {}
@@ -107,7 +182,7 @@ class StageInputFactory:
 
     @classmethod
     def for_review(cls, backend: Backend, work: WorkContext, stack: StackAssignment, *,
-        diff_path: Path, shared_paths: dict[str, Path | None], revision: dict[str, Any],
+        change: CanonicalChange, shared_paths: dict[str, Path | None], revision: dict[str, Any],
         registry: Registry, artifact_session: ArtifactSession | None, allow_standalone: bool,
     ) -> StageInputFactory:
         """Use identical transport and prompt capabilities for live work and restored assertions."""
@@ -125,9 +200,9 @@ class StageInputFactory:
             or getattr(builder, 'review_input_bundle', False) is True)
         read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
                      or inputs.uses_diff_reference(backend, work.repo, read_only=True))
-        return cls(backend, work, stack, diff_path=diff_path, hunk_index_path=diff_path.parent / 'hunk-index.json',
-            shared_paths=shared_paths, revision=revision, artifact_session=artifact_session,
-            allow_standalone=allow_standalone, read_only=read_only, bundle_capable=bundle_capable)
+        return cls(backend, work, stack, change=change, shared_paths=shared_paths, revision=revision,
+            artifact_session=artifact_session, allow_standalone=allow_standalone, read_only=read_only,
+            bundle_capable=bundle_capable)
 
     def validate_retained_decisions(self, decisions: Any, *, complete: bool) -> None:
         """Rebind restored assertions to every original target and its frozen source selectors."""
@@ -149,25 +224,14 @@ class StageInputFactory:
                 raise ValueError('retained source attribution differs from frozen assignment')
 
     def _mapped(self, part: _Part, *, body: str | bytes | None = None) -> _Part:
-        old_path, new_path = self._diff_paths(part.assignment['file'])
+        old_path, new_path = self.change.paths(part.assignment['file'])
         part.assignment.update(part_source_mapping(part.diff, part.assignment,
             artifact_sha256=self.canonical[0].sha256, revision=self.revision,
             old_path=old_path, new_path=new_path, body=body))
         return part
 
-    @staticmethod
-    def _canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
-        return inputs._capture_input(label, path, inputs.SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
-
     def _revalidate_canonical(self) -> None:
-        if self.captured_source is not None:
-            try:
-                self.captured_source.validate()
-            except (GitError, OSError) as exc:
-                raise inputs.SanctionedInputUnavailable(f'captured source changed or is unavailable: {exc}') from exc
-        for expected in self.canonical:
-            if self._canonical(expected.label, expected.path) != expected:
-                raise inputs.SanctionedInputUnavailable(f"sanctioned input {expected.label!r} changed after capture")
+        _revalidate(self.canonical, self.captured_source)
 
     def canonicalize_source_selectors(self, selectors: Any, expected_refs: Iterable[dict[str, Any]], *,
                                       require_assigned: bool = True) -> list[dict[str, Any]]:
@@ -245,16 +309,18 @@ class StageInputFactory:
         result: list[_Part] = []
         reserved_targets = set(self.stack.files)
         next_part = 0
-        blocks: dict[str, str] = {}
-        for path, block in iter_diff_blocks(self.full_diff):
-            blocks[path] = blocks.get(path, "") + block
+        # Keep only this scope's blocks; a path may have several (a type change is a deletion then an addition).
+        blocks: dict[str, list[str]] = {path: [] for path in self.stack.files}
+        for path, block in iter_diff_blocks(self.change.text):
+            if path in blocks:
+                blocks[path].append(block)
         for path in sorted(self.stack.files):
             whole = self._mapped(_Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
-                           "kind": "file", "hunk_index": None}, blocks.get(path, "")))
+                           "kind": "file", "hunk_index": None}, "".join(blocks[path])))
             if self._remaining_bytes(self._render([whole])) >= 0:
                 result.append(whole)
                 continue
-            pieces = self._split_file(path, whole.diff)
+            pieces = self._split_file(path, blocks[path])
             for index, part in enumerate(pieces, 1):
                 while True:
                     next_part += 1
@@ -266,22 +332,26 @@ class StageInputFactory:
             result.extend(pieces)
         return result
 
-    def _split_file(self, path: str, block: str) -> list[_Part]:
-        lines = lf_lines(block)
-        starts = [index for index, line in enumerate(lines) if _HUNK_HEADER.match(line)]
-        # Binary/rename metadata is also required work, split explicitly if huge.
-        if not starts:
-            return self._segments(path, "", block, 0, (0, 0, 0, 0))
-        prefix = "".join(lines[:starts[0]])
+    def _split_file(self, path: str, blocks: list[str]) -> list[_Part]:
+        """Split each block under its own header; hunk ordinals continue across a path's blocks."""
         parts: list[_Part] = []
-        for ordinal, start in enumerate(starts):
-            end = starts[ordinal + 1] if ordinal + 1 < len(starts) else len(lines)
-            match = _HUNK_HEADER.match(lines[start])
-            assert match is not None
-            bounds = (int(match[1]), int(match[2] or 1), int(match[3]), int(match[4] or 1))
-            header = prefix + lines[start]
-            body = "".join(lines[start + 1:end])
-            parts.extend(self._segments(path, header, body, ordinal, bounds))
+        ordinal = 0
+        for block in blocks:
+            lines = lf_lines(block)
+            starts = [index for index, line in enumerate(lines) if _HUNK_HEADER.match(line)]
+            # Binary/rename metadata is also required work, split explicitly if huge.
+            if not starts:
+                parts.extend(self._segments(path, "", block, ordinal, (0, 0, 0, 0)))
+                continue
+            prefix = "".join(lines[:starts[0]])
+            for index, start in enumerate(starts):
+                end = starts[index + 1] if index + 1 < len(starts) else len(lines)
+                match = _HUNK_HEADER.match(lines[start])
+                assert match is not None
+                bounds = (int(match[1]), int(match[2] or 1), int(match[3]), int(match[4] or 1))
+                body = "".join(lines[start + 1:end])
+                parts.extend(self._segments(path, prefix + lines[start], body, ordinal, bounds))
+                ordinal += 1
         return parts
 
     def _segments(self, path: str, header: str, body: str, hunk_index: int, bounds: tuple[int, int, int, int],
@@ -357,23 +427,13 @@ class StageInputFactory:
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
 
-    def _diff_paths(self, file: str) -> tuple[str, str]:
-        block = self.blocks.get(file, "")
-        paths = []
-        for pattern, prefix in ((_DIFF_MINUS_HEADER, "a/"), (_DIFF_PLUS_HEADER, "b/")):
-            header = pattern.search(block)
-            paths.append(_unquote_git_path(header[1].rstrip("\t")).removeprefix(prefix) if header else file)
-        rename_from = next((line.removeprefix("rename from ") for line in block.split('\n')
-                            if line.startswith("rename from ")), None)
-        return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
-
     def _before_context(self, files: set[str], directory: Path, statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
         if not isinstance(self.backend, (PiBackend, OspreyBackend)):
             return {}
         candidates: dict[str, Path] = {}
         for index, file in enumerate(sorted(files)):
-            old_path, new_path = self._diff_paths(file)
+            old_path, new_path = self.change.paths(file)
             if old_path == "/dev/null" or not (new_path == "/dev/null" or old_path != new_path):
                 continue
             label = f"before-context-{index:04d}"
@@ -478,11 +538,7 @@ class StageInputFactory:
         compact_structure = state['stage'] == 'integration' and self.bundle_capable
         # Use the transport allowance with required inputs first. Reuse identity-bound artifacts to avoid
         # copying advisory bytes or following unchecked symlinks.
-        before_files = set(state["assigned_files"])
-        for file in self.blocks:
-            old_path, new_path = self._diff_paths(file)
-            if new_path == "/dev/null" and old_path != "/dev/null":
-                before_files.add(file)
+        before_files = set(state["assigned_files"]) | self.change.deleted_files
         before_context = self._before_context(before_files, directory, statuses)
         selection = inputs.select_advisory_inputs(self.backend, self.work.repo,
             [inputs.AdvisoryCandidate(label, path) for label, path in paths.items()]

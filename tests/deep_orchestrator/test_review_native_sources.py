@@ -291,13 +291,14 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
     """Restored judgments must cite this frozen assignment; changed canonical bytes stop preparation.
 
     Runner resume journeys restore only matching attribution, so the mismatch and late-change
-    refusals are proved directly at the stage-input owner.
+    refusals are proved directly at the stage-input owner. Scopes share one immutable change
+    without sharing the mutable inputs a reviewer's admission updates.
     """
     from daydream.backends.pi import PiBackend
     from daydream.deep.detection import StackAssignment
     from daydream.hunk_index import write_hunk_index
     from daydream.prompt_budget import SanctionedInputUnavailable
-    from daydream.review_stage_inputs import StageInputFactory
+    from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
     from tests.harness.git_helpers import work_context
 
     repo = tmp_path / 'repo'
@@ -309,9 +310,21 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
     diff_path = root / 'diff.patch'
     diff_path.write_text(patch)
     revision = {'head_sha': head, 'merge_base_sha': base, 'diff_key': hashlib.sha256(patch.encode()).hexdigest()}
-    factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='inputs'),
-        StackAssignment('python', ['api.py']), diff_path=diff_path, hunk_index_path=write_hunk_index(root, patch),
-        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+    change = CanonicalChange.capture(diff_path, write_hunk_index(root, patch))
+
+    def scope_inputs() -> StageInputFactory:
+        return StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='inputs'),
+            StackAssignment('python', ['api.py']), change=change, shared_paths={},
+            revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+
+    factory, sibling = scope_inputs(), scope_inputs()
+    pristine = copy.deepcopy((factory.parts[0].assignment, factory.index, factory._source_aliases))
+    sibling.parts[0].assignment['source_refs'].clear()
+    sibling.index['api.py']['hunks'].clear()
+    sibling._source_aliases.clear()
+    assert (factory.parts[0].assignment, factory.index, factory._source_aliases) == pristine
+    with pytest.raises(TypeError):
+        change.index_entries['api.py'] = '{}'  # type: ignore[index]
     part = factory.assignment_batches[0][0]
     reference = next(ref for ref in part['source_refs'] if ref['side'] == 'new')
     decision = {'target_id': part['target_id'], 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}
@@ -324,3 +337,57 @@ def test_stage_inputs_rebind_retained_decisions_and_refuse_changed_canonical_byt
     diff_path.write_text(patch + '# changed after capture\n')
     with pytest.raises(SanctionedInputUnavailable, match='changed after capture'):
         factory.prepare({'stage': 'triage', 'assigned_target_ids': []})
+
+
+@pytest.mark.parametrize(('lines', 'to_symlink'), [(3, True), (3000, True), (3000, False)],
+                         ids=['whole-file', 'split', 'split-to-regular'])
+def test_type_changed_path_keeps_old_side_refs_under_each_block_header(
+    tmp_path: Path, lines: int, to_symlink: bool,
+) -> None:
+    """A type change is a deletion block then an addition block for one path.
+
+    Removed lines stay citable on the old side, and a split part carries only its own block's header,
+    whether the oversized block comes first (regular file to symlink) or last (symlink to regular file).
+    """
+    from daydream.backends.pi import PiBackend
+    from daydream.deep.detection import StackAssignment
+    from daydream.hunk_index import write_hunk_index
+    from daydream.review_stage_inputs import CanonicalChange, StageInputFactory
+    from tests.harness.git_helpers import commit, init_repo, work_context
+
+    repo = tmp_path / 'repo'
+    init_repo(repo)
+    (repo / 'target').write_text('t\n')
+    regular = ''.join(f'line {index} ' + 'y' * 40 + '\n' for index in range(lines))
+    for side, symlink in (('base', not to_symlink), ('type change', to_symlink)):
+        (repo / 'x').unlink(missing_ok=True)
+        if symlink:
+            (repo / 'x').symlink_to('target')
+        else:
+            (repo / 'x').write_text(regular)
+        git(repo, 'add', '.')
+        head = commit(repo, side)
+    base = git(repo, 'rev-parse', 'HEAD~1')
+    patch = git_ops.diff(repo, base, head)
+    root = tmp_path / 'inputs'
+    root.mkdir()
+    diff_path = root / 'diff.patch'
+    diff_path.write_text(patch)
+    revision = {'head_sha': head, 'merge_base_sha': base, 'diff_key': hashlib.sha256(patch.encode()).hexdigest()}
+    factory = StageInputFactory(PiBackend(model='unexecuted'), work_context(repo, run_id='type-change'),
+        StackAssignment('python', ['x']), change=CanonicalChange.capture(diff_path, write_hunk_index(root, patch)),
+        shared_paths={}, revision=revision, artifact_session=None, allow_standalone=True, read_only=True)
+    refs = [{(ref['side'], ref['path']) for ref in part.assignment['source_refs']} for part in factory.parts]
+    if lines == 3:
+        assert refs == [{('old', 'x'), ('new', 'x')}]
+        return
+    headers = [[line for line in part.diff.splitlines() if line.startswith(('diff --git', 'new file', 'deleted file'))]
+               for part in factory.parts]
+    deleted = [['diff --git a/x b/x', 'deleted file mode ' + ('100644' if to_symlink else '120000')]]
+    added = [['diff --git a/x b/x', 'new file mode ' + ('120000' if to_symlink else '100644')]]
+    split = len(factory.parts) - 1
+    assert split > 1
+    if to_symlink:
+        assert (headers, refs) == (deleted * split + added, [{('old', 'x')}] * split + [{('new', 'x')}])
+    else:
+        assert (headers, refs) == (deleted + added * split, [{('old', 'x')}] + [{('new', 'x')}] * split)

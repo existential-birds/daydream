@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import islice
@@ -19,7 +19,6 @@ from daydream.backends.codex import codex_lifecycle_diagnostic
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
-from daydream.deep.sharding import file_change_bytes
 from daydream.host_tools import (
     _MAX_RESULT_BYTES,
     HostToolBinding,
@@ -64,7 +63,7 @@ from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 16
+STAGED_REVIEW_CONTRACT = 17
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -120,14 +119,14 @@ class _AdmissionPlan:
 class ReviewInvestigation:
     """Admit successful stage assertions; observed spend belongs to the host."""
 
-    def __init__(self, stack: StackAssignment, full_diff: str, revision: dict[str, Any], *,
+    def __init__(self, stack: StackAssignment, diff_weights: Mapping[str, int], revision: dict[str, Any], *,
                  assignment_batches: list[list[dict[str, Any]]], coverage: ReviewCoverage,
                  limits: ReviewLimits | None = None) -> None:
         self.scope_id = stack.stack_name
         self.coverage = coverage
         self.files = sorted(stack.files)
         self.revision = revision
-        self.diff_weights = file_change_bytes(full_diff)
+        self.diff_weights = diff_weights
         self.assignment_batches = assignment_batches
         self.assignments = {part['target_id']: part for batch in assignment_batches for part in batch}
         self.required_targets: dict[str, list[str]] = {path: [] for path in self.files}

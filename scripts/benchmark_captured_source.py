@@ -3,8 +3,9 @@
 
 Set DAYDREAM_CAPTURE_BENCH_CODE to the import checkout (defaults to this checkout) and
 DAYDREAM_CAPTURE_BENCH_ROOT to the external fixture/result directory.
-Python allocations and timings run separately; macOS process footprint is sampled
-with the same RUSAGE_INFO_V0 method as the original investigation.
+Python allocations and timings run separately. Process private memory is sampled as macOS
+RUSAGE_INFO_V0 footprint (the original investigation's method) or Linux USS/PSS.
+`run --phase` measures memory held by queued per-stack review scopes through the real phase.
 No providers run; only disposable fixture refs/index are written.
 """
 
@@ -293,6 +294,7 @@ def worker(args):
     captured = None
     error = None
     factories = []
+    phase_sample = None
     try:
         with metrics.span("capture"):
             captured = cs.capture_source(
@@ -303,9 +305,9 @@ def worker(args):
         with metrics.span("validate"):
             captured.validate()
         if args.scopes:
+            from daydream import review_stage_inputs as rsi
             from daydream.deep.detection import StackAssignment
             from daydream.hunk_index import write_hunk_index
-            from daydream.review_stage_inputs import StageInputFactory
             from daydream.workspace import WorkContext
             from tests.harness.backend import ScriptedBackend
 
@@ -326,56 +328,64 @@ def worker(args):
                 captured_source=captured,
             )
             revision = {"head_sha": info["head"], "merge_base_sha": info["base"], "source_id": captured.source_id}
-            with metrics.span("planned_factories"):
-                for i in range(args.scopes):
-                    factories.append(
-                        StageInputFactory(
-                            ScriptedBackend(),
-                            work,
-                            StackAssignment("python#" + str(i), list(captured.files)),
-                            diff_path=diff_path,
-                            hunk_index_path=generated / "hunk-index.json",
-                            shared_paths={},
-                            revision=revision,
-                            artifact_session=None,
-                            allow_standalone=True,
-                            read_only=True,
+            if args.phase:
+                with metrics.span("phase"):
+                    phase_sample = review_phase(args, work, revision, diff_path)
+            else:
+                change = (
+                    {"change": rsi.CanonicalChange.capture(diff_path, generated / "hunk-index.json", captured)}
+                    if hasattr(rsi, "CanonicalChange")
+                    else {"diff_path": diff_path, "hunk_index_path": generated / "hunk-index.json"}
+                )
+                with metrics.span("planned_factories"):
+                    for i in range(args.scopes):
+                        factories.append(
+                            rsi.StageInputFactory(
+                                ScriptedBackend(),
+                                work,
+                                StackAssignment("python#" + str(i), list(captured.files)),
+                                **change,
+                                shared_paths={},
+                                revision=revision,
+                                artifact_session=None,
+                                allow_standalone=True,
+                                read_only=True,
+                            )
                         )
-                    )
-            installed = []
+                installed = []
 
-            def admission(i):
-                factory = factories[i % len(factories)]
+                def admission(i):
+                    factory = factories[i % len(factories)]
 
-                def resolve(canonicalize):
-                    for part in factory.parts[: args.targets]:
-                        assignment = part.assignment
-                        selector = {
-                            "source_id": assignment["source_options"][0]["source_id"],
-                            "basis": "supplied_diff",
-                            "source_range": None,
-                        }
-                        canonicalize([selector], assignment["source_refs"])
+                    def resolve(canonicalize):
+                        for part in factory.parts[: args.targets]:
+                            assignment = part.assignment
+                            selector = {
+                                "source_id": assignment["source_options"][0]["source_id"],
+                                "basis": "supplied_diff",
+                                "source_range": None,
+                            }
+                            canonicalize([selector], assignment["source_refs"])
 
-                if hasattr(factory, "admit_submission"):
+                    if hasattr(factory, "admit_submission"):
 
-                    def prepare(sources):
-                        resolve(sources.canonicalize)
-                        return lambda: installed.append(i)
+                        def prepare(sources):
+                            resolve(sources.canonicalize)
+                            return lambda: installed.append(i)
 
-                    factory.admit_submission(prepare)
-                else:
-                    factory.canonicalize_source_selectors([], [], require_assigned=False)
-                    resolve(factory.canonicalize_source_selectors)
-                    factory.canonicalize_source_selectors([], [], require_assigned=False)
-                    installed.append(i)
+                        factory.admit_submission(prepare)
+                    else:
+                        factory.canonicalize_source_selectors([], [], require_assigned=False)
+                        resolve(factory.canonicalize_source_selectors)
+                        factory.canonicalize_source_selectors([], [], require_assigned=False)
+                        installed.append(i)
 
-            with metrics.span("admissions"):
-                with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-                    list(pool.map(admission, range(args.admissions)))
-            with metrics.span("release_factories"):
-                factories.clear()
-                gc.collect()
+                with metrics.span("admissions"):
+                    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+                        list(pool.map(admission, range(args.admissions)))
+                with metrics.span("release_factories"):
+                    factories.clear()
+                    gc.collect()
         with metrics.span("cleanup"):
             captured.remove()
     except BaseException as exc:
@@ -395,6 +405,8 @@ def worker(args):
         targets=args.targets,
         admissions=args.admissions,
         concurrency=args.concurrency,
+        phase=args.phase,
+        phase_sample=phase_sample,
         phases=metrics.events,
         counters=dict(metrics.data),
         disk_capture=disk_capture,
@@ -431,13 +443,91 @@ def worker(args):
     print(json.dumps({"result": result}), flush=True)
 
 
-def sample_run(params, repeat):
+def review_phase(args, work, revision, diff_path):
+    """Run the real per-stack phase offline; sample while C scopes are admitted and N - C are queued.
+
+    Changed files are partitioned round-robin like shards. Each admitted reviewer blocks in
+    ``execute`` until C have entered, then every invocation fails, so no provider runs.
+    """
+    import anyio
+
+    from daydream import review_stage_inputs as rsi
+    from daydream.backends import effective_fanout_concurrency
+    from daydream.deep.detection import StackAssignment
+    from daydream.phases.review import phase_per_stack_reviews
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from daydream.run_context import InteractionPolicy, RunContext
+    from tests.harness.backend import ScriptedBackend
+
+    files = list(work.captured_source.files)
+    stacks = [StackAssignment(f"python#{i}", files[i :: args.scopes]) for i in range(min(args.scopes, len(files)))]
+    sample = {}
+    release = anyio.Event()
+    release.set()  # The warm-up runs unblocked.
+    entered = 0
+
+    async def respond(*_):
+        nonlocal entered
+        if not release.is_set():
+            entered += 1
+            if entered == admitted:
+                gc.collect()
+                current, peak = tracemalloc.get_traced_memory() if tracemalloc.is_tracing() else (None, None)
+                sample.update(
+                    admitted=admitted,
+                    queued=len(stacks) - admitted,
+                    live_factories=sum(isinstance(item, rsi.StageInputFactory) for item in gc.get_objects()),
+                    python_retained=current,
+                    python_peak=peak,
+                    python_retained_delta=None if current is None else current - before,
+                )
+                release.set()
+            await release.wait()
+        stop = RuntimeError("offline measurement stop")
+        stop.permanent = True  # Permanent: no retry backoff in the measured runtime.
+        return [stop]
+
+    revision = AnalyzedRevision(revision["head_sha"], revision["merge_base_sha"],
+                                hashlib.sha256(diff_path.read_bytes()).hexdigest(), source_id=revision["source_id"])
+    intent = diff_path.parent / "intent.md"
+    intent.write_text("Offline admission benchmark.\n")
+    backend = ScriptedBackend(responder=respond, fanout_concurrency=args.concurrency)
+    admitted = min(effective_fanout_concurrency(10, backend), len(stacks))  # The phase's admission ceiling.
+
+    def review(scopes, run_id):
+        coverage = ReviewCoverage(run_id, revision, [PlannedScope(s.stack_name, s.stack_name, tuple(s.files))
+                                                     for s in scopes], ())
+        return anyio.run(lambda: phase_per_stack_reviews(
+            backend, work, scopes, diff_path=diff_path, intent_path=intent, alternatives_path=intent.parent / "absent",
+            include_alternatives=False, allow_standalone=True, coverage=coverage,
+            run_context=RunContext(InteractionPolicy(interactive=False)),
+        ))
+
+    # Warm lazy imports with one throwaway scope so retained deltas compare queued scopes only.
+    review(stacks[:1], "warm")
+    release = anyio.Event()
+    gc.collect()
+    before = tracemalloc.get_traced_memory()[0] if tracemalloc.is_tracing() else 0
+    start = time.perf_counter()
+    _, failures = review(stacks, "benchmark")
+    sample.update(phase_seconds=time.perf_counter() - start, failed_scopes=len(failures), scopes=len(stacks))
+    return sample
+
+
+def private_memory(process):
+    """Private memory of one process: macOS phys_footprint or Linux (USS, PSS); never RSS."""
+    if sys.platform == "darwin":
+        return _darwin_footprint(process.pid), 0
+    full = process.memory_full_info()
+    return full.uss, full.pss
+
+
+@functools.cache
+def _darwin_rusage():
     import ctypes
 
-    import psutil
-
     class RUsage(ctypes.Structure):
-        # sys/resource.h RUSAGE_INFO_V0, SDK shipped with Xcode on this machine.
+        # sys/resource.h RUSAGE_INFO_V0, SDK shipped with Xcode on the recorded machine.
         _fields_ = [("uuid", ctypes.c_ubyte * 16)] + [
             (k, ctypes.c_uint64)
             for k in (
@@ -454,7 +544,20 @@ def sample_run(params, repeat):
             )
         ]
 
-    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    return RUsage, ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+
+def _darwin_footprint(pid):
+    import ctypes
+
+    rusage, libproc = _darwin_rusage()
+    usage = rusage()
+    return usage.footprint if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)) == 0 else 0
+
+
+def sample_run(params, repeat):
+    import psutil
+
     runs = ROOT / "runs"
     runs.mkdir(exist_ok=True)
     tag = (
@@ -462,6 +565,7 @@ def sample_run(params, repeat):
             str(params.get(k, v))
             for k, v in [("fixture", ""), ("scopes", 0), ("targets", 1), ("admissions", 0), ("concurrency", 1)]
         )
+        + ("-phase" if params.get("phase") else "")
         + "-"
         + ("trace" if params.get("trace") else "time")
         + f"-{repeat}"
@@ -487,7 +591,7 @@ def sample_run(params, repeat):
         start = time.perf_counter()
         peak_disk = 0
         while proc.poll() is None:
-            rss = footprint = 0
+            rss = footprint = pss = 0
             pids = []
             try:
                 procs = [parent, *parent.children(recursive=True)]
@@ -496,19 +600,21 @@ def sample_run(params, repeat):
             for p in procs:
                 try:
                     rss += p.memory_info().rss
+                    private, proportional = private_memory(p)
+                    footprint += private
+                    pss += proportional
                     pids.append(p.pid)
-                    usage = RUsage()
-                    if libproc.proc_pid_rusage(p.pid, 0, ctypes.byref(usage)) == 0:
-                        footprint += usage.footprint
                 except psutil.Error:
                     pass
             if len(samples) % 10 == 0:
                 peak_disk = max(peak_disk, disk_stats(dest)["logical"])
-            samples.append(dict(t=time.perf_counter() - start, rss_sum=rss, phys_footprint_sum=footprint, pids=pids))
+            samples.append(dict(t=time.perf_counter() - start, rss_sum=rss, phys_footprint_sum=footprint,
+                                pss_sum=pss, pids=pids))
             time.sleep(0.01)
         stderr = proc.stderr.read().decode()
         code = proc.wait()
-    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    # The review phase also prints its console panels; keep only the worker's JSON lines.
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line.startswith('{"')]
     result = next((x["result"] for x in rows if "result" in x), None)
     if result:
         result.update(
@@ -519,7 +625,8 @@ def sample_run(params, repeat):
             stderr=stderr,
             tree_rss_sum_peak=max((x["rss_sum"] for x in samples), default=0),
             tree_phys_footprint_sum_peak=max((x["phys_footprint_sum"] for x in samples), default=0),
-            uss_unavailable="macOS task_for_pid denies cross-process psutil.memory_full_info; not reported",
+            tree_pss_sum_peak=max((x["pss_sum"] for x in samples), default=0),
+            private_memory=("macOS phys_footprint" if sys.platform == "darwin" else "Linux USS (PSS also reported)"),
             sampled_disk_logical_peak=peak_disk,
             sample_interval_seconds=0.01,
         )
@@ -535,7 +642,8 @@ def sample_run(params, repeat):
             tag,
             "ERROR=" + str(result["error"])
             if result["error"]
-            else " ".join(f"{x['phase']}={x['seconds']:.3f}s" for x in result["phases"]),
+            else " ".join(f"{x['phase']}={x['seconds']:.3f}s" for x in result["phases"])
+            + ("" if not result.get("phase_sample") else " " + json.dumps(result["phase_sample"])),
             flush=True,
         )
     # Leave logs; dispose resource-heavy run fixtures including competing bytes
@@ -681,12 +789,15 @@ def main():
     worker_parser.add_argument("--fixture", required=True)
     worker_parser.add_argument("--destination", required=True)
     worker_parser.add_argument("--trace", action="store_true")
+    worker_parser.add_argument("--phase", action="store_true")
     for name, default in [("scopes", 0), ("targets", 1), ("admissions", 0), ("concurrency", 1)]:
         worker_parser.add_argument("--" + name, type=int, default=default)
     sub.add_parser("fixtures")
+    sub.add_parser("phase-fixtures")
     execute = sub.add_parser("run")
     execute.add_argument("--fixture", required=True)
     execute.add_argument("--trace", action="store_true")
+    execute.add_argument("--phase", action="store_true")
     execute.add_argument("--repeat", type=int, default=3)
     for name, default in [("scopes", 0), ("targets", 1), ("admissions", 0), ("concurrency", 1)]:
         execute.add_argument("--" + name, type=int, default=default)
@@ -706,7 +817,9 @@ def main():
             "git": run_git(CHECKOUT, "--version").decode().strip(),
             "platform": platform.platform(),
             "cpu": os.cpu_count(),
-            "ram_bytes": subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode().strip(),
+            "ram_bytes": os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            if sys.platform != "darwin"
+            else subprocess.check_output(["sysctl", "-n", "hw.memsize"]).decode().strip(),
             "filesystem": subprocess.check_output(["df", "-h", str(ROOT)]).decode(),
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -727,6 +840,11 @@ def main():
         fixture("over-source", oversized_source=True)
         fixture("large-leaf", source_bytes=64 * 1024**2, files=2)
         print("fixtures ready", flush=True)
+    elif args.command == "phase-fixtures":
+        # Patch size varies with changed lines; scope count and concurrency are run parameters.
+        for lines in (128, 1024, 4096):
+            fixture(f"phase-{lines}", files=64, changes=64, patch_lines=lines)
+        print("phase fixtures ready", flush=True)
     elif args.command == "recorded-fixture":
         recorded_fixture(args.source, args.head, args.base)
     elif args.command == "integrity":
