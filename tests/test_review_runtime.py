@@ -42,8 +42,9 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
         assert review_limits_for_scope(ReviewLimits(), stages=4) == ReviewLimits()
-        assert review_limits_for_scope(ReviewLimits(), stages=12) == ReviewLimits(
-            investigation_s=1440, finalization_s=360, tool_calls=144)
+        # Partial allowances round up: five batches need a second one.
+        assert review_limits_for_scope(ReviewLimits(), stages=5) == ReviewLimits(
+            investigation_s=960, finalization_s=240, tool_calls=96)
 
 async def test_checkpoint_survives_hung_stream_without_finalizer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

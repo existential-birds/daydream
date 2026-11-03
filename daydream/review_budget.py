@@ -215,16 +215,12 @@ class ReviewInvestigationBudget:
     retry_recovery_budget: RetryRecoveryBudget | None = None
 
     @classmethod
-    def from_limits(cls, limits: ReviewLimits, *, deadline: float | None = None,
-                    stages: int = 1) -> ReviewInvestigationBudget:
-        """Resolve diff and ``stages`` batch scaling once, clamped by the shared deadline.
-
-        Serialization time is never investigation time.
-        """
+    def from_limits(cls, limits: ReviewLimits, *, stages: int = 1) -> ReviewInvestigationBudget:
+        """Resolve diff and batch scaling once; serialization time is never investigation time."""
         scaled = review_limits_for_scope(limits, stages=stages)
         shared = review_deadline(discovery=scaled.discovery)
-        bounds = (clock.monotonic() + scaled.investigation_s, shared, deadline)
-        return cls(scaled, min(bound for bound in bounds if bound is not None), shared_deadline=shared)
+        deadline = clock.monotonic() + scaled.investigation_s
+        return cls(scaled, deadline if shared is None else min(deadline, shared), shared_deadline=shared)
 
     @property
     def remaining_tool_calls(self) -> int:
