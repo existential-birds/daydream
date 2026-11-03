@@ -44,6 +44,7 @@ from daydream.git_ops.models import (
     GitHubRequestBudget as GitHubRequestBudget,
     GitPathState as GitPathState,
     GitTimeoutError as GitTimeoutError,
+    GraphQLUnavailableError as GraphQLUnavailableError,
     IndependentSnapshot as IndependentSnapshot,
     IndexSnapshot as IndexSnapshot,
     NotAWorktreeError as NotAWorktreeError,

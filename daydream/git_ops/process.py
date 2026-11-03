@@ -19,7 +19,13 @@ from urllib.parse import urlparse
 
 from daydream.backends._subprocess import terminate_process
 from daydream.git_ops.auth import INHERIT_GITHUB_AUTH, GitHubAuth
-from daydream.git_ops.models import GitError, GitHubRequestBudget, GitTimeoutError, RateLimitError
+from daydream.git_ops.models import (
+    GitError,
+    GitHubRequestBudget,
+    GitTimeoutError,
+    GraphQLUnavailableError,
+    RateLimitError,
+)
 from daydream.redaction import redact_text
 
 _logger = logging.getLogger(__name__)
@@ -30,6 +36,11 @@ _RATE_LIMIT_MARKERS: tuple[str, ...] = (
     "rate limit",
     "secondary rate limit",
 )
+
+# An HTTP refusal of the GraphQL endpoint, unlike a "GraphQL: ..." response error. gh
+# porcelain names the endpoint URL; ``gh api graphql`` reports only "(HTTP 403)".
+_GRAPHQL_ENDPOINT_REFUSED_RE = re.compile(r"\bHTTP 40[34]: .*\(https?://[^\s()]+/graphql\)")
+_HTTP_REFUSED_RE = re.compile(r"\(HTTP 40[34]\)")
 
 
 # Header values must be masked before argv reaches logs or errors.
@@ -519,10 +530,11 @@ def _credential_helper_args(helper: str | None = None) -> list[str]:
     return ["-c", f"credential.helper={helper or GH_CREDENTIAL_HELPER}"]
 
 
-def _gh_error_for(message: str, stderr: str) -> GitError:
+def _gh_error_for(message: str, stderr: str, *, graphql: bool = False) -> GitError:
     """Classify stderr rate-limit indicators, including 429 or rate-associated 403, and
-    parse an integer retry hint when present. Other failures remain ordinary GitError
-    values.
+    parse an integer retry hint when present. Any other 403/404 refusal of the GraphQL
+    endpoint (named in stderr, or *graphql* for ``gh api graphql``) becomes
+    ``GraphQLUnavailableError``. Other failures remain ordinary GitError values.
     """
     lowered = stderr.lower()
     redacted_message = _redact_sensitive_text(message)
@@ -532,6 +544,8 @@ def _gh_error_for(message: str, stderr: str) -> GitError:
         or ("403" in lowered and "rate" in lowered)
     )
     if not is_rate_limit:
+        if _GRAPHQL_ENDPOINT_REFUSED_RE.search(stderr) or (graphql and _HTTP_REFUSED_RE.search(stderr)):
+            return GraphQLUnavailableError(redacted_message)
         return GitError(redacted_message)
     retry_after: float | None = None
     match = re.search(r"retry[- ]after[:\s]+(\d+)", lowered)

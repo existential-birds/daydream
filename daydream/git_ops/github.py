@@ -12,7 +12,14 @@ from urllib.parse import quote
 
 from daydream.git_ops import process, queries
 from daydream.git_ops.auth import INHERIT_GITHUB_AUTH, GitHubAuth
-from daydream.git_ops.models import GitError, GitHubPageLimits, GitHubRequestBudget, GitTimeoutError, PathAbsentError
+from daydream.git_ops.models import (
+    GitError,
+    GitHubPageLimits,
+    GitHubRequestBudget,
+    GitTimeoutError,
+    GraphQLUnavailableError,
+    PathAbsentError,
+)
 from daydream.repository_paths import strip_dot_slash, valid_repository_file_path
 
 # --- gh wrappers -------------------------------------------------------------
@@ -61,6 +68,64 @@ def _pr_view_is_absent(stderr: str, pr: int | None) -> bool:
     )
 
 
+# REST fallbacks for gh porcelain, which reads through GraphQL. ``{owner}/{repo}`` lets
+# gh select the same base repository as porcelain: GH_REPO, ``gh repo set-default``,
+# then the upstream/github/origin remote order.
+
+
+def _rest_pr_row(pull: Any) -> dict[str, Any]:
+    """Shape a REST pull request as the ``gh pr`` JSON fields this module requests."""
+    if not isinstance(pull, dict):
+        raise GitError("GitHub REST returned a non-object pull request")
+    head = pull["head"] if isinstance(pull.get("head"), dict) else {}
+    base = pull["base"] if isinstance(pull.get("base"), dict) else {}
+    head_repo, head_owner = head.get("repo"), head.get("user")
+    return {
+        "number": pull.get("number"),
+        "title": pull.get("title"),
+        "body": pull.get("body") or "",
+        "state": "MERGED" if pull.get("merged_at") else str(pull.get("state") or "").upper(),
+        "headRefName": head.get("ref"),
+        "baseRefName": base.get("ref"),
+        "headRefOid": head.get("sha"),
+        "url": pull.get("html_url"),
+        "headRepository": (
+            {"name": head_repo.get("name"), "nameWithOwner": head_repo.get("full_name")}
+            if isinstance(head_repo, dict) else None
+        ),
+        "headRepositoryOwner": {"login": head_owner.get("login")} if isinstance(head_owner, dict) else None,
+    }
+
+
+def _rest_open_pr_rows(repo: Path, branch: str, *, auth: GitHubAuth) -> list[dict[str, Any]]:
+    """Match open PRs by head ref from any owner, like ``gh pr list --head``. REST filters
+    heads only with an owner prefix, so this reads every open PR.
+    """
+    pulls = gh_api(
+        repo, "repos/{owner}/{repo}/pulls?state=open&per_page=100", paginate=True, idempotent=True, auth=auth,
+    )
+    if not isinstance(pulls, list):
+        raise GitError("GitHub REST pull request list expected a JSON list")
+    return [row for row in map(_rest_pr_row, pulls) if row["headRefName"] == branch]
+
+
+def _rest_pr_view(repo: Path, pr: int | None, *, auth: GitHubAuth) -> dict[str, Any] | None:
+    """Read a numbered PR, or the current branch's first open PR; HTTP 404 is absence."""
+    if pr is None:
+        branch = queries.current_branch(repo)
+        if branch is None:
+            raise GitError("cannot infer a PR without a current branch")
+        rows = _rest_open_pr_rows(repo, branch, auth=auth)
+        return rows[0] if rows else None
+    try:
+        pull = gh_api(repo, f"repos/{{owner}}/{{repo}}/pulls/{pr}", idempotent=True, auth=auth)
+    except GitError as exc:
+        if _gh_failure_is_absence(exc):
+            return None
+        raise
+    return _rest_pr_row(pull)
+
+
 def gh_pr_view(
     repo: Path,
     pr: int | None = None,
@@ -69,8 +134,8 @@ def gh_pr_view(
 ) -> dict[str, Any] | None:
     """Read a PR, inferring it from the current branch when no number is supplied.
 
-    Return ``None`` only for a recognized missing-PR diagnostic. Other failures and
-    malformed JSON raise ``GitError``.
+    Return ``None`` only for a recognized missing-PR diagnostic. Refused GraphQL falls
+    back to REST. Other failures and malformed JSON raise ``GitError``.
     """
     args = ["pr", "view"]
     if pr is not None:
@@ -86,7 +151,10 @@ def gh_pr_view(
         if _pr_view_is_absent(proc.stderr, pr):
             return None
         diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
-        raise process._gh_error_for(f"gh pr view failed: {diagnostic}", proc.stderr)
+        error = process._gh_error_for(f"gh pr view failed: {diagnostic}", proc.stderr)
+        if isinstance(error, GraphQLUnavailableError):
+            return _rest_pr_view(repo, pr, auth=auth)
+        raise error
     try:
         data = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -102,7 +170,8 @@ def gh_pr_list_for_branch(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> list[dict[str, Any]]:
-    """List open PRs for a head ref; only a successful empty query returns ``[]``."""
+    """List open PRs for a head ref; only a successful empty query returns ``[]``.
+    Refused GraphQL falls back to REST."""
     proc = process._run_gh(
         repo,
         [
@@ -120,7 +189,10 @@ def gh_pr_list_for_branch(
     )
     if proc.returncode != 0:
         diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
-        raise process._gh_error_for(f"gh pr list failed: {diagnostic}", proc.stderr)
+        error = process._gh_error_for(f"gh pr list failed: {diagnostic}", proc.stderr)
+        if isinstance(error, GraphQLUnavailableError):
+            return _rest_open_pr_rows(repo, branch, auth=auth)
+        raise error
     try:
         rows = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -168,17 +240,24 @@ def gh_repo_view_required(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[str, str]:
-    """Return the current repository slug, raising on command or shape failure."""
+    """Return the current repository slug, raising on command or shape failure. Refused
+    GraphQL falls back to REST's canonical ``full_name``."""
     proc = process._run_gh(
         repo,
         ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         auth=auth,
         retries=process._gh_retries(),
     )
-    if proc.returncode != 0:
+    if proc.returncode == 0:
+        raw_slug = proc.stdout.rstrip("\r\n")
+    else:
         diagnostic = _safe_gh_diagnostic(proc.stderr) or "no diagnostic"
-        raise process._gh_error_for(f"gh repo view failed: {diagnostic}", proc.stderr)
-    raw_slug = proc.stdout.rstrip("\r\n")
+        error = process._gh_error_for(f"gh repo view failed: {diagnostic}", proc.stderr)
+        if not isinstance(error, GraphQLUnavailableError):
+            raise error
+        data = gh_api(repo, "repos/{owner}/{repo}", idempotent=True, auth=auth)
+        full_name = data.get("full_name") if isinstance(data, dict) else None
+        raw_slug = full_name if isinstance(full_name, str) else ""
     slug = queries.split_owner_repo(raw_slug)
     if slug is None:
         raise GitError("gh repo view returned an invalid repository slug")
@@ -368,7 +447,8 @@ def gh_api(
     concatenated paginated arrays into one JSON value per line. Explicit
     authorization headers support App JWT calls. Only read callers set
     *idempotent* to retry timeouts: GraphQL mutations also use POST and cannot
-    be inferred from *method*. Rate limits raise ``RateLimitError``.
+    be inferred from *method*. Rate limits raise ``RateLimitError``; a refused GraphQL
+    endpoint raises ``GraphQLUnavailableError``.
     """
     header_args = [arg for name, value in (headers or {}).items() for arg in ("-H", f"{name}: {value}")]
     output_args: list[str] = []
@@ -404,6 +484,7 @@ def gh_api(
             raise process._gh_error_for(
                 f"gh api {endpoint} failed: {proc.stderr.strip()}{payload_note}",
                 proc.stderr,
+                graphql=endpoint.lstrip("/") == "graphql",
             )
         result = _parse_gh_json(proc.stdout, jq, endpoint, payload_note=payload_note)
         succeeded = True

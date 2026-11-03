@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Let `daydream --comment` and `daydream post-findings` post reviews where GitHub
+  GraphQL is blocked, such as Claude Code cloud sessions. PR and repository lookups
+  fall back to REST with the same repository selection. Prior findings are
+  deduplicated from REST comments, with a warning that stale findings stay visible
+  because only GraphQL can minimize them.
 - Keep Codex, Claude and Osprey staged reviews from losing a scope when a model
   miscopies a host-supplied digest. Every backend now selects sources and the host
   builds canonical references; an invalid selection still rejects only that stage

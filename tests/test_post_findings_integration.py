@@ -179,7 +179,7 @@ def test_post_findings_drops_flowchart_nodes_absent_from_source(
     artifact = _write_artifact(
         git_repo / "f.json", [_inline_finding("Already posted")], diagrams=payload, head_sha=head_sha,
     )
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64], viewer_did_author=True)
 
     code = cli_main(_post_argv(artifact, head_sha=head_sha, target=git_repo) + ["--bot-login", "daydream"])
 
@@ -369,7 +369,7 @@ def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
 ) -> None:
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True,)
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64], viewer_did_author=True,)
     artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
@@ -413,7 +413,7 @@ def test_post_findings_matched_blocking_finding_prevents_approval(
                       base_sha="b" * 40 if schema_version == 3 else None,
                       comparison_sha="c" * 40 if schema_version == 3 else None)
     argv += ["--approve-on-clean", "--bot-login", "daydream"]
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64], viewer_did_author=True)
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
@@ -421,7 +421,7 @@ def test_post_findings_matched_blocking_finding_prevents_approval(
     assert [parse_finding_markers(comment["body"]) for comment in posts[0].payload["comments"]] == [["b" * 64]]
     assert "Retained concern" not in json.dumps(posts[0].payload)
     assert "no high/medium findings" not in posts[0].payload["body"]
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64, "b" * 64], thread_ids=["RT_1", "RT_2"], viewer_did_author=True)
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64, "b" * 64], viewer_did_author=True)
     assert cli_main(argv) == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
 

@@ -35,6 +35,12 @@ class PathAbsentError(GitError):
     """
 
 
+class GraphQLUnavailableError(GitError):
+    """GitHub refused the GraphQL endpoint itself, as REST-only proxies do. A GraphQL-level
+    error or rate limit is not this; REST-capable reads may degrade instead of failing.
+    """
+
+
 class DeadlineExpired(GitError):
     """Raised before a GitHub request when its shared deadline has expired."""
 

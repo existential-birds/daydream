@@ -476,7 +476,7 @@ class FakeGh:
         """
         self.set_response("GET", f"repos/{repo}/issues/{number}/comments", value=comments)
 
-    def serve_prior_threads(self, *, fingerprints: list[str], thread_ids: list[str], authors: list[str] | None = None,
+    def serve_prior_threads(self, *, fingerprints: list[str], authors: list[str] | None = None,
         viewer_did_author: bool | None = None,
     ) -> None:
         """Build one unresolved inline thread per fingerprint. Optional parallel
@@ -485,45 +485,25 @@ class FakeGh:
         """
         if authors is not None and len(authors) != len(fingerprints):
             raise ValueError("authors must parallel fingerprints")
-        nodes = [self._thread_node(thread_id, f"RC_{i}", 1000 + i, finding_marker(fingerprint),
+        nodes = [self._thread_node(f"RC_{i}", finding_marker(fingerprint),
                 author=authors[i - 1] if authors is not None else None, viewer_did_author=viewer_did_author,
             )
-            for i, (fingerprint, thread_id) in enumerate(zip(fingerprints, thread_ids, strict=True), start=1)
+            for i, fingerprint in enumerate(fingerprints, start=1)
         ]
         self._write_threads(nodes)
-
-    def serve_prior_threads_from(
-        self, call: GhCall, *, author: str | None = None, viewer_did_author: bool | None = None,
-    ) -> None:
-        """Replay a recorded review POST as inline threads plus a body-only REST review.
-        Optional author identity populates both protocol shapes for production trust
-        checks.
-        """
-        payload = call.payload or {}
-        nodes = [self._thread_node(
-                f"RT_{i}", f"RC_{i}", i, comment.get("body", ""), author=author, viewer_did_author=viewer_did_author,
-            )
-            for i, comment in enumerate(payload.get("comments", []), start=1)
-        ]
-        self._write_threads(nodes)
-        review: dict[str, Any] = {"id": 1, "node_id": "PRR_1", "body": payload.get("body", "")}
-        if author is not None:
-            review["user"] = {"login": author}
-        self.set_response("GET", call.endpoint, [review])
 
     # --- internals ------------------------------------------------------------
 
     @staticmethod
-    def _thread_node(thread_id: str, comment_node_id: str, database_id: int, body: str, *, author: str | None = None,
+    def _thread_node(comment_node_id: str, body: str, *, author: str | None = None,
         viewer_did_author: bool | None = None,
     ) -> dict[str, Any]:
-        comment: dict[str, Any] = {"id": comment_node_id, "databaseId": database_id, "body": body, "isMinimized": False,
-        }
+        comment: dict[str, Any] = {"id": comment_node_id, "body": body, "isMinimized": False}
         if author is not None:
             comment["author"] = {"login": author}
         if viewer_did_author is not None:
             comment["viewerDidAuthor"] = bool(viewer_did_author)
-        return {"id": thread_id, "isResolved": False,
+        return {"isResolved": False,
             "comments": {"nodes": [comment], "pageInfo": {"hasNextPage": False, "endCursor": None}},
         }
 

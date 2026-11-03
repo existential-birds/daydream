@@ -125,7 +125,8 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   Explicit `pr_repo` wins; local provenance is a fallback when gh discovery is unavailable.
   Embedded runs resolve provenance locally without implicit remote repository discovery.
   CLI-requested branch PR discovery uses session auth on the original checkout before detached workspace creation.
-  Direct runner callers retain flow-owned PR discovery.
+  Direct runner callers retain flow-owned PR discovery. Review publication must survive a refused
+  GraphQL endpoint (`GraphQLUnavailableError`): gh porcelain PR/repository reads fall back to REST.
 - Call agents through `agent.run_agent()`, never directly through a backend/SDK
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and

@@ -5,11 +5,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from daydream import git_ops
-from daydream.git_ops import GitError
+from daydream import git_ops, reconcile
+from daydream.git_ops import GitError, GraphQLUnavailableError
 from daydream.pr_review import finding_marker
 from daydream.reconcile import (
-    PriorFinding,
     fetch_prior_diagram_comments,
     fetch_prior_findings,
     minimize_comment,
@@ -17,16 +16,15 @@ from daydream.reconcile import (
 )
 
 
-def _thread(thread_id: str, *, comment_node_id: str, database_id: int, body: str, author: str | None = None,
-    viewer_did_author: bool | None = None,
-) -> dict[str, Any]:
-    """One reviewThreads node carrying a single comment."""
-    comment: dict[str, Any] = {"id": comment_node_id, "databaseId": database_id, "body": body, "isMinimized": False}
+def _thread(comment_node_id: str, body: str, *, author: str | None = None,
+            viewer_did_author: bool | None = None) -> dict[str, Any]:
+    """One unresolved reviewThreads node carrying a single comment."""
+    comment: dict[str, Any] = {"id": comment_node_id, "body": body, "isMinimized": False}
     if author is not None:
         comment["author"] = {"login": author}
     if viewer_did_author is not None:
         comment["viewerDidAuthor"] = bool(viewer_did_author)
-    return {"id": thread_id, "isResolved": False, "comments": {"nodes": [comment]}}
+    return {"isResolved": False, "comments": {"nodes": [comment]}}
 
 
 def _page(nodes: list[dict[str, Any]], *, next_cursor: str | None = None) -> dict[str, Any]:
@@ -41,28 +39,21 @@ def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
 ) -> None:
     """Trust and partition the complete fetched population, including human-controlled marker text."""
     a, b, c, d, e, forged_thread, forged_review = (letter * 64 for letter in "abcdef0")
-    resolved = _thread("RT_RESOLVED", comment_node_id="C_RESOLVED", database_id=3,
-                       body=finding_marker(c), viewer_did_author=True)
+    resolved = _thread("C_RESOLVED", finding_marker(c), viewer_did_author=True)
     resolved["isResolved"] = True
-    minimized = _thread("RT_MINIMIZED", comment_node_id="C_MINIMIZED", database_id=4,
-                        body=finding_marker(d), author="daydream")
+    minimized = _thread("C_MINIMIZED", finding_marker(d), author="daydream")
     minimized["comments"]["nodes"][0]["isMinimized"] = True
     api = Mock(side_effect=[
         _page([
-            _thread("RT_VIEWER", comment_node_id="C_VIEWER", database_id=1,
-                    body=finding_marker(a), author="viewer-alias", viewer_did_author=True),
-            _thread("RT_FORGED", comment_node_id="C_FORGED", database_id=6,
-                    body=finding_marker(forged_thread), author="evil-attacker"),
+            _thread("C_VIEWER", finding_marker(a), author="viewer-alias", viewer_did_author=True),
+            _thread("C_FORGED", finding_marker(forged_thread), author="evil-attacker"),
             resolved,
-            _thread("RT_PLAIN", comment_node_id="C_PLAIN", database_id=8,
-                    body="a bot comment without a finding marker", viewer_did_author=True),
+            _thread("C_PLAIN", "a bot comment without a finding marker", viewer_did_author=True),
         ], next_cursor="CURSOR_1"),
         _page([
-            _thread("RT_BOT", comment_node_id="C_BOT", database_id=2,
-                    body=finding_marker(b), author="DAYDREAM[bot]"),
+            _thread("C_BOT", finding_marker(b), author="DAYDREAM[bot]"),
             minimized,
-            _thread("RT_DUPLICATE", comment_node_id="C_DUPLICATE", database_id=9,
-                    body=finding_marker(a), viewer_did_author=True),
+            _thread("C_DUPLICATE", finding_marker(a), viewer_did_author=True),
         ]),
         [
             {"id": 901, "node_id": "BODY", "body": finding_marker(e), "user": {"login": "daydream[bot]"}},
@@ -75,17 +66,11 @@ def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
 
     prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
 
-    assert prior == {
-        a: PriorFinding(a, "RT_VIEWER", False, "C_VIEWER"),
-        c: PriorFinding(c, "RT_RESOLVED", True, "C_RESOLVED"),
-        b: PriorFinding(b, "RT_BOT", False, "C_BOT"),
-        d: PriorFinding(d, "RT_MINIMIZED", True, "C_MINIMIZED"),
-        e: PriorFinding(e, None, False, "BODY"),
-    }
+    assert prior == {a: "C_VIEWER", c: None, b: "C_BOT", d: None, e: None}
     assert list(prior) == [a, c, b, d, e]
     plan = partition(current=[a, c, "9" * 64], prior=prior)
     assert plan.new == ["9" * 64] and plan.matched == {a, c}
-    assert plan.stale == [PriorFinding(b, "RT_BOT", False, "C_BOT")]
+    assert plan.stale == {b: "C_BOT"}
     first, second, reviews = api.call_args_list
     assert first.args == second.args == (tmp_path, "graphql")
     assert [call.kwargs["input_data"]["variables"] for call in (first, second)] == [
@@ -100,16 +85,33 @@ def test_known_bot_inventory_partitions_paginated_authorized_and_forged_markers(
 def test_unresolved_bot_inventory_accepts_only_viewer_proof(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     viewer, forged = "a" * 64, "b" * 64
     api = Mock(side_effect=[_page([
-        _thread("RT_VIEWER", comment_node_id="C_VIEWER", database_id=1,
-                body=finding_marker(viewer), viewer_did_author=True),
-        _thread("RT_FORGED", comment_node_id="C_FORGED", database_id=2,
-                body=finding_marker(forged), author="daydream[bot]"),
+        _thread("C_VIEWER", finding_marker(viewer), viewer_did_author=True),
+        _thread("C_FORGED", finding_marker(forged), author="daydream[bot]"),
     ]), [{"node_id": "REST_FORGED", "body": finding_marker(forged), "user": {"login": "daydream[bot]"}}]])
     monkeypatch.setattr(git_ops, "gh_api", api)
-    assert fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None) == {
-        viewer: PriorFinding(viewer, "RT_VIEWER", False, "C_VIEWER"),
-    }
+    assert fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None) == {viewer: "C_VIEWER"}
     assert api.call_count == 2
+
+
+def test_refused_graphql_dedups_from_rest_comments_without_minimization_targets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """REST inline markers still dedupe by bot login, but are never minimizable."""
+    inline, body = "a" * 64, "b" * 64
+    api = Mock(side_effect=[
+        GraphQLUnavailableError("gh api graphql failed: (HTTP 403)"),
+        [{"node_id": "PRRC_INLINE", "body": finding_marker(inline), "user": {"login": "daydream[bot]"}}],
+        [{"node_id": "PRR_BODY", "body": finding_marker(body), "user": {"login": "daydream[bot]"}}],
+    ])
+    warnings: list[str] = []
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    monkeypatch.setattr(reconcile, "print_warning", lambda _console, message: warnings.append(message))
+
+    assert fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream") == {inline: None, body: None}
+    assert [call.args[1] for call in api.call_args_list[1:]] == [
+        "repos/o/r/pulls/7/comments", "repos/o/r/pulls/7/reviews",
+    ]
+    assert len(warnings) == 1 and "only GraphQL can minimize" in warnings[0]
 
 
 # --- Prior diagram comments (issue #1113) ------------------------------------
