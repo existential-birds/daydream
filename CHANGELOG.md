@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.33.0] - 2026-11-03
+
 ### Changed
 
 - Make the pre-push `make check` gate finish in under two minutes on a cold
@@ -14,33 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collected tests, every test in every run), static checks run in parallel as one
   `static` step, and JSON schemas compile once. Testing guidance now treats
   slowness and overlap as deletion reasons
-  ([#1747](https://github.com/existential-birds/daydream/issues/1747)).
-
+  ([#1747](https://github.com/existential-birds/daydream/issues/1747), #1749).
 - Move the `benchmark` extra's supported Harbor range to `[0.25, 0.26)`. Reinstall
   with `uv sync --all-extras`.
-
 - Publish the simplification sweep skill for contributors. PR mode covers a PR's
   own files and is required only above 5 changed files or 500 added lines;
   full-repository sweeps run on request.
-
 - Give large reviews 50% more time and tool calls at each diff-size tier (×3, ×6
   and ×9 above 1,000, 5,000 and 10,000 lines); automatic sharding thresholds are
   unchanged.
-
 - Default the Claude backend to `claude-haiku-5-5`, `claude-sonnet-5-5` and
   `claude-opus-5-5` across the existing phase tiers. Claude effort stays ambient,
-  and explicit model pins are unchanged.
-
+  and explicit model pins are unchanged
+  ([#1734](https://github.com/existential-birds/daydream/issues/1734)).
 - Committed review handles very large changes by navigating captured source with
   the charged read-only `review_source` lookup and admitting progressive
   `review_admit` batches, instead of refusing plans over 512 assignment parts or
-  inlining the whole inventory ([#1677](https://github.com/existential-birds/daydream/issues/1677));
+  inlining the whole inventory ([#1677](https://github.com/existential-birds/daydream/issues/1677), #1738);
   see [the runtime contract](docs/runtime.md#committed-review-requestresult).
   **Breaking (0.y.z):** committed/immutable/local results move to schemas 4/5/6
   (earlier results must be restarted), the hosted grant becomes `pi-read-only-v2`,
   and native model registries must declare `contextWindow`/`maxTokens`. Extension
   API 8 is unchanged.
-
 - Committed review accepts an optional `assignment_policy="adaptive"` that splits
   large changes into concurrent bounded assignments followed by a required
   cross-assignment investigation; the default broad review is unchanged. All work
@@ -50,13 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Breaking (0.y.z):** committed/immutable/local results move to schemas 7/8/9 with
   work records and per-execution capacity evidence. Restart reviews; results with
   versions 4/5/6 are rejected. Extension API 8 is unchanged.
-
 - Stream captured review sources with bounded Python payload buffers and one raw
   Git reader per operation. Native submissions perform one complete integrity
   check before atomic admission, reducing capture memory and repeated validation
   work while retaining preparation and terminal checks
   ([#1710](https://github.com/existential-birds/daydream/issues/1710)).
-
 - Review local changes as one captured net base-to-working comparison, including
   nonignored untracked files and dirty supporting context. Native browsing and
   canonical references share accepted source; unstable capture fails before model
@@ -65,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Local results use schema 3/terminal 2 with a separate source identity; committed
   results/exports remain distinct. Incompatible stage caches require a fresh review;
   extension API 8 remains supported. Stopped reviews restart.
+- **deps:** bump minimatch (#1750)
+- **deps:** roll up Dependabot updates and security fixes (#1743)
+- **reviewbench:** condense credential concurrency note (#1730)
 
 ### Fixed
 
@@ -79,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with truthful incomplete coverage. A reviewer check that writes into the captured
   checkout now fails the stage it was submitted in for every backend, as Pi already
   did. Cached staged results from earlier versions are not reused
-  ([#1744](https://github.com/existential-birds/daydream/issues/1744)).
+  ([#1744](https://github.com/existential-birds/daydream/issues/1744), #1751).
 - Keep Claude deep reviews from losing scopes to `evidence_incomplete`. Ignored
   output from reviewer checks no longer fails captured-source validation, integrity
   failures name the changed path
@@ -88,7 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deadline without mistaking valid slow admission for a lost submission receipt.
 - Align the packaged ReviewBench host and reviewer Claude Agent SDK dependencies
   so both runtimes install cleanly with the Daydream wheel ([#92](https://github.com/existential-birds/daydream/issues/92)).
-- Allow concurrent ReviewBench Codex trials sharing credentials (existential-birds/code-review-benchmarks#9).
+- Allow concurrent ReviewBench Codex trials sharing credentials
+  (existential-birds/code-review-benchmarks#9, #1727).
 - Make the local gate pass in root-run containers with host-injected Git config,
   and remove a timing race in a Pi diagnostic test. The gate no longer pulls from
   Docker Hub: `make actionlint` runs actionlint 1.7.7 from the uv dev group, and
@@ -99,12 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assigned part instead of stopping with `tool_call_budget_exceeded`. The shared
   pipeline deadline still applies, and small scopes are unchanged
   ([#1746](https://github.com/existential-birds/daydream/issues/1746)).
+- **review:** preserve admitted work across cancellation and retries (#1728)
 
 ### Security
 
 - Require PyJWT 2.15.0 or later and ship patched LiteLLM, msgpack, mcp and undici
   in the locked runtimes, resolving the open Dependabot advisories.
-
 
 ## [0.32.0] - 2026-10-29
 
@@ -1996,7 +1996,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.32.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/existential-birds/daydream/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/existential-birds/daydream/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/existential-birds/daydream/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/existential-birds/daydream/compare/v0.29.0...v0.30.0
