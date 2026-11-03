@@ -783,6 +783,56 @@ def test_gh_read_wrappers_reject_invalid_output(tmp_path: Path, monkeypatch: pyt
     assert "manifest-code-sentinel" not in str(failed.value) and "/app-manifests/***/" in str(failed.value)
 
 
+def test_gh_read_wrappers_fall_back_to_rest_when_graphql_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an HTTP refusal of the GraphQL endpoint degrades porcelain reads to gh-selected REST."""
+    def pull(number: int, ref: str, *, merged: bool = False) -> dict[str, Any]:
+        return {"number": number, "title": "t", "body": None, "state": "closed" if merged else "open",
+                "merged_at": "2026-11-01T00:00:00Z" if merged else None, "html_url": f"https://github.com/o/r/pull/{number}",
+                "head": {"ref": ref, "sha": "a" * 40, "user": {"login": "fork"},
+                         "repo": {"name": "r", "full_name": "fork/r"}},
+                "base": {"ref": "main", "sha": "b" * 40}}
+
+    rest = {"repos/{owner}/{repo}": {"full_name": "Canonical/r"},
+            "repos/{owner}/{repo}/pulls/7": pull(7, "feature", merged=True),
+            "repos/{owner}/{repo}/pulls?state=open&per_page=100": [pull(8, "other"), pull(9, "feature")]}
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[1] != "api":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=(
+                "HTTP 403: GraphQL is not available; use the REST API (https://api.github.com/graphql)\n"))
+        if cmd[-1] not in rest:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="gh: Not Found (HTTP 404)\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rest[cmd[-1]]), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert git_ops.gh_repo_view_required(tmp_path) == ("Canonical", "r")
+    assert git_ops.gh_pr_view(tmp_path, 7) == {
+        "number": 7, "title": "t", "body": "", "state": "MERGED", "headRefName": "feature", "baseRefName": "main",
+        "headRefOid": "a" * 40, "url": "https://github.com/o/r/pull/7",
+        "headRepository": {"name": "r", "nameWithOwner": "fork/r"}, "headRepositoryOwner": {"login": "fork"},
+    }
+    assert git_ops.gh_pr_view(tmp_path, 404) is None
+    assert [row["number"] for row in git_ops.gh_pr_list_for_branch(tmp_path, "feature")] == [9]
+    for branch, expected in (("feature", 9), ("unopened", None)):
+        monkeypatch.setattr(git_ops.queries, "current_branch", lambda _repo, branch=branch: branch)
+        assert (git_ops.gh_pr_view(tmp_path) or {}).get("number") == expected
+    monkeypatch.setattr(git_ops.queries, "current_branch", lambda _repo: None)
+    with pytest.raises(GitError, match="current branch"):
+        git_ops.gh_pr_view(tmp_path)
+    # gh api names no URL, so only the graphql endpoint's 403/404 counts; rate limits stay rate limits.
+    for endpoint, stderr, error_type in [
+        ("graphql", "gh: GraphQL is not available (HTTP 403)", git_ops.GraphQLUnavailableError),
+        ("graphql", "gh: API rate limit exceeded (HTTP 403)", git_ops.RateLimitError),
+        ("repos/o/r/pulls/1/comments", "gh: Resource not accessible by integration (HTTP 403)", GitError),
+    ]:
+        _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
+        with pytest.raises(GitError) as excinfo:
+            git_ops.gh_api(tmp_path, endpoint)
+        assert type(excinfo.value) is error_type, stderr
+
+
 def test_gh_api_input_data_preserves_tempfile_only_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Failed API payloads are preserved and disclosed for recovery; a successful payload file is deleted."""
     class RequestAuth:

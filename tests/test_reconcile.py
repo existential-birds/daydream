@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from daydream import git_ops
-from daydream.git_ops import GitError
+from daydream import git_ops, reconcile
+from daydream.git_ops import GitError, GraphQLUnavailableError
 from daydream.pr_review import finding_marker
 from daydream.reconcile import (
     PriorFinding,
@@ -110,6 +110,33 @@ def test_unresolved_bot_inventory_accepts_only_viewer_proof(monkeypatch: pytest.
         viewer: PriorFinding(viewer, "RT_VIEWER", False, "C_VIEWER"),
     }
     assert api.call_count == 2
+
+
+def test_refused_graphql_dedups_from_rest_comments_without_minimization_targets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """REST inline markers still dedupe by bot login, but carry no thread, so nothing becomes stale."""
+    inline, body, forged = "a" * 64, "b" * 64, "c" * 64
+    api = Mock(side_effect=[
+        GraphQLUnavailableError("gh api graphql failed: (HTTP 403)"),
+        [{"node_id": "PRRC_INLINE", "body": finding_marker(inline), "user": {"login": "daydream[bot]"}},
+         {"node_id": "PRRC_FORGED", "body": finding_marker(forged), "user": {"login": "evil-attacker"}}],
+        [{"node_id": "PRR_BODY", "body": finding_marker(body) + finding_marker(inline),
+          "user": {"login": "daydream[bot]"}}],
+    ])
+    warnings: list[str] = []
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    monkeypatch.setattr(reconcile, "print_warning", lambda _console, message: warnings.append(message))
+
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
+
+    assert prior == {inline: PriorFinding(inline, None, False, "PRRC_INLINE"),
+                     body: PriorFinding(body, None, False, "PRR_BODY")}
+    assert partition(current=[], prior=prior).stale == []
+    assert [call.args[1] for call in api.call_args_list[1:]] == [
+        "repos/o/r/pulls/7/comments", "repos/o/r/pulls/7/reviews",
+    ]
+    assert len(warnings) == 1 and "only GraphQL can minimize" in warnings[0]
 
 
 # --- Prior diagram comments (issue #1113) ------------------------------------

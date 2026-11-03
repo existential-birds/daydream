@@ -1,7 +1,7 @@
 """Reconcile marked findings against bot-authored GitHub history. GitHub is the cross-run
 store; current fingerprints partition into new, matched, and stale. Minimize stale
 inline comments as OUTDATED using least-privilege App access, which cannot resolve
-review threads.
+review threads. Without GraphQL, REST still deduplicates but nothing is minimized.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from daydream import git_ops
 from daydream.bot_identity import bot_login_matches
-from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
+from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, GraphQLUnavailableError
 from daydream.pr_review import parse_diagram_markers, parse_finding_markers
 from daydream.ui import print_warning
 
@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 @dataclass
 class PriorFinding:
     """Recovered fingerprint plus carrying comment/thread identity. A resolved thread or
-    minimized comment is already closed; body-only findings have no thread.
+    minimized comment is already closed; review bodies and REST-read inline comments
+    have no thread.
     """
 
     fingerprint: str
@@ -123,17 +124,30 @@ def fetch_prior_findings(
     """Inventory authenticated markers from paginated GraphQL threads and REST review
     bodies. Viewer authorship or matching bot login is required; unresolved identity
     admits only viewer-proven GraphQL nodes. First fingerprint occurrence wins. Thread
-    resolution or comment minimization closes inline findings; API failures propagate.
+    resolution or comment minimization closes inline findings. Refused GraphQL warns and
+    reads inline comments over REST without thread identity; other API failures propagate.
     """
     owner, name = repo_slug.split("/", 1)
     prior: dict[str, PriorFinding] = {}
+    rest_endpoints = [f"repos/{owner}/{name}/pulls/{pr_number}/reviews"]
 
     cursor: str | None = None
     while True:
         variables = {"owner": owner, "name": name, "number": pr_number, "cursor": cursor}
-        response = _graphql(
-            target_dir, _REVIEW_THREADS_QUERY, variables, idempotent=True, auth=auth
-        )
+        try:
+            response = _graphql(
+                target_dir, _REVIEW_THREADS_QUERY, variables, idempotent=True, auth=auth
+            )
+        except GraphQLUnavailableError:
+            from daydream.agent import console
+
+            print_warning(
+                console,
+                "GitHub GraphQL is unavailable; reading prior inline findings over REST. "
+                "Stale inline findings stay visible because only GraphQL can minimize them.",
+            )
+            rest_endpoints.insert(0, f"repos/{owner}/{name}/pulls/{pr_number}/comments")
+            break
         threads = response["data"]["repository"]["pullRequest"]["reviewThreads"]
         for thread in threads["nodes"]:
             for comment in thread["comments"]["nodes"]:
@@ -157,33 +171,27 @@ def fetch_prior_findings(
             break
         cursor = page_info["endCursor"]
 
-    reviews = git_ops.gh_api(
-        target_dir,
-        f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
-        paginate=True,
-        idempotent=True,
-        auth=auth,
-    )
-    for review in reviews:
-        if not _authored_by_bot(
-            (review.get("user") or {}).get("login"), False, bot_login
-        ):
-            continue
-        for fingerprint in parse_finding_markers(review.get("body") or ""):
-            if fingerprint in prior:
+    for endpoint in rest_endpoints:
+        items = git_ops.gh_api(target_dir, endpoint, paginate=True, idempotent=True, auth=auth)
+        for item in items:
+            if not _authored_by_bot((item.get("user") or {}).get("login"), False, bot_login):
                 continue
-            prior[fingerprint] = PriorFinding(
-                fingerprint=fingerprint,
-                thread_id=None,
-                is_resolved=False,
-                comment_node_id=review.get("node_id"),
-            )
+            for fingerprint in parse_finding_markers(item.get("body") or ""):
+                if fingerprint in prior:
+                    continue
+                prior[fingerprint] = PriorFinding(
+                    fingerprint=fingerprint,
+                    thread_id=None,
+                    is_resolved=False,
+                    comment_node_id=item.get("node_id"),
+                )
     return prior
 
 
 def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> ReconcilePlan:
     """Keep prior matches closed, including human-resolved findings. Only absent,
-    unresolved inline findings become stale; body-only findings simply stop appearing.
+    unresolved findings with a thread become stale; thread-less findings simply stop
+    appearing.
     """
     current_set = set(current)
     return ReconcilePlan(
