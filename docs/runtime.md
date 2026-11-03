@@ -628,9 +628,9 @@ live run info drops it from its view the same way. Realistic causes are an older
 retained partial snapshot whose child file a later fork with the same legacy
 descriptor overwrote, or an edit in private state. Intact bytes with the wrong
 identity remain a fatal freeze error. A run that lost a child still installs its
-outputs and archive, but optional dataset capture rejects its incomplete record.
-Consumers after freeze read references from the frozen copy, where a mismatch is an
-integrity failure.
+outputs and archive, but optional dataset capture skips it rather than record
+incomplete trajectory evidence. Consumers after freeze read references from the
+frozen copy, where a mismatch is an integrity failure.
 
 Finalization reports local JSONL capture, configured upload, archive/evaluation,
 and public installation separately. Later failure cannot revoke a successful
