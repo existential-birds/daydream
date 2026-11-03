@@ -104,11 +104,9 @@ fingerprint markers in each comment body:
   as matched** — the bot respects the dismissal and does not re-post.
 - **Body-only (non-inline) findings have no thread**; when stale they simply
   stop appearing in the next run's review body.
-- **Without GraphQL, dedup reads REST and nothing is minimized.** If GitHub
-  refuses GraphQL, as in REST-only proxies, inline markers are read from REST
-  review comments. That needs `--bot-login` or `$DAYDREAM_BOT_HANDLE`, because REST
-  has no `viewerDidAuthor`. Resolution state and thread identity are unknown, so
-  stale inline findings stay visible with a warning.
+- **Without GraphQL, stale inline findings stay visible**, with a warning. Behind
+  a REST-only proxy, dedup reads REST review comments, which needs `--bot-login` or
+  `$DAYDREAM_BOT_HANDLE` because REST has no `viewerDidAuthor`.
 
 Comment format is unchanged from `daydream --comment` — these workflows add
 triggers and posting identity, not a new output format.
