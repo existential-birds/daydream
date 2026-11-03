@@ -33,7 +33,7 @@ from daydream.backends import (
 from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.pi import PiBackend, PiError
 from daydream.committed_review import CommittedReviewRequest, run_committed_review
-from daydream.committed_review_model import validate_committed_result
+from daydream.committed_review_model import RESULT_VERSIONS, validate_committed_result
 from daydream.host_tools import HostTool, HostToolBinding, HostToolFatal, HostToolRejected, NativeCapacityRequirement
 from daydream.host_tools_server import PiHostToolServer
 from daydream.review_budget import ReviewLimits
@@ -47,7 +47,7 @@ from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.harbor_review import assignment_from_request, looked_up_targets
 from tests.harness.native_pi import _NativeProvider, native_provider_server
 from tests.harness.trajectory import make_recorder
-from tests.test_committed_review import immutable_input_for
+from tests.test_committed_review import _adaptive_repo, immutable_input_for
 
 # Declared loopback model limits must fit committed review's native-capacity preflight.
 FIXTURE_CONTEXT_WINDOW, FIXTURE_MAX_TOKENS = 131072, 16384
@@ -538,7 +538,8 @@ async def test_committed_review_native_challenge_uses_fresh_captured_source_cont
     trajectory = json.loads(trajectory_path.read_text())
     if immutable:
         assert immutable_input is not None
-        assert value["schema_version"] == 5 and value["immutable_input"] == immutable_input.to_dict()
+        assert value["schema_version"] == RESULT_VERSIONS["immutable"]
+        assert value["immutable_input"] == immutable_input.to_dict()
         assert trajectory["extra"]["pr_repo"] == "captured/repository"
         assert trajectory["extra"]["pr_number"] == 1421
         assert trajectory["extra"]["immutable_input"] == immutable_input.to_dict()
@@ -1294,6 +1295,10 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
     Scripted journeys never reached native compaction, so dropped compaction events, a
     renewed allowance after summarization, navigation that lived only in summarized
     history, or unavailable selections erasing earlier admissions all went unnoticed.
+    Investigation then continues toward exhaustion: a two-member batch after 95 of 96
+    starts previously spent the protected submission start and killed the assignment;
+    an unresolved cross-source concern is retained and re-challenged once, after another
+    claim progressed, then stops rather than spending reserves on evidence-free repeats.
     The scripted model proves software behavior, not review quality.
     """
     repo = tmp_path / "source"
@@ -1306,15 +1311,15 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
                                     "compaction": {"enabled": True, "reserveTokens": 16384, "keepRecentTokens": 64}}))
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     bindings: list[HostToolBinding] = []
-    real_assignment = committed_review.Review.assignment
+    real_open = committed_review.Review.open
 
-    def assignment(self: Any, kind: str, **kwargs: Any) -> Any:
-        binding, schema = real_assignment(self, kind, **kwargs)
+    def open_work(self: Any, work_id: str, **kwargs: Any) -> Any:
+        binding, schema = real_open(self, work_id, **kwargs)
         bindings.append(binding)
         return binding, schema
 
-    monkeypatch.setattr(committed_review.Review, "assignment", assignment)
-    state: dict[str, Any] = {"starts": 0, "remaining": [], "summaries": 0}
+    monkeypatch.setattr(committed_review.Review, "open", open_work)
+    state: dict[str, Any] = {"starts": 0, "remaining": [], "summaries": 0, "denied": 0}
     # The 52nd start's generation reports a context above contextWindow - reserveTokens.
     native_provider.usage[51] = {"prompt_tokens": 120000, "completion_tokens": 5, "total_tokens": 120005}
 
@@ -1334,15 +1339,18 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
         assert "Navigation:" in text and assignment["catalog"]["total_targets"] == 4
         if assignment["kind"] == "discovery":
             # One cumulative 96-start ledger: neither compaction nor summarization renews it.
-            assert binding.remaining_tool_calls == 96 - state["starts"]
+            # Denied protected starts are observed, never charged against the allocation.
+            assert binding.remaining_tool_calls == 96 - (state["starts"] - state["denied"])
         if assignment["kind"] == "challenge":
-            claim, = assignment["claims"]
             if not any(m["role"] == "tool" for m in request["messages"]):
                 return [("challenge-lookup", "review_source", {"target_id": state["a"], "path": None, "cursor": None})]
+            # The cross-source concern stays unresolved: evidence-free repetition must stop, not spend reserves.
             return [("challenge-final", "structured_output", {"verdicts": [{
-                "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
-                "grounds": "The reread frozen bytes confirm the changed value.",
-                "evidence_refs": state["refs"]["a.py"]}],
+                "uid": claim["uid"], "revision": claim["revision"],
+                **({"verdict": "confirmed", "grounds": "The reread frozen bytes confirm the changed value."}
+                   if claim["title"] == "Changed value" else
+                   {"verdict": "unresolved", "grounds": "No counterevidence settles the a.py/b.py interaction."}),
+                "evidence_refs": state["refs"]["a.py"]} for claim in assignment["claims"]],
                 "claims": []})]
         targets = {target["file"]: target for target in looked_up_targets(request).values()}
         starts = state["starts"]
@@ -1366,10 +1374,25 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
                 return call("review_admit", {"targets": [{"target_id": state["b"], "status": "reviewed", "reason": "",
                     "evidence_refs": [{"path": "missing.py", "side": "new", "source_range": {"start": 1, "end": 1},
                                        "basis": "source_inspection"}]}], "claims": []})
-            assert starts == 55
+            if starts < 95:
+                return call("read", {"path": "b.py"})
+            if starts == 95:
+                # A two-member investigation batch after 95 of 96 starts: both would consume the
+                # protected structured_output start, so both are denied without closing authority.
+                state["starts"], state["denied"] = 97, 2
+                return [("call-96", "read", {"path": "c.py"}),
+                        ("call-97", "review_source", {"target_id": state["c"], "path": None, "cursor": None})]
+            assert starts == 97 and binding.authority_open and binding.denied_starts == 2
+            denials = [m["content"] for m in request["messages"] if m.get("tool_call_id") in {"call-96", "call-97"}]
+            assert len(denials) == 2 and all("reserved for structured_output" in denial for denial in denials)
             return call("structured_output", {"targets": [
                 {"target_id": state[name[0]], "status": "reviewed", "reason": "", "evidence_refs": state["refs"][name]}
-                for name in ("c.py", "d.py")], "claims": []})
+                for name in ("c.py", "d.py")], "claims": [{
+                    "uid": "", "revision": 0, "source_uids": [], "title": "Cross-source value contract",
+                    "payload": {"claim": "a.py and b.py disagree on the changed value contract.",
+                                "trigger": "Import both modules.", "consequence": "Callers combine 0 and 1.",
+                                "grounds": "Both frozen captured files change VALUE.", "file": "a.py", "line": None,
+                                "evidence_refs": state["refs"]["a.py"] + state["refs"]["b.py"]}}]})
         if starts == 0:
             return call("review_source", {"target_id": None, "path": None, "cursor": None})
         if starts <= 4:
@@ -1397,9 +1420,17 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
         limits=ReviewLimits(240, 12, 192)))
     value = result.to_dict()
     validate_committed_result(value)
-    assert state["summaries"] == 1 and state["remaining"] == [44, 43, 42, 41]
+    assert state["summaries"] == 1 and state["remaining"][:4] == [44, 43, 42, 41] and state["remaining"][-1] == 1
     discovery = bindings[0]
-    assert discovery.accepted and discovery.calls == 56 and discovery.remaining_tool_calls == 40
+    # Every observed start is accounted once: 96 charged plus two denied members; none renewed.
+    assert discovery.accepted
+    assert (discovery.calls, discovery.denied_starts, discovery.remaining_tool_calls) == (98, 2, 0)
+    local, *challenges = value["execution"]
+    assert (local["allocation"], local["observed_starts"], local["overshoot"]) == (96, 98, 2)
+    # Overshoot is reported, never charged against the protected challenge allocation.
+    assert challenges[0]["allocation"] == 96 and [e["assignment"] for e in challenges] == ["challenge"] * 2
+    spanning = next(c for c in value["claims"] if c["title"] == "Cross-source value contract")
+    assert spanning["disposition"] == "unresolved" and len(spanning["challenge_evidence"]) == 2
     decisions = {d["target_id"]: d for scope in value["terminal_result"]["stack_outcomes"]
                  for d in scope["target_decisions"]}
     assert {t for t, d in decisions.items() if d["status"] == "reviewed"} == {state["a"], state["c"], state["d"]}
@@ -1419,3 +1450,72 @@ async def test_committed_navigation_survives_native_compaction_on_one_cumulative
     assert trajectory["final_metrics"]["total_completion_tokens"] == sum(u["completion_tokens"] for u in billed)
     rejection = next(m for r in native_provider.requests for m in r["messages"] if m.get("tool_call_id") == "call-55")
     assert "no available regular blob" in rejection["content"]
+
+
+async def test_adaptive_native_review_challenges_a_spanning_defect_in_a_fresh_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_provider: _NativeProvider,
+) -> None:
+    """Installed Pi runs concurrent local assignments, required cross-assignment and fresh challenge.
+
+    Scripted program journeys substitute run_agent, so they cannot show that the host
+    dispatches cross-assignment through real native sessions when every local
+    assignment is empty, that each sibling's native starts are charged to its own
+    share, or that challenge of the spanning claim carries none of its author's history.
+    """
+    repo, base = _adaptive_repo(tmp_path)
+    (native_provider.config / "settings.json").write_text(json.dumps({
+        "defaultProvider": "output-fixture", "defaultModel": "output-model", "defaultProjectTrust": "always",
+        "retry": {"enabled": False, "maxRetries": 0}}))
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    seen: dict[str, list[dict[str, Any]]] = {}
+
+    def choose(request: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+        assignment = assignment_from_request(request)
+        work = assignment["work"]
+        seen.setdefault(work["work_id"], []).append(request)
+        if work["kind"] == "discovery":
+            # Every local assignment is empty: decided targets, no concerns.
+            return [(f"{work['work_id']}-final", "structured_output", {"targets": [
+                {"target_id": t, "status": "reviewed", "reason": "", "evidence_refs": []}
+                for t in work["targets"]["ids"]], "claims": []})]
+        if work["kind"] == "cross_assignment":
+            targets = looked_up_targets(request)
+            if not targets:
+                # A parallel two-member lookup of original source across both assignments.
+                return [(f"cross-{name}", "review_source", {"target_id": name, "path": None, "cursor": None})
+                        for name in ("a.py", "f.py")]
+            refs = [{"source_id": next(o["source_id"] for o in targets[name]["source_options"] if o["side"] == "new"),
+                     "basis": "supplied_diff", "source_range": None} for name in ("a.py", "f.py")]
+            return [("cross-final", "structured_output", {"targets": [], "claims": [{
+                "uid": "", "revision": 0, "source_uids": [], "title": "Caller divides by zero",
+                "payload": {"claim": "ratio(4, 1) now divides by zero.", "trigger": "Import f.py.",
+                            "consequence": "ZeroDivisionError at import.", "grounds": "a.py uses count - 1.",
+                            "file": "f.py", "line": None, "evidence_refs": refs}}]})]
+        claim, = assignment["claims"]
+        return [("challenge-final", "structured_output", {"verdicts": [{
+            "uid": claim["uid"], "revision": claim["revision"], "verdict": "confirmed",
+            "grounds": "No guard precedes the division in captured a.py.", "evidence_refs": []}], "claims": []})]
+
+    native_provider.choose = choose
+    result = await run_committed_review(CommittedReviewRequest(
+        repo, base, config=RunConfig(backend="pi", output_mode="review", archive=False, run_eval=False),
+        limits=ReviewLimits(240, 12, 40), assignment_policy="adaptive"))
+    value = result.to_dict()
+    validate_committed_result(value)
+    assert result.complete
+    entries = {e["work_id"]: e for e in value["execution"]}
+    kinds = {r["work_id"]: r["kind"] for r in value["work"]}
+    assert sorted(kinds.values()) == ["challenge", "cross_assignment", "discovery", "discovery"]
+    cross = next(w for w, k in kinds.items() if k == "cross_assignment")
+    challenge = next(w for w, k in kinds.items() if k == "challenge")
+    # Native starts are charged per work item from its own stream: siblings 1 each, cross 2 lookups + submit.
+    assert sorted((entries[w]["allocation"], entries[w]["observed_starts"])
+                  for w, k in kinds.items() if k == "discovery") == [(7, 1), (8, 1)]
+    assert (entries[cross]["allocation"], entries[cross]["observed_starts"]) == (18, 3)
+    assert entries[challenge]["allocation"] == 40 - 5
+    finding, = value["findings"]
+    assert finding["work_id"] == cross and finding["challenge_evidence"][0]["work_id"] == challenge
+    # Fresh challenge context: its first native request carries no cross-assignment history.
+    first = seen[challenge][0]
+    assert [m["role"] for m in first["messages"] if m["role"] not in {"system", "developer"}] == ["user"]
+    assert "cross-final" not in json.dumps(seen[challenge]) and "cross-a.py" not in json.dumps(seen[challenge])
