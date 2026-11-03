@@ -125,6 +125,7 @@ when it ends. A canonical failure fails every planned scope; one scope's prepara
 failure fails only that scope. A path with several diff blocks (a type change is a
 deletion then an addition) resolves its old side from the first block and its new
 side from the last; oversized parts split one block at a time under that block's header.
+[Measurements](performance/review-admission.md) compare queued-scope memory before and after.
 
 Open/unresolved candidates receive one triage round. Closed reviewer assertions,
 contradictions, unfinished targets, and isolated failures preserve their original
