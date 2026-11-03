@@ -136,11 +136,15 @@ that same cumulative bound.
 
 For staged stack and structural reviewers, `--review-profile` accepts
 `[pipeline].reviewer_tool_call_budget`, a nonnegative integer base allowance
-independent of those time limits. The host applies existing diff-size scaling
-once, counts every observed tool start across stages and retries, and retains
-incomplete coverage on exhaustion; zero stops review dispatch. Changing the
-allowance changes profile identity and invalidates incompatible cached reviews.
-The default remains defined in [configuration](../daydream/config.py).
+independent of those time limits. Each reviewer scales its time and calls once,
+together, by the larger (never the product) of the diff-size tier and its
+first-pass batch count over `REVIEWER_BATCHES_PER_ALLOWANCE`, rounded up;
+Structure runs one integration stage and counts as one. The shared pipeline
+deadline still bounds the scaled time. The host counts every observed tool start
+across stages and retries, and retains incomplete coverage on exhaustion; zero
+stops review dispatch. Changing the base allowance changes profile identity and
+invalidates incompatible cached reviews. The default and batch ratio are defined
+in [configuration](../daydream/config.py).
 
 ### Committed-review program
 

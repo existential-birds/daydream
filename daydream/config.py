@@ -21,8 +21,14 @@ DEFAULT_WALL_BUDGET_S = 1800.0
 # bounds; exhaustion produces a partial review. Fix turns retain the default above.
 REVIEW_WALL_BUDGET_S = 3600.0
 
-# Base cumulative calls for one staged reviewer; diff scaling applies once.
+# Base cumulative calls for one staged reviewer. Its time and calls scale once, by
+# the larger of the diff-size tier and the scope's first-pass batch count over
+# REVIEWER_BATCHES_PER_ALLOWANCE (docs/extensions.md, reviewer_tool_call_budget).
 REVIEWER_TOOL_CALL_BUDGET = 48
+
+# First-pass batches one base allowance covers: about 12 calls per batch at the
+# default, the ordinary per-batch usage observed in #1746.
+REVIEWER_BATCHES_PER_ALLOWANCE = 4
 
 # Use wall time to bound exploratory turns; tool counts can truncate valid
 # investigation. Each call site may still supply an explicit ceiling.

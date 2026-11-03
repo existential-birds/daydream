@@ -137,7 +137,9 @@ class ReviewInvestigation:
         self.target_progress: dict[str, dict[str, Any]] = {}
         self.handoff: dict[str, list[Any]] = {name: [] for name in ('progress', 'notes', 'candidates')}
         self._base_limits = limits if limits is not None else ReviewLimits()
-        self.budget = ReviewInvestigationBudget.from_limits(self._base_limits)
+        # Structure runs one integration stage although its batches list every changed file.
+        self.budget = ReviewInvestigationBudget.from_limits(self._base_limits, stages=(
+            1 if self.scope_id == STRUCTURE_STACK_NAME else len(assignment_batches)))
         self._effective_allowance_s = 0.0
         self._deadline_bound = ('pipeline_budget' if self.budget.deadline == self.budget.shared_deadline
                                 else 'reviewer_investigation_budget')
